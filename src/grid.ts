@@ -57,10 +57,12 @@ export interface GridLines {
   axisY: Float32Array;
 }
 
-/** 격자 선분(xyz,xyz…) */
-export function gridLines(g: GridSpec): GridLines {
+/** 격자 선분(xyz,xyz…). origin을 주면 그 점 기준 좌표로 낸다(세계 = origin + 값 — 큰 좌표에서 float32 정밀도를 지킨다) */
+export function gridLines(g: GridSpec, origin?: readonly number[] | null): GridLines {
   const major: number[] = [];
   const minor: number[] = [];
+  const ox = origin?.[0] ?? 0, oy = origin?.[1] ?? 0, oz = origin?.[2] ?? 0;
+  const X0 = g.x0 - ox, X1 = g.x1 - ox, Y0 = g.y0 - oy, Y1 = g.y1 - oy, Z = g.z - oz;
   const eps = g.minorStep * 1e-3;
   const hasX = g.y0 <= 0 && g.y1 >= 0;
   const hasY = g.x0 <= 0 && g.x1 >= 0;
@@ -70,17 +72,19 @@ export function gridLines(g: GridSpec): GridLines {
   for (let i = 0; i <= nx; i++) {
     const x = g.x0 + i * g.minorStep;
     if (hasY && Math.abs(x) < eps) continue;
-    (i % ratio === 0 ? major : minor).push(x, g.y0, g.z, x, g.y1, g.z);
+    const lx = origin ? X0 + i * g.minorStep : x;
+    (i % ratio === 0 ? major : minor).push(lx, Y0, Z, lx, Y1, Z);
   }
   for (let j = 0; j <= ny; j++) {
     const y = g.y0 + j * g.minorStep;
     if (hasX && Math.abs(y) < eps) continue;
-    (j % ratio === 0 ? major : minor).push(g.x0, y, g.z, g.x1, y, g.z);
+    const ly = origin ? Y0 + j * g.minorStep : y;
+    (j % ratio === 0 ? major : minor).push(X0, ly, Z, X1, ly, Z);
   }
   return {
     major: new Float32Array(major),
     minor: new Float32Array(minor),
-    axisX: new Float32Array(hasX ? [g.x0, 0, g.z, g.x1, 0, g.z] : []),
-    axisY: new Float32Array(hasY ? [0, g.y0, g.z, 0, g.y1, g.z] : []),
+    axisX: new Float32Array(hasX ? [X0, -oy, Z, X1, -oy, Z] : []),
+    axisY: new Float32Array(hasY ? [-ox, Y0, Z, -ox, Y1, Z] : []),
   };
 }

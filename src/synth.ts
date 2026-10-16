@@ -13,7 +13,7 @@ export function boxMesh(id: string, min: readonly number[], max: readonly number
   const e = [0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7];
   const edges = new Float32Array(e.length * 3);
   e.forEach((v, i) => edges.set(positions.subarray(v * 3, v * 3 + 3), i * 3));
-  return { id, name: id, positions, indices, color, edges, group };
+  return { id, name: id, positions, indices, color, edges, group, closed: true };
 }
 
 /** 위경도 구(정점 법선, 선택: 정점 색) */
@@ -56,7 +56,7 @@ export function sphereMesh(id: string, center: readonly number[], r: number, seg
       indices[q++] = c;
       indices[q++] = d;
     }
-  return { id, name: id, positions, normals, colors, indices, color, group: opts.group };
+  return { id, name: id, positions, normals, colors, indices, color, group: opts.group, closed: true };
 }
 
 /**
@@ -108,8 +108,41 @@ export function gridPointSet(id: string, x0: number, y0: number, z: number, nx: 
   return { id, name: id, positions, color, size: 7, group };
 }
 
-/** 개발 확인용 장면. segments = 나선 선분 수, sphereSeg = 구 경도 칸 수(삼각형 ≈ 2·seg·seg/2) */
-export function syntheticScene(opts: { segments?: number; sphereSeg?: number } = {}): Scene3d {
+/**
+ * 개발 확인용 장면. segments = 나선 선분 수, sphereSeg = 구 경도 칸 수(삼각형 ≈ 2·seg·seg/2).
+ * offset을 주면 장면 전체를 그만큼 옮긴다(큰 좌표 확인): 기본은 묶음 원점(origin)에 두고 positions는 그대로,
+ * bake면 원점 없이 positions에 더해 넣는다(float32로 반올림되는 예전 방식 — 비교용).
+ */
+export function syntheticScene(opts: { segments?: number; sphereSeg?: number; offset?: readonly number[]; bake?: boolean } = {}): Scene3d {
+  const scene = baseScene(opts);
+  const o = opts.offset;
+  if (!o || (!o[0] && !o[1] && !o[2])) return scene;
+  const origin: [number, number, number] = [o[0]!, o[1]!, o[2]!];
+  const shift = <T extends { positions: Float32Array; origin?: [number, number, number] }>(it: T, extra: Float32Array[] = []): T => {
+    if (!opts.bake) return { ...it, origin };
+    const move = (a: Float32Array): Float32Array => {
+      const b = new Float32Array(a.length);
+      for (let i = 0; i < a.length; i += 3) {
+        b[i] = a[i]! + origin[0];
+        b[i + 1] = a[i + 1]! + origin[1];
+        b[i + 2] = a[i + 2]! + origin[2];
+      }
+      return b;
+    };
+    const r = { ...it, positions: move(it.positions) } as T & { edges?: Float32Array };
+    if (extra.length) r.edges = move(extra[0]!);
+    return r;
+  };
+  // 같은 배열을 여러 번 놓은 그물(행렬)은 원점 방식에서는 배열을 그대로 함께 쓴다
+  const meshes = scene.meshes.map((m) => {
+    if (!opts.bake) return { ...m, origin };
+    // 행렬이 있는 그물을 굽기: 원점은 행렬 앞에 오므로 positions에 더한다(행렬은 이동뿐이라 같은 뜻)
+    return shift(m, m.edges ? [m.edges] : []);
+  });
+  return { ...scene, meshes, lines: scene.lines.map((l) => shift(l)), points: scene.points?.map((p) => shift(p)) };
+}
+
+function baseScene(opts: { segments?: number; sphereSeg?: number }): Scene3d {
   const segs = opts.segments ?? 300_000;
   const sseg = opts.sphereSeg ?? 128;
   const meshes: Mesh3d[] = [];

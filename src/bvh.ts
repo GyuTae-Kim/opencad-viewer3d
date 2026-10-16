@@ -287,7 +287,7 @@ export interface TriangleHit {
   v: number;
 }
 
-/** 삼각형 BVH에서 가장 가까운 맞음 */
+/** 삼각형 BVH에서 가장 가까운 맞음(tMin ≤ t < tMax — 단면이 자른 앞쪽을 건너뛸 때 tMin을 준다) */
 export function raycastTriangles(
   bvh: Bvh,
   positions: Float32Array,
@@ -295,6 +295,7 @@ export function raycastTriangles(
   origin: readonly number[],
   dir: readonly number[],
   tMax = Infinity,
+  tMin = 0,
 ): TriangleHit | null {
   if (!bvh.count) return null;
   const ox = origin[0]!, oy = origin[1]!, oz = origin[2]!;
@@ -325,7 +326,7 @@ export function raycastTriangles(
           i2 = i0 + 6;
         }
         const h = rayTriangle(ox, oy, oz, dx, dy, dz, P[i0]!, P[i0 + 1]!, P[i0 + 2]!, P[i1]!, P[i1 + 1]!, P[i1 + 2]!, P[i2]!, P[i2 + 1]!, P[i2 + 2]!);
-        if (h && h[0] < bestT) {
+        if (h && h[0] < bestT && h[0] >= tMin) {
           bestT = h[0];
           best = { t: h[0], tri, u: h[1], v: h[2] };
         }
@@ -346,6 +347,44 @@ export function raycastTriangles(
     }
   }
   return best;
+}
+
+/**
+ * 광선이 tMin 뒤(t > tMin)에서 삼각형을 몇 번 지나는지. 닫힌 그물이면 홀수일 때 광선의 tMin 점이 입체 안이다
+ * (단면의 잘린 면을 고를 때 쓴다).
+ */
+export function countRayHits(
+  bvh: Bvh,
+  positions: Float32Array,
+  indices: Uint32Array | undefined,
+  origin: readonly number[],
+  dir: readonly number[],
+  tMin = 0,
+): number {
+  if (!bvh.count) return 0;
+  const ox = origin[0]!, oy = origin[1]!, oz = origin[2]!;
+  const dx = dir[0]!, dy = dir[1]!, dz = dir[2]!;
+  const ix = inv(dx), iy = inv(dy), iz = inv(dz);
+  const { box, node, order } = bvh;
+  const P = positions;
+  let hits = 0;
+  const stack: number[] = [0];
+  while (stack.length) {
+    const ni = stack.pop()!;
+    if (rayBoxEntry(box, ni, ox, oy, oz, ix, iy, iz, Infinity) === Infinity) continue;
+    const a = node[ni * 2]!, k = node[ni * 2 + 1]!;
+    if (k > 0) {
+      for (let j = a; j < a + k; j++) {
+        const tri = order[j]!;
+        const i0 = indices ? indices[tri * 3]! * 3 : tri * 9;
+        const i1 = indices ? indices[tri * 3 + 1]! * 3 : i0 + 3;
+        const i2 = indices ? indices[tri * 3 + 2]! * 3 : i0 + 6;
+        const h = rayTriangle(ox, oy, oz, dx, dy, dz, P[i0]!, P[i0 + 1]!, P[i0 + 2]!, P[i1]!, P[i1 + 1]!, P[i1 + 2]!, P[i2]!, P[i2 + 1]!, P[i2 + 2]!);
+        if (h && h[0] > tMin) hits++;
+      }
+    } else if (a !== 0xffffffff) stack.push(a, a + 1);
+  }
+  return hits;
 }
 
 /**

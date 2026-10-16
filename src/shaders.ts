@@ -5,7 +5,13 @@
  *   선분 배열(xyz,xyz…)을 그대로 인스턴스 속성(보폭 24바이트)으로 읽는다.
  * - 가는 선: gl.LINES로 같은 버퍼(보폭 12바이트)를 그대로 그린다.
  * - 점: 사각형 인스턴스 + 원 모양 잘라내기.
+ * - 단면(u_clip = 로컬 좌표 평면 [a, b, c, w], 값 > 0 쪽을 버린다):
+ *   그물·가는 선은 CLIP을 정의한 변종(withClip)에서 조각을 버린다(정의하지 않은 기본 셰이더는 예전과 같다 — 버리기 문이 없어 이른 깊이 검사를 막지 않는다).
+ *   굵은 선은 정점 셰이더에서 선분을 평면으로 잘라 남는 부분만 펴고, 점은 잘린 쪽 점을 화면 밖으로 보낸다. 단면이 없으면 u_clip = (0, 0, 0, −1).
  */
+
+/** 셰이더 원본에 #define CLIP을 넣은 변종 */
+export const withClip = (src: string): string => src.replace('#version 300 es\n', '#version 300 es\n#define CLIP\n');
 
 export const MESH_VS = `#version 300 es
 precision highp float;
@@ -20,11 +26,18 @@ uniform float u_vcol;
 out vec3 v_vpos;
 out vec3 v_nrm;
 out vec4 v_col;
+#ifdef CLIP
+uniform vec4 u_clip;
+out float v_clip;
+#endif
 void main() {
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;
   v_nrm = u_nmat * a_nrm;
   v_col = u_vcol > 0.5 ? a_col : u_color;
+#ifdef CLIP
+  v_clip = dot(u_clip, vec4(a_pos, 1.0));
+#endif
 }`;
 
 export const MESH_FS = `#version 300 es
@@ -37,9 +50,15 @@ uniform float u_ortho;
 uniform vec4 u_tint;
 uniform float u_alpha;
 out vec4 o_color;
+#ifdef CLIP
+in float v_clip;
+#endif
 void main() {
   vec3 V = u_ortho > 0.5 ? vec3(0.0, 0.0, 1.0) : normalize(-v_vpos);
   vec3 ng = cross(dFdx(v_vpos), dFdy(v_vpos));
+#ifdef CLIP
+  if (v_clip > 0.0) discard;
+#endif
   float lg = length(ng);
   ng = lg > 0.0 ? ng / lg : V;
   if (dot(ng, V) < 0.0) ng = -ng;
@@ -75,12 +94,23 @@ uniform float u_vcol;
 uniform float u_alpha;
 uniform vec4 u_override;
 uniform float u_bias;
+uniform vec4 u_clip;
 out vec4 v_col;
 out float v_alongW;
 out float v_w;
 void main() {
-  vec4 c0 = u_mvp * vec4(a_p0, 1.0);
-  vec4 c1 = u_mvp * vec4(a_p1, 1.0);
+  vec3 p0 = a_p0;
+  vec3 p1 = a_p1;
+  float k0 = dot(u_clip, vec4(p0, 1.0));
+  float k1 = dot(u_clip, vec4(p1, 1.0));
+  if (k0 > 0.0 && k1 > 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  if (k0 > 0.0) p0 = mix(p0, p1, k0 / (k0 - k1));
+  else if (k1 > 0.0) p1 = mix(p1, p0, k1 / (k1 - k0));
+  vec4 c0 = u_mvp * vec4(p0, 1.0);
+  vec4 c1 = u_mvp * vec4(p1, 1.0);
   float d0 = c0.z + c0.w;
   float d1 = c1.z + c1.w;
   if (d0 < 0.0 && d1 < 0.0) {
@@ -136,6 +166,10 @@ uniform float u_alpha;
 uniform vec4 u_override;
 uniform float u_bias;
 out vec4 v_col;
+#ifdef CLIP
+uniform vec4 u_clip;
+out float v_clip;
+#endif
 void main() {
   vec4 c = u_mvp * vec4(a_pos, 1.0);
   c.z -= u_bias * c.w;
@@ -143,13 +177,22 @@ void main() {
   vec4 col = u_vcol > 0.5 ? a_col : u_color;
   if (u_override.a > 0.0) col = u_override;
   v_col = vec4(col.rgb, col.a * u_alpha);
+#ifdef CLIP
+  v_clip = dot(u_clip, vec4(a_pos, 1.0));
+#endif
 }`;
 
 export const THIN_FS = `#version 300 es
 precision highp float;
 in vec4 v_col;
 out vec4 o_color;
+#ifdef CLIP
+in float v_clip;
+#endif
 void main() {
+#ifdef CLIP
+  if (v_clip > 0.0) discard;
+#endif
   o_color = v_col;
 }`;
 
@@ -161,10 +204,11 @@ uniform mat4 u_mvp;
 uniform vec2 u_viewport;
 uniform float u_size;
 uniform float u_bias;
+uniform vec4 u_clip;
 out vec2 v_c;
 void main() {
   vec4 c = u_mvp * vec4(a_pos, 1.0);
-  if (c.w <= 0.0 || c.z < -c.w) {
+  if (c.w <= 0.0 || c.z < -c.w || dot(u_clip, vec4(a_pos, 1.0)) > 0.0) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }

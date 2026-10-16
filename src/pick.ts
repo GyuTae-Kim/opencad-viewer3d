@@ -5,6 +5,7 @@
 import { type Bvh, queryCone, raycastTriangles } from './bvh';
 import { type ViewFrame, projectToScreen, screenRay, viewDepth } from './camera';
 import { type V3, cross, dot, mat4Invert, normalMatrix, normalize, transformDir, transformPoint } from './math';
+import { type Plane4, planeValue, segmentKeptRange } from './section';
 
 /** 화면 점과 2D 선분 사이 거리와 선분 매개변수 s ∈ [0, 1] */
 export function pointSegmentDistance2d(px: number, py: number, ax: number, ay: number, bx: number, by: number): { d: number; s: number } {
@@ -115,6 +116,8 @@ export interface LinePickOpts {
   limit?: number;
   /** 이 깊이보다 뒤는 버린다(면에 가린 것) */
   maxDepth?: number;
+  /** 단면 평면(positions와 같은 좌표): 값 > 0 쪽 부분은 고르지 않는다(선분은 평면에서 잘라 남는 부분만 잰다) */
+  clip?: Readonly<Plane4> | null;
 }
 
 /** 선분 묶음에서 커서에 가장 가까운 선분(tolPx 안). bvh가 없으면 모두 훑는다 */
@@ -122,15 +125,32 @@ export function pickSegments(f: ViewFrame, positions: Float32Array, bvh: Bvh | n
   const n = Math.floor(positions.length / 6);
   const limit = Math.min(n, opts.limit ?? n);
   const maxDepth = opts.maxDepth ?? Infinity;
+  const clip = opts.clip ?? null;
   const P = positions;
   const cands: LinePick[] = [];
   const test = (i: number): void => {
     if (i >= limit) return;
     const o = i * 6;
-    const h = segmentScreenPick(f, P[o]!, P[o + 1]!, P[o + 2]!, P[o + 3]!, P[o + 4]!, P[o + 5]!, cx, cy);
+    let ax = P[o]!, ay = P[o + 1]!, az = P[o + 2]!, bx = P[o + 3]!, by = P[o + 4]!, bz = P[o + 5]!;
+    let s0 = 0, s1 = 1;
+    if (clip) {
+      const r = segmentKeptRange(clip, ax, ay, az, bx, by, bz);
+      if (!r) return;
+      if (r[0] > 0 || r[1] < 1) {
+        [s0, s1] = r;
+        const ex = bx - ax, ey = by - ay, ez = bz - az;
+        bx = ax + ex * s1;
+        by = ay + ey * s1;
+        bz = az + ez * s1;
+        ax += ex * s0;
+        ay += ey * s0;
+        az += ez * s0;
+      }
+    }
+    const h = segmentScreenPick(f, ax, ay, az, bx, by, bz, cx, cy);
     if (!h || !(h.distPx <= tolPx) || h.depth > maxDepth) return;
     if (f.projection === 'perspective' && h.depth < f.near * 0.999) return;
-    cands.push({ index: i, t: h.t, point: h.point, distPx: h.distPx, depth: h.depth });
+    cands.push({ index: i, t: s0 + (s1 - s0) * h.t, point: h.point, distPx: h.distPx, depth: h.depth });
   };
   if (bvh) {
     const ray = screenRay(f, cx, cy);
@@ -149,13 +169,14 @@ export interface PointPick {
   depth: number;
 }
 
-/** 점 묶음에서 커서에 가장 가까운 점(tolPx 안) */
-export function pickPointSet(f: ViewFrame, positions: Float32Array, bvh: Bvh | null, cx: number, cy: number, tolPx: number, maxDepth = Infinity): PointPick | null {
+/** 점 묶음에서 커서에 가장 가까운 점(tolPx 안). clip(positions와 같은 좌표)이 있으면 잘린 쪽 점은 건너뛴다 */
+export function pickPointSet(f: ViewFrame, positions: Float32Array, bvh: Bvh | null, cx: number, cy: number, tolPx: number, maxDepth = Infinity, clip?: Readonly<Plane4> | null): PointPick | null {
   const n = Math.floor(positions.length / 3);
   const P = positions;
   const cands: PointPick[] = [];
   const test = (i: number): void => {
     const p: V3 = [P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!];
+    if (clip && planeValue(clip, p[0], p[1], p[2]) > 0) return;
     const s = projectToScreen(f, p);
     if (!s) return;
     const d = Math.hypot(s[0] - cx, s[1] - cy);
@@ -182,7 +203,10 @@ export interface MeshPick {
   corners: [V3, V3, V3];
 }
 
-/** 그물 하나에 광선 쏘기(행렬이 있으면 광선을 로컬로 옮긴다) */
+/**
+ * 그물 하나에 광선 쏘기(행렬이 있으면 광선을 로컬로 옮긴다 — 묶음 원점을 합친 모형 행렬을 줘도 된다).
+ * range = [tMin, tMax]를 주면 그 구간(세계 광선의 t)의 맞음만 본다(단면이 남긴 구간).
+ */
 export function pickMeshRay(
   f: ViewFrame,
   ray: { origin: V3; dir: V3 },
@@ -190,6 +214,7 @@ export function pickMeshRay(
   indices: Uint32Array | undefined,
   bvh: Bvh,
   matrix?: ArrayLike<number> | null,
+  range?: readonly [number, number] | null,
 ): MeshPick | null {
   let lo: V3 = ray.origin, ld: V3 = ray.dir;
   if (matrix) {
@@ -199,7 +224,7 @@ export function pickMeshRay(
     // 정규화하지 않는다: 그러면 로컬 t가 세계 t와 같다
     ld = transformDir(inv, ray.dir);
   }
-  const h = raycastTriangles(bvh, positions, indices, lo, ld);
+  const h = raycastTriangles(bvh, positions, indices, lo, ld, range ? range[1] : Infinity, range ? range[0] : 0);
   if (!h) return null;
   const P = positions;
   const vi = (k: number): number => (indices ? indices[h.tri * 3 + k]! : h.tri * 3 + k) * 3;

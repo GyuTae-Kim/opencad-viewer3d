@@ -10,7 +10,7 @@
  */
 import type { Box3 } from './types';
 import { boxCenter, boxCorners, boxIsEmpty } from './bounds';
-import { type Mat4, type V3, add, clamp, cross, dot, lerp3, mat4Invert, mat4Mul, normalize, orthographic, perspective, scale, sub, transform4 } from './math';
+import { type Mat4, type V3, add, clamp, cross, dot, hasOrigin, lerp3, mat4Invert, mat4Mul, normalize, orthographic, perspective, scale, sub, transform4, translation } from './math';
 
 export type Projection = 'perspective' | 'orthographic';
 export type ViewName = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'swIso' | 'seIso' | 'neIso' | 'nwIso';
@@ -174,6 +174,17 @@ export function computeFrame(c: CameraState, width: number, height: number, sphe
   const pixelPerDepth = (2 * tanV) / h;
   const pixelConst = (2 * c.distance * tanV) / h;
   return { width: w, height: h, projection: c.projection, eye, basis, view, proj, viewProj, invViewProj, near, far, pixelPerDepth, pixelConst };
+}
+
+/**
+ * 원점 o 기준 로컬 좌표(세계 = o + 로컬)로 옮긴 프레임. 묶음 원점(origin)이 있는 positions를 그대로 고를 때 쓴다.
+ * 행렬은 double로 합치므로 큰 좌표에서도 정밀하다. 깊이·화면 좌표는 원래 프레임과 같다. o가 없거나 0이면 f 그대로.
+ */
+export function shiftFrame(f: ViewFrame, o: readonly number[] | undefined | null): ViewFrame {
+  if (!hasOrigin(o)) return f;
+  const t = translation(o);
+  const ti = translation([-o[0]!, -o[1]!, -o[2]!]);
+  return { ...f, eye: sub(f.eye, o), view: mat4Mul(f.view, t), viewProj: mat4Mul(f.viewProj, t), invViewProj: mat4Mul(ti, f.invViewProj) };
 }
 
 /** 눈에서 본 깊이(앞쪽이 양수) */

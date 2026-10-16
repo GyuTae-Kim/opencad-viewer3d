@@ -1,6 +1,7 @@
 /**
  * 범위 계산: 그물·선분·점의 축 나란 상자. 같은 형식 배열은 한 번만 훑는다(WeakMap 캐시).
  * 행렬이 있는 그물은 로컬 상자의 꼭짓점 8개만 옮겨 넓힌다(충분히 보수적이고 빠르다).
+ * 묶음 원점(origin)이 있으면 positions 범위를 그만큼 옮긴다(세계 = origin + position, 행렬은 그 뒤).
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Scene3d } from './types';
 import { type V3, transformPoint } from './math';
@@ -92,17 +93,30 @@ export function positionsBox(p: Float32Array): Box3 {
   return b;
 }
 
+/** 상자를 o만큼 옮긴 새 상자(o가 없으면 복사) */
+export function offsetBox(b: Box3, o: readonly number[] | undefined | null): Box3 {
+  if (!o) return copyBox(b);
+  return { min: [b.min[0] + o[0]!, b.min[1] + o[1]!, b.min[2] + o[2]!], max: [b.max[0] + o[0]!, b.max[1] + o[1]!, b.max[2] + o[2]!] };
+}
+
 export function meshBounds(m: Mesh3d): Box3 {
-  const b = positionsBox(m.positions);
-  return m.matrix ? transformBox(b, m.matrix) : copyBox(b);
+  const b = offsetBox(positionsBox(m.positions), m.origin);
+  return m.matrix ? transformBox(b, m.matrix) : b;
 }
 
 export function lineBounds(l: LineSet3d): Box3 {
-  return copyBox(positionsBox(l.positions));
+  return offsetBox(positionsBox(l.positions), l.origin);
 }
 
 export function pointBounds(p: PointSet3d): Box3 {
-  return copyBox(positionsBox(p.positions));
+  return offsetBox(positionsBox(p.positions), p.origin);
+}
+
+/** 그물·선분·점 어느 것이든 세계 범위(행렬은 그물에만 있다) */
+export function itemBounds(it: Mesh3d | LineSet3d | PointSet3d): Box3 {
+  const b = offsetBox(positionsBox(it.positions), it.origin);
+  const m = (it as Mesh3d).matrix;
+  return m ? transformBox(b, m) : b;
 }
 
 export function copyBox(b: Box3): Box3 {

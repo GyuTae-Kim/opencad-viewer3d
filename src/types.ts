@@ -39,6 +39,17 @@ export interface Mesh3d {
   group?: string;
   /** 양면으로 그릴지(얇은 판·열린 면). 기본 true */
   doubleSided?: boolean;
+  /**
+   * 좌표 원점(세계 좌표, 선택). 있으면 positions·edges는 이 점 기준 좌표다:
+   * 세계 = origin + position(matrix가 있으면 matrix · (origin + position)).
+   * 큰 좌표(예: 1e6 mm대)에서 float32 정밀도를 지키려고 쓴다 — 해석기는 묶음 가운데쯤을 원점으로 잡고 positions를 그만큼 빼서 채운다.
+   */
+  origin?: [number, number, number];
+  /**
+   * 닫힌 입체(모든 모서리를 삼각형 둘이 함께 쓰는 물 샐 틈 없는 껍질)면 true.
+   * 단면 보기에서 잘린 면을 채운다. 열린 면·얇은 판·틈 있는 그물에는 두지 않는다(채우기가 어긋난다).
+   */
+  closed?: boolean;
 }
 
 /** 선분 묶음(공구 경로·와이어프레임 등) */
@@ -57,6 +68,8 @@ export interface LineSet3d {
   group?: string;
   /** 선분마다 원본 식별 번호(예: NC 줄 번호) — 고르기 결과로 돌려준다 */
   segmentIds?: Uint32Array;
+  /** 좌표 원점(세계 좌표, 선택). 있으면 positions는 이 점 기준(세계 = origin + position). Mesh3d.origin 참고 */
+  origin?: [number, number, number];
 }
 
 /** 점 묶음(구멍 중심·측정점 등) */
@@ -70,6 +83,8 @@ export interface PointSet3d {
   size?: number;
   group?: string;
   pointIds?: Uint32Array;
+  /** 좌표 원점(세계 좌표, 선택). 있으면 positions는 이 점 기준(세계 = origin + position). Mesh3d.origin 참고 */
+  origin?: [number, number, number];
 }
 
 /** 해석기가 돌려주는 장면 */
@@ -94,10 +109,12 @@ export interface Pick3d {
   id: string;
   /** 선분·점의 원본 식별 번호(segmentIds·pointIds), 그물이면 삼각형 번호 */
   index: number;
-  /** 고른 세계 좌표 */
+  /** 고른 세계 좌표(묶음 origin을 더한 값) */
   point: [number, number, number];
   /** 배열 안 번호(segmentIds·pointIds를 거치기 전 선분·점 번호, 그물이면 삼각형 번호) — setLineDrawRange와 짝 맞출 때 */
   raw?: number;
   /** 그물이면 맞은 면의 세계 법선(눈 쪽을 향함) */
   normal?: [number, number, number];
+  /** 단면 보기에서 그물의 잘린 면(채운 면)을 골랐으면 true — 이때 point는 단면 평면 위, normal은 평면 법선, index·raw는 −1 */
+  section?: boolean;
 }

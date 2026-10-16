@@ -1,18 +1,24 @@
 /**
  * 개발 확인 페이지(dev/viewer3d.html) 스크립트. 패키지 입구(src/index.ts)에서는 내보내지 않는다.
  * 주소 인자: ?segs=선분 수&sseg=구 경도 칸 수&theme=light
- * 자동 확인용으로 window.v3dDev(viewer, scene, bench)를 둔다.
+ *   &offset=1e6      장면을 (offset, −offset/2, offset/100)만큼 옮긴다(큰 좌표 확인, 묶음 원점 방식)
+ *   &bake=1          위와 같이 옮기되 원점 없이 positions에 더해 넣는다(예전 방식 — 떨림 비교용)
+ *   &section=z:0.5   처음부터 단면(축:범위 안 위치 0~1, 뒤에 :flip을 붙이면 반대쪽)
+ * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff …)를 둔다.
  */
 import { buildBvh } from './bvh';
 import { VIEW_LABELS, type ViewName } from './camera';
 import type { RenderMode } from './renderer';
+import type { SectionAxis } from './section';
 import { syntheticScene } from './synth';
 import type { Scene3d } from './types';
-import { Viewer3d } from './viewer';
+import { type SectionCaps, Viewer3d } from './viewer';
 
 const q = new URLSearchParams(location.search);
 const segs = Math.max(1, Number(q.get('segs') ?? 300_000) | 0);
 const sseg = Math.max(4, Number(q.get('sseg') ?? 128) | 0);
+const offset = Number(q.get('offset') ?? 0) || 0;
+const bake = q.get('bake') === '1';
 let theme: 'dark' | 'light' = q.get('theme') === 'light' ? 'light' : 'dark';
 document.body.dataset.theme = theme;
 
@@ -20,17 +26,26 @@ const bar = document.getElementById('bar')!;
 const view = document.getElementById('view')!;
 const status = document.getElementById('status')!;
 
+/** offset 하나 → 장면 이동량(세 축 모두 크게 — Z도 확인한다) */
+const offsetVec = (k: number): [number, number, number] => [k, -k / 2, k / 100];
+const makeScene = (o: { offset?: number; bake?: boolean; segs?: number; sseg?: number } = {}): Scene3d =>
+  syntheticScene({ segments: o.segs ?? segs, sphereSeg: o.sseg ?? sseg, offset: offsetVec(o.offset ?? 0), bake: o.bake });
+
 const viewer = new Viewer3d(view, { theme });
-let scene: Scene3d = syntheticScene({ segments: segs, sphereSeg: sseg });
+let scene: Scene3d = makeScene({ offset, bake });
 viewer.setScene(scene);
 
 let info = '';
 let pickInfo = '';
 const showStatus = (): void => {
   const s = viewer.stats;
-  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}  ${info}  ${pickInfo}`;
+  const off = offset ? ` · 이동 ${offset.toExponential(0)}${bake ? '(굽기)' : '(원점)'}` : '';
+  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}  ${info}  ${pickInfo}`;
 };
-viewer.onCameraChange(() => showStatus());
+viewer.onCameraChange(() => {
+  showStatus();
+  placeHandle();
+});
 
 const button = (label: string, fn: () => void, title?: string): HTMLButtonElement => {
   const b = document.createElement('button');
@@ -88,6 +103,78 @@ button('PNG', () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
 });
+sep();
+// 단면
+const secBtns: HTMLButtonElement[] = [];
+const secRange = document.createElement('input');
+const pressSec = (): void => {
+  const st = viewer.section;
+  secBtns.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.axis === (st?.axis ?? 'off'))));
+  secRange.disabled = !st;
+  if (st) secRange.value = String(Math.round(st.t * 1000));
+  placeHandle();
+};
+for (const a of ['off', 'x', 'y', 'z'] as const) {
+  const b = button(a === 'off' ? '단면 끔' : `단면 ${a.toUpperCase()}`, () => {
+    if (a === 'off') viewer.setSection(null);
+    else viewer.setSectionAxis(a, viewer.section?.axis === a ? viewer.section.t : 0.5);
+    pressSec();
+  });
+  b.dataset.axis = a;
+  secBtns.push(b);
+}
+button('뒤집기', () => {
+  viewer.flipSection();
+  pressSec();
+});
+const capsModes: SectionCaps[] = ['closed', 'all', 'none'];
+const capsBtn = button('채우기: 닫힌 것', () => {
+  const st = viewer.section;
+  const next = capsModes[(capsModes.indexOf(st?.caps ?? 'closed') + 1) % 3]!;
+  viewer.setSectionOptions({ caps: next });
+  capsBtn.textContent = `채우기: ${next === 'closed' ? '닫힌 것' : next === 'all' ? '모두' : '없음'}`;
+});
+secRange.type = 'range';
+secRange.id = 'secpos';
+secRange.min = '0';
+secRange.max = '1000';
+secRange.title = '단면 위치(장면 범위 안 0~1)';
+secRange.disabled = true;
+secRange.addEventListener('input', () => viewer.setSectionPosition(Number(secRange.value) / 1000));
+bar.append(secRange);
+// 화면 위 단면 손잡이(sectionHandle·moveSectionByPixels 확인용)
+const handle = document.createElement('div');
+handle.id = 'sechandle';
+handle.title = '끌어서 단면 옮기기';
+view.append(handle);
+function placeHandle(): void {
+  const h = viewer.section ? viewer.sectionHandle() : null;
+  handle.hidden = !h;
+  if (h) handle.style.transform = `translate(${h.x - 8}px, ${h.y - 8}px)`;
+}
+let hdrag: { x: number; y: number } | null = null;
+handle.addEventListener('pointerdown', (e) => {
+  hdrag = { x: e.clientX, y: e.clientY };
+  try {
+    handle.setPointerCapture(e.pointerId);
+  } catch {
+    /* 자동 확인의 합성 사건 */
+  }
+  e.stopPropagation();
+});
+handle.addEventListener('pointermove', (e) => {
+  if (!hdrag) return;
+  const t = viewer.moveSectionByPixels(e.clientX - hdrag.x, e.clientY - hdrag.y);
+  hdrag = { x: e.clientX, y: e.clientY };
+  if (t !== null) secRange.value = String(Math.round(t * 1000));
+  placeHandle();
+});
+handle.addEventListener('pointerup', () => (hdrag = null));
+const secArg = q.get('section');
+if (secArg) {
+  const [a, t, f] = secArg.split(':');
+  if (a === 'x' || a === 'y' || a === 'z') viewer.setSectionAxis(a as SectionAxis, Number(t ?? 0.5), { flip: f === 'flip' });
+}
 sep();
 // 묶음 켜고 끄기
 for (const g of viewer.groups()) {
@@ -207,6 +294,40 @@ async function bench(o: { segs?: number; sseg?: number; frames?: number; width?:
   return res;
 }
 
+/** 지금 화면(toBlob) → 화소 */
+async function snapshot(): Promise<ImageData> {
+  const b = await viewer.toBlob('image/png');
+  const img = await createImageBitmap(b);
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(img, 0, 0);
+  return ctx.getImageData(0, 0, c.width, c.height);
+}
+
+/** 두 화면의 차이: 화소 채널 차이 최대·평균, 채널 차이가 thr 넘는 화소 비율(%) */
+function diff(a: ImageData, b: ImageData, thr = 24): { max: number; mean: number; changedPct: number } {
+  if (a.width !== b.width || a.height !== b.height) return { max: 255, mean: 255, changedPct: 100 };
+  let max = 0, sum = 0, changed = 0;
+  for (let i = 0; i < a.data.length; i += 4) {
+    const d = Math.max(Math.abs(a.data[i]! - b.data[i]!), Math.abs(a.data[i + 1]! - b.data[i + 1]!), Math.abs(a.data[i + 2]! - b.data[i + 2]!));
+    if (d > max) max = d;
+    sum += d;
+    if (d > thr) changed++;
+  }
+  const n = a.data.length / 4;
+  return { max, mean: sum / n, changedPct: (changed / n) * 100 };
+}
+
+/** 장면 바꾸기(큰 좌표 비교용). 카메라는 그대로 두지 않는다 */
+function load(o: { offset?: number; bake?: boolean; segs?: number; sseg?: number } = {}): Scene3d {
+  scene = makeScene(o);
+  viewer.setScene(scene);
+  pressSec();
+  return scene;
+}
+
 (window as unknown as { v3dDev: unknown }).v3dDev = {
   viewer,
   get scene() {
@@ -214,6 +335,11 @@ async function bench(o: { segs?: number; sseg?: number; frames?: number; width?:
   },
   bench,
   setPlay,
+  load,
+  offsetVec,
+  snapshot,
+  diff,
   ready: true,
 };
+pressSec();
 showStatus();
