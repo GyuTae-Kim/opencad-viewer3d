@@ -10,7 +10,14 @@ import type { LineSet3d } from './types';
  * 결과 좌표는 base 기준이다(세계 = base + 결과). 묶음 원점(origin)은 더하고 base는 빼서 double로 계산한다.
  * 묶음 원점과 base가 모두 없으면 positions 값을 그대로 옮긴다(세계 좌표).
  */
-export function segmentsById(lines: readonly LineSet3d[], ids: Iterable<number>, accept?: (l: LineSet3d) => boolean, base?: readonly number[] | null): Float32Array | null {
+export function segmentsById(
+  lines: readonly LineSet3d[],
+  ids: Iterable<number>,
+  accept?: (l: LineSet3d) => boolean,
+  base?: readonly number[] | null,
+  /** 선분 하나를 건너뛸지(숨긴 구간 등) */
+  skip?: (l: LineSet3d) => ((i: number) => boolean) | null | undefined,
+): Float32Array | null {
   const want = new Set(ids);
   if (!want.size) return null;
   const hits: [LineSet3d, number][] = [];
@@ -18,7 +25,8 @@ export function segmentsById(lines: readonly LineSet3d[], ids: Iterable<number>,
     const sid = l.segmentIds;
     if (!sid || (accept && !accept(l))) continue;
     const n = Math.min(sid.length, Math.floor(l.positions.length / 6));
-    for (let i = 0; i < n; i++) if (want.has(sid[i]!)) hits.push([l, i]);
+    const sk = skip?.(l);
+    for (let i = 0; i < n; i++) if (want.has(sid[i]!) && !(sk && sk(i))) hits.push([l, i]);
   }
   if (!hits.length) return null;
   const out = new Float32Array(hits.length * 6);

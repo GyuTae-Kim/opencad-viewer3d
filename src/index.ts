@@ -7,6 +7,8 @@ export type {
   GroupInfo,
   MarkerOptions,
   MeasureResult,
+  PickEvent,
+  RangeSelection,
   SectionCaps,
   SectionHandle,
   SectionOptions,
@@ -16,6 +18,7 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
+export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_LABELS } from './camera';

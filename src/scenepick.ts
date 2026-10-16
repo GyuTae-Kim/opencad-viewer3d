@@ -46,6 +46,8 @@ export interface ScenePickOptions {
   clip?: Readonly<Plane4> | null;
   /** 단면에서 잘린 면을 채워 그리는 그물인지(닫힌 불투명 그물) — 그 잘린 면을 누르면 평면 위 점을 고른다 */
   caps?: (m: Mesh3d) => boolean;
+  /** 묶음 안 숨긴 구간: 기본 도형 번호(삼각형·선분·점)가 숨겨졌는지 판정하는 함수(숨긴 것이 없으면 null) */
+  hidden?: (it: Mesh3d | LineSet3d | PointSet3d) => ((i: number) => boolean) | null | undefined;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
@@ -96,7 +98,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
         lo = transformPoint(inv, ray.origin);
         ld = transformDir(inv, ray.dir);
       }
-      if (countRayHits(bvh, m.positions, m.indices, lo, ld, t0) % 2 === 1) {
+      if (countRayHits(bvh, m.positions, m.indices, lo, ld, t0, o.hidden?.(m)) % 2 === 1) {
         const point: V3 = [ray.origin[0] + ray.dir[0] * t0, ray.origin[1] + ray.dir[1] * t0, ray.origin[2] + ray.dir[2] * t0];
         cap = { m, point, depth: viewDepth(f, point) };
         break;
@@ -109,7 +111,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       if (!boxHit(bounds(m))) continue;
       const bvh = o.bvh('triangle', m.positions, m.indices);
       if (!bvh) continue;
-      const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval);
+      const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval, o.hidden?.(m));
       if (!h) continue;
       if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
       if (o.occlude && m.color[3] >= 0.999) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
@@ -122,7 +124,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     const bvh = o.bvh('point', p.positions, undefined);
     if (skip(bvh, p.positions.length / 3)) continue;
     const fl = shiftFrame(f, p.origin);
-    const h = pickPointSet(fl, p.positions, bvh, x, y, tol + (p.size ?? 4) / 2, occl, clip ? planeShift(clip, p.origin) : null);
+    const h = pickPointSet(fl, p.positions, bvh, x, y, tol + (p.size ?? 4) / 2, occl, clip ? planeShift(clip, p.origin) : null, o.hidden?.(p));
     if (h) pts.push({ p, i: h.index, point: addOrigin(h.point, p.origin), distPx: h.distPx, depth: h.depth });
   }
   const pt = chooseNearest(pts);
@@ -140,7 +142,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     const bvh = o.bvh('segment', l.positions, undefined);
     if (skip(bvh, l.positions.length / 6)) continue;
     const fl = shiftFrame(f, l.origin);
-    const h = pickSegments(fl, l.positions, bvh, x, y, tl, { limit: o.limit?.(l.id), maxDepth: occl, clip: clip ? planeShift(clip, l.origin) : null });
+    const h = pickSegments(fl, l.positions, bvh, x, y, tl, { limit: o.limit?.(l.id), maxDepth: occl, clip: clip ? planeShift(clip, l.origin) : null, skip: o.hidden?.(l) });
     if (h) lns.push({ l, i: h.index, point: addOrigin(h.point, l.origin), distPx: h.distPx, depth: h.depth });
   }
   const ln = chooseNearest(lns);

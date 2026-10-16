@@ -234,6 +234,9 @@ describe('단면을 반영한 고르기', () => {
     expect(capHit.pick.point[2]).toBeCloseTo(6, 6);
     expect(capHit.pick.normal).toEqual([0, 0, 1]);
     expect(capHit.pick.index).toBe(-1);
+    // 면 가운데(아래 면 대각선 위 — 두 삼각형이 함께 맞는다)를 눌러도 잘린 면
+    const mid = projectToScreen(f, [5, 5, 10])!;
+    expect(pickScene(f, mid[0], mid[1], { meshes: [m], lines: [], points: [] }, { ...base, clip, caps: () => true })!.pick.section).toBe(true);
     // 상자 밖을 누르면 잘린 면이 아니다
     const out = projectToScreen(f, [12, 5, 6])!;
     expect(pickScene(f, out[0], out[1], { meshes: [m], lines: [], points: [] }, { ...base, clip, caps: () => true })).toBeNull();

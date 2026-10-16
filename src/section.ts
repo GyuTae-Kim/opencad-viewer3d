@@ -152,9 +152,9 @@ export function segmentKeptRange(p: Readonly<Plane4>, ax: number, ay: number, az
 
 /**
  * 삼각형 그물과 평면의 교선 = 단면 테두리(선분 쌍 xyz,xyz…, positions와 같은 로컬 좌표).
- * 평면도 같은 로컬 좌표로 준다(planeToLocal). bvh가 있으면 평면을 걸치는 마디만 훑는다.
+ * 평면도 같은 로컬 좌표로 준다(planeToLocal). bvh가 있으면 평면을 걸치는 마디만 훑는다. skip(삼각형 번호)이 true면 건너뛴다(숨긴 구간).
  */
-export function sectionSegments(positions: Float32Array, indices: Uint32Array | undefined, p: Readonly<Plane4>, bvh?: Bvh | null): Float32Array {
+export function sectionSegments(positions: Float32Array, indices: Uint32Array | undefined, p: Readonly<Plane4>, bvh?: Bvh | null, skip?: ((tri: number) => boolean) | null): Float32Array {
   const P = positions;
   const [a, b, c, w] = p;
   let out = new Float32Array(768);
@@ -174,6 +174,7 @@ export function sectionSegments(positions: Float32Array, indices: Uint32Array | 
     put(P[i]! + (P[j]! - P[i]!) * t, P[i + 1]! + (P[j + 1]! - P[i + 1]!) * t, P[i + 2]! + (P[j + 2]! - P[i + 2]!) * t);
   };
   const tri = (t: number): void => {
+    if (skip && skip(t)) return;
     let i0: number, i1: number, i2: number;
     if (indices) {
       i0 = indices[t * 3]! * 3;

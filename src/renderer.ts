@@ -16,6 +16,7 @@ import { type V3, hasOrigin, mat4Mul, modelMatrix, normalMatrix, translation } f
 import { boxCenter, meshBounds } from './bounds';
 import { MESH_FS, MESH_VS, POINT_FS, POINT_VS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip } from './shaders';
 import { NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
+import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
 
 export type RenderMode = 'shaded' | 'shadedEdges' | 'wireframe' | 'xray';
 
@@ -64,6 +65,17 @@ export interface SectionDraw {
   width: number;
 }
 
+/**
+ * 묶음 안 구간(숨김·강조)을 반영한 보이는 구간 목록. 뷰어가 만들어 넘긴다.
+ * prims: 그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점 번호의 보이는 구간(hi = 강조). edges: 그물 윤곽선 선분의 보이는 구간
+ */
+export interface ItemParts {
+  /** 바뀔 때마다 새 값(GPU 캐시 열쇠) */
+  ver: number;
+  prims: readonly RangePart[];
+  edges?: readonly RangePart[] | null;
+}
+
 export interface RenderState {
   mode: RenderMode;
   colors: RenderColors;
@@ -81,6 +93,8 @@ export interface RenderState {
   interacting: boolean;
   /** 단면(없으면 null 또는 생략) */
   section?: SectionDraw | null;
+  /** 묶음 안 구간(숨김·강조). 없는 묶음은 통째로 그린다 */
+  parts?: (id: string) => ItemParts | undefined;
 }
 
 export interface RenderStats {
@@ -108,7 +122,26 @@ interface LineRec {
   thin: WebGLVertexArrayObject;
   /** 로컬 → 세계(묶음 원점), 없으면 단위 */
   model?: ArrayLike<number>;
+  parts?: PartCache;
 }
+
+/** 한 종류(보통·강조)의 그릴 구간: 구간이 적으면 원래 버퍼에서 구간마다, 많으면 모은 자료로 한 번에 */
+interface DrawList {
+  runs: IndexRange[];
+  total: number;
+  compact: { vao: WebGLVertexArrayObject; count: number; rec?: LineRec } | null;
+}
+
+/** 묶음 하나의 구간 그리기 캐시(ItemParts.ver가 바뀌면 GPU 자료를 지우고 새로) */
+interface PartCache {
+  ver: number;
+  vaos: WebGLVertexArrayObject[];
+  bufs: WebGLBuffer[];
+  lists: Map<string, DrawList>;
+}
+
+/** 구간이 이보다 많으면 모은 자료(색인·복사본)를 만들어 그리기 한 번으로 그린다 */
+const RUN_LIMIT = 24;
 
 interface MeshRec {
   src: Mesh3d;
@@ -126,6 +159,7 @@ interface MeshRec {
   center: V3;
   edges: LineRec | null;
   wire: { vao: WebGLVertexArrayObject; count: number } | null;
+  parts?: PartCache;
 }
 
 interface PointRec {
@@ -133,6 +167,7 @@ interface PointRec {
   n: number;
   vao: WebGLVertexArrayObject;
   model?: ArrayLike<number>;
+  parts?: PartCache;
 }
 
 interface ThinRec {
@@ -179,6 +214,8 @@ export class Renderer3d {
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
+  /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
+  private pending: { scene: Scene3d; mi: number; li: number; pi: number } | null = null;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -225,6 +262,7 @@ export class Renderer3d {
     this.cutSeg = null;
     this.meshC = null;
     this.thinC = null;
+    this.pending = null;
   }
 
   private program(vs: string, fs: string): Prog {
@@ -299,23 +337,68 @@ export class Renderer3d {
     return v;
   }
 
-  /** 장면 올리기(이전 것은 지운다) */
-  setScene(scene: Scene3d): void {
+  /**
+   * 장면 올리기(이전 것은 지운다). incremental이면 여기서는 비우기만 하고, uploadSome()을 부를 때마다 묶음을 몇 개씩 올린다
+   * (올라간 묶음부터 그린다 — 큰 모형에서 화면이 멈추지 않게).
+   */
+  setScene(scene: Scene3d, opts: { incremental?: boolean } = {}): void {
     this.clear();
-    for (const m of scene.meshes) this.meshes.push(this.meshRec(m));
-    for (const l of scene.lines) {
-      const r = this.lineRec(l.id, l.group, l.positions, l.colors);
-      if (hasOrigin(l.origin)) r.model = translation(l.origin);
-      this.lines.push({ ...r, src: l });
+    if (opts.incremental) {
+      this.pending = { scene, mi: 0, li: 0, pi: 0 };
+      return;
     }
+    for (const m of scene.meshes) this.meshes.push(this.meshRec(m));
+    for (const l of scene.lines) this.lines.push(this.sceneLineRec(l));
     for (const p of scene.points ?? []) this.points.push(this.pointRec(p));
     this.gl.bindVertexArray(null);
   }
 
-  private meshRec(m: Mesh3d): MeshRec {
+  /** 나눠 올리는 중인지 */
+  get uploading(): boolean {
+    return !!this.pending;
+  }
+
+  /** 나눠 올리기 진행: 올린 묶음 수 / 전체 묶음 수(올리는 중이 아니면 null) */
+  get uploadProgress(): { done: number; total: number } | null {
+    const p = this.pending;
+    if (!p) return null;
+    const s = p.scene;
+    return { done: p.mi + p.li + p.pi, total: s.meshes.length + s.lines.length + (s.points?.length ?? 0) };
+  }
+
+  /**
+   * 나눠 올리기를 budgetMs 동안 이어 간다(적어도 묶음 하나). 그물 → 선분 → 점 차례. 다 올렸으면 true.
+   * 묶음 하나는 통째로 올린다(아주 큰 배열 하나는 한 번에 걸린다).
+   */
+  uploadSome(budgetMs: number): boolean {
+    const p = this.pending;
+    if (!p) return true;
+    const s = p.scene;
+    const pts = s.points ?? [];
+    const t0 = performance.now();
+    let first = true;
+    while (first || performance.now() - t0 < budgetMs) {
+      first = false;
+      if (p.mi < s.meshes.length) this.meshes.push(this.meshRec(s.meshes[p.mi++]!));
+      else if (p.li < s.lines.length) this.lines.push(this.sceneLineRec(s.lines[p.li++]!));
+      else if (p.pi < pts.length) this.points.push(this.pointRec(pts[p.pi++]!));
+      else break;
+    }
+    this.gl.bindVertexArray(null);
+    if (p.mi >= s.meshes.length && p.li >= s.lines.length && p.pi >= pts.length) this.pending = null;
+    return !this.pending;
+  }
+
+  private sceneLineRec(l: LineSet3d): LineRec & { src: LineSet3d } {
+    const r = this.lineRec(l.id, l.group, l.positions, l.colors);
+    if (hasOrigin(l.origin)) r.model = translation(l.origin);
+    return { ...r, src: l };
+  }
+
+  /** 지금 묶인 VAO에 그물 정점 속성(위치·법선·색)을 건다 */
+  private bindMeshAttribs(m: Mesh3d): { hasNormals: boolean; hasColors: boolean } {
     const gl = this.gl;
     const nv = Math.floor(m.positions.length / 3);
-    const vao = this.vao();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(m.positions));
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
@@ -331,6 +414,14 @@ export class Renderer3d {
       gl.enableVertexAttribArray(2);
       gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 16, 0);
     }
+    return { hasNormals, hasColors };
+  }
+
+  private meshRec(m: Mesh3d): MeshRec {
+    const gl = this.gl;
+    const nv = Math.floor(m.positions.length / 3);
+    const vao = this.vao();
+    const { hasNormals, hasColors } = this.bindMeshAttribs(m);
     let count: number;
     const indexed = !!m.indices;
     if (m.indices) {
@@ -433,33 +524,48 @@ export class Renderer3d {
     this.vaos = this.vaos.filter((v) => v !== r.vao);
   }
 
-  /** 따로 두는 선분(강조·단면 테두리): 버퍼와 VAO를 새로 만든다. origin이 있으면 positions는 그 점 기준 */
-  private dynLines(id: string, positions: Float32Array | null, origin?: readonly number[] | null): LineRec | null {
+  /**
+   * 따로 두는 선분(강조·단면 테두리·구간 모음): 버퍼와 VAO를 새로 만든다(버퍼 캐시·VAO 목록 밖 — 지우는 쪽이 지운다).
+   * origin이 있으면 positions는 그 점 기준. colors(정점마다 rgba)는 선택
+   */
+  private dynLines(id: string, positions: Float32Array | null, origin?: readonly number[] | null, colors?: Float32Array | null): LineRec | null {
     const gl = this.gl;
     const n = positions ? Math.floor(positions.length / 6) : 0;
     if (!positions || !n) return null;
     const pos = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, pos);
     gl.bufferData(gl.ARRAY_BUFFER, positions.subarray(0, n * 6), gl.DYNAMIC_DRAW);
+    let col: WebGLBuffer | null = null;
+    if (colors && colors.length >= n * 8) {
+      col = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, col);
+      gl.bufferData(gl.ARRAY_BUFFER, colors.subarray(0, n * 8), gl.STATIC_DRAW);
+    }
     const wide = gl.createVertexArray()!;
     gl.bindVertexArray(wide);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
-    this.bindWide(pos, null, 0);
+    this.bindWide(pos, col, 0);
     const thin = gl.createVertexArray()!;
     gl.bindVertexArray(thin);
     gl.bindBuffer(gl.ARRAY_BUFFER, pos);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    if (col) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, col);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 16, 0);
+    }
     gl.bindVertexArray(null);
-    return { id, group: undefined, n, pos, col: null, wide, thin, model: hasOrigin(origin) ? translation(origin) : undefined };
+    return { id, group: undefined, n, pos, col, wide, thin, model: hasOrigin(origin) ? translation(origin) : undefined };
   }
 
   private deleteDyn(r: LineRec | null): void {
     if (!r) return;
     const gl = this.gl;
     gl.deleteBuffer(r.pos);
+    if (r.col) gl.deleteBuffer(r.col);
     gl.deleteVertexArray(r.wide);
     gl.deleteVertexArray(r.thin);
   }
@@ -492,6 +598,13 @@ export class Renderer3d {
   /** 장면 GPU 자료 지우기(격자·표시 그물은 남긴다) */
   clear(): void {
     const gl = this.gl;
+    this.pending = null;
+    for (const r of this.meshes) {
+      this.dropParts(r);
+      if (r.edges) this.dropParts(r.edges);
+    }
+    for (const r of this.lines) this.dropParts(r);
+    for (const r of this.points) this.dropParts(r);
     const keep = new Set<WebGLVertexArrayObject>();
     if (this.grid) for (const r of [this.grid.major, this.grid.minor, this.grid.axisX, this.grid.axisY]) if (r) keep.add(r.vao);
     const markerBufs = new Set<WebGLBuffer>();
@@ -571,6 +684,135 @@ export class Renderer3d {
     r = this.meshRec({ id: `__marker_${kind}`, positions: g.positions, normals: g.normals, color: [1, 1, 1, 1] });
     this.markers.set(kind, r);
     return r;
+  }
+
+  // ───────────── 묶음 안 구간(숨김·강조) ─────────────
+
+  /** 구간 캐시를 지운다(GPU 자료 포함) */
+  private dropParts(rec: { parts?: PartCache }): void {
+    const c = rec.parts;
+    if (!c) return;
+    const gl = this.gl;
+    for (const v of c.vaos) gl.deleteVertexArray(v);
+    for (const b of c.bufs) gl.deleteBuffer(b);
+    rec.parts = undefined;
+  }
+
+  /** 이 판의 구간 캐시(판이 바뀌었으면 옛 자료를 지우고 새로) */
+  private partCache(rec: { parts?: PartCache }, ver: number): PartCache {
+    const c = rec.parts;
+    if (c && c.ver === ver) return c;
+    if (c) this.dropParts(rec);
+    return (rec.parts = { ver, vaos: [], bufs: [], lists: new Map() });
+  }
+
+  /** 그물의 한 종류 구간(삼각형 번호). wire면 와이어프레임용(삼각형마다 변 셋) */
+  private meshList(r: MeshRec, c: PartCache, parts: readonly RangePart[], hi: boolean, wire: boolean): DrawList {
+    const key = `${wire ? 'w' : 'f'}${hi ? 'h' : 'n'}`;
+    let l = c.lists.get(key);
+    if (l) return l;
+    const runs = partsOf(parts, hi);
+    const total = rangesTotal(runs);
+    let compact: DrawList['compact'] = null;
+    if (runs.length > RUN_LIMIT && total > 0) {
+      const gl = this.gl;
+      const idx = compactTriIndices(r.src.indices, runs, wire);
+      const vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      if (wire) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(r.src.positions));
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+      } else this.bindMeshAttribs(r.src);
+      const buf = gl.createBuffer()!;
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      c.vaos.push(vao);
+      c.bufs.push(buf);
+      compact = { vao, count: idx.length };
+    }
+    l = { runs, total, compact };
+    c.lists.set(key, l);
+    return l;
+  }
+
+  /** 선분 묶음(또는 그물 윤곽선)의 한 종류 구간(선분 번호). 구간이 많으면 위치·색을 모은 복사본을 만든다 */
+  private lineList(rec: LineRec, c: PartCache, parts: readonly RangePart[], hi: boolean, positions: Float32Array, colors: Float32Array | undefined): DrawList {
+    const key = hi ? 'h' : 'n';
+    let l = c.lists.get(key);
+    if (l) return l;
+    const runs = partsOf(parts, hi);
+    const total = rangesTotal(runs);
+    let compact: DrawList['compact'] = null;
+    if (runs.length > RUN_LIMIT && total > 0) {
+      const cr = this.dynLines(`${rec.id}__part`, compactStride(positions, runs, 6), null, rec.col && colors ? compactStride(colors, runs, 8) : null);
+      if (cr) {
+        c.vaos.push(cr.wide, cr.thin);
+        c.bufs.push(cr.pos);
+        if (cr.col) c.bufs.push(cr.col);
+        compact = { vao: cr.wide, count: total, rec: cr };
+      }
+    }
+    l = { runs, total, compact };
+    c.lists.set(key, l);
+    return l;
+  }
+
+  /** 점 묶음의 한 종류 구간(점 번호): 늘 모은 복사본으로 그린다(점 묶음은 대개 작다) */
+  private pointList(r: PointRec, c: PartCache, parts: readonly RangePart[], hi: boolean): DrawList {
+    const key = hi ? 'h' : 'n';
+    let l = c.lists.get(key);
+    if (l) return l;
+    const runs = partsOf(parts, hi);
+    const total = rangesTotal(runs);
+    let compact: DrawList['compact'] = null;
+    if (total > 0) {
+      const gl = this.gl;
+      const buf = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, compactStride(r.src.positions, runs, 3), gl.STATIC_DRAW);
+      const vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quadPoint);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 12, 0);
+      gl.vertexAttribDivisor(1, 1);
+      gl.bindVertexArray(null);
+      c.vaos.push(vao);
+      c.bufs.push(buf);
+      compact = { vao, count: total };
+    }
+    l = { runs, total, compact };
+    c.lists.set(key, l);
+    return l;
+  }
+
+  /**
+   * 선분 구간 그리기: 원래 번호 [lo, hi) 창 안의 구간만(그리기 범위·흐린 나머지와 함께 쓰려고).
+   * 모은 자료가 있으면 창을 모은 번호로 바꿔 한 번에 그린다.
+   */
+  private drawLineList(
+    f: ViewFrame,
+    r: LineRec,
+    model: ArrayLike<number> | undefined,
+    list: DrawList,
+    lo: number,
+    hi: number,
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; clip?: Plane4 | null },
+    st: RenderState,
+    stats: RenderStats,
+  ): void {
+    if (!list.total || hi <= lo) return;
+    if (list.compact?.rec) {
+      const k0 = countBelow(list.runs, lo), k1 = countBelow(list.runs, hi);
+      if (k1 > k0) this.drawLines(f, list.compact.rec, model, { ...o, first: k0, count: k1 - k0 }, st, stats);
+      return;
+    }
+    for (const run of clipRanges(list.runs, lo, hi)) this.drawLines(f, r, model, { ...o, first: run.start, count: run.count }, st, stats);
   }
 
   /** 세계 상자의 화면 사각형(장치 화소, 가장자리 여유 포함). 화면 밖이면 null, 눈 뒤에 걸치면 화면 전체 */
@@ -660,7 +902,9 @@ export class Renderer3d {
         gl.uniform4f(this.loc(p, 'u_clip'), c[0], c[1], c[2], c[3]);
       }
     };
-    const meshDraw = (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean): void => {
+    /** 그물 그리기. list를 주면 그 구간만(묶음 안 숨김·강조) */
+    const meshDraw = (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null): void => {
+      if (list && !list.total) return;
       const p = cur;
       const m = matrix ?? null;
       if (m !== lastMat) {
@@ -685,6 +929,22 @@ export class Renderer3d {
         if (cull) gl.enable(gl.CULL_FACE);
         else gl.disable(gl.CULL_FACE);
       }
+      if (list) {
+        if (list.compact) {
+          gl.bindVertexArray(list.compact.vao);
+          gl.drawElements(gl.TRIANGLES, list.compact.count, gl.UNSIGNED_INT, 0);
+          stats.drawCalls++;
+        } else {
+          gl.bindVertexArray(r.vao);
+          for (const run of list.runs) {
+            if (r.indexed) gl.drawElements(gl.TRIANGLES, run.count * 3, gl.UNSIGNED_INT, run.start * 12);
+            else gl.drawArrays(gl.TRIANGLES, run.start * 3, run.count * 3);
+            stats.drawCalls++;
+          }
+        }
+        stats.triangles += list.total;
+        return;
+      }
       gl.bindVertexArray(r.vao);
       if (r.indexed) gl.drawElements(gl.TRIANGLES, r.count, gl.UNSIGNED_INT, 0);
       else gl.drawArrays(gl.TRIANGLES, 0, r.count);
@@ -692,6 +952,25 @@ export class Renderer3d {
       stats.triangles += r.count / 3;
     };
     const sceneMeshProg = (): Prog => (sec ? this.meshClip() : this.mesh);
+    /** 묶음 안 구간이 있으면 [보통, 강조] 그릴 목록(없으면 null — 옛 캐시는 지운다). wire면 와이어프레임용 */
+    const meshLists = (r: MeshRec, wire = false): [DrawList, DrawList] | null => {
+      const p = st.parts?.(r.src.id);
+      if (!p) {
+        if (r.parts) this.dropParts(r);
+        return null;
+      }
+      const c = this.partCache(r, p.ver);
+      return [this.meshList(r, c, p.prims, false, wire), this.meshList(r, c, p.prims, true, wire)];
+    };
+    /** 보통·강조로 나눠 그물 그리기(구간이 없으면 통째로) */
+    const meshDrawParts = (r: MeshRec, color: Rgba, alpha: number, tint: number, cull: boolean): void => {
+      const L = meshLists(r);
+      if (!L) meshDraw(r, r.model, color, alpha, tint, cull);
+      else {
+        meshDraw(r, r.model, color, alpha, tint, cull, L[0]);
+        meshDraw(r, r.model, color, alpha, 0.5, cull, L[1]);
+      }
+    };
 
     const visibleMeshes = this.meshes.filter((r) => vis(r.src.id, r.src.group));
 
@@ -702,12 +981,12 @@ export class Renderer3d {
       gl.polygonOffset(1, 1);
       for (const r of visibleMeshes) {
         if (r.transparent) continue;
-        meshDraw(r, r.model, r.src.color, 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+        meshDrawParts(r, r.src.color, 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
       // 1b) 잘린 면 채우기
-      if (capsOn && sec) this.drawCaps(f, devW, devH, sec, visibleMeshes, st, stats, meshUse, meshDraw, () => cur);
+      if (capsOn && sec) this.drawCaps(f, devW, devH, sec, visibleMeshes, st, stats, meshUse, meshDraw, () => cur, (r) => meshLists(r));
     }
 
     // 1c) 단면 테두리(교선): 면 위에 깊이를 따져 굵게
@@ -726,7 +1005,18 @@ export class Renderer3d {
         const c = r.src.color;
         const col: Rgba = hi ? hiTint : mode === 'shadedEdges' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
         if (r.edges) {
-          this.drawLines(f, r.edges, r.model, { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: 1, first: 0, count: r.edges.n, clip: clipOf(r.model) }, st, stats);
+          const ep = st.parts?.(r.src.id);
+          const eparts = ep?.edges;
+          const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: 1, clip: clipOf(r.model) };
+          if (!ep || !eparts) {
+            if (r.edges.parts) this.dropParts(r.edges);
+            this.drawLines(f, r.edges, r.model, { ...eo, first: 0, count: r.edges.n }, st, stats);
+          } else {
+            // 윤곽선 구간(숨김·강조)
+            const c = this.partCache(r.edges, ep.ver);
+            this.drawLineList(f, r.edges, r.model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
+            this.drawLineList(f, r.edges, r.model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
+          }
         } else if (mode === 'wireframe') {
           // 윤곽선이 없는 그물: 삼각형 변(X-ray에서는 반투명 면만)
           const w = this.wireOf(r);
@@ -741,10 +1031,29 @@ export class Renderer3d {
           gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
           gl.uniform1f(this.loc(p, 'u_bias'), 0);
           if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
-          gl.bindVertexArray(w.vao);
-          gl.drawElements(gl.LINES, w.count, gl.UNSIGNED_INT, 0);
-          stats.drawCalls++;
-          stats.segments += w.count / 2;
+          const L = meshLists(r, true);
+          if (!L) {
+            gl.bindVertexArray(w.vao);
+            gl.drawElements(gl.LINES, w.count, gl.UNSIGNED_INT, 0);
+            stats.drawCalls++;
+            stats.segments += w.count / 2;
+          } else
+            L.forEach((list, k) => {
+              if (!list.total) return;
+              if (k === 1) gl.uniform4f(this.loc(p, 'u_color'), hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
+              if (list.compact) {
+                gl.bindVertexArray(list.compact.vao);
+                gl.drawElements(gl.LINES, list.compact.count, gl.UNSIGNED_INT, 0);
+                stats.drawCalls++;
+              } else {
+                gl.bindVertexArray(w.vao);
+                for (const run of list.runs) {
+                  gl.drawElements(gl.LINES, run.count * 6, gl.UNSIGNED_INT, run.start * 24);
+                  stats.drawCalls++;
+                }
+              }
+              stats.segments += list.total * 3;
+            });
         }
       }
       gl.disable(gl.BLEND);
@@ -760,13 +1069,34 @@ export class Renderer3d {
       const color = l.color ?? st.colors.line;
       const base = { color: hi ? hiTint : color, vcol: !!r.col && !hi, width: (l.width ?? 1) + (hi ? 1 : 0), dashed: !!l.dashed, clip: clipOf(r.model) };
       const blend = (l.color?.[3] ?? 1) < 1 || !!r.col;
+      const p = st.parts?.(l.id);
+      if (!p && r.parts) this.dropParts(r);
       if (blend) gl.enable(gl.BLEND);
-      if (count > 0) this.drawLines(f, r, r.model, { ...base, alpha: 1, first: 0, count }, st, stats);
-      if (range && range.ghost > 0 && count < r.n) {
-        gl.enable(gl.BLEND);
-        gl.depthMask(false);
-        this.drawLines(f, r, r.model, { ...base, alpha: range.ghost, first: count, count: r.n - count }, st, stats);
-        gl.depthMask(true);
+      if (!p) {
+        if (count > 0) this.drawLines(f, r, r.model, { ...base, alpha: 1, first: 0, count }, st, stats);
+        if (range && range.ghost > 0 && count < r.n) {
+          gl.enable(gl.BLEND);
+          gl.depthMask(false);
+          this.drawLines(f, r, r.model, { ...base, alpha: range.ghost, first: count, count: r.n - count }, st, stats);
+          gl.depthMask(true);
+        }
+      } else {
+        // 묶음 안 구간: 숨긴 구간은 빼고, 강조 구간은 강조색·굵게(그리기 범위·흐린 나머지와 함께)
+        const c = this.partCache(r, p.ver);
+        const ln = this.lineList(r, c, p.prims, false, l.positions, l.colors);
+        const lh = this.lineList(r, c, p.prims, true, l.positions, l.colors);
+        const hiBase = { ...base, color: hiTint, vcol: false, width: (l.width ?? 1) + 1 };
+        if (count > 0) {
+          this.drawLineList(f, r, r.model, ln, 0, count, { ...base, alpha: 1 }, st, stats);
+          this.drawLineList(f, r, r.model, lh, 0, count, { ...hiBase, alpha: 1 }, st, stats);
+        }
+        if (range && range.ghost > 0 && count < r.n) {
+          gl.enable(gl.BLEND);
+          gl.depthMask(false);
+          this.drawLineList(f, r, r.model, ln, count, r.n, { ...base, alpha: range.ghost }, st, stats);
+          this.drawLineList(f, r, r.model, lh, count, r.n, { ...hiBase, alpha: range.ghost }, st, stats);
+          gl.depthMask(true);
+        }
       }
       gl.disable(gl.BLEND);
     }
@@ -793,15 +1123,28 @@ export class Renderer3d {
           const k = clipOf(r.model)!;
           gl.uniform4f(this.loc(p, 'u_clip'), k[0], k[1], k[2], k[3]);
         }
-        gl.uniform1f(this.loc(p, 'u_size'), Math.max(1, (r.src.size ?? 4) * st.dpr + (hi ? 2 * st.dpr : 0)));
-        gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
-        gl.uniform4f(this.loc(p, 'u_ring'), c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 1);
-        if (c[3] < 1) gl.enable(gl.BLEND);
-        gl.bindVertexArray(r.vao);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, r.n);
-        gl.disable(gl.BLEND);
-        stats.drawCalls++;
-        stats.points += r.n;
+        const draw = (vao: WebGLVertexArrayObject, n: number, c: Rgba, big: boolean): void => {
+          gl.uniform1f(this.loc(p, 'u_size'), Math.max(1, (r.src.size ?? 4) * st.dpr + (big ? 2 * st.dpr : 0)));
+          gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
+          gl.uniform4f(this.loc(p, 'u_ring'), c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 1);
+          if (c[3] < 1) gl.enable(gl.BLEND);
+          gl.bindVertexArray(vao);
+          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+          gl.disable(gl.BLEND);
+          stats.drawCalls++;
+          stats.points += n;
+        };
+        const pp = st.parts?.(r.src.id);
+        if (!pp) {
+          if (r.parts) this.dropParts(r);
+          draw(r.vao, r.n, c, hi);
+        } else {
+          // 묶음 안 구간: 숨긴 점은 빼고 강조 점은 강조색·크게
+          const pc = this.partCache(r, pp.ver);
+          const ln = this.pointList(r, pc, pp.prims, false), lh = this.pointList(r, pc, pp.prims, true);
+          if (ln.compact) draw(ln.compact.vao, ln.total, c, hi);
+          if (lh.compact) draw(lh.compact.vao, lh.total, hiTint, true);
+        }
       }
     }
 
@@ -877,7 +1220,7 @@ export class Renderer3d {
       meshUse(sceneMeshProg());
       gl.enable(gl.BLEND);
       gl.depthMask(false);
-      for (const r of trans) meshDraw(r, r.model, r.src.color, xray ? 0.22 : 1, st.highlight.has(r.src.id) ? 0.5 : 0, false);
+      for (const r of trans) meshDrawParts(r, r.src.color, xray ? 0.22 : 1, st.highlight.has(r.src.id) ? 0.5 : 0, false);
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }
@@ -897,8 +1240,9 @@ export class Renderer3d {
     st: RenderState,
     stats: RenderStats,
     meshUse: (p: Prog) => void,
-    meshDraw: (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean) => void,
+    meshDraw: (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null) => void,
     current: () => Prog,
+    lists: (r: MeshRec) => [DrawList, DrawList] | null,
   ): void {
     const gl = this.gl;
     const list = meshes.filter((r) => !r.transparent && (sec.caps === 'all' || r.src.closed === true) && boxStraddles(r.box, sec.plane));
@@ -923,9 +1267,13 @@ export class Renderer3d {
       gl.stencilFunc(gl.ALWAYS, 0, 1);
       gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
       if (current() !== clipP) meshUse(clipP);
-      meshDraw(r, r.model, r.src.color, 1, 0, false);
-      stats.drawCalls--; // 화면에 보이는 그리기가 아니므로 세지 않는다
-      stats.triangles -= r.count / 3;
+      // 화면에 보이는 그리기가 아니므로 통계에서 뺀다
+      const dc = stats.drawCalls, tr = stats.triangles;
+      const L = lists(r);
+      if (!L) meshDraw(r, r.model, r.src.color, 1, 0, false);
+      else for (const l of L) meshDraw(r, r.model, r.src.color, 1, 0, false, l);
+      stats.drawCalls = dc;
+      stats.triangles = tr;
       // 채우기: 평면 다각형(가운데 기준 좌표 + 이동 행렬 — 큰 좌표에서도 정밀)
       gl.colorMask(true, true, true, true);
       gl.depthMask(true);

@@ -5,6 +5,7 @@
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Scene3d } from './types';
 import { type V3, transformPoint } from './math';
+import type { IndexRange } from './ranges';
 
 export function emptyBox(): Box3 {
   return { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
@@ -110,6 +111,46 @@ export function lineBounds(l: LineSet3d): Box3 {
 
 export function pointBounds(p: PointSet3d): Box3 {
   return offsetBox(positionsBox(p.positions), p.origin);
+}
+
+/**
+ * 기본 도형 구간(그물 = 삼각형 번호, 선분 묶음 = 선분 번호, 점 묶음 = 점 번호)에 든 정점만의 범위(positions 좌표, 원점·행렬 전).
+ * 묶음 안 일부를 숨겼을 때 보이는 범위를 구한다.
+ */
+export function rangesBox(kind: 'triangle' | 'segment' | 'point', positions: Float32Array, indices: Uint32Array | undefined, ranges: readonly IndexRange[]): Box3 {
+  const b = emptyBox();
+  const P = positions;
+  const put = (v: number): void => {
+    const o = v * 3;
+    expandPoint(b, P[o]!, P[o + 1]!, P[o + 2]!);
+  };
+  for (const r of ranges)
+    for (let i = r.start, e = r.start + r.count; i < e; i++) {
+      if (kind === 'triangle') {
+        if (indices) {
+          put(indices[i * 3]!);
+          put(indices[i * 3 + 1]!);
+          put(indices[i * 3 + 2]!);
+        } else {
+          put(i * 3);
+          put(i * 3 + 1);
+          put(i * 3 + 2);
+        }
+      } else if (kind === 'segment') {
+        put(i * 2);
+        put(i * 2 + 1);
+      } else put(i);
+    }
+  return b;
+}
+
+/** 묶음의 보이는 구간만의 세계 범위(원점·행렬 반영). ranges는 보이는 구간 */
+export function itemRangesBounds(it: Mesh3d | LineSet3d | PointSet3d, kind: 'triangle' | 'segment' | 'point', ranges: readonly IndexRange[]): Box3 {
+  const local = rangesBox(kind, it.positions, (it as Mesh3d).indices, ranges);
+  if (boxIsEmpty(local)) return local;
+  const b = offsetBox(local, it.origin);
+  const m = (it as Mesh3d).matrix;
+  return m ? transformBox(b, m) : b;
 }
 
 /** 그물·선분·점 어느 것이든 세계 범위(행렬은 그물에만 있다) */
