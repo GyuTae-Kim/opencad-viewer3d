@@ -50,6 +50,33 @@ export interface Mesh3d {
    * 단면 보기에서 잘린 면을 채운다. 열린 면·얇은 판·틈 있는 그물에는 두지 않는다(채우기가 어긋난다).
    */
   closed?: boolean;
+  /**
+   * 무늬 좌표(선택). 정점마다 (u, v) 2값, 또는 원근 무늬(사진 맞춤처럼 면 위에서 q가 바뀌는 투영)면 (u·q, v·q, q) 3값 —
+   * 길이로 가린다(정점 수 × 3이면 3값). u는 그림 오른쪽, v는 그림 위쪽으로 늘고(0 = 그림 아래 끝) 0~1 밖은 되풀이한다.
+   * texture와 함께 둔다(무늬 그림을 아직 풀지 못했거나 찾지 못하면 color로 칠한다).
+   */
+  uvs?: Float32Array;
+  /** 무늬 그림 id(Scene3d.textures). 있으면 color·colors의 rgb 대신 무늬 그림을 칠하고, 불투명도는 color(colors) 알파를 따른다 */
+  texture?: string;
+}
+
+/**
+ * 무늬 그림(Scene3d.textures). 같은 그림을 여러 그물이 id로 함께 쓴다.
+ * 뷰어가 브라우저에서 풀어(createImageBitmap) 크기 한도 안으로 줄이고 되풀이(REPEAT)·밉맵으로 올린다.
+ */
+export interface Texture3d {
+  id: string;
+  /** 그림 파일 바이트(PNG·JPEG·GIF·WebP·BMP 등 브라우저가 풀 수 있는 꼴) */
+  data?: Uint8Array;
+  /** data의 MIME(없으면 첫 바이트로 가린다) */
+  mime?: string;
+  /** 이미 푼 그림(예: 워커에서 만들어 넘긴 ImageBitmap, 보통 방향 — 맨 위 줄이 먼저). 있으면 data 대신 쓴다 */
+  bitmap?: ImageBitmap;
+  /** 그림 화소 크기(알면 — 큰 그림을 풀면서 바로 줄인다) */
+  width?: number;
+  height?: number;
+  /** 투명한 화소를 쓰는 그림이면 true — 이 무늬를 칠한 그물은 반투명 차례에 그린다(아니면 그림의 알파는 무시) */
+  alpha?: boolean;
 }
 
 /** 선분 묶음(공구 경로·와이어프레임 등) */
@@ -96,6 +123,8 @@ export interface Scene3d {
   points?: PointSet3d[];
   /** 알고 있으면(없으면 뷰어가 계산) */
   bounds?: Box3;
+  /** 무늬 그림(Mesh3d.texture가 id로 가리킨다) */
+  textures?: Texture3d[];
   /** 해석 중 생긴 알림(지원하지 않는 요소 등) — 화면에 목록으로 보인다 */
   warnings?: string[];
   /** 형식별 추가 정보(뷰어는 보지 않는다. 화면 패널이 쓴다) */

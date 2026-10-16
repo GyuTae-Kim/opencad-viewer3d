@@ -5,6 +5,7 @@
  *   &bake=1          위와 같이 옮기되 원점 없이 positions에 더해 넣는다(예전 방식 — 떨림 비교용)
  *   &section=z:0.5   처음부터 단면(축:범위 안 위치 0~1, 뒤에 :flip을 붙이면 반대쪽)
  *   &incremental=1   장면을 여러 프레임에 나눠 올린다(진행은 아래 상태 줄)
+ *   &tex=1           무늬 상자·원근 무늬 판을 더한다(바둑판 BMP, 맨 위 왼쪽 칸이 빨강)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { buildBvh } from './bvh';
@@ -21,6 +22,7 @@ const sseg = Math.max(4, Number(q.get('sseg') ?? 128) | 0);
 const offset = Number(q.get('offset') ?? 0) || 0;
 const bake = q.get('bake') === '1';
 const incremental = q.get('incremental') === '1';
+const tex = q.get('tex') === '1';
 let theme: 'dark' | 'light' = q.get('theme') === 'light' ? 'light' : 'dark';
 document.body.dataset.theme = theme;
 
@@ -31,7 +33,7 @@ const status = document.getElementById('status')!;
 /** offset 하나 → 장면 이동량(세 축 모두 크게 — Z도 확인한다) */
 const offsetVec = (k: number): [number, number, number] => [k, -k / 2, k / 100];
 const makeScene = (o: { offset?: number; bake?: boolean; segs?: number; sseg?: number } = {}): Scene3d =>
-  syntheticScene({ segments: o.segs ?? segs, sphereSeg: o.sseg ?? sseg, offset: offsetVec(o.offset ?? 0), bake: o.bake });
+  syntheticScene({ segments: o.segs ?? segs, sphereSeg: o.sseg ?? sseg, offset: offsetVec(o.offset ?? 0), bake: o.bake, textures: tex });
 
 const viewer = new Viewer3d(view, { theme });
 let info = '';
@@ -51,7 +53,8 @@ function onProgress(d: number, t: number): void {
 const showStatus = (): void => {
   const s = viewer.stats;
   const off = offset ? ` · 이동 ${offset.toExponential(0)}${bake ? '(굽기)' : '(원점)'}` : '';
-  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}  ${upInfo}  ${secInfo}  ${info}  ${pickInfo}`;
+  const tx = s.textures.count ? ` · 무늬 ${s.textures.ready}/${s.textures.count}` : '';
+  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}  ${upInfo}  ${secInfo}  ${info}  ${pickInfo}`;
 };
 viewer.onCameraChange(() => {
   showStatus();
