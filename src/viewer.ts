@@ -38,6 +38,7 @@ import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, length, placeMatrix, sub } from './math';
 import { chooseNearest, pickMeshRay, pickPointSet, pickSegments, snapToNearest } from './pick';
 import { countIdsUpTo } from './playback';
+import { segmentsById } from './segments';
 import { type DrawRange, type RenderColors, type RenderMode, type RenderStats, Renderer3d } from './renderer';
 import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
@@ -51,6 +52,8 @@ export interface Viewer3dOptions {
   gridZ?: GridZ;
   /** 오른쪽 위 뷰 큐브(기본 true) */
   viewCube?: boolean;
+  /** 뷰 큐브 한 변(CSS 화소, 기본 112 — 64~160으로 자른다). 좁은 화면에서 줄여 쓴다 */
+  viewCubeSize?: number;
   /** 왼쪽 아래 좌표축(기본 true) */
   axes?: boolean;
   /** 키 입력(기본 true, 캔버스에 초점이 있을 때만) */
@@ -63,6 +66,16 @@ export interface Viewer3dOptions {
   pickTolerance?: number;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
+}
+
+/** 선분 강조 선택(setHighlightSegments·highlightSegmentIds) */
+export interface SegmentHighlightOptions {
+  /** 색(기본: 테마 강조색) */
+  color?: Rgba;
+  /** 화면 화소 굵기(기본 3) */
+  width?: number;
+  /** 가려진 부분의 불투명도 0~1(기본 0.3, 0이면 가려진 부분은 그리지 않는다) */
+  hidden?: number;
 }
 
 export interface MeasureResult {
@@ -118,7 +131,9 @@ const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans K
 const ROT_PER_PX = 0.0085;
 const DRAG_START_PX = 4;
 const CUBE_CSS = 112;
-const KEY_VIEWS: Record<string, ViewName> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
+const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
+/** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
+export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
 
 export class Viewer3d {
@@ -143,6 +158,7 @@ export class Viewer3d {
   private hi = new Set<string>();
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
+  private segHi: { positions: Float32Array; opts: SegmentHighlightOptions } | null = null;
   private mode: RenderMode;
   private cam: CameraState;
   private anim: { from: CameraState; to: CameraState; t0: number; dur: number } | null = null;
@@ -196,6 +212,7 @@ export class Viewer3d {
       grid: opts.grid ?? true,
       gridZ: opts.gridZ ?? 'min',
       viewCube: opts.viewCube ?? true,
+      viewCubeSize: cubeSize(opts.viewCubeSize ?? CUBE_CSS),
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
       animate: opts.animate ?? true,
@@ -225,7 +242,7 @@ export class Viewer3d {
     const cube = document.createElement('canvas');
     cube.className = 'v3d-cube';
     cube.title = '뷰 큐브: 면·모서리·구석을 누르면 그 방향으로 봅니다';
-    cube.style.cssText = `position:absolute;top:8px;right:8px;width:${CUBE_CSS}px;height:${CUBE_CSS}px;cursor:pointer;touch-action:none;`;
+    cube.style.cssText = `position:absolute;top:8px;right:8px;width:${this.opts.viewCubeSize}px;height:${this.opts.viewCubeSize}px;cursor:pointer;touch-action:none;`;
     if (!this.opts.viewCube) cube.style.display = 'none';
     wrap.append(canvas, overlay, cube);
     host.append(wrap);
@@ -286,6 +303,7 @@ export class Viewer3d {
     this.hiddenItems.clear();
     this.hi.clear();
     this.ranges.clear();
+    this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
     this.bvhs = new WeakMap();
@@ -310,6 +328,7 @@ export class Viewer3d {
     this.items.clear();
     this.hi.clear();
     this.ranges.clear();
+    this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
     this.marker = null;
@@ -358,6 +377,15 @@ export class Viewer3d {
   /** 보이는 것 전체 보기 */
   fit(animate = this.opts.animate): void {
     this.goto(fitCamera(this.cam, this.visibleBox(), this.cssW / this.cssH), animate);
+  }
+
+  /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기 */
+  fitItems(ids: readonly string[], animate = this.opts.animate): void {
+    const s = this.sceneRef;
+    const want = new Set(ids);
+    const b = s ? sceneBounds(s, (it) => want.has(it.id) && this.visible(it.id, it.group)) : emptyBox();
+    if (boxIsEmpty(b)) return this.fit(animate);
+    this.goto(fitCamera(this.cam, b, this.cssW / this.cssH), animate);
   }
 
   /** 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기 */
@@ -428,6 +456,29 @@ export class Viewer3d {
     this.invalidate();
   }
 
+  get gridVisible(): boolean {
+    return this.gridOn;
+  }
+
+  get viewCubeVisible(): boolean {
+    return this.opts.viewCube;
+  }
+
+  /** 뷰 큐브 한 변(CSS 화소, 64~160으로 자른다) */
+  setViewCubeSize(px: number): void {
+    this.opts.viewCubeSize = cubeSize(px);
+    this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
+    this.invalidate();
+  }
+
+  get viewCubeSize(): number {
+    return this.opts.viewCubeSize;
+  }
+
+  get axesVisible(): boolean {
+    return this.opts.axes;
+  }
+
   /** 테마 바꾸기(인자 없이 부르면 CSS 변수만 다시 읽는다) */
   setTheme(theme?: Viewer3dOptions['theme']): void {
     if (theme !== undefined) this.themeOpt = theme;
@@ -474,6 +525,27 @@ export class Viewer3d {
   highlight(ids: readonly string[] | null): void {
     this.hi = new Set(ids ?? []);
     this.invalidate();
+  }
+
+  /**
+   * 선분 강조: 선분 쌍 xyz,xyz…(세계 좌표)를 강조색으로 굵게 그린다. 보이는 부분은 깊이를 따지고,
+   * 가려진 부분은 opts.hidden 불투명도로 흐리게 그린다. null이면 해제, 장면을 바꾸면 풀린다.
+   */
+  setHighlightSegments(positions: Float32Array | null, opts: SegmentHighlightOptions = {}): void {
+    this.segHi = positions && positions.length >= 6 ? { positions, opts: { ...opts } } : null;
+    if (!this.lost) this.renderer.setHighlightSegments(this.segHi?.positions ?? null);
+    this.invalidate();
+  }
+
+  /**
+   * 원본 번호(LineSet3d.segmentIds — 예: NC 이동 번호)로 보이는 선분 묶음에서 선분을 모아 강조한다.
+   * 찾은 선분 수를 돌려준다(없으면 0이고 강조는 풀린다). null·빈 목록이면 해제.
+   */
+  highlightSegmentIds(ids: readonly number[] | null, opts: SegmentHighlightOptions = {}): number {
+    const s = this.sceneRef;
+    const p = s && ids?.length ? segmentsById(s.lines, ids, (l) => this.visible(l.id, l.group)) : null;
+    this.setHighlightSegments(p, opts);
+    return p ? p.length / 6 : 0;
   }
 
   /**
@@ -526,7 +598,7 @@ export class Viewer3d {
     return () => this.pickCbs.delete(cb);
   }
 
-  /** 측정 알림(두 번째 점을 찍을 때 결과, 지우면 null) */
+  /** 측정 알림(두 번째 점을 찍을 때 결과, 지우거나 세 번째 점으로 새 측정을 시작하면 null) */
   onMeasure(cb: (m: MeasureResult | null) => void): () => void {
     this.measureCbs.add(cb);
     return () => this.measureCbs.delete(cb);
@@ -553,6 +625,11 @@ export class Viewer3d {
 
   get measureMode(): boolean {
     return this.measuring;
+  }
+
+  /** 지금 찍힌 측정 점 수(0~2) */
+  get measurePointCount(): number {
+    return this.measurePts.length;
   }
 
   clearMeasure(): void {
@@ -879,7 +956,10 @@ export class Viewer3d {
     const d = this.pickDetail(x, y);
     if (this.measuring) {
       if (!d) return;
-      if (this.measurePts.length >= 2) this.measurePts = [];
+      if (this.measurePts.length >= 2) {
+        this.measurePts = [];
+        for (const cb of this.measureCbs) cb(null);
+      }
       this.measurePts.push(d.snap);
       this.measureHover = null;
       const m = this.measurement();
@@ -932,6 +1012,7 @@ export class Viewer3d {
       this.lost = false;
       this.renderer.init();
       if (this.sceneRef) this.renderer.setScene(this.sceneRef);
+      if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions);
       this.rebuildGrid();
       this.invalidate();
     });
@@ -950,7 +1031,7 @@ export class Viewer3d {
         this.invalidate();
         return;
       }
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(CUBE_CSS), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
       const d = h ? h.dir : null;
       if ((d === null) !== (this.cubeHover === null) || (d && this.cubeHover && dot(d, this.cubeHover) < 0.9999)) {
         this.cubeHover = d;
@@ -975,7 +1056,7 @@ export class Viewer3d {
       this.cubeDrag = null;
       if (!cd || cd.moved || cancel) return;
       const p = this.local(e, cube);
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(CUBE_CSS), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
       if (h) this.setViewDir(h.dir);
     };
     this.on<PointerEvent>(cube, 'pointerup', (e) => cubeUp(e, false));
@@ -1111,14 +1192,22 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  private onKey(e: KeyboardEvent): void {
-    if (!this.opts.keyboard || e.ctrlKey || e.metaKey || e.altKey) return;
+  /**
+   * 뷰어 키(F 전체 보기, 1~7 표준 뷰, Esc 측정 지우기)를 처리한다. 처리했으면 기본 동작을 막고 true.
+   * 캔버스에 초점이 없을 때 앱이 창 키를 넘겨 같은 규칙을 쓰게 한다(입력 칸 걸러내기는 앱 몫).
+   */
+  handleKey(e: KeyboardEvent): boolean {
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (e.key === 'f' || e.key === 'F') this.fit();
-    else if (KEY_VIEWS[e.key]) this.setView(KEY_VIEWS[e.key]!);
+    else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
     else if (e.key === 'Escape' && this.measurePts.length) this.clearMeasure();
-    else return;
+    else return false;
     e.preventDefault();
-    e.stopPropagation();
+    return true;
+  }
+
+  private onKey(e: KeyboardEvent): void {
+    if (this.opts.keyboard && this.handleKey(e)) e.stopPropagation();
   }
 
   // ───────────────────────── 내부: 그리기 ─────────────────────────
@@ -1176,6 +1265,13 @@ export class Viewer3d {
       ranges: this.ranges,
       grid: this.gridOn,
       marker,
+      segHighlight: this.segHi
+        ? {
+            color: this.segHi.opts.color ?? this.colors.highlight,
+            width: this.segHi.opts.width ?? 3,
+            hidden: Math.min(1, Math.max(0, this.segHi.opts.hidden ?? 0.3)),
+          }
+        : null,
       interacting: this.interacting,
     });
     this.drawOverlay(f);
@@ -1191,7 +1287,8 @@ export class Viewer3d {
 
   private drawCube(): void {
     const dpr = this.dpr;
-    const n = Math.round(CUBE_CSS * dpr);
+    const size = this.opts.viewCubeSize;
+    const n = Math.round(size * dpr);
     if (this.cube.width !== n || this.cube.height !== n) {
       this.cube.width = n;
       this.cube.height = n;
@@ -1201,7 +1298,7 @@ export class Viewer3d {
     ctx.clearRect(0, 0, n, n);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const th = this.theme;
-    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(CUBE_CSS), { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover }, this.cubeHover, `600 27px ${FONT}`);
+    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover }, this.cubeHover, `600 ${((27 * size) / CUBE_CSS).toFixed(1)}px ${FONT}`);
   }
 
   private drawOverlay(f: ViewFrame): void {
