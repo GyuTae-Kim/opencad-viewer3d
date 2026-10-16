@@ -33,9 +33,9 @@ export function mat4Identity(): Mat4 {
   return m;
 }
 
-/** a · b (열 우선) */
-export function mat4Mul(a: ArrayLike<number>, b: ArrayLike<number>): Mat4 {
-  const o = new Float64Array(16);
+/** a · b (열 우선). out을 주면 거기에 쓴다(그리기마다 새 배열을 만들지 않게 — a·b와 겹치면 안 된다) */
+export function mat4Mul(a: ArrayLike<number>, b: ArrayLike<number>, out?: Mat4): Mat4 {
+  const o = out ?? new Float64Array(16);
   for (let c = 0; c < 4; c++)
     for (let r = 0; r < 4; r++) {
       let s = 0;
@@ -43,6 +43,28 @@ export function mat4Mul(a: ArrayLike<number>, b: ArrayLike<number>): Mat4 {
       o[c * 4 + r] = s;
     }
   return o;
+}
+
+/** 이동 행렬 */
+export function translation(t: readonly number[]): Mat4 {
+  const m = mat4Identity();
+  m[12] = t[0]!;
+  m[13] = t[1]!;
+  m[14] = t[2]!;
+  return m;
+}
+
+/** 원점이 있는지(없거나 0이면 false) */
+export const hasOrigin = (o: readonly number[] | undefined | null): o is readonly number[] => !!o && (o[0] !== 0 || o[1] !== 0 || o[2] !== 0);
+
+/**
+ * 묶음의 모형 행렬(로컬 positions → 세계) = matrix · T(origin). double로 합치므로 큰 좌표도 정밀하다(RTC).
+ * 둘 다 없으면 undefined(단위 행렬), 원점이 없으면 matrix를 그대로 돌려준다.
+ */
+export function modelMatrix(matrix: ArrayLike<number> | undefined | null, origin: readonly number[] | undefined | null): ArrayLike<number> | undefined {
+  if (!hasOrigin(origin)) return matrix ?? undefined;
+  const t = translation(origin);
+  return matrix ? mat4Mul(matrix, t) : t;
 }
 
 /** 역행렬(특이하면 null) */
@@ -135,15 +157,18 @@ export function transformDir(m: ArrayLike<number>, d: readonly number[]): V3 {
   return [m[0]! * x + m[4]! * y + m[8]! * z, m[1]! * x + m[5]! * y + m[9]! * z, m[2]! * x + m[6]! * y + m[10]! * z];
 }
 
-/** 법선 행렬(왼쪽 위 3×3의 역전치, 열 우선 3×3) */
-export function normalMatrix(m: ArrayLike<number>): Float64Array {
+/** 법선 행렬(왼쪽 위 3×3의 역전치, 열 우선 3×3). out을 주면 거기에 쓴다 */
+export function normalMatrix(m: ArrayLike<number>): Float64Array;
+export function normalMatrix<T extends Float64Array | Float32Array>(m: ArrayLike<number>, out: T): T;
+export function normalMatrix(m: ArrayLike<number>, out?: Float64Array | Float32Array): Float64Array | Float32Array {
   const a = m[0]!, b = m[1]!, c = m[2]!;
   const d = m[4]!, e = m[5]!, f = m[6]!;
   const g = m[8]!, h = m[9]!, i = m[10]!;
   const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
   const det = a * A + b * B + c * C;
-  const o = new Float64Array(9);
+  const o = out ?? new Float64Array(9);
   if (!det) {
+    o.fill(0);
     o[0] = o[4] = o[8] = 1;
     return o;
   }

@@ -11,8 +11,9 @@
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d } from './types';
-import { boxIsEmpty, boxSphere, emptyBox, expandPoint, meshBounds, positionsBox, sceneBounds, unionBox } from './bounds';
-import { type Bvh, type PrimKind, buildBvh, rayBoxEntry, safeInv } from './bvh';
+import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, unionBox } from './bounds';
+import { type IndexRange, mergeRanges, partitionRanges, rangeTester } from './ranges';
+import { type Bvh, type PrimKind, buildBvh } from './bvh';
 import {
   type CameraState,
   type Projection,
@@ -35,11 +36,25 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, length, placeMatrix, sub } from './math';
-import { chooseNearest, pickMeshRay, pickPointSet, pickSegments, snapToNearest } from './pick';
+import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub } from './math';
+import { type PickDetail, type ScenePickItems, pickScene } from './scenepick';
 import { countIdsUpTo } from './playback';
+import {
+  AXIS_DIRS,
+  type Plane4,
+  type SectionAxis,
+  boxRange,
+  boxStraddles,
+  planeBoxPolygon,
+  planeFrom,
+  planeToLocal,
+  rangeFraction,
+  sectionDragDistance,
+  sectionScreenAxis,
+  sectionSegments,
+} from './section';
 import { segmentsById } from './segments';
-import { type DrawRange, type RenderColors, type RenderMode, type RenderStats, Renderer3d } from './renderer';
+import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderStats, Renderer3d } from './renderer';
 import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
@@ -76,7 +91,75 @@ export interface SegmentHighlightOptions {
   width?: number;
   /** 가려진 부분의 불투명도 0~1(기본 0.3, 0이면 가려진 부분은 그리지 않는다) */
   hidden?: number;
+  /** positions의 원점(세계 좌표, 선택): 있으면 positions는 이 점 기준(세계 = origin + position) — 큰 좌표용 */
+  origin?: readonly number[];
 }
+
+/** 잘린 면 채우기: 'closed' = Mesh3d.closed인 불투명 그물만(기본), 'all' = 불투명 그물 모두, 'none' = 채우지 않음 */
+export type SectionCaps = 'closed' | 'all' | 'none';
+
+/** 단면 보기 선택(setSection·setSectionAxis·setSectionOptions) — 주지 않은 것은 앞의 값(처음이면 기본값)을 쓴다 */
+export interface SectionOptions {
+  /** 잘린 면 채우기(기본 'closed') */
+  caps?: SectionCaps;
+  /** 단면 테두리(그물과 평면의 교선)를 굵게 그린다(기본 true) */
+  outline?: boolean;
+  /** 평면 위치(평면 ∩ 장면 범위 다각형)를 화면에 옅게 표시(기본 true) */
+  plane?: boolean;
+}
+
+/** 지금 단면 상태(Viewer3d.section) */
+export interface SectionState {
+  /** 잘라 내는 쪽을 향한 단위 법선(normal·p > offset 쪽이 잘린다) */
+  normal: V3;
+  offset: number;
+  /** 축 단면이면 그 축(x·y·z), 아니면 null */
+  axis: SectionAxis | null;
+  /** 기준 방향(축 단면이면 +축). flip이면 normal = −dir */
+  dir: V3;
+  flip: boolean;
+  /** dir 방향 위치(dir·p = position인 평면) */
+  position: number;
+  /** 장면 범위를 dir 방향으로 잰 [min, max] — position이 이 안이면 평면이 장면을 지난다 */
+  min: number;
+  max: number;
+  /** 범위 안 위치 (position − min) / (max − min). 0 = min, 1 = max(슬라이더에 그대로 쓴다) */
+  t: number;
+  caps: SectionCaps;
+  outline: boolean;
+  plane: boolean;
+}
+
+/** 화면에서 단면 평면을 끌 손잡이 정보(Viewer3d.sectionHandle) */
+export interface SectionHandle {
+  /** 평면 위 기준점(장면 가운데를 평면에 내린 점)의 화면 위치(캔버스 CSS 화소) */
+  x: number;
+  y: number;
+  /** 법선(잘라 내는 쪽)이 화면에서 향하는 단위 방향(눈 쪽을 바로 향하면 0, 0) */
+  dx: number;
+  dy: number;
+  /** 법선 방향 세계 1단위가 화면에서 몇 화소인지 */
+  pxPerUnit: number;
+}
+
+/** onPick 두 번째 인자: 누를 때의 수정 키·누른 횟수 */
+export interface PickEvent {
+  altKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+  /** 1 = 한 번, 2 = 두 번째 누르기(바로 앞 누르기와 0.45초·6화소 안 — 두 번 누르기 판별). 세 번째는 다시 1 */
+  clicks: number;
+  /** 누른 단추(0 = 왼쪽)와 포인터 종류('mouse'·'touch'·'pen') */
+  button: number;
+  pointerType: string;
+}
+
+/**
+ * 묶음 안 구간 선택: 기본 도형 번호 범위 목록(그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점 번호),
+ * 또는 그물 윤곽선(Mesh3d.edges의 선분 번호)까지 함께 줄 때 { prims, edges }.
+ */
+export type RangeSelection = readonly IndexRange[] | { prims?: readonly IndexRange[]; edges?: readonly IndexRange[] };
 
 export interface MeasureResult {
   a: V3;
@@ -107,12 +190,44 @@ export interface MarkerOptions {
 export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number };
 
 type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } | { kind: 'point'; item: PointSet3d };
+type AnyItem = Mesh3d | LineSet3d | PointSet3d;
 
-interface PickDetail {
-  pick: Pick3d;
-  /** 측정용 붙잡은 점(꼭짓점·끝점 가까우면 그 점) */
-  snap: V3;
-  vertex: boolean;
+/** 묶음 하나의 구간 상태(숨김·강조, 합친 것)와 그로부터 만든 것 */
+interface RangeState {
+  hidden: IndexRange[];
+  hi: IndexRange[];
+  eHidden: IndexRange[];
+  eHi: IndexRange[];
+  /** 렌더러에 넘길 보이는 구간(숨김·강조가 하나라도 있으면) */
+  parts: ItemParts | null;
+  /** 숨긴 기본 도형 판정(고르기·단면 테두리) */
+  test: ((i: number) => boolean) | null;
+  /** 보이는 구간만의 세계 범위(처음 필요할 때) */
+  box: Box3 | null;
+}
+
+const rangeKind = (it: Item): 'triangle' | 'segment' | 'point' => (it.kind === 'mesh' ? 'triangle' : it.kind === 'line' ? 'segment' : 'point');
+
+/** 묶음의 기본 도형 수(그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점) */
+function primCount(it: Item): number {
+  if (it.kind === 'mesh') return it.item.indices ? Math.floor(it.item.indices.length / 3) : Math.floor(it.item.positions.length / 9);
+  if (it.kind === 'line') return Math.floor(it.item.positions.length / 6);
+  return Math.floor(it.item.positions.length / 3);
+}
+
+const selPrims = (s: RangeSelection | null | undefined): readonly IndexRange[] | undefined => (!s ? undefined : Array.isArray(s) ? s : (s as { prims?: readonly IndexRange[] }).prims);
+const selEdges = (s: RangeSelection | null | undefined): readonly IndexRange[] | undefined => (!s || Array.isArray(s) ? undefined : (s as { edges?: readonly IndexRange[] }).edges);
+
+interface Section {
+  /** 기준 방향(단위) */
+  dir: V3;
+  flip: boolean;
+  /** dir·p = pos */
+  pos: number;
+  axis: SectionAxis | null;
+  caps: SectionCaps;
+  outline: boolean;
+  plane: boolean;
 }
 
 interface Drag {
@@ -150,6 +265,8 @@ export class Viewer3d {
   private themeOpt: Viewer3dOptions['theme'];
   private theme: Viewer3dTheme = DARK_THEME;
   private colors!: RenderColors;
+  /** 단면 테두리·채우기 섞음 색(테마에서 한 번 읽는다) */
+  private sectionColor: Rgba = [1, 0.37, 0.64, 1];
 
   private sceneRef: Scene3d | null = null;
   private items = new Map<string, Item>();
@@ -159,6 +276,16 @@ export class Viewer3d {
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
   private segHi: { positions: Float32Array; opts: SegmentHighlightOptions } | null = null;
+  private sec: Section | null = null;
+  /** 단면 테두리를 다시 계산할지(평면·장면·보이기가 바뀌면) */
+  private cutDirty = true;
+  /** 묶음 세계 범위·모형 행렬 캐시(장면을 바꾸면 새로) */
+  private boxes = new WeakMap<AnyItem, Box3>();
+  private models = new WeakMap<Mesh3d, { m: ArrayLike<number> | undefined }>();
+  /** 보이는 묶음 목록(고르기용, 보이기를 바꾸면 null) */
+  private visLists: ScenePickItems | null = null;
+  /** 장면에 묶음 원점(origin)을 쓴 묶음이 있는지 — 있으면 격자도 원점 기준으로 올린다 */
+  private usesOrigin = false;
   private mode: RenderMode;
   private cam: CameraState;
   private anim: { from: CameraState; to: CameraState; t0: number; dur: number } | null = null;
@@ -196,13 +323,19 @@ export class Viewer3d {
   private measureHover: { p: V3; vertex: boolean } | null = null;
   private hoverAt: { x: number; y: number } | null = null;
 
-  private pickCbs = new Set<(p: Pick3d | null) => void>();
+  private pickCbs = new Set<(p: Pick3d | null, e: PickEvent) => void>();
+  private sectionCbs = new Set<(s: SectionState | null) => void>();
+  private lastClick = { t: 0, x: 0, y: 0, n: 0 };
+  /** 묶음 안 구간(숨김·강조) */
+  private rangeSel = new Map<string, RangeState>();
+  private rangeVer = 0;
+  /** 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림 */
+  private upload: { budget: number; cb: ((done: number, total: number) => void) | null } | null = null;
   private measureCbs = new Set<(m: MeasureResult | null) => void>();
   private camCbs = new Set<(c: CameraState) => void>();
   private lastCamKey = '';
 
   private ro: ResizeObserver;
-  private mql: MediaQueryList | null = null;
   private hostPos: string | null = null;
   private off: (() => void)[] = [];
 
@@ -252,13 +385,27 @@ export class Viewer3d {
     this.cube = cube;
     this.octx = overlay.getContext('2d')!;
     this.cctx = cube.getContext('2d')!;
-    const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, stencil: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
-    if (!gl) {
+    // 스텐실은 단면의 잘린 면 채우기에 쓴다
+    const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, stencil: true, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
+    // 만들다 실패하면 호스트를 처음 그대로 돌려 둔다(덧붙인 요소·바꾼 position)
+    const undo = (): void => {
       wrap.remove();
+      if (this.hostPos !== null) host.style.position = this.hostPos;
+    };
+    if (!gl) {
+      undo();
       throw new Error('이 브라우저는 WebGL2를 지원하지 않아 3D 보기를 열 수 없습니다');
     }
     this.gl = gl;
-    this.renderer = new Renderer3d(gl);
+    let renderer: Renderer3d;
+    try {
+      renderer = new Renderer3d(gl);
+    } catch (e) {
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      undo();
+      throw e;
+    }
+    this.renderer = renderer;
     this.applyTheme();
 
     const r = host.getBoundingClientRect();
@@ -292,8 +439,20 @@ export class Viewer3d {
     return this.sceneRef;
   }
 
-  /** 장면 바꾸기. keepView면 카메라를 그대로 둔다(아니면 남동 등각 + 전체 보기) */
-  setScene(scene: Scene3d, opts: { keepView?: boolean } = {}): void {
+  /**
+   * 장면 바꾸기. keepView면 카메라를 그대로 둔다(아니면 남동 등각 + 전체 보기).
+   * 단면은 keepView면 같은 평면(세계 위치)을 지키고, 아니면 끈다. 묶음 안 구간(숨김·강조)은 풀린다.
+   *
+   * incremental을 주면 GPU 올리기를 여러 프레임에 나눈다(한 프레임 budgetMs, 기본 8 ms — 묶음 하나는 통째로).
+   * 올라간 묶음부터 그리고, onProgress(올린 묶음 수, 전체)를 프레임마다 부른다(끝나면 done = total).
+   * 범위·고르기·측정은 처음부터 장면 전체로 한다. 주지 않으면 예전처럼 한 번에 올린다.
+   */
+  setScene(
+    scene: Scene3d,
+    opts: { keepView?: boolean; incremental?: boolean | { budgetMs?: number }; onProgress?: (done: number, total: number) => void } = {},
+  ): void {
+    if (this.disposed) return;
+    const hadSection = !!this.sec;
     this.sceneRef = scene;
     this.items.clear();
     for (const m of scene.meshes) this.items.set(m.id, { kind: 'mesh', item: m });
@@ -303,12 +462,21 @@ export class Viewer3d {
     this.hiddenItems.clear();
     this.hi.clear();
     this.ranges.clear();
+    this.rangeSel.clear();
     this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
     this.bvhs = new WeakMap();
+    this.boxes = new WeakMap();
+    this.models = new WeakMap();
+    this.visLists = null;
+    this.cutDirty = true;
+    if (!opts.keepView) this.sec = null;
+    this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
-    if (!this.lost) this.renderer.setScene(scene);
+    const inc = opts.incremental;
+    this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), cb: opts.onProgress ?? null } : null;
+    if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc });
     this.allBox = scene.bounds && !boxIsEmpty(scene.bounds) ? scene.bounds : sceneBounds(scene);
     this.visBox = null;
     this.rebuildGrid();
@@ -319,11 +487,17 @@ export class Viewer3d {
       this.pendingFit = !this.sizeKnown;
     }
     this.scheduleBvh();
+    // 단면이 꺼졌거나(새 장면) 장면 범위가 바뀌어 위치(t)가 달라졌으면 알린다
+    if (hadSection || this.sec) this.emitSection();
     this.invalidate();
   }
 
-  /** 장면 비우기 */
+  /** 장면 비우기(단면도 끈다) */
   clear(): void {
+    if (this.disposed) return;
+    const hadSection = !!this.sec;
+    this.rangeSel.clear();
+    this.upload = null;
     this.sceneRef = null;
     this.items.clear();
     this.hi.clear();
@@ -333,19 +507,32 @@ export class Viewer3d {
     this.measureHover = null;
     this.marker = null;
     this.bvhs = new WeakMap();
+    this.boxes = new WeakMap();
+    this.models = new WeakMap();
+    this.visLists = null;
+    this.sec = null;
+    this.cutDirty = true;
+    this.usesOrigin = false;
     this.wheelAnchor = null;
     this.bvhGen++;
-    if (!this.lost) this.renderer.clear();
+    clearTimeout(this.bvhTimer);
+    if (this.gpu) this.renderer.clear();
     this.allBox = emptyBox();
     this.visBox = null;
     this.rebuildGrid();
+    if (hadSection) this.emitSection();
     this.invalidate();
   }
 
+  /**
+   * 뷰어를 없앤다: 입력·관찰·타이머를 풀고 GPU 자료를 지운 뒤 문맥을 놓는다.
+   * 장면·BVH·강조 같은 큰 자료의 참조도 놓는다(앱이 뷰어 객체를 들고 있어도 장면 배열이 메모리에 남지 않게). 그 뒤의 호출은 아무것도 하지 않는다.
+   */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     if (this.raf) cancelAnimationFrame(this.raf);
+    this.raf = 0;
     clearTimeout(this.bvhTimer);
     clearTimeout(this.wheelTimer);
     this.bvhGen++;
@@ -353,12 +540,38 @@ export class Viewer3d {
     this.off = [];
     this.ro.disconnect();
     this.pickCbs.clear();
+    this.sectionCbs.clear();
+    this.rangeSel.clear();
+    this.upload = null;
     this.measureCbs.clear();
     this.camCbs.clear();
     if (!this.lost) this.renderer.dispose();
     this.gl.getExtension('WEBGL_lose_context')?.loseContext();
     this.wrap.remove();
     if (this.hostPos !== null) this.host.style.position = this.hostPos;
+    this.sceneRef = null;
+    this.items.clear();
+    this.hi.clear();
+    this.ranges.clear();
+    this.segHi = null;
+    this.marker = null;
+    this.sec = null;
+    this.measurePts = [];
+    this.measureHover = null;
+    this.bvhs = new WeakMap();
+    this.boxes = new WeakMap();
+    this.models = new WeakMap();
+    this.visLists = null;
+    this.anim = null;
+    this.drag = null;
+    this.touch = null;
+    this.pointers.clear();
+    this.wheelAnchor = null;
+  }
+
+  /** GPU에 올려도 되는지(문맥을 잃었거나 없앤 뒤가 아님) */
+  private get gpu(): boolean {
+    return !this.lost && !this.disposed;
   }
 
   // ───────────────────────── 보기 ─────────────────────────
@@ -381,9 +594,11 @@ export class Viewer3d {
 
   /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기 */
   fitItems(ids: readonly string[], animate = this.opts.animate): void {
-    const s = this.sceneRef;
-    const want = new Set(ids);
-    const b = s ? sceneBounds(s, (it) => want.has(it.id) && this.visible(it.id, it.group)) : emptyBox();
+    let b = emptyBox();
+    for (const id of new Set(ids)) {
+      const it = this.items.get(id);
+      if (it && this.visible(id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    }
     if (boxIsEmpty(b)) return this.fit(animate);
     this.goto(fitCamera(this.cam, b, this.cssW / this.cssH), animate);
   }
@@ -504,15 +719,20 @@ export class Viewer3d {
   setGroupVisible(group: string, on: boolean): void {
     if (on) this.hiddenGroups.delete(group);
     else this.hiddenGroups.add(group);
-    this.visBox = null;
-    this.invalidate();
+    this.visibilityChanged();
   }
 
   /** 항목 하나 켜고 끄기(id) */
   setItemVisible(id: string, on: boolean): void {
     if (on) this.hiddenItems.delete(id);
     else this.hiddenItems.add(id);
+    this.visibilityChanged();
+  }
+
+  private visibilityChanged(): void {
     this.visBox = null;
+    this.visLists = null;
+    this.cutDirty = true;
     this.invalidate();
   }
 
@@ -532,19 +752,23 @@ export class Viewer3d {
    * 가려진 부분은 opts.hidden 불투명도로 흐리게 그린다. null이면 해제, 장면을 바꾸면 풀린다.
    */
   setHighlightSegments(positions: Float32Array | null, opts: SegmentHighlightOptions = {}): void {
+    if (this.disposed) return;
     this.segHi = positions && positions.length >= 6 ? { positions, opts: { ...opts } } : null;
-    if (!this.lost) this.renderer.setHighlightSegments(this.segHi?.positions ?? null);
+    if (this.gpu) this.renderer.setHighlightSegments(this.segHi?.positions ?? null, this.segHi?.opts.origin);
     this.invalidate();
   }
 
   /**
    * 원본 번호(LineSet3d.segmentIds — 예: NC 이동 번호)로 보이는 선분 묶음에서 선분을 모아 강조한다.
    * 찾은 선분 수를 돌려준다(없으면 0이고 강조는 풀린다). null·빈 목록이면 해제.
+   * 묶음 원점(origin)이 있으면 첫 묶음의 원점 기준으로 모아 큰 좌표에서도 정밀하게 그린다.
    */
   highlightSegmentIds(ids: readonly number[] | null, opts: SegmentHighlightOptions = {}): number {
     const s = this.sceneRef;
-    const p = s && ids?.length ? segmentsById(s.lines, ids, (l) => this.visible(l.id, l.group)) : null;
-    this.setHighlightSegments(p, opts);
+    const accept = (l: LineSet3d): boolean => this.visible(l.id, l.group);
+    const base = s ? s.lines.find((l) => l.segmentIds && hasOrigin(l.origin) && accept(l))?.origin : undefined;
+    const p = s && ids?.length ? segmentsById(s.lines, ids, accept, base, (l) => this.rangeSel.get(l.id)?.test) : null;
+    this.setHighlightSegments(p, base ? { ...opts, origin: base } : opts);
     return p ? p.length / 6 : 0;
   }
 
@@ -577,7 +801,8 @@ export class Viewer3d {
       this.ranges.set(l.id, { count: n, ghost: opts.ghost ?? 0 });
       if (n > 0 && (!best || ids[n - 1]! > best.id)) {
         const o = (n - 1) * 6 + 3;
-        best = { id: ids[n - 1]!, p: [l.positions[o]!, l.positions[o + 1]!, l.positions[o + 2]!] };
+        const g = l.origin;
+        best = { id: ids[n - 1]!, p: [l.positions[o]! + (g?.[0] ?? 0), l.positions[o + 1]! + (g?.[1] ?? 0), l.positions[o + 2]! + (g?.[2] ?? 0)] };
       }
     }
     this.invalidate();
@@ -590,10 +815,335 @@ export class Viewer3d {
     this.invalidate();
   }
 
+  // ───────────────────────── 단면 ─────────────────────────
+
+  /**
+   * 단면 보기: 평면 normal·p = offset의 법선 쪽(normal·p > offset)을 잘라 낸다. null이면 끈다.
+   * normal은 길이와 상관없다(단위로 맞추고 offset도 같은 비율로 나눈다). 축 방향 법선이면 축 단면(axis)으로 기억한다.
+   * 잘린 쪽은 그물·선·점·윤곽선·강조 선분 모두 그리지 않고, 고르기·측정·확대 기준점에서도 무시한다.
+   */
+  setSection(s: { normal: readonly number[]; offset: number } | null, opts: SectionOptions = {}): void {
+    if (this.disposed) return;
+    if (!s) {
+      if (!this.sec) return;
+      this.sec = null;
+      this.sectionChanged();
+      return;
+    }
+    const pf = planeFrom(s.normal, s.offset);
+    if (!pf) return;
+    const n = pf.normal;
+    // ±축이면 축 단면으로(dir = +축, 음의 축은 flip)
+    const ai = [0, 1, 2].find((i) => Math.abs(n[i]!) === 1 && n[(i + 1) % 3] === 0 && n[(i + 2) % 3] === 0);
+    const ax = ai === undefined ? null : (['x', 'y', 'z'] as const)[ai]!;
+    if (ax) {
+      const neg = n[ai!]! < 0;
+      this.sec = { ...this.sectionOpts(opts), dir: [...AXIS_DIRS[ax]] as V3, flip: neg, pos: neg ? -pf.offset : pf.offset, axis: ax };
+    } else this.sec = { ...this.sectionOpts(opts), dir: n, flip: false, pos: pf.offset, axis: null };
+    this.sectionChanged();
+  }
+
+  /**
+   * 축 단면: axis(x·y·z)에 수직인 평면을 둔다. value는 장면 범위 안 위치 0~1(0 = 최소, 1 = 최대 좌표)이고 world면 그 축 좌표.
+   * 기본은 +축 쪽(좌표가 위치보다 큰 쪽)을 잘라 낸다. flip이면 반대쪽. flip을 주지 않으면 같은 축의 앞 값을 지킨다.
+   */
+  setSectionAxis(axis: SectionAxis, value: number, opts: SectionOptions & { flip?: boolean; world?: boolean } = {}): void {
+    if (this.disposed) return;
+    const dir = [...AXIS_DIRS[axis]] as V3;
+    const flip = opts.flip ?? (this.sec?.axis === axis ? this.sec.flip : false);
+    const pos = opts.world ? value : this.rangeAt(dir, value);
+    if (!Number.isFinite(pos)) return;
+    this.sec = { ...this.sectionOpts(opts), dir, flip, pos, axis };
+    this.sectionChanged();
+  }
+
+  /** 지금 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position) */
+  setSectionPosition(value: number, opts: { world?: boolean } = {}): void {
+    const s = this.sec;
+    if (!s) return;
+    const pos = opts.world ? value : this.rangeAt(s.dir, value);
+    if (!Number.isFinite(pos) || pos === s.pos) return;
+    s.pos = pos;
+    this.sectionChanged();
+  }
+
+  /** 잘라 내는 쪽을 뒤집는다(flip을 주면 그 값으로) */
+  flipSection(flip?: boolean): void {
+    const s = this.sec;
+    if (!s) return;
+    const f = flip ?? !s.flip;
+    if (f === s.flip) return;
+    s.flip = f;
+    this.sectionChanged();
+  }
+
+  /** 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시) */
+  setSectionOptions(opts: SectionOptions): void {
+    const s = this.sec;
+    if (!s) return;
+    Object.assign(s, this.sectionOpts(opts));
+    this.sectionChanged();
+  }
+
+  /** 지금 단면 상태(없으면 null) */
+  get section(): SectionState | null {
+    const s = this.sec;
+    if (!s) return null;
+    const r = boxRange(this.allBox, s.dir);
+    const k = s.flip ? -1 : 1;
+    return {
+      normal: [s.dir[0] * k, s.dir[1] * k, s.dir[2] * k],
+      offset: s.pos * k,
+      axis: s.axis,
+      dir: [...s.dir] as V3,
+      flip: s.flip,
+      position: s.pos,
+      min: r.min,
+      max: r.max,
+      t: rangeFraction(s.pos, r),
+      caps: s.caps,
+      outline: s.outline,
+      plane: s.plane,
+    };
+  }
+
+  /** 장면 범위를 방향(축 또는 벡터 — 단위로 맞춘다)으로 잰 [min, max]. 슬라이더 눈금·단위 표시에 쓴다 */
+  sectionRange(dir: SectionAxis | readonly number[]): { min: number; max: number } {
+    const d = typeof dir === 'string' ? AXIS_DIRS[dir] : planeFrom(dir, 0)?.normal;
+    return d ? boxRange(this.allBox, d) : { min: 0, max: 0 };
+  }
+
+  /**
+   * 화면에서 단면을 끌 손잡이 정보: 장면 가운데를 평면에 내린 점의 화면 위치와 법선의 화면 방향·배율.
+   * 앱은 이 점에 손잡이를 그리고, 끈 화소를 moveSectionByPixels로 넘기면 된다. 단면이 없거나 점이 눈 뒤면 null.
+   */
+  sectionHandle(): SectionHandle | null {
+    const s = this.sec;
+    if (!s) return null;
+    const c = this.sectionCenter(s);
+    return sectionScreenAxis(this.frame(), c, this.sectionNormal(s));
+  }
+
+  /**
+   * 화면 끌기(CSS 화소)만큼 단면을 법선 방향으로 옮기고 새 범위 위치 t(0~1)를 돌려준다.
+   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null.
+   */
+  moveSectionByPixels(dx: number, dy: number): number | null {
+    const s = this.sec;
+    if (!s) return null;
+    const d = sectionDragDistance(this.frame(), this.sectionCenter(s), this.sectionNormal(s), dx, dy);
+    if (Number.isFinite(d) && d !== 0) {
+      s.pos += s.flip ? -d : d;
+      this.sectionChanged();
+    }
+    return rangeFraction(s.pos, boxRange(this.allBox, s.dir));
+  }
+
+  private sectionOpts(o: SectionOptions): Pick<Section, 'caps' | 'outline' | 'plane'> {
+    const p = this.sec;
+    return { caps: o.caps ?? p?.caps ?? 'closed', outline: o.outline ?? p?.outline ?? true, plane: o.plane ?? p?.plane ?? true };
+  }
+
+  /** dir 방향 범위 안 위치 t → dir·p 값 */
+  private rangeAt(dir: readonly number[], t: number): number {
+    const r = boxRange(this.allBox, dir);
+    return r.min + (r.max - r.min) * t;
+  }
+
+  private sectionNormal(s: Section): V3 {
+    return s.flip ? [-s.dir[0], -s.dir[1], -s.dir[2]] : [s.dir[0], s.dir[1], s.dir[2]];
+  }
+
+  /** 세계 단면 평면(값 > 0 쪽을 버린다) */
+  private sectionPlane(): Plane4 | null {
+    const s = this.sec;
+    if (!s) return null;
+    const n = this.sectionNormal(s);
+    return [n[0], n[1], n[2], s.flip ? s.pos : -s.pos];
+  }
+
+  /** 장면 가운데를 평면에 내린 점 */
+  private sectionCenter(s: Section): V3 {
+    const c = boxIsEmpty(this.allBox) ? this.cam.target : boxCenter(this.allBox);
+    const k = dot(c, s.dir) - s.pos;
+    return [c[0] - s.dir[0] * k, c[1] - s.dir[1] * k, c[2] - s.dir[2] * k];
+  }
+
+  private sectionChanged(): void {
+    this.cutDirty = true;
+    this.wheelAnchor = null;
+    if (this.measuring) this.measureHover = null;
+    this.invalidate();
+    this.emitSection();
+  }
+
+  /**
+   * 단면이 바뀔 때마다 알림(앱 호출·손잡이 끌기·setScene/clear로 꺼짐·장면 범위가 바뀜·문맥 복구). 꺼지면 null. 돌려준 함수로 끊는다
+   */
+  onSectionChange(cb: (s: SectionState | null) => void): () => void {
+    this.sectionCbs.add(cb);
+    return () => this.sectionCbs.delete(cb);
+  }
+
+  private emitSection(): void {
+    if (!this.sectionCbs.size) return;
+    const st = this.section;
+    for (const cb of this.sectionCbs) cb(st);
+  }
+
+  // ───────────────────────── 묶음 안 구간 ─────────────────────────
+
+  /**
+   * 묶음 안 일부 숨기기: 그물은 삼각형 번호, 선분 묶음은 선분 번호, 점 묶음은 점 번호 범위({ start, count }) 목록.
+   * { prims, edges }로 주면 그물 윤곽선(Mesh3d.edges의 선분 번호)도 숨긴다(주지 않으면 윤곽선은 그대로).
+   * 숨긴 구간은 그리지 않고 고르기·측정·단면 테두리·전체 보기 범위에서도 뺀다. null이면 그 묶음의 숨김을 푼다. 장면을 바꾸면 풀린다.
+   */
+  setHiddenRanges(id: string, sel: RangeSelection | null): void {
+    const it = this.items.get(id);
+    if (!it || this.disposed) return;
+    const r = this.rangeState(id);
+    r.hidden = mergeRanges(selPrims(sel), primCount(it));
+    r.eHidden = it.kind === 'mesh' && it.item.edges ? mergeRanges(selEdges(sel), Math.floor(it.item.edges.length / 6)) : [];
+    this.rangesChanged(it);
+    this.visibilityChanged();
+  }
+
+  /** 그 묶음에서 숨긴 기본 도형 구간(합친 것, 없으면 빈 목록) */
+  hiddenRanges(id: string): IndexRange[] {
+    return (this.rangeSel.get(id)?.hidden ?? []).map((r) => ({ ...r }));
+  }
+
+  /** 모든 묶음의 구간 숨김을 푼다 */
+  clearHiddenRanges(): void {
+    let any = false;
+    for (const [id, r] of this.rangeSel) {
+      if (!r.hidden.length && !r.eHidden.length) continue;
+      r.hidden = [];
+      r.eHidden = [];
+      this.rangesChanged(this.items.get(id)!);
+      any = true;
+    }
+    if (any) this.visibilityChanged();
+  }
+
+  /**
+   * 묶음 안 구간 강조: id → 구간 목록(그물은 삼각형, 선분 묶음은 선분, 점 묶음은 점 번호, { prims, edges }면 윤곽선도).
+   * 그 구간만 강조색으로 그린다(그물은 면에 강조색을 섞고, 선·점은 강조색으로 굵게). 앞의 구간 강조를 모두 바꾼다 — null이면 해제.
+   * highlight(ids)(묶음 통째 강조)와는 따로 두며 함께 써도 된다. 장면을 바꾸면 풀린다.
+   */
+  highlightRanges(sel: ReadonlyMap<string, RangeSelection> | Readonly<Record<string, RangeSelection>> | null): void {
+    if (this.disposed) return;
+    const next = new Map<string, RangeSelection>(sel instanceof Map ? sel : Object.entries(sel ?? {}));
+    for (const [id, r] of this.rangeSel) {
+      if (next.has(id) || (!r.hi.length && !r.eHi.length)) continue;
+      r.hi = [];
+      r.eHi = [];
+      this.rangesChanged(this.items.get(id)!);
+    }
+    for (const [id, s] of next) {
+      const it = this.items.get(id);
+      if (!it) continue;
+      const r = this.rangeState(id);
+      r.hi = mergeRanges(selPrims(s), primCount(it));
+      r.eHi = it.kind === 'mesh' && it.item.edges ? mergeRanges(selEdges(s), Math.floor(it.item.edges.length / 6)) : [];
+      this.rangesChanged(it);
+    }
+    this.invalidate();
+  }
+
+  private rangeState(id: string): RangeState {
+    let r = this.rangeSel.get(id);
+    if (!r) this.rangeSel.set(id, (r = { hidden: [], hi: [], eHidden: [], eHi: [], parts: null, test: null, box: null }));
+    return r;
+  }
+
+  /** 구간이 바뀐 묶음의 보이는 구간·판정·범위를 다시 만든다(모두 비면 지운다) */
+  private rangesChanged(it: Item): void {
+    const id = it.item.id;
+    const r = this.rangeSel.get(id);
+    if (!r) return;
+    if (!r.hidden.length && !r.hi.length && !r.eHidden.length && !r.eHi.length) {
+      this.rangeSel.delete(id);
+      return;
+    }
+    const prims = partitionRanges(primCount(it), r.hidden, r.hi);
+    let edges = null;
+    if ((r.eHidden.length || r.eHi.length) && it.kind === 'mesh' && it.item.edges) edges = partitionRanges(Math.floor(it.item.edges.length / 6), r.eHidden, r.eHi);
+    r.parts = { ver: ++this.rangeVer, prims, edges };
+    r.test = rangeTester(r.hidden);
+    r.box = null;
+  }
+
+  /** 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만) */
+  private pumpUpload(budgetMs: number): void {
+    const done = this.renderer.uploadSome(budgetMs);
+    const p = this.renderer.uploadProgress;
+    const s = this.sceneRef;
+    const total = s ? s.meshes.length + s.lines.length + (s.points?.length ?? 0) : 0;
+    const cb = this.upload?.cb;
+    if (done) {
+      if (this.upload) this.upload.cb = null;
+      cb?.(total, total);
+    } else {
+      cb?.(p!.done, p!.total);
+      this.invalidate();
+    }
+  }
+
+  /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
+  private updateCut(): void {
+    this.cutDirty = false;
+    const s = this.sceneRef;
+    const plane = this.sectionPlane();
+    if (!s || !plane || !this.sec!.outline) {
+      if (this.gpu) this.renderer.setSectionLines(null);
+      return;
+    }
+    const origin: V3 = boxIsEmpty(this.allBox) ? [0, 0, 0] : boxCenter(this.allBox);
+    const parts: Float32Array[] = [];
+    let total = 0;
+    for (const it of this.items.values()) {
+      if (it.kind !== 'mesh') continue;
+      const m = it.item;
+      if (!this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
+      const model = this.modelOf(m);
+      const segs = sectionSegments(m.positions, m.indices, planeToLocal(plane, model), this.bvhFor('triangle', m.positions, m.indices, false), this.rangeSel.get(m.id)?.test);
+      if (!segs.length) continue;
+      // 로컬 → 세계(double) → 장면 가운데 기준
+      const M = model;
+      for (let i = 0; i < segs.length; i += 3) {
+        const x = segs[i]!, y = segs[i + 1]!, z = segs[i + 2]!;
+        if (M) {
+          segs[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]! - origin[0];
+          segs[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]! - origin[1];
+          segs[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]! - origin[2];
+        } else {
+          segs[i] = x - origin[0];
+          segs[i + 1] = y - origin[1];
+          segs[i + 2] = z - origin[2];
+        }
+      }
+      parts.push(segs);
+      total += segs.length;
+    }
+    let all: Float32Array | null = null;
+    if (total) {
+      all = parts.length === 1 ? parts[0]! : new Float32Array(total);
+      if (parts.length > 1) {
+        let o = 0;
+        for (const p of parts) {
+          all.set(p, o);
+          o += p.length;
+        }
+      }
+    }
+    if (this.gpu) this.renderer.setSectionLines(all, origin);
+  }
+
   // ───────────────────────── 고르기·측정 ─────────────────────────
 
   /** 고르기 알림(빈 곳을 누르면 null). 돌려준 함수로 끊는다 */
-  onPick(cb: (p: Pick3d | null) => void): () => void {
+  onPick(cb: (p: Pick3d | null, e: PickEvent) => void): () => void {
     this.pickCbs.add(cb);
     return () => this.pickCbs.delete(cb);
   }
@@ -652,6 +1202,8 @@ export class Viewer3d {
 
   /** 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로 */
   toBlob(type = 'image/png', quality?: number): Promise<Blob> {
+    // 나눠 올리는 중이면 그림에는 다 올린 장면을 담는다
+    if (this.gpu && this.renderer.uploading) this.pumpUpload(Infinity);
     this.renderNow();
     const c = document.createElement('canvas');
     c.width = this.canvas.width;
@@ -685,14 +1237,26 @@ export class Viewer3d {
     if (this.visBox) return this.visBox;
     const s = this.sceneRef;
     if (!s) return (this.visBox = emptyBox());
-    if (!this.hiddenGroups.size && !this.hiddenItems.size) return (this.visBox = this.allBox);
-    const b = sceneBounds(s, (it) => this.visible(it.id, it.group));
+    let ranged = false;
+    for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged) return (this.visBox = this.allBox);
+    let b = emptyBox();
+    for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
   }
 
+  /** 묶음의 보이는 세계 범위(묶음 안 숨긴 구간을 빼고) */
+  private visibleBoundsOf(it: Item): Box3 {
+    const r = this.rangeSel.get(it.item.id);
+    if (!r || !r.hidden.length || !r.parts) return this.boundsOf(it.item);
+    return (r.box ??= itemRangesBounds(it.item, rangeKind(it), r.parts.prims));
+  }
+
   private rebuildGrid(): void {
-    this.grid = gridSpec(this.allBox, this.opts.gridZ);
-    if (!this.lost) this.renderer.setGrid(gridLines(this.grid));
+    const g = (this.grid = gridSpec(this.allBox, this.opts.gridZ));
+    // 묶음 원점을 쓰는 장면(큰 좌표)이면 격자도 가운데 기준 좌표로 올린다(원점이 없는 장면은 예전 그대로)
+    const o: V3 | null = this.usesOrigin ? [(g.x0 + g.x1) / 2, (g.y0 + g.y1) / 2, g.z] : null;
+    if (this.gpu) this.renderer.setGrid(gridLines(g, o), o);
   }
 
   private zoomLimits(): { min: number; max: number } {
@@ -741,6 +1305,7 @@ export class Viewer3d {
       axisY: c(theme.axisY),
       highlight: c(theme.highlight),
     };
+    this.sectionColor = c(theme.section ?? base.section ?? DARK_THEME.section!);
   }
 
   /** CSS 색 → RGBA. 직접 못 읽으면 2D 캔버스로 정규화해서 읽는다 */
@@ -753,19 +1318,26 @@ export class Viewer3d {
     return parseColor(String(ctx.fillStyle)) ?? [0, 0, 0, 1];
   }
 
+  /** 화소 비율이 바뀌면(창을 다른 화면으로 옮김·확대) 다시 그린다. 지금 비율에 맞춘 질의 하나만 듣는다 */
   private watchDpr(): void {
+    let mql: MediaQueryList | null = null;
+    const on = (): void => {
+      listen();
+      this.invalidate();
+    };
     const listen = (): void => {
-      this.mql = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-      const on = (): void => {
-        this.mql?.removeEventListener('change', on);
-        if (this.disposed) return;
-        listen();
-        this.invalidate();
-      };
-      this.mql.addEventListener('change', on);
-      this.off.push(() => this.mql?.removeEventListener('change', on));
+      mql?.removeEventListener('change', on);
+      mql = null;
+      if (this.disposed) return;
+      mql = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      mql.addEventListener('change', on);
     };
     listen();
+    // 해제 함수는 하나만 둔다(예전에는 비율이 바뀔 때마다 off 목록에 하나씩 쌓였다)
+    this.off.push(() => {
+      mql?.removeEventListener('change', on);
+      mql = null;
+    });
   }
 
   // ───────────────────────── 내부: 고르기 ─────────────────────────
@@ -842,97 +1414,54 @@ export class Viewer3d {
     return (px * wpp) / MARKER_HEIGHT;
   }
 
-  private pickDetail(x: number, y: number, build = true): PickDetail | null {
-    const s = this.sceneRef;
-    if (!s) return null;
-    const f = this.frame();
-    const ray = screenRay(f, x, y);
-    const tol = this.opts.pickTolerance;
-    const ix = safeInv(ray.dir[0]), iy = safeInv(ray.dir[1]), iz = safeInv(ray.dir[2]);
-    const boxHit = (b: Box3): boolean => {
-      const pad = (Math.abs(b.max[0] - b.min[0]) + Math.abs(b.max[1] - b.min[1]) + Math.abs(b.max[2] - b.min[2])) * 1e-6 + 1e-9;
-      const arr = new Float64Array([b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]]);
-      return rayBoxEntry(arr, 0, ray.origin[0], ray.origin[1], ray.origin[2], ix, iy, iz, Infinity, pad) !== Infinity;
-    };
-    // 그물
-    let mesh: { m: Mesh3d; h: NonNullable<ReturnType<typeof pickMeshRay>> } | null = null;
-    // 선분·점을 가리는 깊이: 불투명 면(음영 모드)만 가린다
-    let occl = Infinity;
-    const shaded = this.mode === 'shaded' || this.mode === 'shadedEdges';
-    for (const it of this.items.values()) {
-      if (it.kind !== 'mesh' || !this.visible(it.item.id, it.item.group)) continue;
-      const m = it.item;
-      if (!boxHit(meshBounds(m))) continue;
-      const bvh = this.bvhFor('triangle', m.positions, m.indices, build);
-      if (!bvh) continue;
-      const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, m.matrix);
-      if (!h) continue;
-      if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
-      if (shaded && m.color[3] >= 0.999) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
-    }
-    /** 아직 BVH가 없고(만들지 말라고 했고) 크면 건너뛴다 — 모두 훑기는 작은 묶음만 */
-    const skip = (bvh: Bvh | null, n: number): boolean => !bvh && !build && n > 20_000;
-    // 점
-    const pts: { p: PointSet3d; i: number; point: V3; distPx: number; depth: number }[] = [];
-    for (const it of this.items.values()) {
-      if (it.kind !== 'point' || !this.visible(it.item.id, it.item.group)) continue;
-      const p = it.item;
-      const bvh = this.bvhFor('point', p.positions, undefined, build);
-      if (skip(bvh, p.positions.length / 3)) continue;
-      const h = pickPointSet(f, p.positions, bvh, x, y, tol + (p.size ?? 4) / 2, occl);
-      if (h) pts.push({ p, i: h.index, point: h.point, distPx: h.distPx, depth: h.depth });
-    }
-    const pt = chooseNearest(pts);
-    if (pt) {
-      const id = pt.p.pointIds?.[pt.i] ?? pt.i;
-      return { pick: { kind: 'point', id: pt.p.id, index: id, point: pt.point, raw: pt.i }, snap: pt.point, vertex: true };
-    }
-    // 선분
-    const lns: { l: LineSet3d; i: number; point: V3; distPx: number; depth: number }[] = [];
-    for (const it of this.items.values()) {
-      if (it.kind !== 'line' || !this.visible(it.item.id, it.item.group)) continue;
-      const l = it.item;
-      const tl = tol + (l.width ?? 1) / 2;
-      if (!boxHit(positionsBox(l.positions)) && !this.nearBox(f, positionsBox(l.positions), x, y, tl)) continue;
-      const bvh = this.bvhFor('segment', l.positions, undefined, build);
-      if (skip(bvh, l.positions.length / 6)) continue;
-      const h = pickSegments(f, l.positions, bvh, x, y, tl, { limit: this.ranges.get(l.id)?.count, maxDepth: occl });
-      if (h) lns.push({ l, i: h.index, point: h.point, distPx: h.distPx, depth: h.depth });
-    }
-    const ln = chooseNearest(lns);
-    if (ln) {
-      const P = ln.l.positions, o = ln.i * 6;
-      const ends: V3[] = [
-        [P[o]!, P[o + 1]!, P[o + 2]!],
-        [P[o + 3]!, P[o + 4]!, P[o + 5]!],
-      ];
-      const v = snapToNearest(f, ends, x, y, 10);
-      const id = ln.l.segmentIds?.[ln.i] ?? ln.i;
-      return { pick: { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i }, snap: v ?? ln.point, vertex: !!v };
-    }
-    if (mesh) {
-      const v = snapToNearest(f, mesh.h.corners, x, y, 10);
-      return {
-        pick: { kind: 'mesh', id: mesh.m.id, index: mesh.h.tri, point: mesh.h.point, raw: mesh.h.tri, normal: mesh.h.normal },
-        snap: v ?? mesh.h.point,
-        vertex: !!v,
-      };
-    }
-    return null;
+  /** 묶음 세계 범위(원점·행렬 반영, 장면마다 캐시) */
+  private boundsOf(it: AnyItem): Box3 {
+    let b = this.boxes.get(it);
+    if (!b) this.boxes.set(it, (b = itemBounds(it)));
+    return b;
   }
 
-  /** 상자를 화면에 투영했을 때 커서가 tol 안에 드는지(대략) */
-  private nearBox(f: ViewFrame, b: Box3, x: number, y: number, tol: number): boolean {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (let i = 0; i < 8; i++) {
-      const p = projectToScreen(f, [i & 1 ? b.max[0] : b.min[0], i & 2 ? b.max[1] : b.min[1], i & 4 ? b.max[2] : b.min[2]]);
-      if (!p) return true;
-      x0 = Math.min(x0, p[0]);
-      x1 = Math.max(x1, p[0]);
-      y0 = Math.min(y0, p[1]);
-      y1 = Math.max(y1, p[1]);
+  /** 그물 모형 행렬 = matrix · T(origin)(장면마다 캐시) */
+  private modelOf(m: Mesh3d): ArrayLike<number> | undefined {
+    let e = this.models.get(m);
+    if (!e) this.models.set(m, (e = { m: modelMatrix(m.matrix, m.origin) }));
+    return e.m;
+  }
+
+  /** 보이는 묶음 목록(고르기용, 보이기를 바꿀 때까지 다시 쓴다) */
+  private visibleItems(): ScenePickItems {
+    if (this.visLists) return this.visLists;
+    const meshes: Mesh3d[] = [], lines: LineSet3d[] = [], points: PointSet3d[] = [];
+    for (const it of this.items.values()) {
+      if (!this.visible(it.item.id, it.item.group)) continue;
+      if (it.kind === 'mesh') meshes.push(it.item);
+      else if (it.kind === 'line') lines.push(it.item);
+      else points.push(it.item);
     }
-    return x >= x0 - tol && x <= x1 + tol && y >= y0 - tol && y <= y1 + tol;
+    return (this.visLists = { meshes, lines, points });
+  }
+
+  private pickDetail(x: number, y: number, build = true): PickDetail | null {
+    if (!this.sceneRef) return null;
+    return pickScene(this.frame(), x, y, this.visibleItems(), {
+      tol: this.opts.pickTolerance,
+      occlude: this.mode === 'shaded' || this.mode === 'shadedEdges',
+      bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
+      fast: !build,
+      limit: (id) => this.ranges.get(id)?.count,
+      bounds: (it) => this.boundsOf(it),
+      model: (m) => this.modelOf(m),
+      clip: this.sectionPlane(),
+      caps: (m) => this.capped(m),
+      hidden: (it) => this.rangeSel.get(it.id)?.test,
+    });
+  }
+
+  /** 단면에서 잘린 면을 채워 그리는 그물인지(렌더러의 채우기 조건과 같다) */
+  private capped(m: Mesh3d): boolean {
+    const s = this.sec;
+    if (!s || s.caps === 'none' || (this.mode !== 'shaded' && this.mode !== 'shadedEdges') || m.color[3] < 0.999 || !this.renderer.canFillSection) return false;
+    return s.caps === 'all' || m.closed === true;
   }
 
   /**
@@ -952,7 +1481,11 @@ export class Viewer3d {
     return p;
   }
 
-  private click(x: number, y: number): void {
+  private click(x: number, y: number, e?: PointerEvent): void {
+    const now = performance.now();
+    const lc = this.lastClick;
+    const n = lc.n === 1 && now - lc.t < 450 && Math.hypot(x - lc.x, y - lc.y) < 6 ? 2 : 1;
+    this.lastClick = { t: now, x, y, n };
     const d = this.pickDetail(x, y);
     if (this.measuring) {
       if (!d) return;
@@ -967,7 +1500,16 @@ export class Viewer3d {
       this.invalidate();
       return;
     }
-    for (const cb of this.pickCbs) cb(d ? d.pick : null);
+    const ev: PickEvent = {
+      altKey: !!e?.altKey,
+      ctrlKey: !!e?.ctrlKey,
+      shiftKey: !!e?.shiftKey,
+      metaKey: !!e?.metaKey,
+      clicks: n,
+      button: e?.button ?? 0,
+      pointerType: e?.pointerType || 'mouse',
+    };
+    for (const cb of this.pickCbs) cb(d ? d.pick : null, ev);
   }
 
   // ───────────────────────── 내부: 입력 ─────────────────────────
@@ -1009,12 +1551,16 @@ export class Viewer3d {
       this.raf = 0;
     });
     this.on(cv, 'webglcontextrestored', () => {
+      if (this.disposed) return;
       this.lost = false;
       this.renderer.init();
-      if (this.sceneRef) this.renderer.setScene(this.sceneRef);
-      if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions);
+      if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload });
+      if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
+      // 단면 테두리도 GPU 자료라 다시 올린다
+      this.cutDirty = true;
       this.rebuildGrid();
       this.invalidate();
+      if (this.sec) this.emitSection();
     });
     const cube = this.cube;
     this.on<PointerEvent>(cube, 'pointermove', (e) => {
@@ -1163,7 +1709,7 @@ export class Viewer3d {
       }
     } else if (!cancel && !d.moved && (d.button === 0 || e.pointerType === 'touch')) {
       const p = this.local(e);
-      this.click(p.x, p.y);
+      this.click(p.x, p.y, e);
     }
     if (this.pointers.size === 0) {
       this.drag = null;
@@ -1250,6 +1796,14 @@ export class Viewer3d {
       this.measureHover = d ? { p: d.snap, vertex: d.vertex } : null;
       this.hoverAt = null;
     }
+    if (this.renderer.uploading) this.pumpUpload(this.upload?.budget ?? 8);
+    if (this.cutDirty) {
+      if (this.sec) this.updateCut();
+      else {
+        this.cutDirty = false;
+        this.renderer.setSectionLines(null);
+      }
+    }
     let marker = null;
     if (this.marker) {
       const m = this.marker;
@@ -1273,6 +1827,8 @@ export class Viewer3d {
           }
         : null,
       interacting: this.interacting,
+      section: this.sec ? { plane: this.sectionPlane()!, caps: this.sec.caps, color: this.sectionColor, width: 2 } : null,
+      parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
     });
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
@@ -1307,8 +1863,34 @@ export class Viewer3d {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
     this.drawMeasure(ctx, f);
+  }
+
+  /** 단면 평면 위치: 평면 ∩ 장면 범위(조금 넓힌) 다각형을 옅게 칠하고 점선 테두리 */
+  private drawSectionPlane(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+    const plane = this.sectionPlane();
+    const b = this.allBox;
+    if (!plane || boxIsEmpty(b)) return;
+    const pad = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) * 0.04 || 1;
+    const poly = planeBoxPolygon({ min: [b.min[0] - pad, b.min[1] - pad, b.min[2] - pad], max: [b.max[0] + pad, b.max[1] + pad, b.max[2] + pad] }, plane);
+    const pts = poly.map((p) => projectToScreen(f, p));
+    if (pts.length < 3 || pts.some((p) => !p)) return;
+    const col = this.theme.section ?? DARK_THEME.section!;
+    ctx.save();
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p![0], p![1]) : ctx.moveTo(p![0], p![1])));
+    ctx.closePath();
+    ctx.globalAlpha = 0.07;
+    ctx.fillStyle = col;
+    ctx.fill();
+    ctx.globalAlpha = 0.65;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.restore();
   }
 
   private drawTriad(ctx: CanvasRenderingContext2D, f: ViewFrame): void {

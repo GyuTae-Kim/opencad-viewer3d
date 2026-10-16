@@ -3,7 +3,22 @@
  */
 export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d } from './types';
 export { VIEW_KEYS, Viewer3d } from './viewer';
-export type { GroupInfo, MarkerOptions, MeasureResult, SegmentHighlightOptions, Viewer3dOptions, Viewer3dStats } from './viewer';
+export type {
+  GroupInfo,
+  MarkerOptions,
+  MeasureResult,
+  PickEvent,
+  RangeSelection,
+  SectionCaps,
+  SectionHandle,
+  SectionOptions,
+  SectionState,
+  SegmentHighlightOptions,
+  Viewer3dOptions,
+  Viewer3dStats,
+} from './viewer';
+export type { Plane4, SectionAxis } from './section';
+export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_LABELS } from './camera';

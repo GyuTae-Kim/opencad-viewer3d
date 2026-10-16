@@ -30,6 +30,8 @@ export interface Viewer3dTheme {
   cubeEdge: string;
   cubeText: string;
   cubeHover: string;
+  /** 단면 테두리(교선)·평면 표시(없으면 기본 테마 값) */
+  section?: string;
 }
 
 export const DARK_THEME: Viewer3dTheme = {
@@ -49,6 +51,7 @@ export const DARK_THEME: Viewer3dTheme = {
   cubeEdge: '#9aa6b5',
   cubeText: '#e8ebf0',
   cubeHover: 'rgba(61,149,240,0.75)',
+  section: '#ff5fa2',
 };
 
 export const LIGHT_THEME: Viewer3dTheme = {
@@ -68,6 +71,7 @@ export const LIGHT_THEME: Viewer3dTheme = {
   cubeEdge: '#8a95a3',
   cubeText: '#1d2530',
   cubeHover: 'rgba(31,111,209,0.6)',
+  section: '#d0246e',
 };
 
 /** CSS 변수 이름(호스트 요소나 조상에 두면 덮어쓴다) */
@@ -88,6 +92,7 @@ export const THEME_CSS_VARS: Record<keyof Viewer3dTheme, string> = {
   cubeEdge: '--v3d-cube-edge',
   cubeText: '--v3d-cube-fg',
   cubeHover: '--v3d-cube-hover',
+  section: '--v3d-section',
 };
 
 /**

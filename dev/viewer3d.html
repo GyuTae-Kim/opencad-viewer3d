@@ -77,6 +77,26 @@
       #play {
         width: 220px;
       }
+      #secpos {
+        width: 160px;
+      }
+      #sechandle {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #ff5fa2;
+        border: 2px solid #fff;
+        box-sizing: border-box;
+        cursor: grab;
+        touch-action: none;
+        z-index: 2;
+      }
+      #sechandle[hidden] {
+        display: none;
+      }
     </style>
   </head>
   <body>
