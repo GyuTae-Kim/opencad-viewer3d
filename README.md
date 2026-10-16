@@ -30,13 +30,22 @@ viewer.setScene(scene); // Scene3d
 viewer.fit();
 ```
 
+앱이 자주 쓰는 것:
+
+- `handleKey(e)`: 캔버스에 초점이 없을 때 창 키를 넘기면 F·1~7·Esc를 뷰어 규칙대로 처리하고 처리했으면 `true`. 표준 뷰 키 표는 `VIEW_KEYS`
+- `fitItems(ids)`: 고른 항목(그물·선·점 id)만 맞춰 보기
+- `highlight(ids)`, `setItemVisible`, `setGroupVisible`, `groups()`: 강조와 보이기
+- `onPick`, `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`
+- `gridVisible`, `viewCubeVisible`, `axesVisible`: 격자·뷰 큐브·좌표축 켜짐 상태
+- `setDrawLimitBySegmentId`, `setMarker`: NC 재생
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.1.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.2.0"
 }
 ```
 

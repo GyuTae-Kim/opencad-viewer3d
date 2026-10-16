@@ -118,7 +118,8 @@ const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans K
 const ROT_PER_PX = 0.0085;
 const DRAG_START_PX = 4;
 const CUBE_CSS = 112;
-const KEY_VIEWS: Record<string, ViewName> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
+/** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
+export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
 
 export class Viewer3d {
@@ -360,6 +361,15 @@ export class Viewer3d {
     this.goto(fitCamera(this.cam, this.visibleBox(), this.cssW / this.cssH), animate);
   }
 
+  /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기 */
+  fitItems(ids: readonly string[], animate = this.opts.animate): void {
+    const s = this.sceneRef;
+    const want = new Set(ids);
+    const b = s ? sceneBounds(s, (it) => want.has(it.id) && this.visible(it.id, it.group)) : emptyBox();
+    if (boxIsEmpty(b)) return this.fit(animate);
+    this.goto(fitCamera(this.cam, b, this.cssW / this.cssH), animate);
+  }
+
   /** 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기 */
   setView(name: ViewName, animate = this.opts.animate): void {
     this.setViewDir(VIEW_DIRS[name], animate);
@@ -426,6 +436,18 @@ export class Viewer3d {
   setAxesVisible(on: boolean): void {
     this.opts.axes = on;
     this.invalidate();
+  }
+
+  get gridVisible(): boolean {
+    return this.gridOn;
+  }
+
+  get viewCubeVisible(): boolean {
+    return this.opts.viewCube;
+  }
+
+  get axesVisible(): boolean {
+    return this.opts.axes;
   }
 
   /** 테마 바꾸기(인자 없이 부르면 CSS 변수만 다시 읽는다) */
@@ -526,7 +548,7 @@ export class Viewer3d {
     return () => this.pickCbs.delete(cb);
   }
 
-  /** 측정 알림(두 번째 점을 찍을 때 결과, 지우면 null) */
+  /** 측정 알림(두 번째 점을 찍을 때 결과, 지우거나 세 번째 점으로 새 측정을 시작하면 null) */
   onMeasure(cb: (m: MeasureResult | null) => void): () => void {
     this.measureCbs.add(cb);
     return () => this.measureCbs.delete(cb);
@@ -553,6 +575,11 @@ export class Viewer3d {
 
   get measureMode(): boolean {
     return this.measuring;
+  }
+
+  /** 지금 찍힌 측정 점 수(0~2) */
+  get measurePointCount(): number {
+    return this.measurePts.length;
   }
 
   clearMeasure(): void {
@@ -879,7 +906,10 @@ export class Viewer3d {
     const d = this.pickDetail(x, y);
     if (this.measuring) {
       if (!d) return;
-      if (this.measurePts.length >= 2) this.measurePts = [];
+      if (this.measurePts.length >= 2) {
+        this.measurePts = [];
+        for (const cb of this.measureCbs) cb(null);
+      }
       this.measurePts.push(d.snap);
       this.measureHover = null;
       const m = this.measurement();
@@ -1111,14 +1141,22 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  private onKey(e: KeyboardEvent): void {
-    if (!this.opts.keyboard || e.ctrlKey || e.metaKey || e.altKey) return;
+  /**
+   * 뷰어 키(F 전체 보기, 1~7 표준 뷰, Esc 측정 지우기)를 처리한다. 처리했으면 기본 동작을 막고 true.
+   * 캔버스에 초점이 없을 때 앱이 창 키를 넘겨 같은 규칙을 쓰게 한다(입력 칸 걸러내기는 앱 몫).
+   */
+  handleKey(e: KeyboardEvent): boolean {
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (e.key === 'f' || e.key === 'F') this.fit();
-    else if (KEY_VIEWS[e.key]) this.setView(KEY_VIEWS[e.key]!);
+    else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
     else if (e.key === 'Escape' && this.measurePts.length) this.clearMeasure();
-    else return;
+    else return false;
     e.preventDefault();
-    e.stopPropagation();
+    return true;
+  }
+
+  private onKey(e: KeyboardEvent): void {
+    if (this.opts.keyboard && this.handleKey(e)) e.stopPropagation();
   }
 
   // ───────────────────────── 내부: 그리기 ─────────────────────────
