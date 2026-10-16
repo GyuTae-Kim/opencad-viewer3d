@@ -7,14 +7,19 @@
  *
  * 단면: 세계 평면을 묶음마다 로컬 좌표로 옮겨(planeToLocal) u_clip으로 넘긴다. 잘린 면 채우기는 스텐실 홀짝으로 한다 —
  * 닫힌 그물을 잘린 채로 스텐실에 뒤집어 그리면 평면 위 입체 안쪽 화소만 1이 남고, 거기에 평면 ∩ 범위 다각형을 칠한다.
+ *
+ * 무늬: 장면의 무늬 그림(Scene3d.textures) 중 그물이 쓰는 것만 몇 장씩 풀어(decodeTexture — 한 장 한도·전체 예산 안으로 줄임)
+ * REPEAT·밉맵으로 올린다. 다 풀기 전에는 그물을 color로 칠하고, 올릴 때마다 onTexture로 다시 그리게 알린다.
+ * 같은 무늬 객체를 다시 넘긴 장면(setScene)은 올린 무늬를 그대로 쓴다.
  */
-import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d } from './types';
+import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
 import type { ViewFrame } from './camera';
 import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
 import { type V3, hasOrigin, mat4Mul, modelMatrix, normalMatrix, translation } from './math';
 import { boxCenter, meshBounds } from './bounds';
-import { MESH_FS, MESH_VS, POINT_FS, POINT_VS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip } from './shaders';
+import { MESH_FS, MESH_VS, POINT_FS, POINT_VS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
+import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
 
@@ -104,6 +109,30 @@ export interface RenderStats {
   points: number;
 }
 
+/** 무늬 그림 상태(장면이 쓰는 것만) */
+export interface TextureStats {
+  /** 그물이 쓰는 무늬 수 */
+  count: number;
+  /** 올린 수 */
+  ready: number;
+  /** 풀지 못한 수(그물은 color로 칠한다) */
+  failed: number;
+  /** 올린 무늬의 GPU 크기 어림(바이트, 밉맵 포함) */
+  bytes: number;
+}
+
+/** 한 번에 풀어 두는 무늬 수(풀린 그림이 한꺼번에 메모리에 쌓이지 않게) */
+const TEXTURE_DECODES = 4;
+
+interface TexRec {
+  src: Texture3d;
+  /** 긴 변 한도(화소) */
+  side: number;
+  tex: WebGLTexture | null;
+  state: 'queued' | 'decoding' | 'ready' | 'failed';
+  bytes: number;
+}
+
 /** 끄는 동안 이보다 많은 선분 묶음은 gl.LINES(1화소)로 그린다 */
 export const FAST_LINES_WHILE_MOVING = 400_000;
 
@@ -150,6 +179,12 @@ interface MeshRec {
   indexed: boolean;
   hasNormals: boolean;
   hasColors: boolean;
+  /** 무늬 좌표 정점당 값 수(0 = 무늬 없음) */
+  uv: 0 | 2 | 3;
+  /** 무늬 그림 id(uv가 있고 장면에 그 그림이 있을 때) */
+  tex: string | null;
+  /** 무늬 그림의 알파를 불투명도에 곱하는지(Texture3d.alpha — 반투명 차례에 그린다) */
+  texAlpha: boolean;
   transparent: boolean;
   /** 로컬 → 세계 = matrix · T(origin)(원점이 없으면 matrix 그대로, 둘 다 없으면 undefined) */
   model: ArrayLike<number> | undefined;
@@ -189,6 +224,9 @@ export class Renderer3d {
   /** 단면 변종(처음 쓸 때 만든다) */
   private meshC: Prog | null = null;
   private thinC: Prog | null = null;
+  /** 무늬 변종(처음 쓸 때 만든다): 보통·단면 */
+  private meshT: Prog | null = null;
+  private meshTC: Prog | null = null;
   private quadWide!: WebGLBuffer;
   private quadPoint!: WebGLBuffer;
   private capBuf!: WebGLBuffer;
@@ -216,6 +254,19 @@ export class Renderer3d {
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
   /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
   private pending: { scene: Scene3d; mi: number; li: number; pi: number } | null = null;
+  /** 장면의 무늬 그림(id → 원본) */
+  private texSrc = new Map<string, Texture3d>();
+  /** 그물이 쓰는 무늬(풀기·올리기 상태) */
+  private textures = new Map<string, TexRec>();
+  /** 무늬 판(장면·문맥이 바뀌면 늘려 늦게 끝난 풀기를 버린다) */
+  private texGen = 0;
+  private decoding = 0;
+  private aniso: { ext: EXT_texture_filter_anisotropic; max: number } | null = null;
+  /** 무늬 한 장 긴 변 한도(화소, GPU 한도와 작은 쪽)와 전체 예산(바이트) — 다음 장면부터 */
+  textureLimit = TEXTURE_LIMIT;
+  textureBudget = TEXTURE_BUDGET;
+  /** 무늬를 올렸거나 풀지 못했을 때(다시 그리기용) */
+  onTexture: (() => void) | null = null;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -231,6 +282,10 @@ export class Renderer3d {
     this.pointP = this.program(POINT_VS, POINT_FS);
     this.meshC = null;
     this.thinC = null;
+    this.meshT = null;
+    this.meshTC = null;
+    const an = gl.getExtension('EXT_texture_filter_anisotropic');
+    this.aniso = an ? { ext: an, max: Number(gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 1 } : null;
     this.quadWide = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
@@ -262,7 +317,13 @@ export class Renderer3d {
     this.cutSeg = null;
     this.meshC = null;
     this.thinC = null;
+    this.meshT = null;
+    this.meshTC = null;
     this.pending = null;
+    this.texGen++;
+    this.textures.clear();
+    this.texSrc.clear();
+    this.decoding = 0;
   }
 
   private program(vs: string, fs: string): Prog {
@@ -297,6 +358,12 @@ export class Renderer3d {
 
   private thinClip(): Prog {
     return (this.thinC ??= this.program(withClip(THIN_VS), withClip(THIN_FS)));
+  }
+
+  /** 무늬 그물 프로그램(clip이면 단면 변종) */
+  private meshTex(clip: boolean): Prog {
+    if (clip) return (this.meshTC ??= this.program(withDefines(MESH_VS, 'CLIP', 'TEX'), withDefines(MESH_FS, 'CLIP', 'TEX')));
+    return (this.meshT ??= this.program(withDefines(MESH_VS, 'TEX'), withDefines(MESH_FS, 'TEX')));
   }
 
   private loc(pr: Prog, name: string): WebGLUniformLocation | null {
@@ -342,7 +409,8 @@ export class Renderer3d {
    * (올라간 묶음부터 그린다 — 큰 모형에서 화면이 멈추지 않게).
    */
   setScene(scene: Scene3d, opts: { incremental?: boolean } = {}): void {
-    this.clear();
+    this.clear(true);
+    this.syncTextures(scene);
     if (opts.incremental) {
       this.pending = { scene, mi: 0, li: 0, pi: 0 };
       return;
@@ -395,7 +463,7 @@ export class Renderer3d {
     return { ...r, src: l };
   }
 
-  /** 지금 묶인 VAO에 그물 정점 속성(위치·법선·색)을 건다 */
+  /** 지금 묶인 VAO에 그물 정점 속성(위치·법선·색·무늬 좌표)을 건다 */
   private bindMeshAttribs(m: Mesh3d): { hasNormals: boolean; hasColors: boolean } {
     const gl = this.gl;
     const nv = Math.floor(m.positions.length / 3);
@@ -414,6 +482,12 @@ export class Renderer3d {
       gl.enableVertexAttribArray(2);
       gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 16, 0);
     }
+    const uv = uvComponents(m);
+    if (uv && m.texture) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(m.uvs!));
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, uv, gl.FLOAT, false, uv * 4, 0);
+    }
     return { hasNormals, hasColors };
   }
 
@@ -429,7 +503,9 @@ export class Renderer3d {
       count = m.indices.length - (m.indices.length % 3);
     } else count = nv - (nv % 3);
     gl.bindVertexArray(null);
-    let transparent = m.color[3] < 0.999;
+    const uv = m.texture && this.texSrc.has(m.texture) ? uvComponents(m) : 0;
+    const texAlpha = uv > 0 && this.texSrc.get(m.texture!)!.alpha === true;
+    let transparent = m.color[3] < 0.999 || texAlpha;
     if (hasColors && !transparent) {
       // 정점 색에 반투명이 있으면 투명 차례에 그린다(앞 몇천 개만 본다)
       const c = m.colors!;
@@ -441,7 +517,23 @@ export class Renderer3d {
     }
     const edges = m.edges && m.edges.length >= 6 ? this.lineRec(m.id, m.group, m.edges, undefined) : null;
     const box = meshBounds(m);
-    return { src: m, vao, count, indexed, hasNormals, hasColors, transparent, model: modelMatrix(m.matrix, m.origin), box, center: boxCenter(box), edges, wire: null };
+    return {
+      src: m,
+      vao,
+      count,
+      indexed,
+      hasNormals,
+      hasColors,
+      uv,
+      tex: uv ? m.texture! : null,
+      texAlpha,
+      transparent,
+      model: modelMatrix(m.matrix, m.origin),
+      box,
+      center: boxCenter(box),
+      edges,
+      wire: null,
+    };
   }
 
   private lineRec(id: string, group: string | undefined, positions: Float32Array, colors: Float32Array | undefined): LineRec {
@@ -595,10 +687,11 @@ export class Renderer3d {
       : null;
   }
 
-  /** 장면 GPU 자료 지우기(격자·표시 그물은 남긴다) */
-  clear(): void {
+  /** 장면 GPU 자료 지우기(격자·표시 그물은 남긴다). keepTextures면 무늬는 남긴다(setScene이 새 장면과 맞춘다) */
+  clear(keepTextures = false): void {
     const gl = this.gl;
     this.pending = null;
+    if (!keepTextures) this.dropTextures();
     for (const r of this.meshes) {
       this.dropParts(r);
       if (r.edges) this.dropParts(r.edges);
@@ -642,9 +735,11 @@ export class Renderer3d {
     gl.deleteBuffer(this.quadPoint);
     gl.deleteBuffer(this.capBuf);
     gl.deleteVertexArray(this.capVao);
-    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC]) if (p) gl.deleteProgram(p.p);
+    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC]) if (p) gl.deleteProgram(p.p);
     this.meshC = null;
     this.thinC = null;
+    this.meshT = null;
+    this.meshTC = null;
   }
 
   /** 삼각형 선 그리기(윤곽선 없는 그물의 와이어프레임) */
@@ -684,6 +779,127 @@ export class Renderer3d {
     r = this.meshRec({ id: `__marker_${kind}`, positions: g.positions, normals: g.normals, color: [1, 1, 1, 1] });
     this.markers.set(kind, r);
     return r;
+  }
+
+  // ───────────── 무늬 ─────────────
+
+  /**
+   * 새 장면의 무늬: 그물이 쓰는 것만 남긴다. 같은 id·같은 원본 객체로 이미 올린(또는 푸는 중인) 것은 그대로 두고,
+   * 나머지는 지운 뒤 한 장 한도·전체 예산으로 긴 변을 정해 차례로 푼다.
+   */
+  private syncTextures(scene: Scene3d): void {
+    const gl = this.gl;
+    this.texSrc.clear();
+    for (const t of scene.textures ?? []) if (t && typeof t.id === 'string' && !this.texSrc.has(t.id)) this.texSrc.set(t.id, t);
+    const used = new Map<string, Texture3d>();
+    for (const m of scene.meshes) {
+      const t = m.texture !== undefined ? this.texSrc.get(m.texture) : undefined;
+      if (t && uvComponents(m)) used.set(t.id, t);
+    }
+    let dropped = false;
+    for (const [id, rec] of this.textures)
+      if (used.get(id) !== rec.src || rec.state === 'failed') {
+        if (rec.tex) gl.deleteTexture(rec.tex);
+        this.textures.delete(id);
+        dropped = true;
+      }
+    // 푸는 중이던 것을 버렸으면 판을 바꿔 늦게 끝난 결과를 버린다(남은 것은 다시 줄 세운다)
+    if (dropped) {
+      this.texGen++;
+      this.decoding = 0;
+      for (const rec of this.textures.values()) if (rec.state === 'decoding') rec.state = 'queued';
+    }
+    const fresh = [...used.values()].filter((t) => !this.textures.has(t.id));
+    if (!fresh.length && !dropped) return;
+    const maxSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
+    const sides = textureSides([...used.values()], Math.max(1, Math.min(maxSize, this.textureLimit)), this.textureBudget);
+    for (const t of fresh) this.textures.set(t.id, { src: t, side: sides.get(t.id) ?? TEXTURE_LIMIT, tex: null, state: 'queued', bytes: 0 });
+    this.pumpTextures();
+  }
+
+  /** 줄 선 무늬를 TEXTURE_DECODES장까지 풀기 시작한다 */
+  private pumpTextures(): void {
+    if (this.decoding >= TEXTURE_DECODES) return;
+    const gen = this.texGen;
+    for (const rec of this.textures.values()) {
+      if (this.decoding >= TEXTURE_DECODES) break;
+      if (rec.state !== 'queued') continue;
+      rec.state = 'decoding';
+      this.decoding++;
+      decodeTexture(rec.src, rec.side).then(
+        (bmp) => {
+          if (gen !== this.texGen || this.textures.get(rec.src.id) !== rec || this.gl.isContextLost()) {
+            bmp.close();
+            return;
+          }
+          try {
+            this.uploadTexture(rec, bmp);
+            rec.state = 'ready';
+          } catch {
+            rec.state = 'failed';
+          } finally {
+            bmp.close();
+          }
+          this.decoding--;
+          this.pumpTextures();
+          this.onTexture?.();
+        },
+        () => {
+          if (gen !== this.texGen || this.textures.get(rec.src.id) !== rec) return;
+          rec.state = 'failed';
+          this.decoding--;
+          this.pumpTextures();
+          this.onTexture?.();
+        },
+      );
+    }
+  }
+
+  private uploadTexture(rec: TexRec, bmp: ImageBitmap): void {
+    const gl = this.gl;
+    const t = gl.createTexture();
+    if (!t) throw new Error('무늬를 만들지 못했습니다');
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    if (this.aniso) gl.texParameterf(gl.TEXTURE_2D, this.aniso.ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, this.aniso.max));
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    rec.tex = t;
+    rec.bytes = Math.round(bmp.width * bmp.height * 4 * (4 / 3));
+  }
+
+  /** 지운다: 올린 무늬 모두 */
+  private dropTextures(): void {
+    for (const rec of this.textures.values()) if (rec.tex) this.gl.deleteTexture(rec.tex);
+    this.textures.clear();
+    this.texSrc.clear();
+    this.texGen++;
+    this.decoding = 0;
+  }
+
+  /** 장면 무늬 상태 */
+  get textureStats(): TextureStats {
+    const s: TextureStats = { count: this.textures.size, ready: 0, failed: 0, bytes: 0 };
+    for (const r of this.textures.values()) {
+      if (r.state === 'ready') {
+        s.ready++;
+        s.bytes += r.bytes;
+      } else if (r.state === 'failed') s.failed++;
+    }
+    return s;
+  }
+
+  /** 그물의 올린 무늬(없거나 아직이면 null) */
+  private texOf(r: MeshRec): WebGLTexture | null {
+    if (!r.tex) return null;
+    const t = this.textures.get(r.tex);
+    return t && t.state === 'ready' ? t.tex : null;
   }
 
   // ───────────── 묶음 안 구간(숨김·강조) ─────────────
@@ -878,6 +1094,7 @@ export class Renderer3d {
     let lastCol = '';
     let lastFlags = '';
     let lastCull: boolean | undefined;
+    let lastTex: WebGLTexture | null = null;
     const meshUse = (p: Prog): void => {
       cur = p;
       gl.useProgram(p.p);
@@ -885,7 +1102,9 @@ export class Renderer3d {
       lastCol = '';
       lastFlags = '';
       lastCull = undefined;
+      lastTex = null;
       gl.uniform1f(this.loc(p, 'u_ortho'), ortho);
+      if (p === this.meshT || p === this.meshTC) gl.uniform1i(this.loc(p, 'u_tex'), 0);
     };
     const setMeshMatrix = (model: ArrayLike<number> | undefined): void => {
       const p = cur;
@@ -902,10 +1121,20 @@ export class Renderer3d {
         gl.uniform4f(this.loc(p, 'u_clip'), c[0], c[1], c[2], c[3]);
       }
     };
-    /** 그물 그리기. list를 주면 그 구간만(묶음 안 숨김·강조) */
+    /** 그물 그리기. list를 주면 그 구간만(묶음 안 숨김·강조). 무늬 프로그램이면 그물의 무늬를 건다 */
     const meshDraw = (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null): void => {
       if (list && !list.total) return;
       const p = cur;
+      if (p === this.meshT || p === this.meshTC) {
+        const t = this.texOf(r);
+        if (t !== lastTex) {
+          lastTex = t;
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, t);
+        }
+        gl.uniform1f(this.loc(p, 'u_uvq'), r.uv === 3 ? 1 : 0);
+        gl.uniform1f(this.loc(p, 'u_texAlpha'), r.texAlpha ? 1 : 0);
+      }
       const m = matrix ?? null;
       if (m !== lastMat) {
         lastMat = m;
@@ -952,6 +1181,8 @@ export class Renderer3d {
       stats.triangles += r.count / 3;
     };
     const sceneMeshProg = (): Prog => (sec ? this.meshClip() : this.mesh);
+    /** 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종) */
+    const progFor = (r: MeshRec): Prog => (this.texOf(r) ? this.meshTex(!!sec) : sceneMeshProg());
     /** 묶음 안 구간이 있으면 [보통, 강조] 그릴 목록(없으면 null — 옛 캐시는 지운다). wire면 와이어프레임용 */
     const meshLists = (r: MeshRec, wire = false): [DrawList, DrawList] | null => {
       const p = st.parts?.(r.src.id);
@@ -974,14 +1205,24 @@ export class Renderer3d {
 
     const visibleMeshes = this.meshes.filter((r) => vis(r.src.id, r.src.group));
 
-    // 1) 불투명 면
+    // 1) 불투명 면(무늬 없는 것 먼저, 그다음 올린 무늬가 있는 것 — 프로그램을 한 번씩만 바꾼다)
     if (mode === 'shaded' || mode === 'shadedEdges') {
-      meshUse(sceneMeshProg());
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1, 1);
+      let textured = false;
+      meshUse(sceneMeshProg());
       for (const r of visibleMeshes) {
         if (r.transparent) continue;
+        if (this.texOf(r)) {
+          textured = true;
+          continue;
+        }
         meshDrawParts(r, r.src.color, 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+      }
+      if (textured) {
+        meshUse(this.meshTex(!!sec));
+        for (const r of visibleMeshes)
+          if (!r.transparent && this.texOf(r)) meshDrawParts(r, r.src.color, 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
@@ -1220,7 +1461,11 @@ export class Renderer3d {
       meshUse(sceneMeshProg());
       gl.enable(gl.BLEND);
       gl.depthMask(false);
-      for (const r of trans) meshDrawParts(r, r.src.color, xray ? 0.22 : 1, st.highlight.has(r.src.id) ? 0.5 : 0, false);
+      for (const r of trans) {
+        const p = progFor(r);
+        if (p !== cur) meshUse(p);
+        meshDrawParts(r, r.src.color, xray ? 0.22 : 1, st.highlight.has(r.src.id) ? 0.5 : 0, false);
+      }
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }

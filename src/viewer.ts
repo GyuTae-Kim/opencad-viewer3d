@@ -54,7 +54,8 @@ import {
   sectionSegments,
 } from './section';
 import { segmentsById } from './segments';
-import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderStats, Renderer3d } from './renderer';
+import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderStats, type TextureStats, Renderer3d } from './renderer';
+import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
@@ -81,6 +82,10 @@ export interface Viewer3dOptions {
   pickTolerance?: number;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
+  /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
+  textureLimit?: number;
+  /** 무늬 그림 전체 GPU 예산(바이트, 기본 256 MB — RGBA·밉맵 어림). 넘으면 모든 무늬를 같은 비로 줄인다 */
+  textureBudget?: number;
 }
 
 /** 선분 강조 선택(setHighlightSegments·highlightSegmentIds) */
@@ -187,7 +192,7 @@ export interface MarkerOptions {
   color?: Rgba;
 }
 
-export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number };
+export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats };
 
 type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } | { kind: 'point'; item: PointSet3d };
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
@@ -351,6 +356,8 @@ export class Viewer3d {
       animate: opts.animate ?? true,
       pickTolerance: opts.pickTolerance ?? 6,
       maxPixelRatio: opts.maxPixelRatio ?? 2,
+      textureLimit: opts.textureLimit ?? TEXTURE_LIMIT,
+      textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
     };
     this.themeOpt = opts.theme;
     this.gridOn = this.opts.grid;
@@ -406,6 +413,10 @@ export class Viewer3d {
       throw e;
     }
     this.renderer = renderer;
+    renderer.textureLimit = this.opts.textureLimit;
+    renderer.textureBudget = this.opts.textureBudget;
+    // 무늬를 다 풀어 올릴 때마다 다시 그린다
+    renderer.onTexture = () => this.invalidate();
     this.applyTheme();
 
     const r = host.getBoundingClientRect();
@@ -1224,7 +1235,7 @@ export class Viewer3d {
   }
 
   get stats(): Viewer3dStats {
-    return { ...this.renderer.stats, frameMs: this.frameMs, width: this.canvas.width, height: this.canvas.height, dpr: this.dpr };
+    return { ...this.renderer.stats, frameMs: this.frameMs, width: this.canvas.width, height: this.canvas.height, dpr: this.dpr, textures: this.renderer.textureStats };
   }
 
   // ───────────────────────── 내부: 상태 ─────────────────────────

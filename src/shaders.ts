@@ -8,10 +8,16 @@
  * - 단면(u_clip = 로컬 좌표 평면 [a, b, c, w], 값 > 0 쪽을 버린다):
  *   그물·가는 선은 CLIP을 정의한 변종(withClip)에서 조각을 버린다(정의하지 않은 기본 셰이더는 예전과 같다 — 버리기 문이 없어 이른 깊이 검사를 막지 않는다).
  *   굵은 선은 정점 셰이더에서 선분을 평면으로 잘라 남는 부분만 펴고, 점은 잘린 쪽 점을 화면 밖으로 보낸다. 단면이 없으면 u_clip = (0, 0, 0, −1).
+ * - 무늬(TEX를 정의한 그물 변종): 무늬 좌표 a_uv(정점마다 (u, v) 또는 원근 무늬 (u·q, v·q, q))를 보간해 조각에서 q로 나누고
+ *   u_tex(REPEAT·밉맵)를 읽어 rgb를 바꾼다. u_texAlpha가 1이면 그림 알파를 불투명도에 곱한다(반투명 차례). 무늬가 없는 그물은 예전 셰이더 그대로.
  */
 
+/** 셰이더 원본에 #define들을 넣은 변종 */
+export const withDefines = (src: string, ...names: string[]): string =>
+  names.length ? src.replace('#version 300 es\n', `#version 300 es\n${names.map((n) => `#define ${n}\n`).join('')}`) : src;
+
 /** 셰이더 원본에 #define CLIP을 넣은 변종 */
-export const withClip = (src: string): string => src.replace('#version 300 es\n', '#version 300 es\n#define CLIP\n');
+export const withClip = (src: string): string => withDefines(src, 'CLIP');
 
 export const MESH_VS = `#version 300 es
 precision highp float;
@@ -30,6 +36,11 @@ out vec4 v_col;
 uniform vec4 u_clip;
 out float v_clip;
 #endif
+#ifdef TEX
+layout(location=3) in vec3 a_uv;
+uniform float u_uvq;
+out vec3 v_uv;
+#endif
 void main() {
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;
@@ -37,6 +48,9 @@ void main() {
   v_col = u_vcol > 0.5 ? a_col : u_color;
 #ifdef CLIP
   v_clip = dot(u_clip, vec4(a_pos, 1.0));
+#endif
+#ifdef TEX
+  v_uv = u_uvq > 0.5 ? a_uv : vec3(a_uv.xy, 1.0);
 #endif
 }`;
 
@@ -52,6 +66,11 @@ uniform float u_alpha;
 out vec4 o_color;
 #ifdef CLIP
 in float v_clip;
+#endif
+#ifdef TEX
+in vec3 v_uv;
+uniform sampler2D u_tex;
+uniform float u_texAlpha;
 #endif
 void main() {
   vec3 V = u_ortho > 0.5 ? vec3(0.0, 0.0, 1.0) : normalize(-v_vpos);
@@ -74,9 +93,14 @@ void main() {
   vec3 L2 = normalize(vec3(0.6, -0.3, 0.45));
   float dif = 0.30 + 0.60 * max(dot(n, L1), 0.0) + 0.20 * max(dot(n, L2), 0.0);
   float spec = pow(max(dot(n, normalize(L1 + V)), 0.0), 48.0) * 0.2;
-  vec3 c = v_col.rgb * dif + vec3(spec);
+  vec4 base = v_col;
+#ifdef TEX
+  vec4 t = texture(u_tex, v_uv.xy / v_uv.z);
+  base = vec4(t.rgb, v_col.a * mix(1.0, t.a, u_texAlpha));
+#endif
+  vec3 c = base.rgb * dif + vec3(spec);
   c = mix(c, u_tint.rgb, u_tint.a);
-  o_color = vec4(c, v_col.a * u_alpha);
+  o_color = vec4(c, base.a * u_alpha);
 }`;
 
 export const WIDE_VS = `#version 300 es

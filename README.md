@@ -16,6 +16,7 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 음영·음영+윤곽·와이어프레임·X-ray, 굵은 선·점선, 바닥 격자, 좌표축, 밝은·어두운 테마(CSS 변수 `--v3d-*`로 바꿀 수 있음)
 - BVH 고르기(그물·선분·점), 두 점 측정, 묶음별 켜고 끄기, 선분 그리기 범위(재생용), 그림 저장
 - 단면 보기: 자르는 평면 하나(축 또는 임의 방향), 잘린 면 채우기(닫힌 그물)·단면 테두리, 고르기·측정도 잘린 쪽을 무시
+- 무늬(텍스처): 그물마다 무늬 좌표(UV, 원근 무늬는 q까지)와 그림 하나. 되풀이(REPEAT)·밉맵·비등방 거르기, 한 장 크기·전체 GPU 예산 한도
 - 큰 좌표(예: 1e6 mm대): 묶음 원점(`origin`)을 double 행렬로 합쳐 그려 떨리지 않음
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다.
 
@@ -32,6 +33,21 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   범위·`fitItems`·고르기 결과(`Pick3d.point`)·측정·`setDrawLimitBySegmentId`가 돌려주는 위치는 모두 원점을 더한 세계 좌표입니다.
 - `Mesh3d.closed`: 닫힌 입체(물 샐 틈 없는 껍질)면 `true`. 단면에서 잘린 면을 채웁니다. 열린 면·얇은 판에는 두지 않습니다.
 - `Pick3d.section`: 잘린 면(채운 면)을 골랐으면 `true`(`point`는 평면 위, `normal`은 평면 법선, `index`·`raw`는 −1).
+
+0.5.0에서 더한 선택 필드(무늬):
+
+- `Scene3d.textures`(`Texture3d[]`): 무늬 그림. `id`와 그림 파일 바이트 `data`(PNG·JPEG·GIF·WebP·BMP, `mime`은 없으면 첫 바이트로 가림)
+  또는 이미 푼 `bitmap`(ImageBitmap, 보통 방향 — 워커에서 만들어 넘길 때). `width`·`height`를 알면 큰 그림을 풀면서 바로 줄인다.
+  `alpha: true`면 그림의 투명 화소를 쓰고 그 무늬를 칠한 그물을 반투명 차례에 그린다(없으면 그림 알파는 무시하고 불투명).
+- `Mesh3d.texture`: 쓸 무늬의 `id`. `Mesh3d.uvs`: 정점마다 `(u, v)` 2값, 또는 원근 무늬(사진 맞춤처럼 면 위에서 q가 바뀌는 투영)면
+  `(u·q, v·q, q)` 3값 — 길이로 가린다(정점 수 × 3이면 3값). u는 그림 오른쪽, v는 위쪽으로 늘고(0 = 그림 아래 끝) 0~1 밖은 되풀이한다.
+- 무늬가 있으면 `color`(`colors`)의 rgb 대신 그림을 칠하고 불투명도는 `color` 알파를 따른다. 조명·강조·X-ray·단면 자르기·고르기는 그대로다.
+  그림을 풀기 전(또는 풀지 못하면) `color`로 칠하므로 해석기는 `color`에 그림 평균색을 두면 된다. 잘린 면 채우기·와이어프레임은 `color`.
+- 같은 `Texture3d` 객체를 다시 넘긴 `setScene`은 올린 무늬를 그대로 쓴다(장면을 바꿔 끼워도 다시 풀지 않는다).
+- `Viewer3dOptions.textureLimit`(한 장 긴 변, 기본 2048 화소 — GPU 한도가 작으면 그것)·`textureBudget`(전체, 기본 256 MB 어림):
+  넘으면 풀면서 줄이고, 전체가 넘으면 모든 무늬를 같은 비로 줄인다(64 화소 아래로는 줄이지 않음). 휴대 기기는 앱이 낮춰 준다.
+- `stats.textures`: 쓰는 무늬 수·올린 수·실패 수·GPU 크기 어림. 무늬는 한 번에 네 장까지 풀고, 올릴 때마다 다시 그린다.
+- `imageInfo(bytes)`: 그림 꼴·크기·알파 가능성(머리만 읽는 순수 함수 — 해석기도 쓸 수 있다).
 
 ```ts
 import { Viewer3d, type Scene3d } from 'opencad-viewer3d';
@@ -82,7 +98,7 @@ npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대�
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.4.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.5.0"
 }
 ```
 
@@ -99,13 +115,14 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/index.ts` | 공개 입구 |
 | `src/types.ts` | 장면 계약(`Scene3d`, `Mesh3d`, `LineSet3d`, `PointSet3d`, `Pick3d`) |
 | `src/viewer.ts` | `Viewer3d`: 조작·고르기·측정·단면·화면 덧그림 |
-| `src/renderer.ts`, `src/shaders.ts` | WebGL2 그리기(묶음 원점 RTC, 단면 자르기·잘린 면 채우기) |
+| `src/renderer.ts`, `src/shaders.ts` | WebGL2 그리기(묶음 원점 RTC, 단면 자르기·잘린 면 채우기, 무늬 올리기·무늬 셰이더 변종) |
+| `src/texture.ts` | 무늬 도구(그림 머리 읽기, 크기 한도·예산 나누기, 뒤집어 풀기) |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
 | `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색·행렬·재생 도우미 |
-| `src/synth.ts`, `src/dev.ts`, `dev/viewer3d.html` | 합성 장면과 개발 확인 페이지 |
+| `src/synth.ts`, `src/dev.ts`, `dev/viewer3d.html` | 합성 장면(무늬 상자·원근 무늬 판 포함)과 개발 확인 페이지 |
 
 ## 개발
 
@@ -113,7 +130,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 npm install
 npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 칸 수&theme=light)
                    #   &offset=1e6(큰 좌표, 묶음 원점) &bake=1(원점 없이 구워 넣기 — 떨림 비교) &section=z:0.5(:flip)
-                   #   &incremental=1(나눠 올리기). 단추: 단면 X·Y·Z, 구간 숨김·구간 강조
+                   #   &incremental=1(나눠 올리기) &tex=1(무늬 상자·원근 무늬 판). 단추: 단면 X·Y·Z, 구간 숨김·구간 강조
 npm run typecheck
 npm test
 ```
@@ -125,6 +142,8 @@ npm test
 - 원점(`origin`) 없이 큰 좌표를 그대로 넣은 장면은 예전처럼 떨린다(해석기가 원점을 채워야 한다)
 - 나눠 올리기는 묶음 단위라 아주 큰 배열 하나(예: 선분 수백만 개 한 묶음)는 한 프레임에 걸린다(버퍼를 쪼개 올리지 않는다)
 - 구간 숨김은 그물 윤곽선(`edges`)을 삼각형과 짝지어 주지 않는다 — 윤곽선도 숨기려면 `{ prims, edges }`로 윤곽선 번호를 함께 준다
+- 무늬는 그물마다 하나(앞·뒷면 다른 무늬, 여러 겹 무늬, 법선·거칠기 같은 PBR 그림 없음). 색 공간은 정점 색과 같이 sRGB 값 그대로 조명한다
+- 투명 화소를 쓰는 무늬(`alpha`)는 그물 단위로 앞뒤를 정렬해 그린다(그물 안 삼각형끼리는 정렬하지 않는다)
 
 ## 내력
 

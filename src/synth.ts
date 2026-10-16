@@ -1,7 +1,7 @@
 /**
- * 합성 장면(개발 확인 페이지·시험용): 상자·구 그물, 나선 공구 경로 선분, 점.
+ * 합성 장면(개발 확인 페이지·시험용): 상자·구 그물, 나선 공구 경로 선분, 점. 선택으로 무늬 상자·원근 무늬 판.
  */
-import type { LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d } from './types';
+import type { LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
 
 /** 축 나란 상자(정점 8개, 삼각형 12개, 모서리 12개) */
 export function boxMesh(id: string, min: readonly number[], max: readonly number[], color: Rgba, group?: string): Mesh3d {
@@ -14,6 +14,84 @@ export function boxMesh(id: string, min: readonly number[], max: readonly number
   const edges = new Float32Array(e.length * 3);
   e.forEach((v, i) => edges.set(positions.subarray(v * 3, v * 3 + 3), i * 3));
   return { id, name: id, positions, indices, color, edges, group, closed: true };
+}
+
+/**
+ * 바둑판 무늬 BMP(24비트, 의존성 없이 — 개발 확인·시험용). cells × cells 칸, 칸마다 px 화소.
+ * 그림 맨 위 왼쪽 칸은 빨강이라 무늬 방향(v 위로)을 눈으로 확인할 수 있다.
+ */
+export function checkerBmp(cells = 8, px = 8, a: readonly number[] = [236, 236, 230], b: readonly number[] = [58, 92, 150]): Uint8Array {
+  const w = cells * px;
+  const stride = (w * 3 + 3) & ~3;
+  const size = 54 + stride * w;
+  const out = new Uint8Array(size);
+  const dv = new DataView(out.buffer);
+  out[0] = 0x42;
+  out[1] = 0x4d;
+  dv.setUint32(2, size, true);
+  dv.setUint32(10, 54, true);
+  dv.setUint32(14, 40, true);
+  dv.setInt32(18, w, true);
+  dv.setInt32(22, w, true); // 양수 = 아래 줄부터
+  dv.setUint16(26, 1, true);
+  dv.setUint16(28, 24, true);
+  dv.setUint32(34, stride * w, true);
+  for (let row = 0; row < w; row++) {
+    const y = w - 1 - row; // 그림 위에서 잰 줄
+    for (let x = 0; x < w; x++) {
+      const cx = Math.floor(x / px), cy = Math.floor(y / px);
+      const c = cx === 0 && cy === 0 ? [220, 40, 40] : (cx + cy) % 2 ? b : a;
+      const o = 54 + row * stride + x * 3;
+      out[o] = c[2]!;
+      out[o + 1] = c[1]!;
+      out[o + 2] = c[0]!;
+    }
+  }
+  return out;
+}
+
+/** 무늬 상자: 면마다 정점 4개(정점 24개)와 무늬 좌표(tile 길이마다 한 번 되풀이). 옆면은 v가 위(+Z), 윗면·밑면은 u = x, v = y */
+export function texturedBoxMesh(id: string, min: readonly number[], max: readonly number[], color: Rgba, texture: string, tile: number, group?: string): Mesh3d {
+  const [x0, y0, z0] = min as [number, number, number];
+  const [x1, y1, z1] = max as [number, number, number];
+  // 면마다 바깥에서 볼 때 반시계 네 점(왼쪽 아래부터)과 (u 축, v 축)
+  const faces: [number[][], number, number][] = [
+    [[[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], 0, 2], // 앞(−Y)
+    [[[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], 1, 2], // 오른쪽(+X)
+    [[[x1, y1, z0], [x0, y1, z0], [x0, y1, z1], [x1, y1, z1]], 0, 2], // 뒤(+Y, u는 −X 쪽으로)
+    [[[x0, y1, z0], [x0, y0, z0], [x0, y0, z1], [x0, y1, z1]], 1, 2], // 왼쪽(−X, u는 −Y 쪽으로)
+    [[[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], 0, 1], // 위
+    [[[x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [x0, y0, z0]], 0, 1], // 아래
+  ];
+  const positions = new Float32Array(24 * 3);
+  const uvs = new Float32Array(24 * 2);
+  const indices = new Uint32Array(36);
+  faces.forEach(([pts, ua, va], f) => {
+    const p0 = pts[0]!;
+    const du = Math.sign(pts[1]![ua]! - p0[ua]!) || 1;
+    pts.forEach((p, k) => {
+      positions.set(p, (f * 4 + k) * 3);
+      uvs[(f * 4 + k) * 2] = ((p[ua]! - p0[ua]!) * du) / tile;
+      uvs[(f * 4 + k) * 2 + 1] = (p[va]! - (va === 2 ? z0 : p0[va]!)) / tile;
+    });
+    indices.set([f * 4, f * 4 + 1, f * 4 + 2, f * 4, f * 4 + 2, f * 4 + 3], f * 6);
+  });
+  const e = boxMesh(id, min, max, color).edges;
+  return { id, name: id, positions, indices, uvs, texture, color, edges: e, group, closed: true };
+}
+
+/**
+ * 원근 무늬 판: 사다리꼴 네 점에 (u·q, v·q, q) 3값 무늬 좌표를 준다(먼 변의 q = 0.5) — 셰이더가 조각마다 q로 나누는지 확인용.
+ * q를 무시하면 바둑판이 대각선으로 꺾여 보인다.
+ */
+export function projectiveQuadMesh(id: string, at: readonly number[], w: number, d: number, texture: string, group?: string): Mesh3d {
+  const [x, y, z] = at as [number, number, number];
+  const positions = new Float32Array([x, y, z, x + w, y, z, x + w * 0.75, y + d, z, x + w * 0.25, y + d, z]);
+  const q = [1, 1, 0.5, 0.5];
+  const uv = [0, 0, 4, 0, 4, 4, 0, 4];
+  const uvs = new Float32Array(12);
+  for (let k = 0; k < 4; k++) uvs.set([uv[k * 2]! * q[k]!, uv[k * 2 + 1]! * q[k]!, q[k]!], k * 3);
+  return { id, name: id, positions, indices: new Uint32Array([0, 1, 2, 0, 2, 3]), uvs, texture, color: [0.6, 0.62, 0.66, 1], group };
 }
 
 /** 위경도 구(정점 법선, 선택: 정점 색) */
@@ -113,8 +191,14 @@ export function gridPointSet(id: string, x0: number, y0: number, z: number, nx: 
  * offset을 주면 장면 전체를 그만큼 옮긴다(큰 좌표 확인): 기본은 묶음 원점(origin)에 두고 positions는 그대로,
  * bake면 원점 없이 positions에 더해 넣는다(float32로 반올림되는 예전 방식 — 비교용).
  */
-export function syntheticScene(opts: { segments?: number; sphereSeg?: number; offset?: readonly number[]; bake?: boolean } = {}): Scene3d {
+export function syntheticScene(opts: { segments?: number; sphereSeg?: number; offset?: readonly number[]; bake?: boolean; textures?: boolean } = {}): Scene3d {
   const scene = baseScene(opts);
+  if (opts.textures) {
+    const tex: Texture3d = { id: '바둑판', data: checkerBmp(), mime: 'image/bmp', width: 64, height: 64 };
+    scene.textures = [tex];
+    scene.meshes.push(texturedBoxMesh('무늬 상자', [-80, 0, 0], [-20, 60, 50], [0.6, 0.6, 0.65, 1], tex.id, 20, '무늬'));
+    scene.meshes.push(projectiveQuadMesh('원근 무늬', [-90, -110, 0], 100, 80, tex.id, '무늬'));
+  }
   const o = opts.offset;
   if (!o || (!o[0] && !o[1] && !o[2])) return scene;
   const origin: [number, number, number] = [o[0]!, o[1]!, o[2]!];
