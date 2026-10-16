@@ -37,6 +37,7 @@ viewer.fit();
 - `highlight(ids)`, `setItemVisible`, `setGroupVisible`, `groups()`: 강조와 보이기
 - `onPick`, `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`
 - `gridVisible`, `viewCubeVisible`, `axesVisible`: 격자·뷰 큐브·좌표축 켜짐 상태
+- `viewCubeSize` 옵션·`setViewCubeSize(px)`: 뷰 큐브 크기(기본 112, 64~160) — 좁은 화면에서 줄여 쓴다
 - `setDrawLimitBySegmentId`, `setMarker`: NC 재생
 
 ## 다른 저장소에서 가져다 쓰기

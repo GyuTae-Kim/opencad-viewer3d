@@ -51,6 +51,8 @@ export interface Viewer3dOptions {
   gridZ?: GridZ;
   /** 오른쪽 위 뷰 큐브(기본 true) */
   viewCube?: boolean;
+  /** 뷰 큐브 한 변(CSS 화소, 기본 112 — 64~160으로 자른다). 좁은 화면에서 줄여 쓴다 */
+  viewCubeSize?: number;
   /** 왼쪽 아래 좌표축(기본 true) */
   axes?: boolean;
   /** 키 입력(기본 true, 캔버스에 초점이 있을 때만) */
@@ -118,6 +120,7 @@ const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans K
 const ROT_PER_PX = 0.0085;
 const DRAG_START_PX = 4;
 const CUBE_CSS = 112;
+const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
 export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
@@ -197,6 +200,7 @@ export class Viewer3d {
       grid: opts.grid ?? true,
       gridZ: opts.gridZ ?? 'min',
       viewCube: opts.viewCube ?? true,
+      viewCubeSize: cubeSize(opts.viewCubeSize ?? CUBE_CSS),
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
       animate: opts.animate ?? true,
@@ -226,7 +230,7 @@ export class Viewer3d {
     const cube = document.createElement('canvas');
     cube.className = 'v3d-cube';
     cube.title = '뷰 큐브: 면·모서리·구석을 누르면 그 방향으로 봅니다';
-    cube.style.cssText = `position:absolute;top:8px;right:8px;width:${CUBE_CSS}px;height:${CUBE_CSS}px;cursor:pointer;touch-action:none;`;
+    cube.style.cssText = `position:absolute;top:8px;right:8px;width:${this.opts.viewCubeSize}px;height:${this.opts.viewCubeSize}px;cursor:pointer;touch-action:none;`;
     if (!this.opts.viewCube) cube.style.display = 'none';
     wrap.append(canvas, overlay, cube);
     host.append(wrap);
@@ -444,6 +448,17 @@ export class Viewer3d {
 
   get viewCubeVisible(): boolean {
     return this.opts.viewCube;
+  }
+
+  /** 뷰 큐브 한 변(CSS 화소, 64~160으로 자른다) */
+  setViewCubeSize(px: number): void {
+    this.opts.viewCubeSize = cubeSize(px);
+    this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
+    this.invalidate();
+  }
+
+  get viewCubeSize(): number {
+    return this.opts.viewCubeSize;
   }
 
   get axesVisible(): boolean {
@@ -980,7 +995,7 @@ export class Viewer3d {
         this.invalidate();
         return;
       }
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(CUBE_CSS), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
       const d = h ? h.dir : null;
       if ((d === null) !== (this.cubeHover === null) || (d && this.cubeHover && dot(d, this.cubeHover) < 0.9999)) {
         this.cubeHover = d;
@@ -1005,7 +1020,7 @@ export class Viewer3d {
       this.cubeDrag = null;
       if (!cd || cd.moved || cancel) return;
       const p = this.local(e, cube);
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(CUBE_CSS), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
       if (h) this.setViewDir(h.dir);
     };
     this.on<PointerEvent>(cube, 'pointerup', (e) => cubeUp(e, false));
@@ -1229,7 +1244,8 @@ export class Viewer3d {
 
   private drawCube(): void {
     const dpr = this.dpr;
-    const n = Math.round(CUBE_CSS * dpr);
+    const size = this.opts.viewCubeSize;
+    const n = Math.round(size * dpr);
     if (this.cube.width !== n || this.cube.height !== n) {
       this.cube.width = n;
       this.cube.height = n;
@@ -1239,7 +1255,7 @@ export class Viewer3d {
     ctx.clearRect(0, 0, n, n);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const th = this.theme;
-    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(CUBE_CSS), { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover }, this.cubeHover, `600 27px ${FONT}`);
+    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover }, this.cubeHover, `600 ${((27 * size) / CUBE_CSS).toFixed(1)}px ${FONT}`);
   }
 
   private drawOverlay(f: ViewFrame): void {
