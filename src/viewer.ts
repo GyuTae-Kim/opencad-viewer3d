@@ -38,6 +38,7 @@ import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, length, placeMatrix, sub } from './math';
 import { chooseNearest, pickMeshRay, pickPointSet, pickSegments, snapToNearest } from './pick';
 import { countIdsUpTo } from './playback';
+import { segmentsById } from './segments';
 import { type DrawRange, type RenderColors, type RenderMode, type RenderStats, Renderer3d } from './renderer';
 import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
@@ -65,6 +66,16 @@ export interface Viewer3dOptions {
   pickTolerance?: number;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
+}
+
+/** 선분 강조 선택(setHighlightSegments·highlightSegmentIds) */
+export interface SegmentHighlightOptions {
+  /** 색(기본: 테마 강조색) */
+  color?: Rgba;
+  /** 화면 화소 굵기(기본 3) */
+  width?: number;
+  /** 가려진 부분의 불투명도 0~1(기본 0.3, 0이면 가려진 부분은 그리지 않는다) */
+  hidden?: number;
 }
 
 export interface MeasureResult {
@@ -147,6 +158,7 @@ export class Viewer3d {
   private hi = new Set<string>();
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
+  private segHi: { positions: Float32Array; opts: SegmentHighlightOptions } | null = null;
   private mode: RenderMode;
   private cam: CameraState;
   private anim: { from: CameraState; to: CameraState; t0: number; dur: number } | null = null;
@@ -291,6 +303,7 @@ export class Viewer3d {
     this.hiddenItems.clear();
     this.hi.clear();
     this.ranges.clear();
+    this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
     this.bvhs = new WeakMap();
@@ -315,6 +328,7 @@ export class Viewer3d {
     this.items.clear();
     this.hi.clear();
     this.ranges.clear();
+    this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
     this.marker = null;
@@ -511,6 +525,27 @@ export class Viewer3d {
   highlight(ids: readonly string[] | null): void {
     this.hi = new Set(ids ?? []);
     this.invalidate();
+  }
+
+  /**
+   * 선분 강조: 선분 쌍 xyz,xyz…(세계 좌표)를 강조색으로 굵게 그린다. 보이는 부분은 깊이를 따지고,
+   * 가려진 부분은 opts.hidden 불투명도로 흐리게 그린다. null이면 해제, 장면을 바꾸면 풀린다.
+   */
+  setHighlightSegments(positions: Float32Array | null, opts: SegmentHighlightOptions = {}): void {
+    this.segHi = positions && positions.length >= 6 ? { positions, opts: { ...opts } } : null;
+    if (!this.lost) this.renderer.setHighlightSegments(this.segHi?.positions ?? null);
+    this.invalidate();
+  }
+
+  /**
+   * 원본 번호(LineSet3d.segmentIds — 예: NC 이동 번호)로 보이는 선분 묶음에서 선분을 모아 강조한다.
+   * 찾은 선분 수를 돌려준다(없으면 0이고 강조는 풀린다). null·빈 목록이면 해제.
+   */
+  highlightSegmentIds(ids: readonly number[] | null, opts: SegmentHighlightOptions = {}): number {
+    const s = this.sceneRef;
+    const p = s && ids?.length ? segmentsById(s.lines, ids, (l) => this.visible(l.id, l.group)) : null;
+    this.setHighlightSegments(p, opts);
+    return p ? p.length / 6 : 0;
   }
 
   /**
@@ -977,6 +1012,7 @@ export class Viewer3d {
       this.lost = false;
       this.renderer.init();
       if (this.sceneRef) this.renderer.setScene(this.sceneRef);
+      if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions);
       this.rebuildGrid();
       this.invalidate();
     });
@@ -1229,6 +1265,13 @@ export class Viewer3d {
       ranges: this.ranges,
       grid: this.gridOn,
       marker,
+      segHighlight: this.segHi
+        ? {
+            color: this.segHi.opts.color ?? this.colors.highlight,
+            width: this.segHi.opts.width ?? 3,
+            hidden: Math.min(1, Math.max(0, this.segHi.opts.hidden ?? 0.3)),
+          }
+        : null,
       interacting: this.interacting,
     });
     this.drawOverlay(f);

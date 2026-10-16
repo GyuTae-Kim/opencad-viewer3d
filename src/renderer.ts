@@ -30,6 +30,15 @@ export interface DrawRange {
   ghost: number;
 }
 
+/** 앱이 고른 선분 강조(Viewer3d.setHighlightSegments) — 선분 자체는 setHighlightSegments로 올린다 */
+export interface SegmentHighlightDraw {
+  color: Rgba;
+  /** 화면 화소 굵기 */
+  width: number;
+  /** 가려진 부분의 불투명도(0이면 가려진 부분은 안 그림) */
+  hidden: number;
+}
+
 export interface MarkerDraw {
   kind: MarkerKind;
   matrix: Float64Array;
@@ -47,6 +56,8 @@ export interface RenderState {
   ranges: ReadonlyMap<string, DrawRange>;
   grid: boolean;
   marker: MarkerDraw | null;
+  /** 선분 강조(없으면 null) */
+  segHighlight: SegmentHighlightDraw | null;
   /** 끄는 중(큰 선분 묶음은 가는 선으로 빠르게) */
   interacting: boolean;
 }
@@ -120,6 +131,8 @@ export class Renderer3d {
   points: PointRec[] = [];
   private grid: { major: ThinRec | null; minor: ThinRec | null; axisX: ThinRec | null; axisY: ThinRec | null } | null = null;
   private markers = new Map<MarkerKind, MeshRec>();
+  /** 강조 선분(자주 바뀌므로 버퍼 캐시·VAO 목록 밖에서 따로 만들고 지운다) */
+  private hiSeg: LineRec | null = null;
   stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0 };
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
@@ -156,6 +169,7 @@ export class Renderer3d {
     this.points = [];
     this.grid = null;
     this.markers.clear();
+    this.hiSeg = null;
   }
 
   private program(vs: string, fs: string): Prog {
@@ -349,6 +363,35 @@ export class Renderer3d {
     this.vaos = this.vaos.filter((v) => v !== r.vao);
   }
 
+  /** 강조 선분 바꾸기(선분 쌍 xyz,xyz…, null이면 없음). 이전 버퍼는 지운다 */
+  setHighlightSegments(positions: Float32Array | null): void {
+    const gl = this.gl;
+    if (this.hiSeg) {
+      gl.deleteBuffer(this.hiSeg.pos);
+      gl.deleteVertexArray(this.hiSeg.wide);
+      gl.deleteVertexArray(this.hiSeg.thin);
+      this.hiSeg = null;
+    }
+    const n = positions ? Math.floor(positions.length / 6) : 0;
+    if (!positions || !n) return;
+    const pos = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, pos);
+    gl.bufferData(gl.ARRAY_BUFFER, positions.subarray(0, n * 6), gl.DYNAMIC_DRAW);
+    const wide = gl.createVertexArray()!;
+    gl.bindVertexArray(wide);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+    this.bindWide(pos, null, 0);
+    const thin = gl.createVertexArray()!;
+    gl.bindVertexArray(thin);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pos);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindVertexArray(null);
+    this.hiSeg = { id: '__hiseg', group: undefined, n, pos, col: null, wide, thin };
+  }
+
   /** 격자 선분 바꾸기(null이면 없음) */
   setGrid(g: GridLines | null): void {
     if (this.grid) {
@@ -383,6 +426,7 @@ export class Renderer3d {
     this.meshes = [];
     this.lines = [];
     this.points = [];
+    this.setHighlightSegments(null);
   }
 
   dispose(): void {
@@ -606,6 +650,23 @@ export class Renderer3d {
       meshDraw(r, st.marker.matrix, st.marker.color, 1, 0, false);
     }
 
+    // 5b) 선분 강조: 가려진 부분은 깊이 비교를 뒤집어 흐리게, 보이는 부분은 깊이를 따져 굵게(같은 선분 위에 겹쳐 그린다)
+    if (st.segHighlight && this.hiSeg) {
+      const s = st.segHighlight;
+      const r = this.hiSeg;
+      const base = { color: s.color, vcol: false, width: s.width, dashed: false, first: 0, count: r.n };
+      gl.enable(gl.BLEND);
+      if (s.hidden > 0) {
+        gl.depthFunc(gl.GREATER);
+        gl.depthMask(false);
+        this.drawLines(f, r, undefined, { ...base, alpha: s.hidden }, st, stats);
+        gl.depthMask(true);
+        gl.depthFunc(gl.LEQUAL);
+      }
+      this.drawLines(f, r, undefined, { ...base, alpha: 1, bias: 2e-5 }, st, stats);
+      gl.disable(gl.BLEND);
+    }
+
     // 6) 격자
     if (st.grid && this.grid) {
       const p = this.thinP;
@@ -662,7 +723,7 @@ export class Renderer3d {
     f: ViewFrame,
     r: LineRec,
     matrix: ArrayLike<number> | undefined,
-    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number },
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number; bias?: number },
     st: RenderState,
     stats: RenderStats,
   ): void {
@@ -683,7 +744,7 @@ export class Renderer3d {
       gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
       gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
       gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(this.loc(p, 'u_bias'), 0);
+      gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
       gl.uniform2f(this.loc(p, 'u_dash'), o.dashed ? DASH[0] * st.dpr : 0, DASH[1] * st.dpr);
       gl.bindVertexArray(r.wide);
       if (o.first) this.bindWide(r.pos, r.col, o.first);
@@ -697,7 +758,7 @@ export class Renderer3d {
       gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
       gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
       gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(this.loc(p, 'u_bias'), 0);
+      gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
       gl.bindVertexArray(r.thin);
       gl.drawArrays(gl.LINES, o.first * 2, o.count * 2);
     }

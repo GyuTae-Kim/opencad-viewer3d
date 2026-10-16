@@ -34,7 +34,8 @@ viewer.fit();
 
 - `handleKey(e)`: 캔버스에 초점이 없을 때 창 키를 넘기면 F·1~7·Esc를 뷰어 규칙대로 처리하고 처리했으면 `true`. 표준 뷰 키 표는 `VIEW_KEYS`
 - `fitItems(ids)`: 고른 항목(그물·선·점 id)만 맞춰 보기
-- `highlight(ids)`, `setItemVisible`, `setGroupVisible`, `groups()`: 강조와 보이기
+- `highlight(ids)`, `setItemVisible`, `setGroupVisible`, `groups()`: 항목 단위 강조와 보이기
+- `highlightSegmentIds(ids)`, `setHighlightSegments(positions)`: 선분 단위 강조(예: NC 한 줄). 보이는 부분은 깊이를 따져 굵게, 가려진 부분은 흐리게(`hidden`) 그린다. `highlightSegmentIds`는 `segmentIds`로 찾고 찾은 선분 수를 돌려준다
 - `onPick`, `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`
 - `gridVisible`, `viewCubeVisible`, `axesVisible`: 격자·뷰 큐브·좌표축 켜짐 상태
 - `viewCubeSize` 옵션·`setViewCubeSize(px)`: 뷰 큐브 크기(기본 112, 64~160) — 좁은 화면에서 줄여 쓴다
@@ -46,7 +47,7 @@ npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대�
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.2.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.3.0"
 }
 ```
 
@@ -65,7 +66,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/viewer.ts` | `Viewer3d`: 조작·고르기·측정·화면 덧그림 |
 | `src/renderer.ts`, `src/shaders.ts` | WebGL2 그리기 |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
-| `src/bvh.ts`, `src/pick.ts`, `src/bounds.ts` | 고르기 가속 구조·고르기·범위 |
+| `src/bvh.ts`, `src/pick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기·범위, 원본 번호로 강조 선분 모으기 |
 | `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색·행렬·재생 도우미 |
 | `src/synth.ts`, `src/dev.ts`, `dev/viewer3d.html` | 합성 장면과 개발 확인 페이지 |
 
@@ -80,7 +81,6 @@ npm test
 
 ## 남은 일
 
-- 선분 하나 강조 API
 - 큰 좌표 정밀도(묶음 원점)
 - 단면 보기
 

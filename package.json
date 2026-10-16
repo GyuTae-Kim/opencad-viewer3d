@@ -1,6 +1,6 @@
 {
   "name": "opencad-viewer3d",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "OpenCAD 3D 뷰어 코어: 브라우저에서 WebGL2로 3D 장면(Scene3d)을 그리고 고르고 재는 뷰어",
   "license": "MIT",
