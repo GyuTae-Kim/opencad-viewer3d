@@ -63,6 +63,12 @@ export interface Mesh3d {
    * 단면에서 그 그물들의 교차를 더해 안쪽을 한 번에 채운다(그물 하나하나는 closed가 아니어도 된다). 채운 면 색은 처음 그물 색
    */
   capGroup?: string;
+  /**
+   * 늘 카메라를 마주 보는 그물(0.7.0, 선택 — SketchUp "늘 나를 보기" 컴포넌트, 2D 나무·사람): 세계 Z축(origin을 지나는) 둘레로
+   * 프레임마다 돌려 front(그물 앞 방향, 기본 [0, −1, 0] — 앞 뷰에서 보이는 쪽)가 카메라 쪽을 향하게 한다. origin은 세계 좌표(matrix·origin을 거친 뒤).
+   * 고르기·측정도 돌린 자리로 한다. 범위는 원점 둘레 기둥(돌려도 변하지 않게)
+   */
+  billboard?: { origin: [number, number, number]; axis?: 'z'; front?: [number, number, number] };
 }
 
 /**

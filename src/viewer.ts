@@ -48,6 +48,7 @@ import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene } from './scenepick';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
+import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
 import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance } from './pointer';
 import {
@@ -491,6 +492,9 @@ export class Viewer3d {
   private measureHover: { p: V3; vertex: boolean } | null = null;
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
+  /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
+  private bbList: Mesh3d[] = [];
+  private bbCamKey = '';
   /** 조작 방식(궤도·걷기)과 걷기 상태 */
   private nav: 'orbit' | 'walk' = 'orbit';
   private walkOpts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {};
@@ -658,6 +662,8 @@ export class Viewer3d {
     const hadSection = !!this.sec;
     this.sceneRef = scene;
     this.items.clear();
+    this.bbList = scene.meshes.filter((m) => !!m.billboard && Array.isArray(m.billboard.origin));
+    this.bbCamKey = '';
     for (const m of scene.meshes) this.items.set(m.id, { kind: 'mesh', item: m });
     for (const l of scene.lines) this.items.set(l.id, { kind: 'line', item: l });
     for (const p of scene.points ?? []) this.items.set(p.id, { kind: 'point', item: p });
@@ -713,6 +719,7 @@ export class Viewer3d {
     this.upload = null;
     this.sceneRef = null;
     this.items.clear();
+    this.bbList = [];
     this.hi.clear();
     this.ranges.clear();
     this.segHi = null;
@@ -2143,7 +2150,7 @@ export class Viewer3d {
     if (!s) return (this.visBox = emptyBox());
     let ranged = false;
     for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
-    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoves) return (this.visBox = this.allBox);
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoves && !this.bbList.length) return (this.visBox = this.allBox);
     let b = emptyBox();
     for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
@@ -2334,13 +2341,31 @@ export class Viewer3d {
       b = itemBounds(it);
       const lm = this.looks.get(it.id)?.matrix;
       if (lm) b = transformBox(b, lm);
+      // 마주 보는 그물: 돌려도 변하지 않는 기둥 범위
+      const bb = (it as Mesh3d).billboard;
+      if (bb && this.items.get(it.id)?.kind === 'mesh') b = billboardBounds(b, bb.origin);
       this.boxes.set(it, b);
     }
     return b;
   }
 
-  /** 그물 모형 행렬 = (묶음 행렬 setItemMatrix ·) matrix · T(origin)(장면마다 캐시) */
+  /** 마주 보는 그물의 지금 카메라 돌림(세계, 원점 둘레) */
+  private billboardRot(m: Mesh3d): ArrayLike<number> {
+    const bb = m.billboard!;
+    const c = this.cam;
+    const to = towardCamera(bb.origin, cameraEye(c), cameraBasis(c).back, c.projection === 'perspective', c.yaw);
+    return billboardMatrix(bb.origin, billboardAngle(bb.front ?? [0, -1, 0], to));
+  }
+
+  /** 그물 모형 행렬 = (마주 보기 돌림 ·)(묶음 행렬 setItemMatrix ·) matrix · T(origin)(마주 보기가 아니면 장면마다 캐시) */
   private modelOf(m: Mesh3d): ArrayLike<number> | undefined {
+    if (m.billboard) {
+      let base = modelMatrix(m.matrix, m.origin);
+      const lm = this.looks.get(m.id)?.matrix;
+      if (lm) base = base ? mat4Mul(lm, base) : lm;
+      const R = this.billboardRot(m);
+      return base ? mat4Mul(R, base) : R;
+    }
     let e = this.models.get(m);
     if (!e) {
       let mm = modelMatrix(m.matrix, m.origin);
@@ -2349,6 +2374,21 @@ export class Viewer3d {
       this.models.set(m, (e = { m: mm }));
     }
     return e.m;
+  }
+
+  /** 마주 보는 그물이 있을 때 렌더러 겉모습: 그 그물은 이 프레임 돌림(· 묶음 행렬)을 행렬로 */
+  private billboardLook(): (id: string) => LookState | undefined {
+    const mats = new Map<string, ArrayLike<number>>();
+    for (const m of this.bbList) {
+      const lm = this.looks.get(m.id)?.matrix;
+      const R = this.billboardRot(m);
+      mats.set(m.id, lm ? mat4Mul(R, lm) : R);
+    }
+    return (id) => {
+      const l = this.looks.get(id);
+      const mm = mats.get(id);
+      return mm ? { ...(l ?? {}), matrix: mm as Float64Array } : l;
+    };
   }
 
   /** 선분·점 묶음의 모형 행렬: 묶음 행렬(setItemMatrix)이 있을 때만(원점 포함), 없으면 undefined(예전처럼 원점만 옮긴다) */
@@ -2811,6 +2851,15 @@ export class Viewer3d {
       this.overlay.height = h;
     }
     if (this.nav === 'walk') this.stepWalk(now);
+    // 마주 보는 그물: 카메라가 바뀌면 그림자·단면 테두리·고르기 목록이 따라 바뀐다
+    if (this.bbList.length) {
+      const k = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}`;
+      if (k !== this.bbCamKey) {
+        this.bbCamKey = k;
+        this.shadowVer++;
+        if (this.sec) this.cutDirty = true;
+      }
+    }
     const f = this.frame();
     // 측정 중 커서 아래 붙잡을 점
     if (this.measuring && this.hoverAt && !this.drag) {
@@ -2888,7 +2937,7 @@ export class Viewer3d {
         : null,
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
-      look: this.looks.size ? (id) => this.looks.get(id) : null,
+      look: this.bbList.length ? this.billboardLook() : this.looks.size ? (id) => this.looks.get(id) : null,
       hiddenEdges: this.renderOpts.hiddenEdges,
       profiles: this.renderOpts.profiles
         ? {
