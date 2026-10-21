@@ -20,6 +20,7 @@ export type {
   SectionPlane,
   SectionState,
   SegmentHighlightOptions,
+  SnapshotOptions,
   Viewer3dOptions,
   Viewer3dStats,
 } from './viewer';

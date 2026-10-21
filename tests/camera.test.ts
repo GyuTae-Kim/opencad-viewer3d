@@ -245,3 +245,26 @@ describe('조작', () => {
     expect(lerpCamera(a, b, 1).yaw).toBeCloseTo(b.yaw, 12);
   });
 });
+
+describe('창 확대', () => {
+  it('사각형 가운데 깊이의 점이 화면 가운데로, 사각형 모서리가 화면 가장자리로', async () => {
+    const { rectZoomCamera, computeFrame, projectToScreen, rayAtDepth, screenRay, defaultCamera } = await import('../src/camera');
+    for (const projection of ['perspective', 'orthographic'] as const) {
+      const c = { ...defaultCamera(), target: [10, 5, 2] as [number, number, number], distance: 80, projection };
+      const f = computeFrame(c, 800, 600, { center: [10, 5, 2], radius: 40 });
+      const depth = 75;
+      const [x0, y0, x1, y1] = [500, 120, 660, 240];
+      const mid = rayAtDepth(f, screenRay(f, 580, 180), depth);
+      const corner = rayAtDepth(f, screenRay(f, 660, 180), depth);
+      const c2 = rectZoomCamera(c, f, x0, y0, x1, y1, depth);
+      const f2 = computeFrame(c2, 800, 600, { center: [10, 5, 2], radius: 40 });
+      const m = projectToScreen(f2, mid)!;
+      expect(m[0]).toBeCloseTo(400, 6);
+      expect(m[1]).toBeCloseTo(300, 6);
+      // 폭이 더 꽉 찬다(160/800 > 120/600): 사각형 오른쪽 가운데가 화면 오른쪽 끝
+      expect(projectToScreen(f2, corner)![0]).toBeCloseTo(800, 4);
+      expect(c2.yaw).toBe(c.yaw);
+      expect(c2.distance).toBeLessThan(c.distance);
+    }
+  });
+});

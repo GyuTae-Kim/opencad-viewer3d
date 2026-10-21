@@ -125,6 +125,10 @@ export interface RenderState {
   parts?: (id: string) => ItemParts | undefined;
   /** 묶음별 겉모습(없으면 모두 장면 그대로) */
   look?: ((id: string) => ItemLook | undefined) | null;
+  /** 화면 밖 그리기(그림 저장): 대상 크기(장치 화소). 없으면 그리기 버퍼 크기 */
+  viewport?: readonly [number, number];
+  /** 투명 바탕(그림 저장): 바탕을 비우고 알파를 곱해 쌓는다(결과 색은 알파를 곱한 값) */
+  transparent?: boolean;
   /** 앱 측정 덧그림 선(setAnnotationLines로 올린 것)을 그릴 때: 굵기(화면 화소)·가려진 부분 불투명도(0이면 안 그림) */
   annotations?: { width: number; hidden: number } | null;
 }
@@ -1162,7 +1166,8 @@ export class Renderer3d {
     const capsOn = (multi ? multi.planes.some((q) => q.caps !== 'none') : !!sec && sec.caps !== 'none') && this.stencilOk && (st.mode === 'shaded' || st.mode === 'shadedEdges');
     gl.viewport(0, 0, devW, devH);
     const bg = st.colors.background;
-    gl.clearColor(bg[0], bg[1], bg[2], 1);
+    if (st.transparent) gl.clearColor(0, 0, 0, 0);
+    else gl.clearColor(bg[0], bg[1], bg[2], 1);
     gl.clearDepth(1);
     gl.depthMask(true);
     gl.colorMask(true, true, true, true);
@@ -1175,7 +1180,8 @@ export class Renderer3d {
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    if (st.transparent) gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     const vpF = new Float32Array(f.viewProj);
     const ortho = f.projection === 'orthographic' ? 1 : 0;
@@ -1835,7 +1841,8 @@ export class Renderer3d {
       gl.useProgram(p.p);
       if (clips) this.setClips(p, clips);
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-      gl.uniform2f(this.loc(p, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
+      if (st.viewport) gl.uniform2f(this.loc(p, 'u_viewport'), st.viewport[0], st.viewport[1]);
+      else gl.uniform2f(this.loc(p, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
       gl.uniform1f(this.loc(p, 'u_width'), wDev);
       gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
       gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);

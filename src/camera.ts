@@ -319,3 +319,16 @@ export function lerpCamera(a: CameraState, b: CameraState, t: number): CameraSta
     fovY: a.fovY + (b.fovY - a.fovY) * t,
   };
 }
+
+/**
+ * 창 확대(zoomToRect): 화면 사각형 [x0, x1]×[y0, y1](화소)이 화면을 채우게 한다. 사각형 가운데 깊이 depth의 점을 화면 가운데로 옮긴 뒤
+ * 그 점을 중심으로 max(사각형 폭/화면 폭, 높이/화면 높이)만큼 확대한다(그 깊이에서 사각형이 화면에 꼭 맞는다). 방향은 그대로
+ */
+export function rectZoomCamera(c: CameraState, f: ViewFrame, x0: number, y0: number, x1: number, y1: number, depth: number, limits?: { min: number; max: number }): CameraState {
+  const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+  if (!(w > 0) || !(h > 0)) return c;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const anchor = rayAtDepth(f, screenRay(f, cx, cy), depth);
+  const panned = panCamera(c, f, f.width / 2 - cx, f.height / 2 - cy, depth);
+  return zoomCamera(panned, Math.max(w / f.width, h / f.height), anchor, limits);
+}

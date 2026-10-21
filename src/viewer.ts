@@ -31,6 +31,7 @@ import {
   orbitCamera,
   panCamera,
   projectToScreen,
+  rectZoomCamera,
   rayAtDepth,
   worldPerPixel,
   screenRay,
@@ -64,7 +65,7 @@ import {
   sectionSegments,
 } from './section';
 import { segmentsById } from './segments';
-import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderStats, type TextureStats, Renderer3d } from './renderer';
+import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
@@ -267,6 +268,20 @@ interface LookState {
   pickable?: boolean;
   color?: Rgba;
   matrix?: Float64Array;
+}
+
+/** toBlob(선택)·renderImage 선택 */
+export interface SnapshotOptions {
+  /** 그림 꼴(기본 'image/png') */
+  type?: string;
+  /** JPEG·WebP 품질 0~1 */
+  quality?: number;
+  /** 화면 화소의 몇 배로 그릴지(기본 1, 0.1~16). 선 굵기·점 크기·덧그림도 같은 비율 */
+  scale?: number;
+  /** 바탕을 비운다(PNG 알파) */
+  transparent?: boolean;
+  /** 측정·덧그림·좌표축·단면 표시를 담는다(기본 true) */
+  overlays?: boolean;
 }
 
 /** pick(x, y, opts) 선택 */
@@ -1724,8 +1739,13 @@ export class Viewer3d {
 
   // ───────────────────────── 출력 ─────────────────────────
 
-  /** 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로 */
-  toBlob(type = 'image/png', quality?: number): Promise<Blob> {
+  /**
+   * 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로. 첫 인자로 선택을 주면 화면 밖에서 다시 그린다:
+   * scale(화면 화소의 몇 배, 기본 1 — 굵기·점 크기도 같은 비율), transparent(바탕을 비운 PNG), overlays(측정·덧그림·좌표축·단면 표시, 기본 true),
+   * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다
+   */
+  toBlob(type: string | SnapshotOptions = 'image/png', quality?: number): Promise<Blob> {
+    if (typeof type === 'object') return this.snapshotBlob(type);
     // 나눠 올리는 중이면 그림에는 다 올린 장면을 담는다
     if (this.gpu && this.renderer.uploading) this.pumpUpload(Infinity);
     this.renderNow();
@@ -1736,6 +1756,138 @@ export class Viewer3d {
     ctx.drawImage(this.canvas, 0, 0);
     ctx.drawImage(this.overlay, 0, 0);
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
+  }
+
+  /** 화면 밖 그리기로 그림 만들기(toBlob 선택) */
+  private async snapshotBlob(o: SnapshotOptions): Promise<Blob> {
+    const type = o.type ?? 'image/png';
+    const data = this.renderImage(o);
+    const c = document.createElement('canvas');
+    c.width = data.width;
+    c.height = data.height;
+    c.getContext('2d')!.putImageData(data, 0, 0);
+    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, o.quality));
+  }
+
+  /**
+   * 화면 밖에서 그린 화소(ImageData, 덧그림 포함). scale·transparent·overlays는 toBlob 선택과 같다.
+   * GPU 다중 표본 버퍼에 그리고 읽어 온다(화면 캔버스는 건드리지 않는다)
+   */
+  renderImage(o: Omit<SnapshotOptions, 'type' | 'quality'> = {}): ImageData {
+    if (!this.gpu) throw new Error('3D 보기 문맥이 없어 그림을 만들 수 없습니다');
+    if (this.renderer.uploading) this.pumpUpload(Infinity);
+    const gl = this.gl;
+    const dpr = this.dpr || 1;
+    const maxRb = Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 4096;
+    const vp = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array;
+    const maxSide = Math.min(maxRb, vp?.[0] ?? maxRb, vp?.[1] ?? maxRb);
+    let k = Math.max(0.1, Math.min(16, o.scale ?? 1)) * dpr;
+    const fit = (): void => {
+      const W = this.cssW * k, H = this.cssH * k;
+      const s = Math.min(1, maxSide / W, maxSide / H, Math.sqrt(40e6 / (W * H)));
+      k *= s;
+    };
+    fit();
+    const W = Math.max(1, Math.round(this.cssW * k)), H = Math.max(1, Math.round(this.cssH * k));
+    const samples = Math.min(4, Number(gl.getParameter(gl.MAX_SAMPLES)) || 0, W * H > 16e6 ? 0 : 4);
+    const f = this.frame();
+    // 그리기 버퍼: 다중 표본 색·깊이·스텐실 → 한 표본 색으로 풀기
+    const fb = gl.createFramebuffer()!, rbC = gl.createRenderbuffer()!, rbD = gl.createRenderbuffer()!;
+    const fb2 = gl.createFramebuffer()!, rb2 = gl.createRenderbuffer()!;
+    try {
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rbC);
+      if (samples > 0) gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, W, H);
+      else gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rbD);
+      if (samples > 0) gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH24_STENCIL8, W, H);
+      else gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, W, H);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rbC);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, rbD);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('그림 저장용 GPU 버퍼를 만들지 못했습니다');
+      if (this.cutDirty) {
+        if (this.sec) this.updateCut();
+        else {
+          this.cutDirty = false;
+          this.renderer.setSectionLines(null);
+        }
+      }
+      const overlays = o.overlays ?? true;
+      const st = this.renderState(f, k);
+      st.viewport = [W, H];
+      if (o.transparent) st.transparent = true;
+      if (!overlays) st.annotations = null;
+      this.renderer.render(f, W, H, st);
+      // 한 표본으로 풀어 읽는다
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rb2);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb2);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb2);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb2);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb2);
+      const px = new Uint8Array(W * H * 4);
+      gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      // 아래에서 위로 → 위에서 아래로, 투명 바탕이면 알파 곱을 푼다
+      const out = new ImageData(W, H);
+      const D = out.data;
+      const row = W * 4;
+      for (let y = 0; y < H; y++) {
+        const src = (H - 1 - y) * row, dst = y * row;
+        if (!o.transparent) {
+          // 불투명 바탕: 섞기가 알파 채널에 남긴 값은 버린다(화면 캔버스처럼)
+          D.set(px.subarray(src, src + row), dst);
+          for (let i = 3; i < row; i += 4) D[dst + i] = 255;
+        } else
+          for (let i = 0; i < row; i += 4) {
+            const a = px[src + i + 3]!;
+            D[dst + i + 3] = a;
+            if (a > 0) {
+              D[dst + i] = Math.min(255, Math.round((px[src + i]! * 255) / a));
+              D[dst + i + 1] = Math.min(255, Math.round((px[src + i + 1]! * 255) / a));
+              D[dst + i + 2] = Math.min(255, Math.round((px[src + i + 2]! * 255) / a));
+            }
+          }
+      }
+      if (!overlays) return out;
+      // 덧그림은 2D 캔버스에 같은 배율로 그려 위에 얹는다
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const ctx = c.getContext('2d')!;
+      ctx.putImageData(out, 0, 0);
+      const oc = document.createElement('canvas');
+      oc.width = W;
+      oc.height = H;
+      const octx = oc.getContext('2d')!;
+      this.drawOverlayOn(octx, f, W / this.cssW);
+      ctx.drawImage(oc, 0, 0);
+      return ctx.getImageData(0, 0, W, H);
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+      gl.deleteFramebuffer(fb);
+      gl.deleteFramebuffer(fb2);
+      gl.deleteRenderbuffer(rbC);
+      gl.deleteRenderbuffer(rbD);
+      gl.deleteRenderbuffer(rb2);
+      this.invalidate();
+    }
+  }
+
+  /**
+   * 창 확대: 화면 사각형(캔버스 CSS 화소 두 구석)이 화면을 채우게 한다. 사각형 가운데 아래 점(없으면 대상점 깊이)을 화면 가운데로 옮기고
+   * 그 깊이에서 사각형이 꼭 맞게 확대한다. 너무 작은 사각형(2화소 미만)은 무시한다
+   */
+  zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.opts.animate): void {
+    if (this.disposed || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return;
+    this.finishAnim();
+    const f = this.frame();
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const hit = this.pickDetail(cx, cy, true);
+    const depth = hit ? viewDepth(f, hit.pick.point) : viewDepth(f, this.cam.target);
+    this.goto(rectZoomCamera(this.cam, f, x0, y0, x1, y1, depth, this.zoomLimits()), animate);
   }
 
   /** 기다리지 않고 바로 그린다 */
@@ -2395,13 +2547,27 @@ export class Viewer3d {
         this.renderer.setSectionLines(null);
       }
     }
+    this.renderer.render(f, w, h, this.renderState(f, dpr));
+    this.drawOverlay(f);
+    if (this.opts.viewCube) this.drawCube();
+    this.frameMs = performance.now() - t0;
+    const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}`;
+    if (key !== this.lastCamKey) {
+      this.lastCamKey = key;
+      const c = this.getCamera();
+      for (const cb of this.camCbs) cb(c);
+    }
+  }
+
+  /** 한 프레임 그리기 상태(화면과 그림 저장이 함께 쓴다) */
+  private renderState(f: ViewFrame, dpr: number): RenderState {
     let marker = null;
     if (this.marker) {
       const m = this.marker;
       const s = this.markerScale(f);
       marker = { kind: m.kind, matrix: placeMatrix(m.pos, m.opts.axis ?? [0, 0, 1], s), color: m.opts.color ?? this.rgba(this.theme.marker) };
     }
-    this.renderer.render(f, w, h, {
+    return {
       mode: this.mode,
       colors: this.colors,
       dpr,
@@ -2425,16 +2591,7 @@ export class Viewer3d {
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
       look: this.looks.size ? (id) => this.looks.get(id) : null,
-    });
-    this.drawOverlay(f);
-    if (this.opts.viewCube) this.drawCube();
-    this.frameMs = performance.now() - t0;
-    const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}`;
-    if (key !== this.lastCamKey) {
-      this.lastCamKey = key;
-      const c = this.getCamera();
-      for (const cb of this.camCbs) cb(c);
-    }
+    };
   }
 
   private drawCube(): void {
@@ -2458,7 +2615,12 @@ export class Viewer3d {
     const dpr = this.dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawOverlayOn(ctx, f, dpr);
+  }
+
+  /** 덧그림(단면 평면·좌표축·덧그림·측정)을 ctx에 CSS 화소 × k 배율로 */
+  private drawOverlayOn(ctx: CanvasRenderingContext2D, f: ViewFrame, k: number): void {
+    ctx.setTransform(k, 0, 0, k, 0, 0);
     if (this.multiSection) this.drawSectionPlanes(ctx, f);
     else if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
