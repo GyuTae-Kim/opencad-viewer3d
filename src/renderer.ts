@@ -29,6 +29,22 @@ import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriI
  */
 export type RenderMode = 'shaded' | 'shadedEdges' | 'wireframe' | 'xray' | 'hiddenLine' | 'monochrome' | 'noTexture';
 
+/** 그물이 윤곽선(Mesh3d.edges)을 선분 하나(6값) 이상 가졌는지 — 이때만 윤곽선을 올려 그린다 */
+export function hasMeshEdges(m: Pick<Mesh3d, 'edges'>): boolean {
+  return !!m.edges && m.edges.length >= 6;
+}
+
+/**
+ * 윤곽선·와이어프레임 차례에 그물을 무엇으로 그리는지: 'edges' = 윤곽선(음영 말고 모든 모드),
+ * 'triangles' = 삼각형 변(윤곽선이 없는 그물을 와이어프레임·숨은 선 모드에서 — Mesh3d.triangleEdges가 false면 하지 않는다),
+ * null = 선 없음
+ */
+export function meshLineKind(m: Pick<Mesh3d, 'edges' | 'triangleEdges'>, mode: RenderMode): 'edges' | 'triangles' | null {
+  if (mode === 'shaded') return null;
+  if (hasMeshEdges(m)) return 'edges';
+  return (mode === 'wireframe' || mode === 'hiddenLine') && m.triangleEdges !== false ? 'triangles' : null;
+}
+
 export interface RenderColors {
   /** 단색 모드 면 색(없으면 밝은 회색) */
   monochrome?: Rgba;
@@ -827,7 +843,7 @@ export class Renderer3d {
           break;
         }
     }
-    const edges = m.edges && m.edges.length >= 6 ? this.lineRec(m.id, m.group, m.edges, undefined) : null;
+    const edges = hasMeshEdges(m) ? this.lineRec(m.id, m.group, m.edges!, undefined) : null;
     const box = meshBounds(m);
     // 뒷면 색·무늬(없으면 null — 예전 그대로)
     const buv = m.backTexture && this.texSrc.has(m.backTexture) ? uvComponents(m, m.backUvs ?? m.uvs) : 0;
@@ -1808,8 +1824,8 @@ export class Renderer3d {
             this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
             this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
           }
-        } else if (mode === 'wireframe' || flat) {
-          // 윤곽선이 없는 그물: 삼각형 변(X-ray에서는 반투명 면만)
+        } else if (meshLineKind(r.src, mode) === 'triangles') {
+          // 윤곽선이 없는 그물: 와이어프레임·숨은 선에서 삼각형 변(X-ray에서는 반투명 면만, triangleEdges: false면 선 없음)
           const w = this.wireOf(r);
           const clip = clipOf(model);
           const wclips = clipsOf(r.src.id, model);
@@ -1859,15 +1875,34 @@ export class Renderer3d {
       gl.disable(gl.BLEND);
     }
 
-    // 2b) 숨은 선 모드: 면 뒤 윤곽선을 흐린 점선으로(깊이 비교를 뒤집어)
+    // 2b) 숨은 선 모드: 면 뒤 윤곽선을 흐린 점선으로(깊이 비교를 뒤집어). 숨긴 구간(setHiddenRanges)은 빼고 묶음 불투명도를 곱한다.
+    // 모형 모서리 선분 묶음(LineSet3d.hiddenEdges)도 그리기 범위 안쪽을 함께(선분 묶음은 아직 깊이에 없어 면만 가린다)
     if (flat && st.hiddenEdges && st.hiddenEdges > 0) {
       gl.enable(gl.BLEND);
       gl.depthFunc(gl.GREATER);
       gl.depthMask(false);
+      /** 선분 레코드 하나를 [0, count) 안에서 숨은 점선으로(구간이 있으면 보통·강조 구간 모두, 숨긴 구간은 빼고) */
+      const dashHidden = (rec: LineRec, id: string, model: ArrayLike<number> | undefined, count: number, parts: readonly RangePart[] | null | undefined, ver: number, positions: Float32Array, colors: Float32Array | undefined): void => {
+        const o = { color: st.colors.line, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges! * alphaOf(id), clip: clipOf(model), clips: clipsOf(id, model) };
+        if (!parts) {
+          this.drawLines(f, rec, model, { ...o, first: 0, count }, st, stats);
+          return;
+        }
+        const c = this.partCache(rec, ver);
+        for (const hi of [false, true]) this.drawLineList(f, rec, model, this.lineList(rec, c, parts, hi, positions, colors), 0, count, o, st, stats);
+      };
       for (const r of visibleMeshes) {
         if (!r.edges) continue;
-        const model = mm(r);
-        this.drawLines(f, r.edges, model, { color: st.colors.line, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges, first: 0, count: r.edges.n, clip: clipOf(model), clips: clipsOf(r.src.id, model) }, st, stats);
+        const ep = st.parts?.(r.src.id);
+        dashHidden(r.edges, r.src.id, mm(r), r.edges.n, ep?.edges, ep?.ver ?? 0, r.src.edges!, undefined);
+      }
+      for (const r of this.lines) {
+        const l = r.src;
+        if (l.hiddenEdges !== true || !vis(l.id, l.group)) continue;
+        const range = st.ranges.get(l.id);
+        const count = range ? Math.max(0, Math.min(r.n, Math.floor(range.count))) : r.n;
+        const p = st.parts?.(l.id);
+        if (count > 0) dashHidden(r, l.id, lm(r, l.id), count, p?.prims, p?.ver ?? 0, l.positions, l.colors);
       }
       gl.depthMask(true);
       gl.depthFunc(gl.LEQUAL);

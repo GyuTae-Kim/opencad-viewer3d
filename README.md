@@ -172,7 +172,7 @@ viewer.fit();
 
 ### 그리기 모드 더하기·외곽선
 
-- `setRenderMode('hiddenLine')`: 면을 바탕색(조명 없이)으로 채워 뒤의 선을 가리고 윤곽선만 보인다(윤곽선이 없는 그물은 삼각형 변). 윤곽선 색은 선 색(테마 글자 쪽)
+- `setRenderMode('hiddenLine')`: 면을 바탕색(조명 없이)으로 채워 뒤의 선을 가리고 윤곽선만 보인다(윤곽선이 없는 그물은 삼각형 변 — 0.7.1부터 `triangleEdges: false`면 선 없음). 윤곽선 색은 선 색(테마 글자 쪽)
 - `setRenderMode('monochrome')`: 정점 색·무늬 없이 한 색(테마 `monochrome`·CSS `--v3d-mono`, 기본 밝은 회색) 음영 + 윤곽선
 - `setRenderMode('noTexture')`: 무늬만 끈 음영 + 윤곽선(정점 색·`color`는 그대로)
 - `setRenderOptions({ hiddenEdges })`: 숨은 선 모드에서 면 뒤 윤곽선을 흐린 점선으로(true = 0.35 또는 불투명도)
@@ -225,13 +225,37 @@ viewer.fit();
   고르기·`project`·하늘 바탕이 함께 따른다. 표준 뷰(`setView`)는 둘 다 0으로 돌린다. 값이 없으면 카메라 객체·투영은 예전과 같다
 - `onCameraChange`는 0.7.0부터 시야각(`setFov`)·굴림·렌즈 이동이 바뀔 때도 부른다
 
+## 0.7.1: 모서리만 그리기·선분 묶음 숨은 점선
+
+새 선택을 주지 않으면 그림·고르기는 0.7.0과 화소·값까지 같다(개발 페이지 기본·큰 좌표 장면에서 일곱 모드·숨은 점선·단면·구간 숨김과 강조 등
+화면 31가지와 고르기·붙잡기 값을 견주었다). 고친 것 하나: 숨은 점선이 숨긴 윤곽선 구간도 그리던 것.
+
+- `Mesh3d.triangleEdges`(기본 `true`): `false`면 윤곽선(`edges`)이 없는 그물도 와이어프레임·숨은 선에서 삼각형 변을 그리지 않는다.
+  선은 `edges`만 그린다(없으면 선 없음). 고르기·측정·단면 채우기·그림자·겉모습·그림 저장은 그대로다(면은 모드와 상관없이 고른다)
+  - B-rep 해석기(STEP): 면 그물에 `triangleEdges: false`를 두면 모서리 없는 매끈한 닫힌 면(원환 등)이 숨은 선에서 촘촘한 삼각형 그물로 보이지 않는다.
+    그런 면의 테두리가 필요하면 외곽선(`setRenderOptions({ profiles: true })`)을 함께 켠다
+  - 모서리를 선분 묶음으로 따로 주는 해석기(SketchUp): 그물마다 `triangleEdges: false`를 두면 와이어프레임·숨은 선에 모서리만 보인다.
+    0.7.0에서 쓰던 길이 0 윤곽선을 넣고 `setHiddenRanges`로 숨기는 꼼수는 필요 없다
+- `LineSet3d.hiddenEdges`(선택): `true`면 그 선분 묶음도 숨은 선 모드의 숨은 점선(`setRenderOptions({ hiddenEdges })`)을 받는다 — 면 뒤로 가려진 부분만
+  흐린 1화소 점선. 그리기 범위(`setLineDrawRange`) 안쪽만, 숨긴 구간은 빼고, 묶음 불투명도를 곱한다. 선분 묶음에 색을 주지 않으면 같은 모서리를
+  그물 `edges`로 줄 때와 숨은 선 모드 그림이 화소까지 같다
+- 숨은 점선은 `setHiddenRanges(id, { edges })`로 숨긴 윤곽선 구간을 빼고 묶음 불투명도(`setItemOpacity`)를 곱한다(0.7.0은 숨긴 윤곽선도 그렸다)
+
+```ts
+// SketchUp 꼴: 면 그물은 삼각형 변 없이, 모서리는 따로 선분 묶음
+scene.meshes.push({ id: 'face-1', positions, indices, color, triangleEdges: false });
+scene.lines.push({ id: 'edges-1', positions: edgeSegments, hiddenEdges: true });
+viewer.setRenderMode('hiddenLine');
+viewer.setRenderOptions({ hiddenEdges: true }); // 뒷모서리를 흐린 점선으로
+```
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.7.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.7.1"
 }
 ```
 
