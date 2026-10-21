@@ -10,6 +10,9 @@
  *   굵은 선은 정점 셰이더에서 선분을 평면으로 잘라 남는 부분만 펴고, 점은 잘린 쪽 점을 화면 밖으로 보낸다. 단면이 없으면 u_clip = (0, 0, 0, −1).
  * - 여러 단면(CLIPN을 정의한 변종, 0.7.0): u_clips[MAX](로컬 평면들)·u_nclip개 모두의 남는 쪽만 남긴다. 그물·가는 선은 로컬 위치를 보간해
  *   조각에서 평면마다 버리고, 굵은 선은 정점 셰이더에서 평면마다 차례로 자르고, 점은 잘린 쪽 점을 화면 밖으로 보낸다.
+ * - FLAT(그물 변종, 숨은 선 모드): 조명 없이 색 그대로(바탕색으로 채워 뒤의 선을 가린다).
+ * - 윤곽(PROFILE): 그물만 그린 깊이 그림에서 화면 화소 반지름 둘레의 깊이 2차 차분이 크면(실루엣) 그 색을 칠한다.
+ *   원근 깊이 버퍼 값은 1/z에 대해 1차라 평면은 2차 차분이 0이다. 허용치는 (1 − 깊이)에 비례(가까운 곳·먼 곳 같은 상대 기준).
  * - 무늬(TEX를 정의한 그물 변종): 무늬 좌표 a_uv(정점마다 (u, v) 또는 원근 무늬 (u·q, v·q, q))를 보간해 조각에서 q로 나누고
  *   u_tex(REPEAT·밉맵)를 읽어 rgb를 바꾼다. u_texAlpha가 1이면 그림 알파를 불투명도에 곱한다(반투명 차례). 무늬가 없는 그물은 예전 셰이더 그대로.
  */
@@ -118,6 +121,9 @@ void main() {
   base = vec4(t.rgb, v_col.a * mix(1.0, t.a, u_texAlpha));
 #endif
   vec3 c = base.rgb * dif + vec3(spec);
+#ifdef FLAT
+  c = base.rgb;
+#endif
   c = mix(c, u_tint.rgb, u_tint.a);
   o_color = vec4(c, base.a * u_alpha);
 }`;
@@ -322,4 +328,41 @@ void main() {
   float R = u_size * 0.5;
   if (r > R) discard;
   o_color = r > R - max(1.0, R * 0.25) ? u_ring : u_color;
+}`;
+
+/** 화면 전체 삼각형(정점 번호로 만든다 — 버퍼 없음) */
+export const FULL_VS = `#version 300 es
+precision highp float;
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+export const PROFILE_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform highp sampler2D u_depth;
+uniform vec2 u_texel;
+uniform float u_r;
+uniform vec4 u_color;
+uniform float u_ortho;
+out vec4 o_color;
+float D(vec2 o) { return texture(u_depth, v_uv + o * u_texel).r; }
+void main() {
+  float c = D(vec2(0.0));
+  float thr = u_ortho > 0.5 ? 0.002 : 0.04 * max(1.0 - c, 1e-7);
+  float e = 0.0;
+  vec2 dirs[4] = vec2[4](vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.7071, 0.7071), vec2(0.7071, -0.7071));
+  for (int i = 0; i < 4; i++) {
+    vec2 o = dirs[i] * u_r;
+    float a = D(o), b = D(-o);
+    // 바탕(1)과 그물 경계는 늘 윤곽
+    if ((c < 1.0) != (a < 1.0) || (c < 1.0) != (b < 1.0)) { e = 1.0; break; }
+    if (c >= 1.0) continue;
+    if (abs(a + b - 2.0 * c) > thr) { e = 1.0; break; }
+  }
+  if (e < 0.5) discard;
+  o_color = u_color;
 }`;

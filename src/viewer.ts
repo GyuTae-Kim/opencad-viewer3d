@@ -446,6 +446,8 @@ export class Viewer3d {
   private measureHover: { p: V3; vertex: boolean } | null = null;
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
+  /** 보여 주기 선택(외곽선·숨은 점선) */
+  private renderOpts: { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } = { profiles: null, hiddenEdges: 0 };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
   private looks = new Map<string, LookState>();
   /** 묶음 행렬을 건 묶음 수(있으면 보이는 범위를 다시 모은다) */
@@ -786,6 +788,28 @@ export class Viewer3d {
 
   getRenderMode(): RenderMode {
     return this.mode;
+  }
+
+  /**
+   * 보여 주기 선택(0.7.0): profiles = 화면 공간 외곽선(실루엣, true 또는 { width: CSS 화소(기본 2), color }),
+   * hiddenEdges = 숨은 선 모드에서 면 뒤 윤곽선을 흐린 점선으로(true = 0.35, 또는 불투명도). 주지 않은 것은 그대로, null이면 끈다
+   */
+  setRenderOptions(o: { profiles?: boolean | { width?: number; color?: Rgba | string } | null; hiddenEdges?: boolean | number | null }): void {
+    if ('profiles' in o) {
+      const p = o.profiles;
+      this.renderOpts.profiles = !p ? null : { width: Math.max(1, (typeof p === 'object' ? p.width : undefined) ?? 2), color: typeof p === 'object' ? (p.color ?? null) : null };
+    }
+    if ('hiddenEdges' in o) {
+      const h = o.hiddenEdges;
+      this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+    }
+    this.invalidate();
+  }
+
+  /** 지금 보여 주기 선택 */
+  get renderOptions(): { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } {
+    const p = this.renderOpts.profiles;
+    return { profiles: p ? { ...p } : null, hiddenEdges: this.renderOpts.hiddenEdges };
   }
 
   /** 대상점 둘레 회전(라디안) */
@@ -1724,7 +1748,7 @@ export class Viewer3d {
 
   /** 음영 모드에서 세계 점 p(화면 x, y)가 불투명 면에 가렸는지. build면 BVH가 없을 때 만든다 */
   private occludedAt(f: ViewFrame, p: readonly number[], x: number, y: number, build: boolean): boolean {
-    if (!this.sceneRef || (this.mode !== 'shaded' && this.mode !== 'shadedEdges')) return false;
+    if (!this.sceneRef || !this.shadedMode) return false;
     const d = viewDepth(f, p);
     const od = occludingDepth(f, x, y, this.visibleItems(), {
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
@@ -1976,6 +2000,7 @@ export class Viewer3d {
     const c = (s: string): Rgba => this.rgba(s);
     const line: Rgba = base === LIGHT_THEME ? [0.15, 0.2, 0.28, 1] : [0.85, 0.88, 0.92, 1];
     this.colors = {
+      ...(theme.monochrome ? { monochrome: c(theme.monochrome) } : {}),
       background: c(theme.background),
       edge: c(theme.edge),
       line,
@@ -2159,7 +2184,7 @@ export class Viewer3d {
       ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
       tol: t.tol,
       snap: t.snap,
-      occlude: this.mode === 'shaded' || this.mode === 'shadedEdges',
+      occlude: this.shadedMode,
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
       fast: !build,
       limit: (id) => this.ranges.get(id)?.count,
@@ -2176,8 +2201,14 @@ export class Viewer3d {
   }
 
   private cappedBy(m: Mesh3d, s: Section | null | undefined): boolean {
-    if (!s || s.caps === 'none' || (this.mode !== 'shaded' && this.mode !== 'shadedEdges') || !this.meshOpaque(m) || !this.renderer.canFillSection) return false;
+    if (!s || s.caps === 'none' || !this.shadedMode || !this.meshOpaque(m) || !this.renderer.canFillSection) return false;
     return s.caps === 'all' || m.closed === true || m.capGroup !== undefined;
+  }
+
+  /** 면이 앞의 것을 가리는 모드(음영 계열 — 고르기·가림·잘린 면 채우기) */
+  private get shadedMode(): boolean {
+    const m = this.mode;
+    return m === 'shaded' || m === 'shadedEdges' || m === 'hiddenLine' || m === 'monochrome' || m === 'noTexture';
   }
 
   /** 고르기·가림 판정의 단면 선택(평면 하나면 예전 그대로 clip, 여러 단면이면 묶음마다 clips) */
@@ -2591,6 +2622,13 @@ export class Viewer3d {
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
       look: this.looks.size ? (id) => this.looks.get(id) : null,
+      hiddenEdges: this.renderOpts.hiddenEdges,
+      profiles: this.renderOpts.profiles
+        ? {
+            width: this.renderOpts.profiles.width * dpr,
+            color: this.renderOpts.profiles.color === null ? this.colors.line : typeof this.renderOpts.profiles.color === 'string' ? this.rgba(this.renderOpts.profiles.color) : this.renderOpts.profiles.color,
+          }
+        : null,
     };
   }
 

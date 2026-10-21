@@ -32,6 +32,8 @@ export interface Viewer3dTheme {
   cubeHover: string;
   /** 단면 테두리(교선)·평면 표시(없으면 기본 테마 값) */
   section?: string;
+  /** 단색 모드(monochrome) 면 색(없으면 밝은 회색) */
+  monochrome?: string;
 }
 
 export const DARK_THEME: Viewer3dTheme = {
@@ -93,6 +95,7 @@ export const THEME_CSS_VARS: Record<keyof Viewer3dTheme, string> = {
   cubeText: '--v3d-cube-fg',
   cubeHover: '--v3d-cube-hover',
   section: '--v3d-section',
+  monochrome: '--v3d-mono',
 };
 
 /**
