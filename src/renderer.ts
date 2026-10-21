@@ -29,6 +29,22 @@ import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriI
  */
 export type RenderMode = 'shaded' | 'shadedEdges' | 'wireframe' | 'xray' | 'hiddenLine' | 'monochrome' | 'noTexture';
 
+/** 그물이 윤곽선(Mesh3d.edges)을 선분 하나(6값) 이상 가졌는지 — 이때만 윤곽선을 올려 그린다 */
+export function hasMeshEdges(m: Pick<Mesh3d, 'edges'>): boolean {
+  return !!m.edges && m.edges.length >= 6;
+}
+
+/**
+ * 윤곽선·와이어프레임 차례에 그물을 무엇으로 그리는지: 'edges' = 윤곽선(음영 말고 모든 모드),
+ * 'triangles' = 삼각형 변(윤곽선이 없는 그물을 와이어프레임·숨은 선 모드에서 — Mesh3d.triangleEdges가 false면 하지 않는다),
+ * null = 선 없음
+ */
+export function meshLineKind(m: Pick<Mesh3d, 'edges' | 'triangleEdges'>, mode: RenderMode): 'edges' | 'triangles' | null {
+  if (mode === 'shaded') return null;
+  if (hasMeshEdges(m)) return 'edges';
+  return (mode === 'wireframe' || mode === 'hiddenLine') && m.triangleEdges !== false ? 'triangles' : null;
+}
+
 export interface RenderColors {
   /** 단색 모드 면 색(없으면 밝은 회색) */
   monochrome?: Rgba;
@@ -827,7 +843,7 @@ export class Renderer3d {
           break;
         }
     }
-    const edges = m.edges && m.edges.length >= 6 ? this.lineRec(m.id, m.group, m.edges, undefined) : null;
+    const edges = hasMeshEdges(m) ? this.lineRec(m.id, m.group, m.edges!, undefined) : null;
     const box = meshBounds(m);
     // 뒷면 색·무늬(없으면 null — 예전 그대로)
     const buv = m.backTexture && this.texSrc.has(m.backTexture) ? uvComponents(m, m.backUvs ?? m.uvs) : 0;
@@ -1808,8 +1824,8 @@ export class Renderer3d {
             this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
             this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
           }
-        } else if (mode === 'wireframe' || flat) {
-          // 윤곽선이 없는 그물: 삼각형 변(X-ray에서는 반투명 면만)
+        } else if (meshLineKind(r.src, mode) === 'triangles') {
+          // 윤곽선이 없는 그물: 와이어프레임·숨은 선에서 삼각형 변(X-ray에서는 반투명 면만, triangleEdges: false면 선 없음)
           const w = this.wireOf(r);
           const clip = clipOf(model);
           const wclips = clipsOf(r.src.id, model);
