@@ -13,6 +13,7 @@
  * - FLAT(그물 변종, 숨은 선 모드): 조명 없이 색 그대로(바탕색으로 채워 뒤의 선을 가린다).
  * - 윤곽(PROFILE): 그물만 그린 깊이 그림에서 화면 화소 반지름 둘레의 깊이 2차 차분이 크면(실루엣) 그 색을 칠한다.
  *   원근 깊이 버퍼 값은 1/z에 대해 1차라 평면은 2차 차분이 0이다. 허용치는 (1 − 깊이)에 비례(가까운 곳·먼 곳 같은 상대 기준).
+ *   끊긴 곳 양쪽 화소를 모두 칠해 가장 가는 것이 2화소다. ONE(0.7.2, 굵기 1화소)이면 앞쪽 화소(그물 쪽·이웃 평균보다 가까운 쪽)만 칠한다.
  * - 해(SUN, 0.7.0): 고정 보조광 대신 세계 방향 해 하나(시점 공간으로 옮긴 u_sunDir)·주변광. SHADOW면 해 쪽 평행 투영 깊이 그림을
  *   sampler2DShadow로 3×3 PCF해 그늘을 곱한다. FOG(그물·선·점)면 눈 깊이로 선형 안개 색을 섞는다.
  * - 뒷면(BACK·BACKTEX, 0.7.0): gl_FrontFacing으로 뒷면이면 Mesh3d.backColor(u_backColor, a < 0이면 앞면 그대로)나 뒷면 무늬(u_tex2, 좌표 a_uv2)를 칠한다.
@@ -471,6 +472,10 @@ out vec4 o_color;
 float D(vec2 o) { return texture(u_depth, v_uv + o * u_texel).r; }
 void main() {
   float c = D(vec2(0.0));
+#ifdef ONE
+  // 굵기 1화소(0.7.2): 깊이가 끊기는 곳의 가까운 쪽 화소만 칠한다(바탕 쪽·먼 쪽 화소는 칠하지 않는다)
+  if (c >= 1.0) discard;
+#endif
   float thr = u_ortho > 0.5 ? 0.002 : 0.04 * max(1.0 - c, 1e-7);
   float e = 0.0;
   vec2 dirs[4] = vec2[4](vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.7071, 0.7071), vec2(0.7071, -0.7071));
@@ -480,7 +485,12 @@ void main() {
     // 바탕(1)과 그물 경계는 늘 윤곽
     if ((c < 1.0) != (a < 1.0) || (c < 1.0) != (b < 1.0)) { e = 1.0; break; }
     if (c >= 1.0) continue;
+#ifdef ONE
+    // 이웃 평균보다 가까운 화소(끊긴 곳의 앞쪽)만
+    if (a + b - 2.0 * c > thr) { e = 1.0; break; }
+#else
     if (abs(a + b - 2.0 * c) > thr) { e = 1.0; break; }
+#endif
   }
   if (e < 0.5) discard;
   o_color = u_color;
