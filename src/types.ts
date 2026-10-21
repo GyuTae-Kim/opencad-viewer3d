@@ -58,6 +58,26 @@ export interface Mesh3d {
   uvs?: Float32Array;
   /** 무늬 그림 id(Scene3d.textures). 있으면 color·colors의 rgb 대신 무늬 그림을 칠하고, 불투명도는 color(colors) 알파를 따른다 */
   texture?: string;
+  /**
+   * 잘린 면을 함께 채우는 묶음 이름(0.7.0, 선택). 재질별로 나뉜 그물들이 함께 하나의 닫힌 입체를 이루면 같은 이름을 준다 —
+   * 단면에서 그 그물들의 교차를 더해 안쪽을 한 번에 채운다(그물 하나하나는 closed가 아니어도 된다). 채운 면 색은 처음 그물 색
+   */
+  capGroup?: string;
+  /**
+   * 늘 카메라를 마주 보는 그물(0.7.0, 선택 — SketchUp "늘 나를 보기" 컴포넌트, 2D 나무·사람): 세계 Z축(origin을 지나는) 둘레로
+   * 프레임마다 돌려 front(그물 앞 방향, 기본 [0, −1, 0] — 앞 뷰에서 보이는 쪽)가 카메라 쪽을 향하게 한다. origin은 세계 좌표(matrix·origin을 거친 뒤).
+   * 고르기·측정도 돌린 자리로 한다. 범위는 원점 둘레 기둥(돌려도 변하지 않게)
+   */
+  billboard?: { origin: [number, number, number]; axis?: 'z'; front?: [number, number, number] };
+  /**
+   * 뒷면 색(0.7.0, 선택): 삼각형 감김이 화면에서 시계 방향인 쪽(바깥에서 반시계로 감은 그물의 안쪽)을 이 색으로(rgb, 불투명도는 color 알파).
+   * SketchUp 면의 뒷면 재질처럼. matrix가 거울(행렬식 < 0)이면 앞뒤를 맞춰 뒤집는다
+   */
+  backColor?: Rgba;
+  /** 뒷면 무늬 그림 id(Scene3d.textures). 좌표는 backUvs(없으면 uvs) */
+  backTexture?: string;
+  /** 뒷면 무늬 좌표(uvs와 같은 꼴 — 정점마다 2값 또는 3값) */
+  backUvs?: Float32Array;
 }
 
 /**
@@ -133,10 +153,11 @@ export interface Scene3d {
 
 /** 뷰어가 고르기 결과로 돌려주는 것 */
 export interface Pick3d {
-  kind: 'mesh' | 'line' | 'point';
-  /** Mesh3d·LineSet3d·PointSet3d의 id */
+  /** 'edge'는 그물 윤곽선(Mesh3d.edges) — 윤곽선 고르기를 켰을 때만(0.7.0, Viewer3dOptions.pickEdges·pick(x, y, { edges })) */
+  kind: 'mesh' | 'line' | 'point' | 'edge';
+  /** Mesh3d·LineSet3d·PointSet3d의 id('edge'면 그 윤곽선을 가진 그물 id) */
   id: string;
-  /** 선분·점의 원본 식별 번호(segmentIds·pointIds), 그물이면 삼각형 번호 */
+  /** 선분·점의 원본 식별 번호(segmentIds·pointIds), 그물이면 삼각형 번호, 'edge'면 Mesh3d.edges의 선분 번호 */
   index: number;
   /** 고른 세계 좌표(묶음 origin을 더한 값) */
   point: [number, number, number];

@@ -130,3 +130,18 @@ describe('터치 허용 거리로 장면 고르기', () => {
     expect(pickScene(f, 300 - 12, 200, items, { tol: 6, occlude: false, bvh: () => null })!.vertex).toBe(false);
   });
 });
+
+describe('걷기 키', () => {
+  it('물리 키(code)를 먼저: 한글 입력기의 ㅈ(KeyW)도 앞으로, code가 없으면 key', async () => {
+    const { walkKeyOf } = await import('../src/pointer');
+    expect(walkKeyOf({ code: 'KeyW', key: 'ㅈ' })).toBe('w');
+    expect(walkKeyOf({ code: 'KeyA', key: 'ㅁ' })).toBe('a');
+    expect(walkKeyOf({ code: 'KeyD', key: 'D' })).toBe('d');
+    expect(walkKeyOf({ code: 'ArrowLeft', key: 'ArrowLeft' })).toBe('ArrowLeft');
+    expect(walkKeyOf({ code: 'KeyF', key: 'f' })).toBeNull();
+    expect(walkKeyOf({ code: 'Digit1', key: '1' })).toBeNull();
+    expect(walkKeyOf({ key: 'W' })).toBe('w');
+    expect(walkKeyOf({ code: '', key: 'PageUp' })).toBe('PageUp');
+    expect(walkKeyOf({ key: 'ㅈ' })).toBeNull();
+  });
+});

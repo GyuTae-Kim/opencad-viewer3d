@@ -245,3 +245,64 @@ export function sectionDragDistance(f: ViewFrame, c: readonly number[], n: reado
   const toEye = dot(n, f.basis.back) >= 0 ? 1 : -1;
   return -dyPx * wpp * toEye;
 }
+
+/** 단면 평면 최대 수(셰이더 균일 배열 크기 — 상자 단면 여섯 면) */
+export const MAX_SECTION_PLANES = 6;
+
+/**
+ * 여러 평면 모두의 남는 쪽(교집합)에 광선이 있는 t 구간. 평면이 하나면 rayKeptInterval과 같다. 없으면 null.
+ * 들어오는 평면 번호(enter: 구간 시작을 정한 평면, 눈이 이미 안이면 −1)도 돌려준다.
+ */
+export function rayKeptIntervalN(planes: readonly Readonly<Plane4>[], origin: readonly number[], dir: readonly number[]): { t0: number; t1: number; enter: number } | null {
+  let t0 = 0, t1 = Infinity, enter = -1;
+  for (let i = 0; i < planes.length; i++) {
+    const r = rayKeptInterval(planes[i]!, origin, dir);
+    if (!r) return null;
+    if (r[0] > t0) {
+      t0 = r[0];
+      enter = i;
+    }
+    if (r[1] < t1) t1 = r[1];
+    if (t0 > t1) return null;
+  }
+  return { t0, t1, enter };
+}
+
+/** 볼록 다각형을 평면으로 잘라 남는 쪽(값 ≤ 0)만(Sutherland–Hodgman). 다 잘리면 빈 배열 */
+export function clipPolygon(poly: readonly V3[], p: Readonly<Plane4>): V3[] {
+  const out: V3[] = [];
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i]!, b = poly[(i + 1) % n]!;
+    const va = planeValue(p, a[0], a[1], a[2]), vb = planeValue(p, b[0], b[1], b[2]);
+    if (va <= 0) out.push(a);
+    if (va <= 0 !== vb <= 0) {
+      const t = va / (va - vb);
+      out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
+    }
+  }
+  return out.length >= 3 ? out : [];
+}
+
+/**
+ * 선분 묶음(xyz,xyz…, 세계 좌표 double 배열 또는 float)을 여러 평면의 남는 쪽으로 잘라 남는 부분만 돌려준다(다른 평면으로 단면 테두리를 자를 때)
+ */
+export function clipSegments(segs: ArrayLike<number>, planes: readonly Readonly<Plane4>[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i + 5 < segs.length; i += 6) {
+    const ax = segs[i]!, ay = segs[i + 1]!, az = segs[i + 2]!, bx = segs[i + 3]!, by = segs[i + 4]!, bz = segs[i + 5]!;
+    let s0 = 0, s1 = 1, ok = true;
+    for (const p of planes) {
+      const r = segmentKeptRange(p, ax + (bx - ax) * s0, ay + (by - ay) * s0, az + (bz - az) * s0, ax + (bx - ax) * s1, ay + (by - ay) * s1, az + (bz - az) * s1);
+      if (!r) {
+        ok = false;
+        break;
+      }
+      const d = s1 - s0;
+      [s0, s1] = [s0 + d * r[0], s0 + d * r[1]];
+    }
+    if (!ok || !(s1 > s0)) continue;
+    out.push(ax + (bx - ax) * s0, ay + (by - ay) * s0, az + (bz - az) * s0, ax + (bx - ax) * s1, ay + (by - ay) * s1, az + (bz - az) * s1);
+  }
+  return out;
+}

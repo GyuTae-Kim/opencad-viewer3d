@@ -13,7 +13,7 @@
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d } from './types';
-import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
 import { type IndexRange, mergeRanges, partitionRanges, rangeTester } from './ranges';
 import { type Bvh, type PrimKind, buildBvh } from './bvh';
 import {
@@ -23,25 +23,34 @@ import {
   type ViewName,
   VIEW_DIRS,
   cameraBasis,
+  cameraEye,
   computeFrame,
   defaultCamera,
   dirToAngles,
   fitCamera,
   lerpCamera,
   orbitCamera,
+  lookCamera,
   panCamera,
   projectToScreen,
+  rectZoomCamera,
+  standCamera,
+  walkCamera,
   rayAtDepth,
+  worldPerPixel,
   screenRay,
   viewDepth,
   zoomCamera,
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub } from './math';
-import { type PickDetail, type ScenePickItems, pickScene } from './scenepick';
+import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, translation } from './math';
+import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene } from './scenepick';
+import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
+import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
+import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
-import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance } from './pointer';
+import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import {
   AXIS_DIRS,
   type Plane4,
@@ -51,13 +60,17 @@ import {
   planeBoxPolygon,
   planeFrom,
   planeToLocal,
+  MAX_SECTION_PLANES,
+  clipPolygon,
+  clipSegments,
+  planeValue,
   rangeFraction,
   sectionDragDistance,
   sectionScreenAxis,
   sectionSegments,
 } from './section';
 import { segmentsById } from './segments';
-import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderStats, type TextureStats, Renderer3d } from './renderer';
+import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
@@ -88,8 +101,18 @@ export interface Viewer3dOptions {
    * 측정 점을 꼭짓점·끝점에 붙잡는 거리도 이 값(10보다 작으면 10)까지 넓힌다
    */
   touchPickTolerance?: number;
+  /**
+   * 그물 윤곽선(Mesh3d.edges)도 고른다(기본 false): 누르기·측정·onPick이 선분 다음, 면보다 먼저 kind 'edge'(그물 id, edges 선분 번호)를 돌려준다.
+   * 허용 거리는 선분과 같다(터치는 touchPickTolerance). 음영 모드에서는 면에 가린 윤곽선은 고르지 않는다. setPickEdges로 바꾼다
+   */
+  pickEdges?: boolean;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
+  /**
+   * 측정 글 꼴(내장 측정과 글을 주지 않은 거리 덧그림): 거리·성분·두 점·장면 단위를 받아 글 줄들을 돌려준다.
+   * 앱이 단위(파일·mm·in)·자릿수·언어를 맞출 때 쓴다. 없으면 기본("거리 … mm" / "ΔX … ΔY … ΔZ …"). setMeasureFormat으로 바꾼다
+   */
+  formatMeasure?: MeasureFormat | null;
   /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
   textureLimit?: number;
   /** 무늬 그림 전체 GPU 예산(바이트, 기본 256 MB — RGBA·밉맵 어림). 넘으면 모든 무늬를 같은 비로 줄인다 */
@@ -141,6 +164,20 @@ export interface SectionState {
   caps: SectionCaps;
   outline: boolean;
   plane: boolean;
+  /** 이 평면이 자르는 묶음 id(setSections에서 정했을 때만) */
+  items?: string[];
+  /** setSections에서 준 식별자 */
+  id?: string;
+}
+
+/** setSections의 평면 하나: normal·p = offset의 법선 쪽을 잘라 낸다 */
+export interface SectionPlane extends SectionOptions {
+  normal: readonly number[];
+  offset: number;
+  /** 이 평면이 자르는 묶음 id(없으면 모두) */
+  items?: readonly string[] | null;
+  /** 앱이 붙이는 식별자(state.id로 돌려준다) */
+  id?: string;
 }
 
 /** 화면에서 단면 평면을 끌 손잡이 정보(Viewer3d.sectionHandle) */
@@ -200,6 +237,113 @@ export interface MarkerOptions {
   color?: Rgba;
 }
 
+/** 측정 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat): 받은 값으로 글 줄들을 만든다 */
+export type MeasureFormat = (m: MeasureResult & { units: Scene3d['units'] }) => string[];
+
+/** project() 결과: 세계 점의 캔버스 위치(CSS 화소, 왼쪽 위 원점)와 보이는지 */
+export interface ProjectedPoint {
+  /** 캔버스 CSS 화소. behind면 눈 뒤 점을 원근 나눗셈한 자리(화면에서 거울처럼 뒤집힌 쪽 — 화살표 방향을 정할 때만 쓴다) */
+  x: number;
+  y: number;
+  /** 눈에서 본 깊이(앞쪽이 양수, 세계 단위) */
+  depth: number;
+  /** 원근에서 눈 뒤(깊이 ≤ 0)에 있는지(평행 투영은 늘 false) */
+  behind: boolean;
+  /** 눈 앞(가까운 면 안쪽)에 있고 캔버스 안에 들어오는지 */
+  onScreen: boolean;
+  /** 불투명 면에 가렸는지(occlusion을 줬고 음영 모드일 때만 따진다, 아니면 false) */
+  occluded: boolean;
+  /** onScreen이고 단면에 잘리지 않았고 (occlusion을 줬으면) 가리지 않았는지 */
+  visible: boolean;
+}
+
+/** 묶음 겉모습(itemLook): 바꾼 것만 있다 */
+export interface ItemLookState {
+  /** 불투명도 0~1 */
+  opacity?: number;
+  /** false면 고르기·측정·가림에서 뺀다 */
+  pickable: boolean;
+  color?: Rgba;
+  /** 세계에 더 건 행렬(열 우선 4×4) */
+  matrix?: Float64Array;
+}
+
+interface LookState {
+  alpha?: number;
+  pickable?: boolean;
+  color?: Rgba;
+  matrix?: Float64Array;
+}
+
+/** setLighting 선택 */
+export interface LightingOptions {
+  sun: {
+    /** 해 쪽 세계 방향(길이 상관없음) */
+    direction: readonly number[];
+    /** 세기(기본 0.85) */
+    intensity?: number;
+    /** 해 빛 색(기본 흰색) */
+    color?: Rgba | string;
+  };
+  /** 주변광(기본 0.35) */
+  ambient?: number;
+  /** 그림자: true 또는 { size: 깊이 그림 한 변(기본 2048), bias: 깊이 치우침(기본 0.0015) } */
+  shadows?: boolean | { size?: number; bias?: number };
+}
+
+/** setFog 선택 */
+export interface FogOptions {
+  /** 안개 색(기본 바탕색) */
+  color?: Rgba | string;
+  /** 눈 깊이(세계 단위): start부터 섞기 시작해 end에서 안개 색 */
+  start: number;
+  end: number;
+}
+
+/** setBackground 선택: 색은 CSS 색 문자열 또는 RGBA 0~1 */
+export interface BackgroundOptions {
+  /** 한 색 바탕(테마 바탕 대신) */
+  color?: Rgba | string;
+  /** 하늘(지평선 위) 꼭대기 색 — sky나 ground를 주면 기울기 바탕 */
+  sky?: Rgba | string;
+  /** 지평선 근처 하늘 색(없으면 sky) */
+  skyHorizon?: Rgba | string;
+  /** 땅(지평선 아래) 바닥 쪽 색 */
+  ground?: Rgba | string;
+  /** 지평선 근처 땅 색(없으면 ground) */
+  groundHorizon?: Rgba | string;
+}
+
+/** toBlob(선택)·renderImage 선택 */
+export interface SnapshotOptions {
+  /** 그림 꼴(기본 'image/png') */
+  type?: string;
+  /** JPEG·WebP 품질 0~1 */
+  quality?: number;
+  /** 화면 화소의 몇 배로 그릴지(기본 1, 0.1~16). 선 굵기·점 크기·덧그림도 같은 비율 */
+  scale?: number;
+  /** 바탕을 비운다(PNG 알파) */
+  transparent?: boolean;
+  /** 측정·덧그림·좌표축·단면 표시를 담는다(기본 true) */
+  overlays?: boolean;
+}
+
+/** pick(x, y, opts) 선택 */
+export interface PickOptions {
+  /** 포인터 종류('touch'면 터치 허용 거리) */
+  pointerType?: string;
+  /** 그물 윤곽선도 고른다(주지 않으면 Viewer3dOptions.pickEdges) */
+  edges?: boolean;
+}
+
+/** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
+export interface AnnotationOptions {
+  /** 가려진 부분(선·점·글자)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 그리지 않는다) */
+  hidden?: number;
+  /** 선 굵기(화면 화소, 기본 2) */
+  width?: number;
+}
+
 export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats };
 
 type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } | { kind: 'point'; item: PointSet3d };
@@ -215,8 +359,16 @@ interface RangeState {
   parts: ItemParts | null;
   /** 숨긴 기본 도형 판정(고르기·단면 테두리) */
   test: ((i: number) => boolean) | null;
+  /** 숨긴 윤곽선 판정(윤곽선 고르기) */
+  eTest: ((i: number) => boolean) | null;
   /** 보이는 구간만의 세계 범위(처음 필요할 때) */
   box: Box3 | null;
+}
+
+/** 쓸 수 있는 마주 보기 설정인지(origin이 수 셋 이상 — 배열·형식 배열 모두) */
+function hasBillboard(m: Mesh3d): boolean {
+  const o = m.billboard?.origin as ArrayLike<number> | undefined;
+  return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
 }
 
 const rangeKind = (it: Item): 'triangle' | 'segment' | 'point' => (it.kind === 'mesh' ? 'triangle' : it.kind === 'line' ? 'segment' : 'point');
@@ -241,6 +393,9 @@ interface Section {
   caps: SectionCaps;
   outline: boolean;
   plane: boolean;
+  /** 이 평면이 자르는 묶음 id(없으면 모두) */
+  items: Set<string> | null;
+  id?: string;
 }
 
 interface Drag {
@@ -260,6 +415,10 @@ interface Drag {
 const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif";
 const ROT_PER_PX = 0.0085;
 const CUBE_CSS = 112;
+/** 그림 저장 2D 캔버스 넓이 한도(화소): iOS Safari 캔버스 한도(약 16.7 Mpx = 4096²) */
+export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
+/** 그림 저장 한 변 한도(화소) */
+const SNAPSHOT_MAX_SIDE = 16384;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
 export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
@@ -275,7 +434,7 @@ export class Viewer3d {
   private cctx: CanvasRenderingContext2D;
   private gl: WebGL2RenderingContext;
   private renderer: Renderer3d;
-  private opts: Required<Omit<Viewer3dOptions, 'theme' | 'projection' | 'renderMode'>>;
+  private opts: Required<Omit<Viewer3dOptions, 'theme' | 'projection' | 'renderMode' | 'formatMeasure'>>;
   private themeOpt: Viewer3dOptions['theme'];
   private theme: Viewer3dTheme = DARK_THEME;
   private colors!: RenderColors;
@@ -291,6 +450,10 @@ export class Viewer3d {
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
   private segHi: { positions: Float32Array; opts: SegmentHighlightOptions } | null = null;
   private sec: Section | null = null;
+  /** 둘째 평면부터(setSections) */
+  private secMore: Section[] = [];
+  /** 묶음 id → 자르는 평면 번호(단면이 바뀌면 비운다) */
+  private secIdx = new Map<string, number[]>();
   /** 단면 테두리를 다시 계산할지(평면·장면·보이기가 바뀌면) */
   private cutDirty = true;
   /** 묶음 세계 범위·모형 행렬 캐시(장면을 바꾸면 새로) */
@@ -335,11 +498,41 @@ export class Viewer3d {
   private measuring = false;
   private measurePts: V3[] = [];
   private measureHover: { p: V3; vertex: boolean } | null = null;
+  /** 측정 글 꼴(없으면 기본) */
+  private measureFmt: MeasureFormat | null = null;
+  /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
+  private bbList: Mesh3d[] = [];
+  private bbCamKey = '';
+  /** 조작 방식(궤도·걷기)과 걷기 상태 */
+  private nav: 'orbit' | 'walk' = 'orbit';
+  private walkOpts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {};
+  private walkKeys = new Set<string>();
+  /** 걷기 키 떼기 듣기를 푸는 함수(누르고 있는 동안만) */
+  private walkRelease: (() => void) | null = null;
+  private walkFast = false;
+  private walkIn = { forward: 0, right: 0, up: 0, turn: 0, look: 0 };
+  private walkT = 0;
+  /** 바탕 바꾸기(한 색·하늘·땅) */
+  private bgOpt: BackgroundOptions | null = null;
+  /** 해 조명·그림자, 안개 */
+  private lightOpt: LightingOptions | null = null;
+  private fogOpt: FogOptions | null = null;
+  /** 그림자 깊이 그림 판(그림자를 바꾸는 상태가 바뀔 때마다 늘린다) */
+  private shadowVer = 0;
+  /** 보여 주기 선택(외곽선·숨은 점선) */
+  private renderOpts: { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } = { profiles: null, hiddenEdges: 0 };
+  /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
+  private looks = new Map<string, LookState>();
+  /** 묶음 행렬을 건 묶음 수(있으면 보이는 범위를 다시 모은다) */
+  private lookMoves = 0;
+  private lineModels = new WeakMap<LineSet3d | PointSet3d, ArrayLike<number>>();
+  /** 앱 측정 덧그림(setAnnotations)과 계산한 모양 */
+  private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number; box: Box3 | null } | null = null;
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
   private pickCbs = new Set<(p: Pick3d | null, e: PickEvent) => void>();
-  private sectionCbs = new Set<(s: SectionState | null) => void>();
+  private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
@@ -366,11 +559,13 @@ export class Viewer3d {
       animate: opts.animate ?? true,
       pickTolerance: opts.pickTolerance ?? PICK_TOLERANCE_PX,
       touchPickTolerance: opts.touchPickTolerance ?? TOUCH_PICK_TOLERANCE_PX,
+      pickEdges: opts.pickEdges ?? false,
       maxPixelRatio: opts.maxPixelRatio ?? 2,
       textureLimit: opts.textureLimit ?? TEXTURE_LIMIT,
       textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
     };
     this.themeOpt = opts.theme;
+    this.measureFmt = opts.formatMeasure ?? null;
     this.gridOn = this.opts.grid;
     this.mode = opts.renderMode ?? 'shadedEdges';
     this.cam = { ...defaultCamera(), projection: opts.projection ?? 'perspective' };
@@ -477,6 +672,8 @@ export class Viewer3d {
     const hadSection = !!this.sec;
     this.sceneRef = scene;
     this.items.clear();
+    this.bbList = scene.meshes.filter((m) => hasBillboard(m));
+    this.bbCamKey = '';
     for (const m of scene.meshes) this.items.set(m.id, { kind: 'mesh', item: m });
     for (const l of scene.lines) this.items.set(l.id, { kind: 'line', item: l });
     for (const p of scene.points ?? []) this.items.set(p.id, { kind: 'point', item: p });
@@ -485,6 +682,9 @@ export class Viewer3d {
     this.hi.clear();
     this.ranges.clear();
     this.rangeSel.clear();
+    this.looks.clear();
+    this.lookMoves = 0;
+    this.lineModels = new WeakMap();
     this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
@@ -493,7 +693,12 @@ export class Viewer3d {
     this.models = new WeakMap();
     this.visLists = null;
     this.cutDirty = true;
-    if (!opts.keepView) this.sec = null;
+    if (!opts.keepView) {
+      this.sec = null;
+      this.secMore = [];
+    }
+    this.secIdx.clear();
+    this.shadowVer++;
     this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
     const inc = opts.incremental;
@@ -519,9 +724,12 @@ export class Viewer3d {
     if (this.disposed) return;
     const hadSection = !!this.sec;
     this.rangeSel.clear();
+    this.looks.clear();
+    this.lookMoves = 0;
     this.upload = null;
     this.sceneRef = null;
     this.items.clear();
+    this.bbList = [];
     this.hi.clear();
     this.ranges.clear();
     this.segHi = null;
@@ -533,6 +741,8 @@ export class Viewer3d {
     this.models = new WeakMap();
     this.visLists = null;
     this.sec = null;
+    this.secMore = [];
+    this.secIdx.clear();
     this.cutDirty = true;
     this.usesOrigin = false;
     this.wheelAnchor = null;
@@ -553,6 +763,7 @@ export class Viewer3d {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.listenWalkRelease(false);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     clearTimeout(this.bvhTimer);
@@ -578,6 +789,7 @@ export class Viewer3d {
     this.segHi = null;
     this.marker = null;
     this.sec = null;
+    this.secMore = [];
     this.measurePts = [];
     this.measureHover = null;
     this.bvhs = new WeakMap();
@@ -598,6 +810,7 @@ export class Viewer3d {
 
   // ───────────────────────── 보기 ─────────────────────────
 
+  /** 지금 카메라(굴림·렌즈 이동은 있을 때만 들어 있다) */
   getCamera(): CameraState {
     return { ...this.cam, target: [...this.cam.target] as V3 };
   }
@@ -630,10 +843,35 @@ export class Viewer3d {
     this.setViewDir(VIEW_DIRS[name], animate);
   }
 
-  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기 */
+  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로) */
   setViewDir(dir: readonly number[], animate = this.opts.animate): void {
     const a = dirToAngles(dir, 0);
-    this.goto(fitCamera({ ...this.cam, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
+    const { roll: _r, shiftX: _x, shiftY: _y, ...base } = this.cam;
+    void _r, _x, _y;
+    this.goto(fitCamera({ ...base, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
+  }
+
+  /** 카메라 굴림(라디안, 0.7.0): 화면 위 방향을 보는 축 둘레로(+면 카메라가 반시계로 기울어 장면은 시계로). 0이면 없앤다 */
+  setRoll(rad: number): void {
+    if (!Number.isFinite(rad)) return;
+    this.finishAnim();
+    const { roll: _r, ...base } = this.cam;
+    void _r;
+    this.cam = rad ? { ...base, roll: rad } : base;
+    this.invalidate();
+  }
+
+  /**
+   * 렌즈 이동(0.7.0, 정규 장치 좌표 — 화면 반폭·반높이의 몇 배): 보는 방향은 그대로 두고 그림만 옮긴다(축 어긋난 투영).
+   * 2점 투시: 앙각을 0으로 두고 shiftY로 위아래를 맞춘다(세로선이 곧다). 둘 다 0이면 없앤다. 표준 뷰(setView)는 0으로 돌린다
+   */
+  setLensShift(x: number, y: number): void {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    this.finishAnim();
+    const { shiftX: _x, shiftY: _y, ...base } = this.cam;
+    void _x, _y;
+    this.cam = x || y ? { ...base, shiftX: x, shiftY: y } : base;
+    this.invalidate();
   }
 
   setProjection(p: Projection): void {
@@ -654,6 +892,169 @@ export class Viewer3d {
 
   getRenderMode(): RenderMode {
     return this.mode;
+  }
+
+  /**
+   * 보여 주기 선택(0.7.0): profiles = 화면 공간 외곽선(실루엣, true 또는 { width: CSS 화소(기본 2), color }),
+   * hiddenEdges = 숨은 선 모드에서 면 뒤 윤곽선을 흐린 점선으로(true = 0.35, 또는 불투명도). 주지 않은 것은 그대로, null이면 끈다
+   */
+  setRenderOptions(o: { profiles?: boolean | { width?: number; color?: Rgba | string } | null; hiddenEdges?: boolean | number | null }): void {
+    if ('profiles' in o) {
+      const p = o.profiles;
+      this.renderOpts.profiles = !p ? null : { width: Math.max(1, (typeof p === 'object' ? p.width : undefined) ?? 2), color: typeof p === 'object' ? (p.color ?? null) : null };
+    }
+    if ('hiddenEdges' in o) {
+      const h = o.hiddenEdges;
+      this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+    }
+    this.invalidate();
+  }
+
+  /**
+   * 바탕(0.7.0): color = 한 색(테마 바탕 대신 — 앱이 파일 스타일을 따를 때), sky·ground = 지평선 위·아래 색(주면 하늘·땅 기울기 바탕 —
+   * 지평선은 카메라 앙각을 따라 움직인다), skyHorizon·groundHorizon = 지평선 근처 색(없으면 각각 sky·ground). null이면 테마 바탕으로.
+   * 색은 CSS 색 문자열 또는 RGBA 0~1. 투명 바탕 그림 저장에는 그리지 않는다
+   */
+  setBackground(o: BackgroundOptions | null): void {
+    this.bgOpt = o ? { ...o } : null;
+    this.invalidate();
+  }
+
+  get background(): BackgroundOptions | null {
+    return this.bgOpt ? { ...this.bgOpt } : null;
+  }
+
+  private skyColors(bg: BackgroundOptions, base: Rgba): { sky: Rgba; skyHorizon: Rgba; ground: Rgba; groundHorizon: Rgba } {
+    const c = (v: Rgba | string | undefined, d: Rgba): Rgba => (v === undefined ? d : typeof v === 'string' ? this.rgba(v) : v);
+    const sky = c(bg.sky, base), ground = c(bg.ground, base);
+    return { sky, skyHorizon: c(bg.skyHorizon, sky), ground, groundHorizon: c(bg.groundHorizon, ground) };
+  }
+
+  /**
+   * 해 조명(0.7.0, 기본은 꺼짐 — 예전 고정 조명): sun.direction = 해 쪽 세계 방향(예: [0.4, −0.6, 0.7]), intensity(기본 0.85)·color, ambient(기본 0.35).
+   * shadows면 해 쪽 평행 투영 깊이 그림(기본 2048², 3×3 PCF)으로 그림자를 드리운다 — 장면·보이기·단면·겉모습·조명이 바뀔 때만 다시 그린다. null이면 끈다
+   */
+  setLighting(o: LightingOptions | null): void {
+    this.lightOpt = o ? { ...o, sun: { ...o.sun, direction: [...o.sun.direction] } } : null;
+    this.shadowVer++;
+    this.invalidate();
+  }
+
+  get lighting(): LightingOptions | null {
+    return this.lightOpt ? { ...this.lightOpt, sun: { ...this.lightOpt.sun } } : null;
+  }
+
+  /** 선형 안개(0.7.0, 기본 꺼짐): 눈 깊이 start(세계 단위)부터 end까지 color(기본 바탕색)로 섞는다. 그물·선·점(덧그림 제외). null이면 끈다 */
+  setFog(o: FogOptions | null): void {
+    this.fogOpt = o && Number.isFinite(o.start) && Number.isFinite(o.end) ? { ...o } : null;
+    this.invalidate();
+  }
+
+  get fog(): FogOptions | null {
+    return this.fogOpt ? { ...this.fogOpt } : null;
+  }
+
+  /** 지금 보여 주기 선택 */
+  get renderOptions(): { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } {
+    const p = this.renderOpts.profiles;
+    return { profiles: p ? { ...p } : null, hiddenEdges: this.renderOpts.hiddenEdges };
+  }
+
+  /**
+   * 조작 방식(0.7.0): 'orbit'(기본, 대상점 둘레 궤도) 또는 'walk'(1인칭 — 끌기 = 제자리에서 둘러보기, 휠·W/S·↑/↓ = 앞뒤, A/D = 옆, ←/→ = 돌기,
+   * Q/E·PageDown/PageUp = 아래·위, Shift = 빠르게, 두 번 누르기 = 그 자리에 서기(눈높이), 터치 두 손가락 = 벌려 앞으로·끌어 옆/위아래).
+   * opts: eyeHeight(세계 단위, 기본 단위별 1.6 m), speed(초당 세계 단위, 기본 보이는 범위 반지름의 0.4), tapToStand(기본 true).
+   * 걷기로 바꿀 때 눈은 제자리에 두고 대상점을 눈높이만큼 앞에 둔다. 앱의 가상 조이스틱은 setWalkInput으로
+   */
+  setNavigation(mode: 'orbit' | 'walk', opts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {}): void {
+    this.walkOpts = { ...this.walkOpts, ...opts };
+    if (mode === this.nav) return;
+    this.finishAnim();
+    this.nav = mode;
+    this.walkKeys.clear();
+    this.listenWalkRelease(false);
+    this.walkIn = { forward: 0, right: 0, up: 0, turn: 0, look: 0 };
+    if (mode === 'walk') {
+      const eye = cameraEye(this.cam);
+      const back = cameraBasis(this.cam).back;
+      const d = Math.max(this.eyeHeight(), 1e-6);
+      this.cam = { ...this.cam, distance: d, target: [eye[0] - back[0] * d, eye[1] - back[1] * d, eye[2] - back[2] * d] };
+    }
+    this.invalidate();
+  }
+
+  get navigation(): 'orbit' | 'walk' {
+    return this.nav;
+  }
+
+  /**
+   * 걷기 입력(가상 조이스틱 등): forward·right·up은 −1~1(초당 speed배), turn·look은 −1~1(초당 약 90°, 왼쪽·아래가 +).
+   * 0이 아닌 값이 있는 동안 프레임마다 움직인다. 모두 0이면 멈춘다
+   */
+  setWalkInput(i: { forward?: number; right?: number; up?: number; turn?: number; look?: number }): void {
+    const c = (v: number | undefined): number => Math.max(-1, Math.min(1, Number(v) || 0));
+    this.walkIn = { forward: c(i.forward), right: c(i.right), up: c(i.up), turn: c(i.turn), look: c(i.look) };
+    this.invalidate();
+  }
+
+  /** 1인칭 한 걸음(세계 단위): 수평 앞·오른쪽, 세계 위 */
+  walkBy(forward: number, right: number, up = 0): void {
+    this.finishAnim();
+    this.cam = walkCamera(this.cam, forward, right, up);
+    this.invalidate();
+  }
+
+  /** 제자리에서 고개 돌리기(라디안, 왼쪽·아래가 +) */
+  lookBy(dYaw: number, dPitch: number): void {
+    this.finishAnim();
+    this.cam = lookCamera(this.cam, dYaw, dPitch);
+    this.invalidate();
+  }
+
+  /** 세로 시야각(도, 10~120). 원근에서 보이는 넓이를 바꾼다(평행에서는 확대와 같다) */
+  setFov(deg: number): void {
+    if (!Number.isFinite(deg)) return;
+    this.finishAnim();
+    this.cam = { ...this.cam, fovY: (Math.max(10, Math.min(120, deg)) * Math.PI) / 180 };
+    this.invalidate();
+  }
+
+  get fov(): number {
+    return (this.cam.fovY * 180) / Math.PI;
+  }
+
+  /** 걷기 빠르기(초당 세계 단위) */
+  private walkSpeed(): number {
+    return this.walkOpts.speed ?? Math.max(boxSphere(this.visibleBox()).radius * 0.4, 1e-6);
+  }
+
+  /** 눈높이(세계 단위): 정하지 않았으면 장면 단위로 1.6 m */
+  private eyeHeight(): number {
+    if (this.walkOpts.eyeHeight !== undefined) return this.walkOpts.eyeHeight;
+    const u = this.sceneRef?.units;
+    return u === 'mm' ? 1600 : u === 'inch' ? 63 : u === 'm' ? 1.6 : Math.max(boxSphere(this.visibleBox()).radius * 0.1, 1e-6);
+  }
+
+  /** 걷기: 누른 키·조이스틱 입력만큼 이 프레임 움직이고, 입력이 남아 있으면 다음 프레임을 부른다 */
+  private stepWalk(now: number): void {
+    const K = this.walkKeys, I = this.walkIn;
+    const key = (a: string, b: string): number => (K.has(a) || K.has(b) ? 1 : 0);
+    const fw = key('w', 'ArrowUp') - key('s', 'ArrowDown') + I.forward;
+    const rt = key('d', 'd') - key('a', 'a') + I.right;
+    const up = key('e', 'PageUp') - key('q', 'PageDown') + I.up;
+    const tn = key('ArrowLeft', 'ArrowLeft') - key('ArrowRight', 'ArrowRight') + I.turn;
+    const lk = I.look;
+    if (!fw && !rt && !up && !tn && !lk) {
+      this.walkT = 0;
+      return;
+    }
+    const dt = this.walkT ? Math.min(0.1, Math.max(0, (now - this.walkT) / 1000)) : 1 / 60;
+    this.walkT = now;
+    const v = this.walkSpeed() * (this.walkFast ? 3 : 1) * dt;
+    this.anim = null;
+    if (fw || rt || up) this.cam = walkCamera(this.cam, fw * v, rt * v, up * v);
+    if (tn || lk) this.cam = lookCamera(this.cam, tn * dt * (Math.PI / 2), lk * dt * (Math.PI / 2));
+    this.invalidate();
   }
 
   /** 대상점 둘레 회전(라디안) */
@@ -752,6 +1153,7 @@ export class Viewer3d {
   }
 
   private visibilityChanged(): void {
+    this.shadowVer++;
     this.visBox = null;
     this.visLists = null;
     this.cutDirty = true;
@@ -843,31 +1245,66 @@ export class Viewer3d {
    * 단면 보기: 평면 normal·p = offset의 법선 쪽(normal·p > offset)을 잘라 낸다. null이면 끈다.
    * normal은 길이와 상관없다(단위로 맞추고 offset도 같은 비율로 나눈다). 축 방향 법선이면 축 단면(axis)으로 기억한다.
    * 잘린 쪽은 그물·선·점·윤곽선·강조 선분 모두 그리지 않고, 고르기·측정·확대 기준점에서도 무시한다.
+   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
    */
   setSection(s: { normal: readonly number[]; offset: number } | null, opts: SectionOptions = {}): void {
     if (this.disposed) return;
     if (!s) {
-      if (!this.sec) return;
+      if (!this.sec && !this.secMore.length) return;
       this.sec = null;
+      this.secMore = [];
       this.sectionChanged();
       return;
     }
-    const pf = planeFrom(s.normal, s.offset);
-    if (!pf) return;
+    const n = this.makeSection(s.normal, s.offset, this.sectionOpts(opts));
+    if (!n) return;
+    this.sec = n;
+    this.secMore = [];
+    this.sectionChanged();
+  }
+
+  /**
+   * 여러 단면 평면(0.7.0, 최대 MAX_SECTION_PLANES = 6 — 상자 단면): 모든 평면의 남는 쪽(교집합)만 남긴다. null·빈 목록이면 끈다.
+   * 평면마다 items(그 평면이 자르는 묶음 id, 없으면 모두)·caps·outline·plane을 따로 줄 수 있다(주지 않으면 opts, 그다음 기본값).
+   * 첫 평면이 예전 단면 API(section·setSectionPosition·sectionHandle …의 기본 번호 0)의 평면이다.
+   */
+  setSections(list: readonly SectionPlane[] | null, opts: SectionOptions = {}): void {
+    if (this.disposed) return;
+    if (!list || !list.length) return this.setSection(null);
+    const out: Section[] = [];
+    for (const q of list.slice(0, MAX_SECTION_PLANES)) {
+      const base = { caps: q.caps ?? opts.caps ?? 'closed', outline: q.outline ?? opts.outline ?? true, plane: q.plane ?? opts.plane ?? true };
+      const n = this.makeSection(q.normal, q.offset, base);
+      if (!n) continue;
+      if (q.items) n.items = new Set(q.items);
+      if (q.id !== undefined) n.id = q.id;
+      out.push(n);
+    }
+    if (!out.length) return this.setSection(null);
+    this.sec = out[0]!;
+    this.secMore = out.slice(1);
+    this.sectionChanged();
+  }
+
+  /** normal·p = offset 평면 → 단면(축 방향이면 축 단면). 법선이 0이거나 수가 아니면 null */
+  private makeSection(normal: readonly number[], offset: number, o: Pick<Section, 'caps' | 'outline' | 'plane'>): Section | null {
+    const pf = planeFrom(normal, offset);
+    if (!pf) return null;
     const n = pf.normal;
     // ±축이면 축 단면으로(dir = +축, 음의 축은 flip)
     const ai = [0, 1, 2].find((i) => Math.abs(n[i]!) === 1 && n[(i + 1) % 3] === 0 && n[(i + 2) % 3] === 0);
     const ax = ai === undefined ? null : (['x', 'y', 'z'] as const)[ai]!;
     if (ax) {
       const neg = n[ai!]! < 0;
-      this.sec = { ...this.sectionOpts(opts), dir: [...AXIS_DIRS[ax]] as V3, flip: neg, pos: neg ? -pf.offset : pf.offset, axis: ax };
-    } else this.sec = { ...this.sectionOpts(opts), dir: n, flip: false, pos: pf.offset, axis: null };
-    this.sectionChanged();
+      return { ...o, dir: [...AXIS_DIRS[ax]] as V3, flip: neg, pos: neg ? -pf.offset : pf.offset, axis: ax, items: null };
+    }
+    return { ...o, dir: n, flip: false, pos: pf.offset, axis: null, items: null };
   }
 
   /**
    * 축 단면: axis(x·y·z)에 수직인 평면을 둔다. value는 장면 범위 안 위치 0~1(0 = 최소, 1 = 최대 좌표)이고 world면 그 축 좌표.
    * 기본은 +축 쪽(좌표가 위치보다 큰 쪽)을 잘라 낸다. flip이면 반대쪽. flip을 주지 않으면 같은 축의 앞 값을 지킨다.
+   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
    */
   setSectionAxis(axis: SectionAxis, value: number, opts: SectionOptions & { flip?: boolean; world?: boolean } = {}): void {
     if (this.disposed) return;
@@ -875,13 +1312,14 @@ export class Viewer3d {
     const flip = opts.flip ?? (this.sec?.axis === axis ? this.sec.flip : false);
     const pos = opts.world ? value : this.rangeAt(dir, value);
     if (!Number.isFinite(pos)) return;
-    this.sec = { ...this.sectionOpts(opts), dir, flip, pos, axis };
+    this.sec = { ...this.sectionOpts(opts), dir, flip, pos, axis, items: null };
+    this.secMore = [];
     this.sectionChanged();
   }
 
-  /** 지금 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position) */
-  setSectionPosition(value: number, opts: { world?: boolean } = {}): void {
-    const s = this.sec;
+  /** 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position). index는 평면 번호(기본 0) */
+  setSectionPosition(value: number, opts: { world?: boolean; index?: number } = {}): void {
+    const s = this.secAt(opts.index);
     if (!s) return;
     const pos = opts.world ? value : this.rangeAt(s.dir, value);
     if (!Number.isFinite(pos) || pos === s.pos) return;
@@ -889,9 +1327,9 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** 잘라 내는 쪽을 뒤집는다(flip을 주면 그 값으로) */
-  flipSection(flip?: boolean): void {
-    const s = this.sec;
+  /** 잘라 내는 쪽을 뒤집는다(flip을 주면 그 값으로). index는 평면 번호(기본 0) */
+  flipSection(flip?: boolean, index = 0): void {
+    const s = this.secAt(index);
     if (!s) return;
     const f = flip ?? !s.flip;
     if (f === s.flip) return;
@@ -899,21 +1337,28 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시) */
-  setSectionOptions(opts: SectionOptions): void {
-    const s = this.sec;
+  /** 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시). index는 평면 번호(기본 0) */
+  setSectionOptions(opts: SectionOptions, index = 0): void {
+    const s = this.secAt(index);
     if (!s) return;
-    Object.assign(s, this.sectionOpts(opts));
+    Object.assign(s, { caps: opts.caps ?? s.caps, outline: opts.outline ?? s.outline, plane: opts.plane ?? s.plane });
     this.sectionChanged();
   }
 
-  /** 지금 단면 상태(없으면 null) */
+  /** 지금 단면 상태(첫 평면, 없으면 null) */
   get section(): SectionState | null {
-    const s = this.sec;
-    if (!s) return null;
+    return this.sec ? this.sectionState(this.sec) : null;
+  }
+
+  /** 모든 단면 평면 상태(차례대로, 없으면 빈 목록) */
+  get sections(): SectionState[] {
+    return this.allSecs().map((s) => this.sectionState(s));
+  }
+
+  private sectionState(s: Section): SectionState {
     const r = boxRange(this.allBox, s.dir);
     const k = s.flip ? -1 : 1;
-    return {
+    const st: SectionState = {
       normal: [s.dir[0] * k, s.dir[1] * k, s.dir[2] * k],
       offset: s.pos * k,
       axis: s.axis,
@@ -927,6 +1372,9 @@ export class Viewer3d {
       outline: s.outline,
       plane: s.plane,
     };
+    if (s.items) st.items = [...s.items];
+    if (s.id !== undefined) st.id = s.id;
+    return st;
   }
 
   /** 장면 범위를 방향(축 또는 벡터 — 단위로 맞춘다)으로 잰 [min, max]. 슬라이더 눈금·단위 표시에 쓴다 */
@@ -937,10 +1385,10 @@ export class Viewer3d {
 
   /**
    * 화면에서 단면을 끌 손잡이 정보: 장면 가운데를 평면에 내린 점의 화면 위치와 법선의 화면 방향·배율.
-   * 앱은 이 점에 손잡이를 그리고, 끈 화소를 moveSectionByPixels로 넘기면 된다. 단면이 없거나 점이 눈 뒤면 null.
+   * 앱은 이 점에 손잡이를 그리고, 끈 화소를 moveSectionByPixels로 넘기면 된다. 단면이 없거나 점이 눈 뒤면 null. index는 평면 번호(기본 0)
    */
-  sectionHandle(): SectionHandle | null {
-    const s = this.sec;
+  sectionHandle(index = 0): SectionHandle | null {
+    const s = this.secAt(index);
     if (!s) return null;
     const c = this.sectionCenter(s);
     return sectionScreenAxis(this.frame(), c, this.sectionNormal(s));
@@ -948,10 +1396,10 @@ export class Viewer3d {
 
   /**
    * 화면 끌기(CSS 화소)만큼 단면을 법선 방향으로 옮기고 새 범위 위치 t(0~1)를 돌려준다.
-   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null.
+   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null. index는 평면 번호(기본 0)
    */
-  moveSectionByPixels(dx: number, dy: number): number | null {
-    const s = this.sec;
+  moveSectionByPixels(dx: number, dy: number, index = 0): number | null {
+    const s = this.secAt(index);
     if (!s) return null;
     const d = sectionDragDistance(this.frame(), this.sectionCenter(s), this.sectionNormal(s), dx, dy);
     if (Number.isFinite(d) && d !== 0) {
@@ -966,6 +1414,39 @@ export class Viewer3d {
     return { caps: o.caps ?? p?.caps ?? 'closed', outline: o.outline ?? p?.outline ?? true, plane: o.plane ?? p?.plane ?? true };
   }
 
+  /** 모든 단면 평면(첫 평면이 앞) */
+  private allSecs(): Section[] {
+    return this.sec ? [this.sec, ...this.secMore] : [];
+  }
+
+  private secAt(index = 0): Section | null {
+    return index === 0 ? this.sec : (this.secMore[index - 1] ?? null);
+  }
+
+  /** 여러 단면 그리기·고르기를 쓰는지(평면이 둘 이상이거나 범위를 정한 평면이 있다) — 아니면 예전 평면 하나 경로 */
+  private get multiSection(): boolean {
+    return !!this.sec && (this.secMore.length > 0 || !!this.sec.items);
+  }
+
+  /** 묶음 id를 자르는 평면 번호들(범위를 정하지 않은 평면은 모두를 자른다). 단면이 바뀔 때까지 기억한다 */
+  private secOf(id: string): readonly number[] {
+    let r = this.secIdx.get(id);
+    if (!r) {
+      r = [];
+      this.allSecs().forEach((s, i) => {
+        if (!s.items || s.items.has(id)) r!.push(i);
+      });
+      this.secIdx.set(id, r);
+    }
+    return r;
+  }
+
+  /** 묶음을 자르는 세계 평면들 */
+  private clipsFor(id: string): Plane4[] {
+    const all = this.allSecs();
+    return this.secOf(id).map((i) => this.planeOf(all[i]!));
+  }
+
   /** dir 방향 범위 안 위치 t → dir·p 값 */
   private rangeAt(dir: readonly number[], t: number): number {
     const r = boxRange(this.allBox, dir);
@@ -976,12 +1457,17 @@ export class Viewer3d {
     return s.flip ? [-s.dir[0], -s.dir[1], -s.dir[2]] : [s.dir[0], s.dir[1], s.dir[2]];
   }
 
-  /** 세계 단면 평면(값 > 0 쪽을 버린다) */
+  /** 단면 하나의 세계 평면(값 > 0 쪽을 버린다) */
+  private planeOf(s: Section): Plane4 {
+    const n = this.sectionNormal(s);
+    return [n[0], n[1], n[2], s.flip ? s.pos : -s.pos];
+  }
+
+  /** 세계 단면 평면(첫 평면, 값 > 0 쪽을 버린다) */
   private sectionPlane(): Plane4 | null {
     const s = this.sec;
     if (!s) return null;
-    const n = this.sectionNormal(s);
-    return [n[0], n[1], n[2], s.flip ? s.pos : -s.pos];
+    return this.planeOf(s);
   }
 
   /** 장면 가운데를 평면에 내린 점 */
@@ -992,7 +1478,9 @@ export class Viewer3d {
   }
 
   private sectionChanged(): void {
+    this.shadowVer++;
     this.cutDirty = true;
+    this.secIdx.clear();
     this.wheelAnchor = null;
     if (this.measuring) this.measureHover = null;
     this.invalidate();
@@ -1000,9 +1488,10 @@ export class Viewer3d {
   }
 
   /**
-   * 단면이 바뀔 때마다 알림(앱 호출·손잡이 끌기·setScene/clear로 꺼짐·장면 범위가 바뀜·문맥 복구). 꺼지면 null. 돌려준 함수로 끊는다
+   * 단면이 바뀔 때마다 알림(앱 호출·손잡이 끌기·setScene/clear로 꺼짐·장면 범위가 바뀜·문맥 복구). 꺼지면 null. 돌려준 함수로 끊는다.
+   * 두 번째 인자는 모든 평면 상태(여러 단면일 때)
    */
-  onSectionChange(cb: (s: SectionState | null) => void): () => void {
+  onSectionChange(cb: (s: SectionState | null, all: SectionState[]) => void): () => void {
     this.sectionCbs.add(cb);
     return () => this.sectionCbs.delete(cb);
   }
@@ -1010,7 +1499,8 @@ export class Viewer3d {
   private emitSection(): void {
     if (!this.sectionCbs.size) return;
     const st = this.section;
-    for (const cb of this.sectionCbs) cb(st);
+    const all = this.sections;
+    for (const cb of this.sectionCbs) cb(st, all);
   }
 
   // ───────────────────────── 묶음 안 구간 ─────────────────────────
@@ -1075,7 +1565,7 @@ export class Viewer3d {
 
   private rangeState(id: string): RangeState {
     let r = this.rangeSel.get(id);
-    if (!r) this.rangeSel.set(id, (r = { hidden: [], hi: [], eHidden: [], eHi: [], parts: null, test: null, box: null }));
+    if (!r) this.rangeSel.set(id, (r = { hidden: [], hi: [], eHidden: [], eHi: [], parts: null, test: null, eTest: null, box: null }));
     return r;
   }
 
@@ -1093,12 +1583,14 @@ export class Viewer3d {
     if ((r.eHidden.length || r.eHi.length) && it.kind === 'mesh' && it.item.edges) edges = partitionRanges(Math.floor(it.item.edges.length / 6), r.eHidden, r.eHi);
     r.parts = { ver: ++this.rangeVer, prims, edges };
     r.test = rangeTester(r.hidden);
+    r.eTest = rangeTester(r.eHidden);
     r.box = null;
   }
 
   /** 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만) */
   private pumpUpload(budgetMs: number): void {
     const done = this.renderer.uploadSome(budgetMs);
+    this.shadowVer++;
     const p = this.renderer.uploadProgress;
     const s = this.sceneRef;
     const total = s ? s.meshes.length + s.lines.length + (s.points?.length ?? 0) : 0;
@@ -1115,6 +1607,7 @@ export class Viewer3d {
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
   private updateCut(): void {
     this.cutDirty = false;
+    if (this.multiSection) return this.updateCutMulti();
     const s = this.sceneRef;
     const plane = this.sectionPlane();
     if (!s || !plane || !this.sec!.outline) {
@@ -1162,6 +1655,58 @@ export class Viewer3d {
     if (this.gpu) this.renderer.setSectionLines(all, origin);
   }
 
+  /** 여러 단면의 테두리: 평면마다 그 평면이 자르는 보이는 그물과의 교선을 모으고, 그 그물을 자르는 다른 평면들로 다시 자른다 */
+  private updateCutMulti(): void {
+    const sc = this.sceneRef;
+    const all = this.allSecs();
+    if (!sc || !all.some((q) => q.outline)) {
+      if (this.gpu) this.renderer.setSectionLines(null);
+      return;
+    }
+    const origin: V3 = boxIsEmpty(this.allBox) ? [0, 0, 0] : boxCenter(this.allBox);
+    const world: number[] = [];
+    all.forEach((q, k) => {
+      if (!q.outline) return;
+      const plane = this.planeOf(q);
+      for (const it of this.items.values()) {
+        if (it.kind !== 'mesh') continue;
+        const m = it.item;
+        const idx = this.secOf(m.id);
+        if (!idx.includes(k) || !this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
+        const model = this.modelOf(m);
+        const segs = sectionSegments(m.positions, m.indices, planeToLocal(plane, model), this.bvhFor('triangle', m.positions, m.indices, false), this.rangeSel.get(m.id)?.test);
+        if (!segs.length) continue;
+        // 로컬 → 세계(double)
+        const w: number[] = new Array(segs.length);
+        const M = model;
+        for (let i = 0; i < segs.length; i += 3) {
+          const x = segs[i]!, y = segs[i + 1]!, z = segs[i + 2]!;
+          if (M) {
+            w[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]!;
+            w[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]!;
+            w[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]!;
+          } else {
+            w[i] = x;
+            w[i + 1] = y;
+            w[i + 2] = z;
+          }
+        }
+        const others = idx.filter((i) => i !== k).map((i) => this.planeOf(all[i]!));
+        for (const v of others.length ? clipSegments(w, others) : w) world.push(v);
+      }
+    });
+    let out: Float32Array | null = null;
+    if (world.length) {
+      out = new Float32Array(world.length);
+      for (let i = 0; i < world.length; i += 3) {
+        out[i] = world[i]! - origin[0];
+        out[i + 1] = world[i + 1]! - origin[1];
+        out[i + 2] = world[i + 2]! - origin[2];
+      }
+    }
+    if (this.gpu) this.renderer.setSectionLines(out, origin);
+  }
+
   // ───────────────────────── 고르기·측정 ─────────────────────────
 
   /** 고르기 알림(빈 곳을 누르면 null). 돌려준 함수로 끊는다 */
@@ -1182,9 +1727,26 @@ export class Viewer3d {
     return () => this.camCbs.delete(cb);
   }
 
-  /** 화면 점(캔버스 기준 CSS 화소)에서 고르기. pointerType이 'touch'면 터치 허용 거리(touchPickTolerance)로, 아니면 pickTolerance로 */
-  pick(x: number, y: number, pointerType?: string): Pick3d | null {
-    return this.pickDetail(x, y, true, pointerType)?.pick ?? null;
+  /**
+   * 화면 점(캔버스 기준 CSS 화소)에서 고르기. 두 번째 인자는 포인터 종류 문자열 또는 { pointerType, edges }:
+   * pointerType이 'touch'면 터치 허용 거리(touchPickTolerance)로, 아니면 pickTolerance로. edges면 그물 윤곽선도 고른다(주지 않으면 pickEdges 선택)
+   */
+  pick(x: number, y: number, opts?: string | PickOptions): Pick3d | null {
+    const o = typeof opts === 'string' ? { pointerType: opts } : (opts ?? {});
+    return this.pickDetail(x, y, true, o.pointerType, o.edges)?.pick ?? null;
+  }
+
+  /** 누르기·측정·onPick이 그물 윤곽선도 고르는지(Viewer3dOptions.pickEdges) */
+  setPickEdges(on: boolean): void {
+    if (this.opts.pickEdges === on) return;
+    this.opts.pickEdges = on;
+    if (this.measuring) this.measureHover = null;
+    if (on) this.scheduleBvh();
+    this.invalidate();
+  }
+
+  get pickEdges(): boolean {
+    return this.opts.pickEdges;
   }
 
   /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
@@ -1220,10 +1782,253 @@ export class Viewer3d {
     return { a, b, distance: Math.hypot(dx, dy, dz), dx, dy, dz };
   }
 
+  // ───────────────────────── 화면 위치·측정 덧그림 ─────────────────────────
+
+  /**
+   * 세계 점 → 캔버스 위치(CSS 화소, 왼쪽 위 원점)·깊이·보이는지. 앱이 화면 위에 자기 표시(글자·단추)를 붙일 때 쓴다.
+   * occlusion이면 음영 모드에서 그 점이 불투명 면에 가렸는지도 따진다(고르기와 같은 광선 — 점이 면 위에 있으면 보인다).
+   */
+  project(p: readonly number[], opts: { occlusion?: boolean } = {}): ProjectedPoint | null {
+    if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) return null;
+    const f = this.frame();
+    const depth = viewDepth(f, p);
+    const c = transform4(f.viewProj, p[0]!, p[1]!, p[2]!);
+    if (!(Math.abs(c[3]) > 1e-12)) return null;
+    const x = ((c[0] / c[3] + 1) / 2) * f.width, y = ((1 - c[1] / c[3]) / 2) * f.height;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const behind = f.projection === 'perspective' && c[3] <= 0;
+    const front = f.projection === 'orthographic' || (!behind && depth >= f.near * 0.999);
+    const onScreen = front && x >= 0 && x <= this.cssW && y >= 0 && y <= this.cssH;
+    const cut = this.pointCut(p);
+    const occluded = !!opts.occlusion && onScreen && !cut && this.occludedAt(f, p, x, y, true);
+    return { x, y, depth, behind, onScreen, occluded, visible: onScreen && !cut && !occluded };
+  }
+
+  /**
+   * 두 묶음(그물·선분·점 묶음 id) 사이 가장 가까운 두 점과 거리(세계 좌표). 묶음 원점·행렬을 반영하고 숨긴 구간은 뺀다.
+   * 이미 만든 BVH를 쓴다(없으면 만든다). 서로 걸치면 거리 0. maxDistance를 주면 그보다 멀면 null. 없는 id·빈 묶음도 null
+   */
+  closestPoints(idA: string, idB: string, opts: { maxDistance?: number } = {}): ClosestResult | null {
+    const a = this.closestShape(idA), b = this.closestShape(idB);
+    if (!a || !b) return null;
+    return closestBetween(a, b, opts);
+  }
+
+  private closestShape(id: string): ClosestShape | null {
+    const it = this.items.get(id);
+    if (!it) return null;
+    const skip = this.rangeSel.get(id)?.test ?? null;
+    if (it.kind === 'mesh') {
+      const m = it.item;
+      const bvh = this.bvhFor('triangle', m.positions, m.indices, true);
+      return bvh ? { kind: 'triangle', positions: m.positions, indices: m.indices, bvh, model: this.modelOf(m), skip } : null;
+    }
+    const kind = it.kind === 'line' ? 'segment' : 'point';
+    const bvh = this.bvhFor(kind, it.item.positions, undefined, true);
+    const o = it.item.origin;
+    return bvh ? { kind, positions: it.item.positions, bvh, model: this.lineModel(it.item) ?? (hasOrigin(o) ? translation(o) : undefined), skip } : null;
+  }
+
+  // ───────────────────────── 묶음 겉모습 ─────────────────────────
+
+  /**
+   * 묶음(그물·선·점 id) 불투명도 0~1(묶음 색 알파에 곱한다, null이면 되돌림). 1보다 작으면 반투명 차례에 뒤에서 앞으로 그린다.
+   * pickable: false면 고르기·측정·가림(덧그림·윤곽선)에서 뺀다(유령처럼 흐리게 둘 때). null로 되돌리면 pickable도 true로
+   */
+  setItemOpacity(id: string, alpha: number | null, opts: { pickable?: boolean } = {}): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (alpha === null) {
+      delete l.alpha;
+      delete l.pickable;
+    } else {
+      l.alpha = Math.min(1, Math.max(0, Number(alpha) || 0));
+      if (opts.pickable !== undefined) l.pickable = opts.pickable;
+    }
+    this.setLook(id, l, false);
+  }
+
+  /** 묶음 색 바꾸기(정점 색·무늬 대신 이 색 — 태그·부품별 색). CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림 */
+  setItemColor(id: string, color: Rgba | string | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (color === null) delete l.color;
+    else l.color = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
+    this.setLook(id, l, false);
+  }
+
+  /**
+   * 묶음에 세계 행렬을 더 건다(열 우선 4×4, 세계' = matrix · 세계 — 분해도·움직이기). null이면 되돌림.
+   * 그리기·고르기·측정·범위(전체 보기)·단면·최근접점이 모두 이 행렬을 따른다. 큰 좌표면 행렬을 장면 원점 근처에서 만든다
+   */
+  setItemMatrix(id: string, matrix: ArrayLike<number> | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (matrix === null) delete l.matrix;
+    else if (matrix.length >= 16 && Array.from(matrix).slice(0, 16).every((v) => Number.isFinite(v))) l.matrix = Float64Array.from(Array.from(matrix).slice(0, 16));
+    else return;
+    this.setLook(id, l, true);
+  }
+
+  /** 묶음 겉모습(바꾼 것만, 없으면 null) */
+  itemLook(id: string): ItemLookState | null {
+    const l = this.looks.get(id);
+    if (!l) return null;
+    const out: ItemLookState = { pickable: l.pickable !== false };
+    if (l.alpha !== undefined) out.opacity = l.alpha;
+    if (l.color) out.color = l.color;
+    if (l.matrix) out.matrix = new Float64Array(l.matrix);
+    return out;
+  }
+
+  /** 모든 묶음 겉모습을 되돌린다 */
+  clearItemLooks(): void {
+    if (!this.looks.size) return;
+    const moved = this.lookMoves > 0;
+    this.looks.clear();
+    this.lookChanged(moved);
+  }
+
+  private setLook(id: string, l: LookState, moved: boolean): void {
+    if (!this.items.has(id)) return;
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix) this.looks.delete(id);
+    else this.looks.set(id, l);
+    this.lookChanged(moved);
+  }
+
+  private lookChanged(moved: boolean): void {
+    this.shadowVer++;
+    let n = 0;
+    for (const l of this.looks.values()) if (l.matrix) n++;
+    this.lookMoves = n;
+    this.visLists = null;
+    if (moved) {
+      this.boxes = new WeakMap();
+      this.models = new WeakMap();
+      this.lineModels = new WeakMap();
+      for (const r of this.rangeSel.values()) r.box = null;
+      this.visBox = null;
+      this.cutDirty = true;
+      this.wheelAnchor = null;
+    }
+    if (this.measuring) this.measureHover = null;
+    this.invalidate();
+  }
+
+  /** 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다 */
+  setMeasureFormat(fn: MeasureFormat | null): void {
+    this.measureFmt = fn ?? null;
+    this.invalidate();
+  }
+
+  /**
+   * 앱 측정 덧그림: 거리(a–b)·각(꼭짓점 a, 팔 b·c)·반지름(중심 a, 원 위 b, normal을 주면 원도)·점(a)을 내장 측정과 같은 모양으로 그린다.
+   * 선은 깊이를 따져 가려진 부분을 흐리게(opts.hidden), 점·글자는 가려지면 흐리게 그린다. 단면으로 자르지 않고 그림 저장(toBlob)에도 담긴다.
+   * 앞의 덧그림을 모두 바꾸고 null이면 지운다. 장면을 바꿔도 남는다(앱이 지운다).
+   */
+  setAnnotations(list: readonly Annotation3d[] | null, opts: AnnotationOptions = {}): void {
+    if (this.disposed) return;
+    if (!list || !list.length) {
+      if (!this.annos) return;
+      this.annos = null;
+      if (this.gpu) this.renderer.setAnnotationLines(null, null);
+      this.invalidate();
+      return;
+    }
+    const copy = list.map((a) => ({ ...a }));
+    const geo = copy.map((a) => annotationGeometry(a));
+    // 선·점이 닿는 범위(가까운·먼 면에 넣는다)
+    const box = emptyBox();
+    for (const g of geo) {
+      if (!g) continue;
+      for (let i = 0; i + 2 < g.segs.length; i += 3) expandPoint(box, g.segs[i]!, g.segs[i + 1]!, g.segs[i + 2]!);
+      for (const p of g.dots) expandPoint(box, p[0], p[1], p[2]);
+      expandPoint(box, g.labelAt[0], g.labelAt[1], g.labelAt[2]);
+    }
+    this.annos = {
+      list: copy,
+      geo,
+      hidden: Math.min(1, Math.max(0, opts.hidden ?? 0.35)),
+      width: Math.max(0.5, opts.width ?? 2),
+      box: boxIsEmpty(box) ? null : box,
+    };
+    this.uploadAnnotations();
+    this.invalidate();
+  }
+
+  /** 지금 측정 덧그림(복사본, 없으면 빈 목록) */
+  get annotations(): Annotation3d[] {
+    return this.annos ? this.annos.list.map((a) => ({ ...a })) : [];
+  }
+
+  /** 덧그림 선을 첫 점 기준 좌표로 모아 올린다(큰 좌표에서도 정밀하게) */
+  private uploadAnnotations(): void {
+    const A = this.annos;
+    if (!this.gpu) return;
+    if (!A) {
+      this.renderer.setAnnotationLines(null, null);
+      return;
+    }
+    let n = 0;
+    for (const g of A.geo) if (g) n += g.segs.length;
+    const first = A.geo.find((g) => g)?.dots[0];
+    if (!n || !first) {
+      this.renderer.setAnnotationLines(null, null);
+      return;
+    }
+    const o: V3 = [first[0], first[1], first[2]];
+    const pos = new Float32Array(n);
+    const col = new Float32Array((n / 3) * 4);
+    let k = 0, c = 0;
+    A.geo.forEach((g, i) => {
+      if (!g) return;
+      const rgba = this.rgba(A.list[i]!.color ?? this.theme.measure);
+      for (let j = 0; j < g.segs.length; j += 3) {
+        pos[k++] = g.segs[j]! - o[0];
+        pos[k++] = g.segs[j + 1]! - o[1];
+        pos[k++] = g.segs[j + 2]! - o[2];
+        col.set(rgba, c);
+        c += 4;
+      }
+    });
+    this.renderer.setAnnotationLines(pos, col, o);
+  }
+
+  /** 세계 점이 단면에 잘리는 쪽에 있는지 */
+  /** 세계 점이 단면(범위를 정하지 않은 평면)의 잘린 쪽에 있는지 */
+  private pointCut(p: readonly number[]): boolean {
+    for (const q of this.allSecs()) {
+      if (q.items) continue;
+      const plane = this.planeOf(q);
+      if (planeValue(plane, p[0]!, p[1]!, p[2]!) > 1e-9 * (Math.abs(plane[3]) + 1)) return true;
+    }
+    return false;
+  }
+
+  /** 음영 모드에서 세계 점 p(화면 x, y)가 불투명 면에 가렸는지. build면 BVH가 없을 때 만든다 */
+  private occludedAt(f: ViewFrame, p: readonly number[], x: number, y: number, build: boolean): boolean {
+    if (!this.sceneRef || !this.shadedMode) return false;
+    const d = viewDepth(f, p);
+    const od = occludingDepth(f, x, y, this.visibleItems(), {
+      bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
+      limit: (id) => this.ranges.get(id)?.count,
+      bounds: (it) => this.boundsOf(it),
+      model: (m) => this.modelOf(m),
+      ...this.clipOpts(),
+      hidden: (it) => this.rangeSel.get(it.id)?.test,
+    });
+    return od < d - Math.max(Math.abs(d) * 1e-4, worldPerPixel(f, d) * 2, 1e-9);
+  }
+
   // ───────────────────────── 출력 ─────────────────────────
 
-  /** 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로 */
-  toBlob(type = 'image/png', quality?: number): Promise<Blob> {
+  /**
+   * 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로. 첫 인자로 선택을 주면 화면 밖에서 다시 그린다:
+   * scale(화면 화소의 몇 배, 기본 1 — 굵기·점 크기도 같은 비율), transparent(바탕을 비운 PNG), overlays(측정·덧그림·좌표축·단면 표시, 기본 true),
+   * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다
+   */
+  toBlob(type: string | SnapshotOptions = 'image/png', quality?: number): Promise<Blob> {
+    if (typeof type === 'object') return this.snapshotBlob(type);
     // 나눠 올리는 중이면 그림에는 다 올린 장면을 담는다
     if (this.gpu && this.renderer.uploading) this.pumpUpload(Infinity);
     this.renderNow();
@@ -1234,6 +2039,152 @@ export class Viewer3d {
     ctx.drawImage(this.canvas, 0, 0);
     ctx.drawImage(this.overlay, 0, 0);
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
+  }
+
+  /** 화면 밖 그리기로 그림 만들기(toBlob 선택). 실패하면 무엇이 문제인지 적은 Error로 거절한다 */
+  private async snapshotBlob(o: SnapshotOptions): Promise<Blob> {
+    const type = o.type ?? 'image/png';
+    const c = this.renderCanvas(o);
+    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error(`그림을 만들지 못했습니다(${c.width}×${c.height})`))), type, o.quality));
+  }
+
+  /**
+   * 화면 밖 그림의 실제 크기와 배율(화면 CSS 화소 대비). scale을 GPU 한 변 한도·2D 캔버스 넓이 한도(SNAPSHOT_MAX_PIXELS,
+   * iOS Safari도 되는 4096² 화소)에 맞춰 줄인 값이다 — toBlob·renderImage가 이 크기로 그린다
+   */
+  snapshotSize(o: Pick<SnapshotOptions, 'scale'> = {}): { width: number; height: number; scale: number } {
+    const gl = this.gl;
+    const dpr = this.dpr || 1;
+    const lost = !this.gpu;
+    const maxRb = lost ? 4096 : Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 4096;
+    const vp = lost ? null : (gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array | null);
+    const maxSide = Math.min(maxRb, vp?.[0] ?? maxRb, vp?.[1] ?? maxRb, SNAPSHOT_MAX_SIDE);
+    const want = Number.isFinite(o.scale) && o.scale! > 0 ? Math.min(16, Math.max(0.1, o.scale!)) : 1;
+    let k = want * dpr;
+    const W0 = this.cssW * k, H0 = this.cssH * k;
+    k *= Math.min(1, maxSide / W0, maxSide / H0, Math.sqrt(SNAPSHOT_MAX_PIXELS / (W0 * H0)));
+    // 화면 캔버스와 같은 반올림(1배면 화면 그림과 같은 크기)
+    const width = Math.max(1, Math.round(this.cssW * k)), height = Math.max(1, Math.round(this.cssH * k));
+    return { width, height, scale: width / this.cssW / dpr };
+  }
+
+  /**
+   * 화면 밖에서 그린 화소(ImageData, 덧그림 포함). scale·transparent·overlays는 toBlob 선택과 같다(실제 크기는 snapshotSize).
+   * GPU 다중 표본 버퍼에 그리고 읽어 온다(화면 캔버스는 건드리지 않는다)
+   */
+  renderImage(o: Omit<SnapshotOptions, 'type' | 'quality'> = {}): ImageData {
+    if (o.overlays === false) return this.renderPixels(o).data;
+    const c = this.renderCanvas(o);
+    return c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+  }
+
+  /** 화면 밖 그림을 2D 캔버스 하나에(덧그림은 같은 캔버스 위에 같은 배율로) */
+  private renderCanvas(o: Omit<SnapshotOptions, 'type' | 'quality'>): HTMLCanvasElement {
+    const { data, f, k } = this.renderPixels(o);
+    const c = document.createElement('canvas');
+    c.width = data.width;
+    c.height = data.height;
+    const ctx = c.getContext('2d');
+    if (!ctx) throw new Error(`그림 저장용 2D 캔버스를 만들지 못했습니다(${data.width}×${data.height} — 기기 한도를 넘었을 수 있습니다)`);
+    ctx.putImageData(data, 0, 0);
+    if (o.overlays ?? true) this.drawOverlayOn(ctx, f, k);
+    return c;
+  }
+
+  /** GPU에 화면 밖으로 그려 화소를 읽는다(읽은 버퍼를 그대로 ImageData로 — 위아래 뒤집기·알파 곱 풀기는 그 자리에서) */
+  private renderPixels(o: Omit<SnapshotOptions, 'type' | 'quality'>): { data: ImageData; f: ViewFrame; k: number } {
+    if (!this.gpu) throw new Error('3D 보기 문맥이 없어 그림을 만들 수 없습니다');
+    if (this.renderer.uploading) this.pumpUpload(Infinity);
+    const gl = this.gl;
+    const { width: W, height: H } = this.snapshotSize(o);
+    const k = W / this.cssW;
+    // 다중 표본은 GPU 메모리를 표본 수만큼 쓴다: 크면 줄이고 아주 크면 한 표본(배율 자체가 덜 계단지게 한다)
+    const maxS = Number(gl.getParameter(gl.MAX_SAMPLES)) || 0;
+    const samples = Math.min(maxS, W * H <= 4.2e6 ? 4 : W * H <= 8.4e6 ? 2 : 0);
+    const f = this.frame();
+    // 그리기 버퍼: 다중 표본 색·깊이·스텐실 → 한 표본 색으로 풀기
+    const fb = gl.createFramebuffer()!, rbC = gl.createRenderbuffer()!, rbD = gl.createRenderbuffer()!;
+    const fb2 = gl.createFramebuffer()!, rb2 = gl.createRenderbuffer()!;
+    let data: ImageData;
+    try {
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rbC);
+      if (samples > 0) gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, W, H);
+      else gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rbD);
+      if (samples > 0) gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH24_STENCIL8, W, H);
+      else gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, W, H);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rbC);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, rbD);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`그림 저장용 GPU 버퍼를 만들지 못했습니다(${W}×${H})`);
+      if (this.cutDirty) {
+        if (this.sec) this.updateCut();
+        else {
+          this.cutDirty = false;
+          this.renderer.setSectionLines(null);
+        }
+      }
+      const st = this.renderState(f, k);
+      st.viewport = [W, H];
+      if (o.transparent) st.transparent = true;
+      if (o.overlays === false) st.annotations = null;
+      this.renderer.render(f, W, H, st);
+      // 한 표본으로 풀어 읽는다(ImageData 버퍼에 바로)
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rb2);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb2);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb2);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb2);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb2);
+      data = new ImageData(W, H);
+      gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(data.data.buffer, data.data.byteOffset, data.data.byteLength));
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+      gl.deleteFramebuffer(fb);
+      gl.deleteFramebuffer(fb2);
+      gl.deleteRenderbuffer(rbC);
+      gl.deleteRenderbuffer(rbD);
+      gl.deleteRenderbuffer(rb2);
+      this.invalidate();
+    }
+    // 아래에서 위로 → 위에서 아래로(줄 하나 임시), 투명 바탕이면 알파 곱을 풀고 아니면 알파를 채운다
+    const D = data.data;
+    const row = W * 4;
+    const tmp = new Uint8ClampedArray(row);
+    for (let y = 0; y < H >> 1; y++) {
+      const a = y * row, b = (H - 1 - y) * row;
+      tmp.set(D.subarray(a, a + row));
+      D.copyWithin(a, b, b + row);
+      D.set(tmp, b);
+    }
+    if (o.transparent) {
+      for (let i = 0; i < D.length; i += 4) {
+        const a = D[i + 3]!;
+        if (a > 0 && a < 255) {
+          D[i] = Math.min(255, Math.round((D[i]! * 255) / a));
+          D[i + 1] = Math.min(255, Math.round((D[i + 1]! * 255) / a));
+          D[i + 2] = Math.min(255, Math.round((D[i + 2]! * 255) / a));
+        }
+      }
+    } else for (let i = 3; i < D.length; i += 4) D[i] = 255;
+    return { data, f, k };
+  }
+
+  /**
+   * 창 확대: 화면 사각형(캔버스 CSS 화소 두 구석)이 화면을 채우게 한다. 사각형 가운데 아래 점(없으면 대상점 깊이)을 화면 가운데로 옮기고
+   * 그 깊이에서 사각형이 꼭 맞게 확대한다. 너무 작은 사각형(2화소 미만)은 무시한다
+   */
+  zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.opts.animate): void {
+    if (this.disposed || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return;
+    this.finishAnim();
+    const f = this.frame();
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const hit = this.pickDetail(cx, cy, true);
+    const depth = hit ? viewDepth(f, hit.pick.point) : viewDepth(f, this.cam.target);
+    this.goto(rectZoomCamera(this.cam, f, x0, y0, x1, y1, depth, this.zoomLimits()), animate);
   }
 
   /** 기다리지 않고 바로 그린다 */
@@ -1261,7 +2212,7 @@ export class Viewer3d {
     if (!s) return (this.visBox = emptyBox());
     let ranged = false;
     for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
-    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged) return (this.visBox = this.allBox);
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoves && !this.bbList.length) return (this.visBox = this.allBox);
     let b = emptyBox();
     for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
@@ -1271,7 +2222,12 @@ export class Viewer3d {
   private visibleBoundsOf(it: Item): Box3 {
     const r = this.rangeSel.get(it.item.id);
     if (!r || !r.hidden.length || !r.parts) return this.boundsOf(it.item);
-    return (r.box ??= itemRangesBounds(it.item, rangeKind(it), r.parts.prims));
+    if (!r.box) {
+      r.box = itemRangesBounds(it.item, rangeKind(it), r.parts.prims);
+      const lm = this.looks.get(it.item.id)?.matrix;
+      if (lm) r.box = transformBox(r.box, lm);
+    }
+    return r.box;
   }
 
   private rebuildGrid(): void {
@@ -1317,6 +2273,7 @@ export class Viewer3d {
     const c = (s: string): Rgba => this.rgba(s);
     const line: Rgba = base === LIGHT_THEME ? [0.15, 0.2, 0.28, 1] : [0.85, 0.88, 0.92, 1];
     this.colors = {
+      ...(theme.monochrome ? { monochrome: c(theme.monochrome) } : {}),
       background: c(theme.background),
       edge: c(theme.edge),
       line,
@@ -1328,6 +2285,8 @@ export class Viewer3d {
       highlight: c(theme.highlight),
     };
     this.sectionColor = c(theme.section ?? base.section ?? DARK_THEME.section!);
+    // 덧그림 기본색(측정 색)이 테마를 따른다
+    if (this.annos) this.uploadAnnotations();
   }
 
   /** CSS 색 → RGBA. 직접 못 읽으면 2D 캔버스로 정규화해서 읽는다 */
@@ -1386,6 +2345,7 @@ export class Viewer3d {
     if (!s) return;
     const tasks: { n: number; run: () => void }[] = [];
     for (const m of s.meshes) tasks.push({ n: m.indices?.length ?? m.positions.length, run: () => this.bvhFor('triangle', m.positions, m.indices, true) });
+    if (this.opts.pickEdges) for (const m of s.meshes) if (m.edges && m.edges.length >= 6) tasks.push({ n: m.edges.length, run: () => this.bvhFor('segment', m.edges!, undefined, true) });
     for (const l of s.lines) tasks.push({ n: l.positions.length, run: () => this.bvhFor('segment', l.positions, undefined, true) });
     for (const p of s.points ?? []) tasks.push({ n: p.positions.length, run: () => this.bvhFor('point', p.positions, undefined, true) });
     tasks.sort((a, b) => a.n - b.n);
@@ -1410,6 +2370,8 @@ export class Viewer3d {
       const g = this.grid;
       b = unionBox(b, { min: [g.x0, g.y0, g.z], max: [g.x1, g.y1, g.z] });
     }
+    // 덧그림도 가까운·먼 면 안에(장면 밖에 둔 측정이 잘리지 않게)
+    if (this.annos?.box) b = unionBox(b, this.annos.box);
     if (this.marker) {
       const m = this.marker;
       const s = this.markerScale(null);
@@ -1439,15 +2401,78 @@ export class Viewer3d {
   /** 묶음 세계 범위(원점·행렬 반영, 장면마다 캐시) */
   private boundsOf(it: AnyItem): Box3 {
     let b = this.boxes.get(it);
-    if (!b) this.boxes.set(it, (b = itemBounds(it)));
+    if (!b) {
+      b = itemBounds(it);
+      const lm = this.looks.get(it.id)?.matrix;
+      if (lm) b = transformBox(b, lm);
+      // 마주 보는 그물: 돌려도 변하지 않는 기둥 범위
+      if (this.items.get(it.id)?.kind === 'mesh' && hasBillboard(it as Mesh3d)) b = billboardBounds(b, (it as Mesh3d).billboard!.origin);
+      this.boxes.set(it, b);
+    }
     return b;
   }
 
-  /** 그물 모형 행렬 = matrix · T(origin)(장면마다 캐시) */
+  /** 마주 보는 그물의 지금 카메라 돌림 각(라디안) */
+  private billboardAngleOf(m: Mesh3d): number {
+    const bb = m.billboard!;
+    const c = this.cam;
+    const to = towardCamera(bb.origin, cameraEye(c), cameraBasis(c).back, c.projection === 'perspective', c.yaw);
+    return billboardAngle(bb.front ?? [0, -1, 0], to);
+  }
+
+  /** 마주 보는 그물의 지금 카메라 돌림(세계, 원점 둘레) */
+  private billboardRot(m: Mesh3d): ArrayLike<number> {
+    return billboardMatrix(m.billboard!.origin, this.billboardAngleOf(m));
+  }
+
+  /** 그물 모형 행렬 = (마주 보기 돌림 ·)(묶음 행렬 setItemMatrix ·) matrix · T(origin)(마주 보기가 아니면 장면마다 캐시) */
   private modelOf(m: Mesh3d): ArrayLike<number> | undefined {
+    if (hasBillboard(m)) {
+      let base = modelMatrix(m.matrix, m.origin);
+      const lm = this.looks.get(m.id)?.matrix;
+      if (lm) base = base ? mat4Mul(lm, base) : lm;
+      const R = this.billboardRot(m);
+      return base ? mat4Mul(R, base) : R;
+    }
     let e = this.models.get(m);
-    if (!e) this.models.set(m, (e = { m: modelMatrix(m.matrix, m.origin) }));
+    if (!e) {
+      let mm = modelMatrix(m.matrix, m.origin);
+      const lm = this.looks.get(m.id)?.matrix;
+      if (lm) mm = mm ? mat4Mul(lm, mm) : lm;
+      this.models.set(m, (e = { m: mm }));
+    }
     return e.m;
+  }
+
+  /** 마주 보는 그물이 있을 때 렌더러 겉모습: 그 그물은 이 프레임 돌림(· 묶음 행렬)을 행렬로 */
+  private billboardLook(): (id: string) => LookState | undefined {
+    const mats = new Map<string, ArrayLike<number>>();
+    for (const m of this.bbList) {
+      const lm = this.looks.get(m.id)?.matrix;
+      const R = this.billboardRot(m);
+      mats.set(m.id, lm ? mat4Mul(R, lm) : R);
+    }
+    return (id) => {
+      const l = this.looks.get(id);
+      const mm = mats.get(id);
+      return mm ? { ...(l ?? {}), matrix: mm as Float64Array } : l;
+    };
+  }
+
+  /** 선분·점 묶음의 모형 행렬: 묶음 행렬(setItemMatrix)이 있을 때만(원점 포함), 없으면 undefined(예전처럼 원점만 옮긴다) */
+  private lineModel(it: LineSet3d | PointSet3d): ArrayLike<number> | undefined {
+    const lm = this.looks.get(it.id)?.matrix;
+    if (!lm) return undefined;
+    let e = this.lineModels.get(it);
+    if (!e) this.lineModels.set(it, (e = hasOrigin(it.origin) ? mat4Mul(lm, translation(it.origin)) : lm));
+    return e;
+  }
+
+  /** 불투명 그물인지(겉모습 색·불투명도 반영) */
+  private meshOpaque(m: Mesh3d): boolean {
+    const l = this.looks.get(m.id);
+    if (!l) return m.color[3] >= 0.999;
+    return (l.color ? l.color[3] : m.color[3]) * (l.alpha ?? 1) >= 0.999;
   }
 
   /** 보이는 묶음 목록(고르기용, 보이기를 바꿀 때까지 다시 쓴다) */
@@ -1455,7 +2480,7 @@ export class Viewer3d {
     if (this.visLists) return this.visLists;
     const meshes: Mesh3d[] = [], lines: LineSet3d[] = [], points: PointSet3d[] = [];
     for (const it of this.items.values()) {
-      if (!this.visible(it.item.id, it.item.group)) continue;
+      if (!this.visible(it.item.id, it.item.group) || this.looks.get(it.item.id)?.pickable === false) continue;
       if (it.kind === 'mesh') meshes.push(it.item);
       else if (it.kind === 'line') lines.push(it.item);
       else points.push(it.item);
@@ -1463,30 +2488,48 @@ export class Viewer3d {
     return (this.visLists = { meshes, lines, points });
   }
 
-  /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance) */
-  private pickDetail(x: number, y: number, build = true, pointerType?: string): PickDetail | null {
+  /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도 */
+  private pickDetail(x: number, y: number, build = true, pointerType?: string, edges = this.opts.pickEdges): PickDetail | null {
     if (!this.sceneRef) return null;
     const t = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance);
     return pickScene(this.frame(), x, y, this.visibleItems(), {
+      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
       tol: t.tol,
       snap: t.snap,
-      occlude: this.mode === 'shaded' || this.mode === 'shadedEdges',
+      occlude: this.shadedMode,
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
       fast: !build,
       limit: (id) => this.ranges.get(id)?.count,
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
-      clip: this.sectionPlane(),
-      caps: (m) => this.capped(m),
+      ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
   }
 
-  /** 단면에서 잘린 면을 채워 그리는 그물인지(렌더러의 채우기 조건과 같다) */
+  /** 단면에서 잘린 면을 채워 그리는 그물인지(렌더러의 채우기 조건과 같다). capGroup이 있는 그물은 묶음으로 채운다 */
   private capped(m: Mesh3d): boolean {
-    const s = this.sec;
-    if (!s || s.caps === 'none' || (this.mode !== 'shaded' && this.mode !== 'shadedEdges') || m.color[3] < 0.999 || !this.renderer.canFillSection) return false;
-    return s.caps === 'all' || m.closed === true;
+    return this.cappedBy(m, this.sec);
+  }
+
+  private cappedBy(m: Mesh3d, s: Section | null | undefined): boolean {
+    if (!s || s.caps === 'none' || !this.shadedMode || !this.meshOpaque(m) || !this.renderer.canFillSection) return false;
+    return s.caps === 'all' || m.closed === true || m.capGroup !== undefined;
+  }
+
+  /** 면이 앞의 것을 가리는 모드(음영 계열 — 고르기·가림·잘린 면 채우기) */
+  private get shadedMode(): boolean {
+    const m = this.mode;
+    return m === 'shaded' || m === 'shadedEdges' || m === 'hiddenLine' || m === 'monochrome' || m === 'noTexture';
+  }
+
+  /** 고르기·가림 판정의 단면 선택(평면 하나면 예전 그대로 clip, 여러 단면이면 묶음마다 clips) */
+  private clipOpts(): Pick<ScenePickOptions, 'clip' | 'clips' | 'caps' | 'capGroup' | 'opaque' | 'itemModel'> {
+    // 겉모습(불투명도·묶음 행렬)이 있을 때만 그 판정을 넘긴다(없으면 예전 규칙 그대로)
+    const lk = this.looks.size ? { opaque: (m: Mesh3d) => this.meshOpaque(m), itemModel: (it: LineSet3d | PointSet3d) => this.lineModel(it) } : {};
+    if (!this.multiSection) return { clip: this.sectionPlane(), caps: (m) => this.capped(m), capGroup: (m) => m.capGroup, ...lk };
+    const all = this.allSecs();
+    return { clips: (it) => this.clipsFor(it.id), caps: (m, k) => this.cappedBy(m, all[this.secOf(m.id)[k ?? 0]!]), capGroup: (m) => m.capGroup, ...lk };
   }
 
   /**
@@ -1512,6 +2555,14 @@ export class Viewer3d {
     const n = clickCount(this.lastClick, now, x, y, type);
     this.lastClick = { t: now, x, y, n };
     const d = this.pickDetail(x, y, true, type);
+    // 걷기: 두 번 누르면 그 자리에 선다(눈높이 위)
+    // 서기에 쓴 두 번째 누르기는 고르기·측정으로 알리지 않는다(첫 누르기는 이미 clicks 1로 알렸다)
+    if (this.nav === 'walk' && n === 2 && d && this.walkOpts.tapToStand !== false) {
+      this.finishAnim();
+      this.cam = standCamera(this.cam, d.pick.point, this.eyeHeight());
+      this.invalidate();
+      return;
+    }
     if (this.measuring) {
       if (!d) return;
       if (this.measurePts.length >= 2) {
@@ -1568,6 +2619,13 @@ export class Viewer3d {
       if (e.button === 1) e.preventDefault();
     });
     this.on<KeyboardEvent>(cv, 'keydown', (e) => this.onKey(e));
+    this.on<KeyboardEvent>(cv, 'keyup', (e) => {
+      if (this.opts.keyboard && this.handleKeyUp(e)) e.stopPropagation();
+    });
+    this.on(cv, 'blur', () => {
+      this.walkKeys.clear();
+      this.listenWalkRelease(false);
+    });
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
@@ -1581,6 +2639,7 @@ export class Viewer3d {
       this.renderer.init();
       if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload });
       if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
+      this.uploadAnnotations();
       // 단면 테두리도 GPU 자료라 다시 올린다
       this.cutDirty = true;
       this.rebuildGrid();
@@ -1694,6 +2753,14 @@ export class Viewer3d {
       const dist = Math.hypot(a!.x - b!.x, a!.y - b!.y);
       const cx = (a!.x + b!.x) / 2, cy = (a!.y + b!.y) / 2;
       const t = this.touch;
+      if (this.nav === 'walk') {
+        // 걷기: 벌리면 앞으로, 두 손가락을 끌면 옆·위아래로(장면을 잡아 끄는 쪽)
+        const k = this.walkSpeed() * 0.01;
+        this.cam = walkCamera(this.cam, (dist - t.dist) * k, -(cx - t.cx) * k, (cy - t.cy) * k);
+        this.touch = { dist, cx, cy };
+        this.invalidate();
+        return;
+      }
       const f = this.frame();
       this.cam = panCamera(this.cam, f, cx - t.cx, cy - t.cy);
       if (dist > 1 && t.dist > 1) {
@@ -1726,8 +2793,11 @@ export class Viewer3d {
     d.lx = p.x;
     d.ly = p.y;
     this.wheelAnchor = null;
-    if (d.mode === 'orbit') this.cam = orbitCamera(this.cam, -dx * ROT_PER_PX, dy * ROT_PER_PX, d.pivot);
-    else this.cam = panCamera(this.cam, this.frame(), dx, dy, d.depth ?? this.cam.distance);
+    if (d.mode === 'orbit') {
+      // 걷기: 눈은 제자리에 두고 고개만 돌린다(장면을 잡아 끄는 쪽으로)
+      if (this.nav === 'walk') this.cam = lookCamera(this.cam, dx * ROT_PER_PX * 0.5, -dy * ROT_PER_PX * 0.5);
+      else this.cam = orbitCamera(this.cam, -dx * ROT_PER_PX, dy * ROT_PER_PX, d.pivot);
+    } else this.cam = panCamera(this.cam, this.frame(), dx, dy, d.depth ?? this.cam.distance);
     this.invalidate();
   }
 
@@ -1767,6 +2837,12 @@ export class Viewer3d {
     this.finishAnim();
     const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.cssH : 1;
     const delta = Math.max(-400, Math.min(400, e.deltaY * k));
+    if (this.nav === 'walk') {
+      // 걷기: 휠은 앞뒤로 걷는다
+      this.cam = walkCamera(this.cam, -delta * this.walkSpeed() * 0.002, 0, 0);
+      this.invalidate();
+      return;
+    }
     const factor = Math.exp(delta * (e.ctrlKey ? 0.006 : 0.0015));
     const p = this.local(e);
     const f = this.frame();
@@ -1786,12 +2862,63 @@ export class Viewer3d {
    */
   handleKey(e: KeyboardEvent): boolean {
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    // 걷기: W·A·S·D·화살표·Q·E·PageUp·PageDown(물리 키 — 한글 입력기에서도)은 누르는 동안 움직인다.
+    // 떼기는 창 keyup·창 흐려짐·탭 숨김을 뷰어가 스스로 듣는다(앱이 창 keydown만 넘겨도 멈춘다)
+    const wk = this.nav === 'walk' ? walkKeyOf(e) : null;
+    if (wk) {
+      this.walkKeys.add(wk);
+      this.walkFast = e.shiftKey;
+      this.listenWalkRelease(true);
+      this.invalidate();
+      e.preventDefault();
+      return true;
+    }
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
     else if (e.key === 'Escape' && this.measurePts.length) this.clearMeasure();
     else return false;
     e.preventDefault();
     return true;
+  }
+
+  /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true */
+  handleKeyUp(e: KeyboardEvent): boolean {
+    const k = walkKeyOf(e);
+    if (!k || !this.walkKeys.delete(k)) return false;
+    this.walkFast = e.shiftKey;
+    if (!this.walkKeys.size) this.listenWalkRelease(false);
+    return true;
+  }
+
+  /** 걷기 키를 누르고 있는 동안만 창 keyup·blur·visibilitychange를 들어 떼기를 놓치지 않는다 */
+  private listenWalkRelease(on: boolean): void {
+    if (on === !!this.walkRelease) return;
+    if (!on) {
+      this.walkRelease!();
+      this.walkRelease = null;
+      return;
+    }
+    const up = (e: KeyboardEvent): void => {
+      const k = walkKeyOf(e);
+      if (k) this.walkKeys.delete(k);
+      this.walkFast = e.shiftKey;
+      if (!this.walkKeys.size) this.listenWalkRelease(false);
+    };
+    const clear = (): void => {
+      this.walkKeys.clear();
+      this.listenWalkRelease(false);
+    };
+    const vis = (): void => {
+      if (document.visibilityState === 'hidden') clear();
+    };
+    window.addEventListener('keyup', up, true);
+    window.addEventListener('blur', clear);
+    document.addEventListener('visibilitychange', vis);
+    this.walkRelease = () => {
+      window.removeEventListener('keyup', up, true);
+      window.removeEventListener('blur', clear);
+      document.removeEventListener('visibilitychange', vis);
+    };
   }
 
   private onKey(e: KeyboardEvent): void {
@@ -1831,6 +2958,18 @@ export class Viewer3d {
       this.overlay.width = w;
       this.overlay.height = h;
     }
+    if (this.nav === 'walk') this.stepWalk(now);
+    // 마주 보는 그물: 카메라가 바뀌면 그림자·단면 테두리·고르기 목록이 따라 바뀐다
+    if (this.bbList.length) {
+      // 돌림 각이 하나라도 바뀌었을 때만(카메라가 움직여도 각이 같으면 그림자·테두리는 그대로)
+      let k = '';
+      for (const m of this.bbList) k += `${this.billboardAngleOf(m).toFixed(9)},`;
+      if (k !== this.bbCamKey) {
+        this.bbCamKey = k;
+        this.shadowVer++;
+        if (this.sec) this.cutDirty = true;
+      }
+    }
     const f = this.frame();
     // 측정 중 커서 아래 붙잡을 점
     if (this.measuring && this.hoverAt && !this.drag) {
@@ -1846,15 +2985,48 @@ export class Viewer3d {
         this.renderer.setSectionLines(null);
       }
     }
+    this.renderer.render(f, w, h, this.renderState(f, dpr));
+    this.drawOverlay(f);
+    if (this.opts.viewCube) this.drawCube();
+    this.frameMs = performance.now() - t0;
+    const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}|${this.cam.fovY}|${this.cam.roll ?? 0}|${this.cam.shiftX ?? 0}|${this.cam.shiftY ?? 0}`;
+    if (key !== this.lastCamKey) {
+      this.lastCamKey = key;
+      const c = this.getCamera();
+      for (const cb of this.camCbs) cb(c);
+    }
+  }
+
+  /** 한 프레임 그리기 상태(화면과 그림 저장이 함께 쓴다) */
+  private renderState(f: ViewFrame, dpr: number): RenderState {
     let marker = null;
     if (this.marker) {
       const m = this.marker;
       const s = this.markerScale(f);
       marker = { kind: m.kind, matrix: placeMatrix(m.pos, m.opts.axis ?? [0, 0, 1], s), color: m.opts.color ?? this.rgba(this.theme.marker) };
     }
-    this.renderer.render(f, w, h, {
+    const bg = this.bgOpt;
+    const bgColor = bg?.color === undefined ? null : typeof bg.color === 'string' ? this.rgba(bg.color) : bg.color;
+    const colors = bgColor ? { ...this.colors, background: bgColor } : this.colors;
+    const sky = bg && (bg.sky !== undefined || bg.ground !== undefined) ? this.skyColors(bg, colors.background) : null;
+    const L = this.lightOpt;
+    let light: RenderState['light'] = null;
+    if (L) {
+      const d = L.sun.direction;
+      const l = Math.hypot(d[0]!, d[1]!, d[2]!) || 1;
+      const k = L.sun.intensity ?? 0.85;
+      const c = L.sun.color === undefined ? ([1, 1, 1, 1] as Rgba) : typeof L.sun.color === 'string' ? this.rgba(L.sun.color) : L.sun.color;
+      light = { dir: [d[0]! / l, d[1]! / l, d[2]! / l], color: [c[0] * k, c[1] * k, c[2] * k, 1], ambient: L.ambient ?? 0.35 };
+    }
+    const shadows = L?.shadows;
+    const F = this.fogOpt;
+    return {
+      light,
+      shadow: L && shadows ? { box: this.visibleBox(), size: (typeof shadows === 'object' ? shadows.size : undefined) ?? 2048, bias: (typeof shadows === 'object' ? shadows.bias : undefined) ?? 0.0015, version: this.shadowVer } : null,
+      fog: F ? { color: F.color === undefined ? colors.background : typeof F.color === 'string' ? this.rgba(F.color) : F.color, start: F.start, end: F.end } : null,
       mode: this.mode,
-      colors: this.colors,
+      colors,
+      sky,
       dpr,
       visible: (id, g) => this.visible(id, g),
       highlight: this.hi,
@@ -1869,18 +3041,21 @@ export class Viewer3d {
           }
         : null,
       interacting: this.interacting,
-      section: this.sec ? { plane: this.sectionPlane()!, caps: this.sec.caps, color: this.sectionColor, width: 2 } : null,
+      section: this.sec && !this.multiSection ? { plane: this.sectionPlane()!, caps: this.sec.caps, color: this.sectionColor, width: 2 } : null,
+      sections: this.multiSection
+        ? { planes: this.allSecs().map((q) => ({ plane: this.planeOf(q), caps: q.caps })), of: (id) => this.secOf(id), color: this.sectionColor, width: 2 }
+        : null,
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
-    });
-    this.drawOverlay(f);
-    if (this.opts.viewCube) this.drawCube();
-    this.frameMs = performance.now() - t0;
-    const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}`;
-    if (key !== this.lastCamKey) {
-      this.lastCamKey = key;
-      const c = this.getCamera();
-      for (const cb of this.camCbs) cb(c);
-    }
+      annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
+      look: this.bbList.length ? this.billboardLook() : this.looks.size ? (id) => this.looks.get(id) : null,
+      hiddenEdges: this.renderOpts.hiddenEdges,
+      profiles: this.renderOpts.profiles
+        ? {
+            width: this.renderOpts.profiles.width * dpr,
+            color: this.renderOpts.profiles.color === null ? this.colors.line : typeof this.renderOpts.profiles.color === 'string' ? this.rgba(this.renderOpts.profiles.color) : this.renderOpts.profiles.color,
+          }
+        : null,
+    };
   }
 
   private drawCube(): void {
@@ -1904,10 +3079,78 @@ export class Viewer3d {
     const dpr = this.dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (this.sec?.plane) this.drawSectionPlane(ctx, f);
+    this.drawOverlayOn(ctx, f, dpr);
+  }
+
+  /** 덧그림(단면 평면·좌표축·덧그림·측정)을 ctx에 CSS 화소 × k 배율로 */
+  private drawOverlayOn(ctx: CanvasRenderingContext2D, f: ViewFrame, k: number): void {
+    ctx.setTransform(k, 0, 0, k, 0, 0);
+    if (this.multiSection) this.drawSectionPlanes(ctx, f);
+    else if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
+    if (this.annos) this.drawAnnotations(ctx, f);
     this.drawMeasure(ctx, f);
+  }
+
+  /** 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게 */
+  private drawAnnotations(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+    const A = this.annos!;
+    const th = this.theme;
+    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
+    // 점이 많으면 끄는 동안은 가림을 따지지 않는다(놓으면 다시 그린다)
+    let anchors = 0;
+    for (const g of A.geo) if (g) anchors += g.dots.length + 1;
+    const occl = !this.interacting || anchors <= 64;
+    const hiddenA = A.hidden;
+    ctx.save();
+    A.geo.forEach((g, i) => {
+      if (!g) return;
+      const an = A.list[i]!;
+      const color = an.color ?? th.measure;
+      for (const p of g.dots) {
+        const s = projectToScreen(f, p);
+        if (!s) continue;
+        const hid = occl && this.occludedAt(f, p, s[0], s[1], false);
+        if (hid && hiddenA <= 0) continue;
+        ctx.globalAlpha = hid ? hiddenA : 1;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = th.textBg;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(s[0], s[1], 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      const fm = this.measureFmt;
+      let lines: string[];
+      if (fm && an.kind === 'distance' && an.label === undefined) {
+        const [p, q] = g.dots as [V3, V3];
+        lines = fm({ a: [...p] as V3, b: [...q] as V3, distance: g.value, dx: q[0] - p[0], dy: q[1] - p[1], dz: q[2] - p[2], units: this.sceneRef?.units ?? 'unknown' });
+      } else lines = annotationText(an, g, (v) => this.fmt(v), unit);
+      const at = projectToScreen(f, g.labelAt);
+      if (!lines.length || !at) return;
+      const hid = occl && this.occludedAt(f, g.labelAt, at[0], at[1], false);
+      if (hid && hiddenA <= 0) return;
+      ctx.globalAlpha = hid ? Math.max(hiddenA, 0.5) : 1;
+      ctx.font = `12px ${FONT}`;
+      const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 14;
+      const h = lines.length * 16 + 8;
+      let x = at[0] + 10, y = at[1] - h - 8;
+      x = Math.min(Math.max(4, x), this.cssW - w - 4);
+      y = Math.min(Math.max(4, y), this.cssH - h - 4);
+      ctx.fillStyle = th.textBg;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = th.text;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      lines.forEach((t, k) => ctx.fillText(t, x + 7, y + 5 + k * 16));
+    });
+    ctx.restore();
   }
 
   /** 단면 평면 위치: 평면 ∩ 장면 범위(조금 넓힌) 다각형을 옅게 칠하고 점선 테두리 */
@@ -1932,6 +3175,38 @@ export class Viewer3d {
     ctx.lineWidth = 1;
     ctx.setLineDash([6, 4]);
     ctx.stroke();
+    ctx.restore();
+  }
+
+  /** 여러 단면의 평면 위치: 평면마다 다각형을 범위를 정하지 않은 다른 평면들로 잘라 옅게 칠한다 */
+  private drawSectionPlanes(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+    const b = this.allBox;
+    if (boxIsEmpty(b)) return;
+    const all = this.allSecs();
+    const pad = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) * 0.04 || 1;
+    const box: Box3 = { min: [b.min[0] - pad, b.min[1] - pad, b.min[2] - pad], max: [b.max[0] + pad, b.max[1] + pad, b.max[2] + pad] };
+    const col = this.theme.section ?? DARK_THEME.section!;
+    ctx.save();
+    all.forEach((q, k) => {
+      if (!q.plane) return;
+      let poly = planeBoxPolygon(box, this.planeOf(q));
+      all.forEach((o, j) => {
+        if (j !== k && !o.items && poly.length) poly = clipPolygon(poly, this.planeOf(o));
+      });
+      const pts = poly.map((p) => projectToScreen(f, p));
+      if (pts.length < 3 || pts.some((p) => !p)) return;
+      ctx.beginPath();
+      pts.forEach((p, i) => (i ? ctx.lineTo(p![0], p![1]) : ctx.moveTo(p![0], p![1])));
+      ctx.closePath();
+      ctx.globalAlpha = 0.07;
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.globalAlpha = 0.65;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+    });
     ctx.restore();
   }
 
@@ -2004,7 +3279,7 @@ export class Viewer3d {
       ctx.stroke();
     };
     const label = (at: V3 | null, lines: string[]): void => {
-      if (!at) return;
+      if (!at || !lines.length) return;
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((s) => ctx.measureText(s).width)) + 14;
       const h = lines.length * 16 + 8;
@@ -2038,7 +3313,13 @@ export class Viewer3d {
       const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
       const mid = sa && sb ? ([(sa[0] + sb[0]) / 2, (sa[1] + sb[1]) / 2, 0] as V3) : sb ?? sa;
       const u = unit ? ` ${unit}` : '';
-      label(mid, [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`]);
+      const fm = this.measureFmt;
+      label(
+        mid,
+        fm
+          ? fm({ a: [...a] as V3, b: [...b] as V3, distance: Math.hypot(dx, dy, dz), dx, dy, dz, units: this.sceneRef?.units ?? 'unknown' })
+          : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
+      );
     }
     for (const p of pts) dotAt(P(p), false);
     if (hover) dotAt(P(hover.p), hover.vertex);

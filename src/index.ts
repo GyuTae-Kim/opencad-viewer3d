@@ -2,24 +2,37 @@
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
 export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
-export { VIEW_KEYS, Viewer3d } from './viewer';
+export { SNAPSHOT_MAX_PIXELS, VIEW_KEYS, Viewer3d } from './viewer';
 export type {
+  AnnotationOptions,
+  BackgroundOptions,
+  FogOptions,
   GroupInfo,
+  ItemLookState,
+  LightingOptions,
   MarkerOptions,
+  MeasureFormat,
   MeasureResult,
   PickEvent,
+  PickOptions,
+  ProjectedPoint,
   RangeSelection,
   SectionCaps,
   SectionHandle,
   SectionOptions,
+  SectionPlane,
   SectionState,
   SegmentHighlightOptions,
+  SnapshotOptions,
   Viewer3dOptions,
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
+export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
+export { type ClosestResult, closestBetween } from './closest';
+export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_LABELS } from './camera';
 export type { RenderMode, TextureStats } from './renderer';
@@ -38,6 +51,8 @@ export {
   TOUCH_DRAG_START_PX,
   TOUCH_PICK_TOLERANCE_PX,
   dragStartPx,
+  walkKeyOf,
+  type WalkKey,
   isTouch,
   pickTolerance,
   type PickTolerance,

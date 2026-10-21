@@ -13,19 +13,25 @@
  * 같은 무늬 객체를 다시 넘긴 장면(setScene)은 올린 무늬를 그대로 쓴다.
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
-import type { ViewFrame } from './camera';
+import { type ViewFrame, viewMatrix } from './camera';
 import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
-import { type V3, hasOrigin, mat4Mul, modelMatrix, normalMatrix, translation } from './math';
-import { boxCenter, meshBounds } from './bounds';
-import { MESH_FS, MESH_VS, POINT_FS, POINT_VS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
+import { type V3, cross, hasOrigin, mat4Mul, modelMatrix, normalMatrix, normalize, orthographic, translation } from './math';
+import { boxCenter, boxIsEmpty, boxSphere, meshBounds, transformBox, unionBox } from './bounds';
+import { DEPTH_FS, DEPTH_VS, FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, SKY_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
-import { NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
+import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
 
-export type RenderMode = 'shaded' | 'shadedEdges' | 'wireframe' | 'xray';
+/**
+ * 그리기 모드. 0.7.0: hiddenLine(면을 바탕색으로 채워 뒤의 선을 가리고 윤곽선만 — 숨은 윤곽선을 점선으로 보일 수도),
+ * monochrome(정점 색·무늬 없이 한 색 음영 + 윤곽선), noTexture(무늬만 끈 음영 + 윤곽선)
+ */
+export type RenderMode = 'shaded' | 'shadedEdges' | 'wireframe' | 'xray' | 'hiddenLine' | 'monochrome' | 'noTexture';
 
 export interface RenderColors {
+  /** 단색 모드 면 색(없으면 밝은 회색) */
+  monochrome?: Rgba;
   background: Rgba;
   edge: Rgba;
   line: Rgba;
@@ -70,6 +76,27 @@ export interface SectionDraw {
   width: number;
 }
 
+/** 묶음 하나의 겉모습 바꾸기(0.7.0, Viewer3d.setItemOpacity·setItemColor·setItemMatrix 등) */
+export interface ItemLook {
+  /** 불투명도 0~1(묶음 색 알파에 곱한다. 1보다 작으면 반투명 차례에 그린다) */
+  alpha?: number;
+  /** 색 바꾸기(정점 색·무늬 대신 이 색, 알파도 이 값) */
+  color?: Rgba;
+  /** 세계에 더 거는 4×4 행렬(열 우선): 세계' = matrix · 세계 */
+  matrix?: ArrayLike<number>;
+}
+
+/** 여러 단면 그리기 상태(0.7.0 — 평면이 둘 이상이거나 범위를 정한 평면이 있을 때). 있으면 section 대신 쓴다 */
+export interface SectionsDraw {
+  /** 평면들(세계 [a, b, c, w], 값 > 0 쪽을 버린다)과 채우기 */
+  planes: readonly { plane: Plane4; caps: 'closed' | 'all' | 'none' }[];
+  /** 묶음 id → 그 묶음을 자르는 평면 번호들(planes 안, 오름차순). 모르는 id(강조 선분 등)는 범위 없는 평면들 */
+  of: (id: string) => readonly number[];
+  /** 단면 테두리 색·굵기 */
+  color: Rgba;
+  width: number;
+}
+
 /**
  * 묶음 안 구간(숨김·강조)을 반영한 보이는 구간 목록. 뷰어가 만들어 넘긴다.
  * prims: 그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점 번호의 보이는 구간(hi = 강조). edges: 그물 윤곽선 선분의 보이는 구간
@@ -98,8 +125,30 @@ export interface RenderState {
   interacting: boolean;
   /** 단면(없으면 null 또는 생략) */
   section?: SectionDraw | null;
+  /** 여러 단면(있으면 section 대신) */
+  sections?: SectionsDraw | null;
   /** 묶음 안 구간(숨김·강조). 없는 묶음은 통째로 그린다 */
   parts?: (id: string) => ItemParts | undefined;
+  /** 묶음별 겉모습(없으면 모두 장면 그대로) */
+  look?: ((id: string) => ItemLook | undefined) | null;
+  /** 화면 밖 그리기(그림 저장): 대상 크기(장치 화소). 없으면 그리기 버퍼 크기 */
+  viewport?: readonly [number, number];
+  /** 투명 바탕(그림 저장): 바탕을 비우고 알파를 곱해 쌓는다(결과 색은 알파를 곱한 값) */
+  transparent?: boolean;
+  /** 숨은 선 모드에서 면 뒤의 윤곽선을 이 불투명도의 점선으로(0·없으면 안 그림) */
+  hiddenEdges?: number;
+  /** 화면 공간 외곽선(실루엣): 굵기(장치 화소)·색. 음영 계열 모드에서만 */
+  profiles?: { width: number; color: Rgba } | null;
+  /** 하늘·땅 바탕(없으면 colors.background 한 색) */
+  sky?: { sky: Rgba; skyHorizon: Rgba; ground: Rgba; groundHorizon: Rgba } | null;
+  /** 해 조명(없으면 예전 고정 조명): 세계 방향(해 쪽, 단위)·색(세기를 곱한 rgb)·주변광 */
+  light?: { dir: V3; color: Rgba; ambient: number } | null;
+  /** 해 그림자(light가 있을 때): 그림자를 받을 범위(세계)·깊이 그림 크기·치우침·판(바뀌면 깊이 그림을 다시 그린다) */
+  shadow?: { box: Box3; size: number; bias: number; version: number } | null;
+  /** 선형 안개: 색·시작·끝(눈 깊이, 세계 단위) */
+  fog?: { color: Rgba; start: number; end: number } | null;
+  /** 앱 측정 덧그림 선(setAnnotationLines로 올린 것)을 그릴 때: 굵기(화면 화소)·가려진 부분 불투명도(0이면 안 그림) */
+  annotations?: { width: number; hidden: number } | null;
 }
 
 export interface RenderStats {
@@ -139,9 +188,28 @@ export const FAST_LINES_WHILE_MOVING = 400_000;
 interface Prog {
   p: WebGLProgram;
   u: Map<string, WebGLUniformLocation | null>;
+  /** 그물 변종 표시: CLIP(평면 하나 u_clip)·CLIPN(여러 평면)·TEX(무늬)·SUN·SHADOW·FOG */
+  clip1?: boolean;
+  clipN?: boolean;
+  tex?: boolean;
+  sun?: boolean;
+  shadow?: boolean;
+  fog?: boolean;
+  back?: boolean;
+  backTex?: boolean;
+}
+
+/** 겉모습 행렬을 합친 모형 행렬 캐시(행렬·원래 모형이 같으면 다시 쓴다 — 균일 변수 캐시가 같은 객체로 알아보게) */
+interface LookCache {
+  src: ArrayLike<number>;
+  base: ArrayLike<number> | undefined;
+  model: ArrayLike<number>;
+  box?: Box3;
+  center?: V3;
 }
 
 interface LineRec {
+  lookM?: LookCache;
   id: string;
   group: string | undefined;
   n: number;
@@ -173,6 +241,7 @@ interface PartCache {
 const RUN_LIMIT = 24;
 
 interface MeshRec {
+  lookM?: LookCache;
   src: Mesh3d;
   vao: WebGLVertexArrayObject;
   count: number;
@@ -186,6 +255,8 @@ interface MeshRec {
   /** 무늬 그림의 알파를 불투명도에 곱하는지(Texture3d.alpha — 반투명 차례에 그린다) */
   texAlpha: boolean;
   transparent: boolean;
+  /** 뒷면(Mesh3d.backColor·backTexture): 색(없으면 null)·뒷면 무늬 id·좌표 값 수·무늬 알파 */
+  back: { color: Rgba | null; tex: string | null; uv: 0 | 2 | 3; texAlpha: boolean } | null;
   /** 로컬 → 세계 = matrix · T(origin)(원점이 없으면 matrix 그대로, 둘 다 없으면 undefined) */
   model: ArrayLike<number> | undefined;
   /** 세계 범위(행렬·원점 반영) */
@@ -198,6 +269,7 @@ interface MeshRec {
 }
 
 interface PointRec {
+  lookM?: LookCache;
   src: PointSet3d;
   n: number;
   vao: WebGLVertexArrayObject;
@@ -211,7 +283,23 @@ interface ThinRec {
   count: number;
 }
 
+/** 잘린 면을 채울 단위(그물 하나 또는 같은 capGroup 그물들, 평면 하나) */
+interface CapUnit {
+  meshes: MeshRec[];
+  /** 세계 범위(묶음이면 합친 것) */
+  box: Box3;
+  /** 채울 평면(세계) */
+  plane: Plane4;
+  /** 채운 면을 자를 다른 평면들(세계, 여러 단면일 때) */
+  others: Plane4[];
+  /** 채운 면 바탕색(첫 그물 색) */
+  color: Rgba;
+  group: boolean;
+}
+
 const DASH: [number, number] = [7, 5];
+/** 단색 모드 기본 면 색 */
+const MONO_COLOR: Rgba = [0.86, 0.87, 0.89, 1];
 /** 잘린 면 다각형 꼭짓점 최대 수(평면 ∩ 상자는 6각형까지) */
 const CAP_MAX_VERTS = 8;
 
@@ -227,6 +315,19 @@ export class Renderer3d {
   /** 무늬 변종(처음 쓸 때 만든다): 보통·단면 */
   private meshT: Prog | null = null;
   private meshTC: Prog | null = null;
+  /** 0.7.0 셰이더 변종(정의 이름 묶음 → 프로그램, 처음 쓸 때 만든다) */
+  private variants = new Map<string, Prog>();
+  private clipBuf = new Float32Array(MAX_SECTION_PLANES * 4);
+  /** 외곽선: 깊이 그림(그물만)과 그 그리기 버퍼, 화면 전체 삼각형 프로그램 */
+  private profTex: { tex: WebGLTexture; fb: WebGLFramebuffer; w: number; h: number } | null = null;
+  private profileP: Prog | null = null;
+  private skyP: Prog | null = null;
+  /** 해 그림자 깊이 그림과 그때의 빛 행렬(판이 같으면 다시 쓴다) */
+  private shadowMap: { tex: WebGLTexture; fb: WebGLFramebuffer; size: number; version: number; vp: Float64Array } | null = null;
+  /** 만들지 못한 그림자 깊이 그림 크기(같은 크기는 다시 시도하지 않는다) */
+  private shadowFailed = 0;
+  private m4c = new Float32Array(16);
+  private emptyVao: WebGLVertexArrayObject | null = null;
   private quadWide!: WebGLBuffer;
   private quadPoint!: WebGLBuffer;
   private capBuf!: WebGLBuffer;
@@ -244,6 +345,8 @@ export class Renderer3d {
   private hiSeg: LineRec | null = null;
   /** 단면 테두리 선분(평면이 바뀔 때마다 바뀐다 — 강조 선분처럼 따로 둔다) */
   private cutSeg: LineRec | null = null;
+  /** 앱 측정 덧그림 선(정점 색). 장면을 바꿔도 남는다(앱이 지운다) */
+  private annoSeg: LineRec | null = null;
   stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0 };
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
@@ -284,6 +387,9 @@ export class Renderer3d {
     this.thinC = null;
     this.meshT = null;
     this.meshTC = null;
+    this.variants.clear();
+    this.profileP = null;
+    this.skyP = null;
     const an = gl.getExtension('EXT_texture_filter_anisotropic');
     this.aniso = an ? { ext: an, max: Number(gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 1 } : null;
     this.quadWide = gl.createBuffer()!;
@@ -315,10 +421,17 @@ export class Renderer3d {
     this.markers.clear();
     this.hiSeg = null;
     this.cutSeg = null;
+    this.annoSeg = null;
     this.meshC = null;
     this.thinC = null;
     this.meshT = null;
     this.meshTC = null;
+    this.variants.clear();
+    this.profTex = null;
+    this.profileP = null;
+    this.skyP = null;
+    this.shadowMap = null;
+    this.emptyVao = null;
     this.pending = null;
     this.texGen++;
     this.textures.clear();
@@ -353,7 +466,7 @@ export class Renderer3d {
   }
 
   private meshClip(): Prog {
-    return (this.meshC ??= this.program(withClip(MESH_VS), withClip(MESH_FS)));
+    return (this.meshC ??= { ...this.program(withClip(MESH_VS), withClip(MESH_FS)), clip1: true });
   }
 
   private thinClip(): Prog {
@@ -362,8 +475,199 @@ export class Renderer3d {
 
   /** 무늬 그물 프로그램(clip이면 단면 변종) */
   private meshTex(clip: boolean): Prog {
-    if (clip) return (this.meshTC ??= this.program(withDefines(MESH_VS, 'CLIP', 'TEX'), withDefines(MESH_FS, 'CLIP', 'TEX')));
-    return (this.meshT ??= this.program(withDefines(MESH_VS, 'TEX'), withDefines(MESH_FS, 'TEX')));
+    if (clip) return (this.meshTC ??= { ...this.program(withDefines(MESH_VS, 'CLIP', 'TEX'), withDefines(MESH_FS, 'CLIP', 'TEX')), clip1: true, tex: true });
+    return (this.meshT ??= { ...this.program(withDefines(MESH_VS, 'TEX'), withDefines(MESH_FS, 'TEX')), tex: true });
+  }
+
+  /** 안개 변종 선·점 프로그램에 안개 색·범위와 눈 깊이 행(시점·모형의 z 행)을 올린다 */
+  private setLineFog(p: Prog, f: ViewFrame, model: ArrayLike<number> | undefined, fog: NonNullable<RenderState['fog']>): void {
+    const gl = this.gl;
+    const mv = model ? mat4Mul(f.view, model, this.d4b) : f.view;
+    gl.uniform4f(this.loc(p, 'u_mvz'), mv[2]!, mv[6]!, mv[10]!, mv[14]!);
+    gl.uniform4f(this.loc(p, 'u_fogCol'), fog.color[0], fog.color[1], fog.color[2], 1);
+    gl.uniform2f(this.loc(p, 'u_fog'), fog.start, fog.end);
+  }
+
+  /** 해 그림자 깊이 그림(비교 표본 — sampler2DShadow) */
+  private makeShadowMap(size: number): Renderer3d['shadowMap'] {
+    const gl = this.gl;
+    this.dropShadow();
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, size, size, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
+    if (!ok) {
+      gl.deleteFramebuffer(fb);
+      gl.deleteTexture(tex);
+      return null;
+    }
+    return (this.shadowMap = { tex, fb, size, version: -1, vp: new Float64Array(16) });
+  }
+
+  private dropShadow(): void {
+    const m = this.shadowMap;
+    if (!m) return;
+    this.gl.deleteFramebuffer(m.fb);
+    this.gl.deleteTexture(m.tex);
+    this.shadowMap = null;
+  }
+
+  /** 해 쪽 평행 투영(범위를 감싸는 구에 맞춘다): 빛 시점·투영 행렬(double) */
+  private lightViewProj(dir: V3, box: Box3): Float64Array {
+    const b = boxIsEmpty(box) ? { min: [-1, -1, -1] as [number, number, number], max: [1, 1, 1] as [number, number, number] } : box;
+    const sp = boxSphere(b);
+    const R = Math.max(sp.radius, 1e-6);
+    const back = normalize(dir);
+    const ref: V3 = Math.abs(back[2]) < 0.99 ? [0, 0, 1] : [0, 1, 0];
+    const right = normalize(cross(ref, back));
+    const up = cross(back, right);
+    const eye: V3 = [sp.center[0] + back[0] * R * 2, sp.center[1] + back[1] * R * 2, sp.center[2] + back[2] * R * 2];
+    const view = viewMatrix(eye, { right, up, back });
+    return mat4Mul(orthographic(-R, R, -R, R, R * 0.5, R * 3.5), view);
+  }
+
+  /** 그물 정점만 그리기(깊이 그림): 구간 목록이 있으면 그 구간만 */
+  private drawMeshGeometry(r: MeshRec, list: DrawList | null): void {
+    const gl = this.gl;
+    if (list) {
+      if (!list.total) return;
+      if (list.compact) {
+        gl.bindVertexArray(list.compact.vao);
+        gl.drawElements(gl.TRIANGLES, list.compact.count, gl.UNSIGNED_INT, 0);
+        return;
+      }
+      gl.bindVertexArray(r.vao);
+      for (const run of list.runs) {
+        if (r.indexed) gl.drawElements(gl.TRIANGLES, run.count * 3, gl.UNSIGNED_INT, run.start * 12);
+        else gl.drawArrays(gl.TRIANGLES, run.start * 3, run.count * 3);
+      }
+      return;
+    }
+    gl.bindVertexArray(r.vao);
+    if (r.indexed) gl.drawElements(gl.TRIANGLES, r.count, gl.UNSIGNED_INT, 0);
+    else gl.drawArrays(gl.TRIANGLES, 0, r.count);
+  }
+
+  /** 하늘·땅 바탕을 화면 전체 삼각형으로(깊이는 쓰지 않는다) */
+  private drawSky(f: ViewFrame, sky: NonNullable<RenderState['sky']>, devW: number, devH: number): void {
+    const gl = this.gl;
+    const p = (this.skyP ??= this.program(FULL_VS, SKY_FS));
+    gl.useProgram(p.p);
+    const b = f.basis;
+    gl.uniform3f(this.loc(p, 'u_right'), b.right[0], b.right[1], b.right[2]);
+    gl.uniform3f(this.loc(p, 'u_up'), b.up[0], b.up[1], b.up[2]);
+    gl.uniform3f(this.loc(p, 'u_fwd'), -b.back[0], -b.back[1], -b.back[2]);
+    const tanV = (f.pixelPerDepth * f.height) / 2;
+    gl.uniform2f(this.loc(p, 'u_tan'), tanV * (f.width / f.height), tanV);
+    gl.uniform2f(this.loc(p, 'u_shift'), f.shift?.[0] ?? 0, f.shift?.[1] ?? 0);
+    const c = (n: string, v: Rgba): void => gl.uniform4f(this.loc(p, n), v[0], v[1], v[2], v[3]);
+    c('u_sky', sky.sky);
+    c('u_skyH', sky.skyHorizon);
+    c('u_ground', sky.ground);
+    c('u_groundH', sky.groundHorizon);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.depthMask(false);
+    this.emptyVao ??= gl.createVertexArray();
+    gl.bindVertexArray(this.emptyVao);
+    gl.viewport(0, 0, devW, devH);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
+    gl.enable(gl.DEPTH_TEST);
+    gl.bindVertexArray(null);
+  }
+
+  /** 외곽선 깊이 그림 버퍼(크기가 바뀌면 다시 만든다). 만들지 못하면 null */
+  private profileTarget(w: number, h: number): WebGLFramebuffer | null {
+    const gl = this.gl;
+    const t = this.profTex;
+    if (t && t.w === w && t.h === h) return t.fb;
+    this.dropProfile();
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
+    if (!ok) {
+      gl.deleteFramebuffer(fb);
+      gl.deleteTexture(tex);
+      return null;
+    }
+    this.emptyVao ??= gl.createVertexArray();
+    this.profTex = { tex, fb, w, h };
+    return fb;
+  }
+
+  private dropProfile(): void {
+    const t = this.profTex;
+    if (!t) return;
+    this.gl.deleteFramebuffer(t.fb);
+    this.gl.deleteTexture(t.tex);
+    this.profTex = null;
+  }
+
+  /** 겉모습 행렬 m을 합친 모형 행렬(m · base, 캐시) */
+  private lookModel(rec: { lookM?: LookCache }, m: ArrayLike<number>, base: ArrayLike<number> | undefined): LookCache {
+    const c = rec.lookM;
+    if (c && c.src === m && c.base === base) return c;
+    return (rec.lookM = { src: m, base, model: base ? mat4Mul(m, base) : m });
+  }
+
+  /** 0.7.0 변종 프로그램(기본 원본 + #define 이름들). 같은 묶음은 한 번만 만든다 */
+  private variant(base: 'mesh' | 'wide' | 'thin' | 'point' | 'depth', defs: readonly string[]): Prog {
+    const key = `${base}:${[...defs].sort().join(',')}`;
+    let p = this.variants.get(key);
+    if (p) return p;
+    const [vs, fs] =
+      base === 'mesh' ? [MESH_VS, MESH_FS] : base === 'wide' ? [WIDE_VS, WIDE_FS] : base === 'thin' ? [THIN_VS, THIN_FS] : base === 'depth' ? [DEPTH_VS, DEPTH_FS] : [POINT_VS, POINT_FS];
+    p = {
+      ...this.program(withDefines(vs, ...defs), withDefines(fs, ...defs)),
+      clip1: defs.includes('CLIP'),
+      clipN: defs.includes('CLIPN'),
+      tex: defs.includes('TEX'),
+      sun: defs.includes('SUN'),
+      shadow: defs.includes('SHADOW'),
+      fog: defs.includes('FOG'),
+      back: defs.includes('BACK'),
+      backTex: defs.includes('BACKTEX'),
+    };
+    this.variants.set(key, p);
+    return p;
+  }
+
+  /** 여러 단면 평면(로컬)을 지금 프로그램에 올린다(u_clips·u_nclip) */
+  private setClips(p: Prog, planes: readonly Readonly<Plane4>[]): void {
+    const n = Math.min(planes.length, MAX_SECTION_PLANES);
+    const b = this.clipBuf;
+    b.fill(0);
+    for (let i = 0; i < n; i++) b.set(planes[i]!, i * 4);
+    this.gl.uniform4fv(this.loc(p, 'u_clips'), b);
+    this.gl.uniform1i(this.loc(p, 'u_nclip'), n);
   }
 
   private loc(pr: Prog, name: string): WebGLUniformLocation | null {
@@ -488,6 +792,14 @@ export class Renderer3d {
       gl.enableVertexAttribArray(3);
       gl.vertexAttribPointer(3, uv, gl.FLOAT, false, uv * 4, 0);
     }
+    // 뒷면 무늬 좌표(backUvs, 없으면 uvs)
+    const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
+    const buv = buvs ? uvComponents(m, buvs) : 0;
+    if (buv) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(buvs!));
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, buv, gl.FLOAT, false, buv * 4, 0);
+    }
     return { hasNormals, hasColors };
   }
 
@@ -517,7 +829,13 @@ export class Renderer3d {
     }
     const edges = m.edges && m.edges.length >= 6 ? this.lineRec(m.id, m.group, m.edges, undefined) : null;
     const box = meshBounds(m);
+    // 뒷면 색·무늬(없으면 null — 예전 그대로)
+    const buv = m.backTexture && this.texSrc.has(m.backTexture) ? uvComponents(m, m.backUvs ?? m.uvs) : 0;
+    const bcol = m.backColor && m.backColor.length >= 3 ? m.backColor : null;
+    const back = bcol || buv ? { color: bcol, tex: buv ? m.backTexture! : null, uv: buv, texAlpha: buv > 0 && this.texSrc.get(m.backTexture!)!.alpha === true } : null;
+    if (back?.texAlpha) transparent = true;
     return {
+      back,
       src: m,
       vao,
       count,
@@ -674,6 +992,12 @@ export class Renderer3d {
     this.cutSeg = this.dynLines('__cut', positions, origin);
   }
 
+  /** 앱 측정 덧그림 선 바꾸기(선분 쌍, origin 기준 좌표, 정점마다 rgba 색, null이면 없음) */
+  setAnnotationLines(positions: Float32Array | null, colors: Float32Array | null, origin?: readonly number[] | null): void {
+    this.deleteDyn(this.annoSeg);
+    this.annoSeg = this.dynLines('__anno', positions, origin, colors);
+  }
+
   /** 격자 선분 바꾸기(null이면 없음). origin이 있으면 선분은 그 점 기준 좌표(gridLines(g, origin)) */
   setGrid(g: GridLines | null, origin?: readonly number[] | null): void {
     if (this.grid) {
@@ -725,6 +1049,7 @@ export class Renderer3d {
   dispose(): void {
     this.clear();
     this.setGrid(null);
+    this.setAnnotationLines(null, null);
     const gl = this.gl;
     for (const v of this.vaos) gl.deleteVertexArray(v);
     for (const b of this.arrayBufs.values()) gl.deleteBuffer(b);
@@ -735,7 +1060,13 @@ export class Renderer3d {
     gl.deleteBuffer(this.quadPoint);
     gl.deleteBuffer(this.capBuf);
     gl.deleteVertexArray(this.capVao);
-    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC]) if (p) gl.deleteProgram(p.p);
+    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC, this.profileP, this.skyP, ...this.variants.values()]) if (p) gl.deleteProgram(p.p);
+    this.variants.clear();
+    this.profileP = null;
+    this.dropProfile();
+    this.dropShadow();
+    if (this.emptyVao) gl.deleteVertexArray(this.emptyVao);
+    this.emptyVao = null;
     this.meshC = null;
     this.thinC = null;
     this.meshT = null;
@@ -795,6 +1126,8 @@ export class Renderer3d {
     for (const m of scene.meshes) {
       const t = m.texture !== undefined ? this.texSrc.get(m.texture) : undefined;
       if (t && uvComponents(m)) used.set(t.id, t);
+      const bt = m.backTexture !== undefined ? this.texSrc.get(m.backTexture) : undefined;
+      if (bt && uvComponents(m, m.backUvs ?? m.uvs)) used.set(bt.id, bt);
     }
     let dropped = false;
     for (const [id, rec] of this.textures)
@@ -893,6 +1226,13 @@ export class Renderer3d {
       } else if (r.state === 'failed') s.failed++;
     }
     return s;
+  }
+
+  /** 그물의 올린 뒷면 무늬(없거나 아직이면 null) */
+  private backTexOf(r: MeshRec): WebGLTexture | null {
+    if (!r.back?.tex) return null;
+    const t = this.textures.get(r.back.tex);
+    return t && t.state === 'ready' ? t.tex : null;
   }
 
   /** 그물의 올린 무늬(없거나 아직이면 null) */
@@ -1018,7 +1358,7 @@ export class Renderer3d {
     list: DrawList,
     lo: number,
     hi: number,
-    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; clip?: Plane4 | null },
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean },
     st: RenderState,
     stats: RenderStats,
   ): void {
@@ -1060,11 +1400,16 @@ export class Renderer3d {
     const gl = this.gl;
     const stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0 };
     this.stats = stats;
-    const sec = st.section ?? null;
-    const capsOn = !!sec && sec.caps !== 'none' && this.stencilOk && (st.mode === 'shaded' || st.mode === 'shadedEdges');
+    const multi = st.sections ?? null;
+    const sec = multi ? null : (st.section ?? null);
+    const capsOn =
+      (multi ? multi.planes.some((q) => q.caps !== 'none') : !!sec && sec.caps !== 'none') &&
+      this.stencilOk &&
+      (st.mode === 'shaded' || st.mode === 'shadedEdges' || st.mode === 'hiddenLine' || st.mode === 'monochrome' || st.mode === 'noTexture');
     gl.viewport(0, 0, devW, devH);
     const bg = st.colors.background;
-    gl.clearColor(bg[0], bg[1], bg[2], 1);
+    if (st.transparent) gl.clearColor(0, 0, 0, 0);
+    else gl.clearColor(bg[0], bg[1], bg[2], 1);
     gl.clearDepth(1);
     gl.depthMask(true);
     gl.colorMask(true, true, true, true);
@@ -1073,20 +1418,78 @@ export class Renderer3d {
       gl.stencilMask(0xff);
     }
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | (capsOn ? gl.STENCIL_BUFFER_BIT : 0));
+    if (st.sky && !st.transparent) this.drawSky(f, st.sky, devW, devH);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    if (st.transparent) gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     const vpF = new Float32Array(f.viewProj);
     const ortho = f.projection === 'orthographic' ? 1 : 0;
     const vis = (id: string, g: string | undefined): boolean => st.visible(id, g);
     const hiTint = st.colors.highlight;
     const mode = st.mode;
+    // 0.7.0 모드: 숨은 선(바탕색 면 + 윤곽선)·단색·무늬 없음. 예전 모드에서는 모두 꺼진다
+    const flat = mode === 'hiddenLine';
+    const noTex = flat || mode === 'monochrome' || mode === 'noTexture';
+    const mono: Rgba | null = mode === 'monochrome' ? (st.colors.monochrome ?? MONO_COLOR) : null;
+    const shadedLike = mode === 'shaded' || mode === 'shadedEdges' || mode === 'hiddenLine' || mode === 'monochrome' || mode === 'noTexture';
+    /** 그물 셰이더에 더 넣을 정의 */
+    const meshExtra: string[] = flat ? ['FLAT'] : [];
+    const light = st.light ?? null;
+    const fog = st.fog ?? null;
+    if (light) meshExtra.push('SUN');
+    if (fog) meshExtra.push('FOG');
+    // 그림자는 깊이 그림을 그린 뒤에 SHADOW를 더한다(아래 1a)
+    let shadowOn = false;
     /** 묶음 로컬 좌표의 단면 평면(단면이 없으면 null) */
     const clipOf = (model: ArrayLike<number> | undefined): Plane4 | null => (sec ? planeToLocal(sec.plane, model) : null);
-
+    /** 여러 단면: 묶음 id를 자르는 평면들(로컬). 여러 단면이 아니면 null */
+    const clipsOf = (id: string, model: ArrayLike<number> | undefined): Plane4[] | null => (multi ? multi.of(id).map((i) => planeToLocal(multi.planes[i]!.plane, model)) : null);
+    // 묶음별 겉모습(없으면 모두 장면 그대로 — 아래 함수들은 예전 값을 그대로 돌려준다)
+    const look = st.look ?? null;
+    const lookOf = (id: string): ItemLook | undefined => (look ? look(id) : undefined);
+    const mm = (r: MeshRec): ArrayLike<number> | undefined => {
+      const m = lookOf(r.src.id)?.matrix;
+      return m ? this.lookModel(r, m, r.model).model : r.model;
+    };
+    const lm = (r: { lookM?: LookCache; model?: ArrayLike<number> }, id: string): ArrayLike<number> | undefined => {
+      const m = lookOf(id)?.matrix;
+      return m ? this.lookModel(r, m, r.model).model : r.model;
+    };
+    const bgFill: Rgba = [st.colors.background[0], st.colors.background[1], st.colors.background[2], 1];
+    const colOf = (r: MeshRec): Rgba => {
+      const c = lookOf(r.src.id)?.color ?? r.src.color;
+      if (flat) return bgFill;
+      return mono ? [mono[0], mono[1], mono[2], c[3]] : c;
+    };
+    const alphaOf = (id: string): number => lookOf(id)?.alpha ?? 1;
+    const texOfR = (r: MeshRec): WebGLTexture | null => (noTex || lookOf(r.src.id)?.color ? null : this.texOf(r));
+    const transOf = (r: MeshRec): boolean => {
+      if (flat) return false;
+      const l = lookOf(r.src.id);
+      if (!l) return r.transparent;
+      return (l.color ? l.color[3] < 0.999 : r.transparent) || (l.alpha ?? 1) < 0.999;
+    };
+    /** 겉모습 행렬을 반영한 세계 범위·가운데 */
+    const boxOf = (r: MeshRec): Box3 => {
+      const m = lookOf(r.src.id)?.matrix;
+      if (!m) return r.box;
+      const c = this.lookModel(r, m, r.model);
+      return (c.box ??= transformBox(r.box, m));
+    };
+    const centerOf = (r: MeshRec): V3 => {
+      const m = lookOf(r.src.id)?.matrix;
+      if (!m) return r.center;
+      const c = this.lookModel(r, m, r.model);
+      return (c.center ??= boxCenter(boxOf(r)));
+    };
+    const meshN = multi ? this.variant('mesh', ['CLIPN']) : null;
+    const meshTN = multi ? this.variant('mesh', ['CLIPN', 'TEX']) : null;
+    /** 잘린 면 홀짝 그리기 동안 쓸 단면 평면(세계, 여러 단면에서 평면 하나만으로 자를 때) */
+    let capPlane: Plane4 | null = null;
     // 그물 공통. 같은 값의 균일 변수는 다시 보내지 않는다(부품이 수천 개인 조립품에서 호출 수를 줄인다)
     // 그물 프로그램을 쓰기 시작할 때 meshUse()로 캐시를 비운다
     let cur: Prog = this.mesh;
@@ -1095,6 +1498,7 @@ export class Renderer3d {
     let lastFlags = '';
     let lastCull: boolean | undefined;
     let lastTex: WebGLTexture | null = null;
+    let lastClip = '#';
     const meshUse = (p: Prog): void => {
       cur = p;
       gl.useProgram(p.p);
@@ -1103,8 +1507,30 @@ export class Renderer3d {
       lastFlags = '';
       lastCull = undefined;
       lastTex = null;
+      lastClip = '#';
       gl.uniform1f(this.loc(p, 'u_ortho'), ortho);
-      if (p === this.meshT || p === this.meshTC) gl.uniform1i(this.loc(p, 'u_tex'), 0);
+      if (p.tex) gl.uniform1i(this.loc(p, 'u_tex'), 0);
+      if (p.sun && light) {
+        // 해 방향을 시점 공간으로(회전만)
+        const v = f.view, d = light.dir;
+        const sx = v[0]! * d[0] + v[4]! * d[1] + v[8]! * d[2], sy = v[1]! * d[0] + v[5]! * d[1] + v[9]! * d[2], sz = v[2]! * d[0] + v[6]! * d[1] + v[10]! * d[2];
+        const l = Math.hypot(sx, sy, sz) || 1;
+        gl.uniform3f(this.loc(p, 'u_sunDir'), sx / l, sy / l, sz / l);
+        gl.uniform3f(this.loc(p, 'u_sunCol'), light.color[0], light.color[1], light.color[2]);
+        gl.uniform1f(this.loc(p, 'u_amb'), light.ambient);
+      }
+      if (p.shadow && this.shadowMap) {
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, this.shadowMap.tex);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1i(this.loc(p, 'u_shadow'), 2);
+        gl.uniform2f(this.loc(p, 'u_shadowTexel'), 1 / this.shadowMap.size, 1 / this.shadowMap.size);
+        gl.uniform1f(this.loc(p, 'u_shadowBias'), st.shadow?.bias ?? 0.0015);
+      }
+      if (p.fog && fog) {
+        gl.uniform4f(this.loc(p, 'u_fogCol'), fog.color[0], fog.color[1], fog.color[2], 1);
+        gl.uniform2f(this.loc(p, 'u_fog'), fog.start, fog.end);
+      }
     };
     const setMeshMatrix = (model: ArrayLike<number> | undefined): void => {
       const p = cur;
@@ -1116,16 +1542,35 @@ export class Renderer3d {
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
       gl.uniformMatrix4fv(this.loc(p, 'u_mv'), false, this.m4b);
       gl.uniformMatrix3fv(this.loc(p, 'u_nmat'), false, this.m3);
-      if (p === this.meshC) {
-        const c = clipOf(model) ?? NO_CLIP;
+      if (p.shadow && this.shadowMap) {
+        // 깊이 그림 좌표 = [0, 1] 맞춤 · 빛 투영·시점 · 모형(double로 합친 뒤 float)
+        const lv = model ? mat4Mul(this.shadowMap.vp, model, this.d4a) : this.shadowMap.vp;
+        for (let i = 0; i < 16; i++) this.m4c[i] = lv[i]!;
+        for (let j = 0; j < 4; j++) for (let i = 0; i < 3; i++) this.m4c[j * 4 + i] = lv[j * 4 + i]! * 0.5 + lv[j * 4 + 3]! * 0.5;
+        gl.uniformMatrix4fv(this.loc(p, 'u_shadowM'), false, this.m4c);
+      }
+      // 무늬 단면 변종(CLIP+TEX)도 평면을 받는다(0.6.0까지는 빠져 무늬 그물이 단면에 잘리지 않았다)
+      if (p.clip1) {
+        const c = (capPlane ? planeToLocal(capPlane, model) : clipOf(model)) ?? NO_CLIP;
         gl.uniform4f(this.loc(p, 'u_clip'), c[0], c[1], c[2], c[3]);
       }
+    };
+    /** 여러 단면 변종이면 그물의 평면들을 올린다(묶음·행렬이 바뀔 때만) */
+    let clipMat: ArrayLike<number> | null | undefined;
+    const meshClips = (r: MeshRec, matrix: ArrayLike<number> | undefined): void => {
+      const p = cur;
+      if (!multi || !p.clipN) return;
+      const key = multi.of(r.src.id).join(',');
+      if (key === lastClip && clipMat === (matrix ?? null)) return;
+      lastClip = key;
+      clipMat = matrix ?? null;
+      this.setClips(p, clipsOf(r.src.id, matrix)!);
     };
     /** 그물 그리기. list를 주면 그 구간만(묶음 안 숨김·강조). 무늬 프로그램이면 그물의 무늬를 건다 */
     const meshDraw = (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null): void => {
       if (list && !list.total) return;
       const p = cur;
-      if (p === this.meshT || p === this.meshTC) {
+      if (p.tex) {
         const t = this.texOf(r);
         if (t !== lastTex) {
           lastTex = t;
@@ -1135,20 +1580,39 @@ export class Renderer3d {
         gl.uniform1f(this.loc(p, 'u_uvq'), r.uv === 3 ? 1 : 0);
         gl.uniform1f(this.loc(p, 'u_texAlpha'), r.texAlpha ? 1 : 0);
       }
+      if (p.back) {
+        const bc = r.back?.color;
+        if (bc) gl.uniform4f(this.loc(p, 'u_backColor'), bc[0], bc[1], bc[2], 1);
+        else gl.uniform4f(this.loc(p, 'u_backColor'), 0, 0, 0, -1);
+        // 거울 행렬(행렬식 < 0)이면 감김이 뒤집힌다
+        const M = matrix;
+        const det = M ? M[0]! * (M[5]! * M[10]! - M[6]! * M[9]!) - M[4]! * (M[1]! * M[10]! - M[2]! * M[9]!) + M[8]! * (M[1]! * M[6]! - M[2]! * M[5]!) : 1;
+        gl.uniform1f(this.loc(p, 'u_flipFace'), det < 0 ? 1 : 0);
+        if (p.backTex) {
+          gl.activeTexture(gl.TEXTURE3);
+          gl.bindTexture(gl.TEXTURE_2D, this.backTexOf(r));
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(this.loc(p, 'u_tex2'), 3);
+          gl.uniform1f(this.loc(p, 'u_uvq2'), r.back?.uv === 3 ? 1 : 0);
+          gl.uniform1f(this.loc(p, 'u_tex2Alpha'), r.back?.texAlpha ? 1 : 0);
+        }
+      }
       const m = matrix ?? null;
       if (m !== lastMat) {
         lastMat = m;
         setMeshMatrix(matrix);
       }
+      if (multi) meshClips(r, matrix);
       const ck = `${color[0]},${color[1]},${color[2]},${color[3]}`;
       if (ck !== lastCol) {
         lastCol = ck;
         gl.uniform4f(this.loc(p, 'u_color'), color[0], color[1], color[2], color[3]);
       }
-      const fk = `${r.hasColors ? 1 : 0}${r.hasNormals ? 1 : 0}|${tint}|${alpha}`;
+      const vcol = r.hasColors && !(look && lookOf(r.src.id)?.color) && !mono && !flat;
+      const fk = `${vcol ? 1 : 0}${r.hasNormals ? 1 : 0}|${tint}|${alpha}`;
       if (fk !== lastFlags) {
         lastFlags = fk;
-        gl.uniform1f(this.loc(p, 'u_vcol'), r.hasColors ? 1 : 0);
+        gl.uniform1f(this.loc(p, 'u_vcol'), vcol ? 1 : 0);
         gl.uniform1f(this.loc(p, 'u_hasNrm'), r.hasNormals ? 1 : 0);
         gl.uniform4f(this.loc(p, 'u_tint'), hiTint[0], hiTint[1], hiTint[2], tint);
         gl.uniform1f(this.loc(p, 'u_alpha'), alpha);
@@ -1180,9 +1644,22 @@ export class Renderer3d {
       stats.drawCalls++;
       stats.triangles += r.count / 3;
     };
-    const sceneMeshProg = (): Prog => (sec ? this.meshClip() : this.mesh);
-    /** 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종) */
-    const progFor = (r: MeshRec): Prog => (this.texOf(r) ? this.meshTex(!!sec) : sceneMeshProg());
+    /** 그물 프로그램: 단면(CLIP·CLIPN)·무늬(TEX)에 모드·조명 등 더 넣을 정의(extra)가 있으면 그 변종, 없으면 예전 프로그램 */
+    const progOf = (tex: boolean): Prog => {
+      if (!meshExtra.length) return tex ? (meshTN ?? this.meshTex(!!sec)) : (meshN ?? (sec ? this.meshClip() : this.mesh));
+      return this.variant('mesh', [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(tex ? ['TEX'] : [])]);
+    };
+    const sceneMeshProg = (): Prog => progOf(false);
+    const texProg = (): Prog => progOf(true);
+    /** 뒷면 변종이 필요한 그물인지(단색·숨은 선 모드, 색 바꾸기는 뒷면 없이) */
+    const backOf = (r: MeshRec): boolean => !!r.back && !mono && !flat && !lookOf(r.src.id)?.color && (!!r.back.color || (!noTex && !!this.backTexOf(r)));
+    /** 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종, 뒷면이 있으면 뒷면 변종) */
+    const progFor = (r: MeshRec): Prog => {
+      if (!backOf(r)) return texOfR(r) ? texProg() : sceneMeshProg();
+      const defs = [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(texOfR(r) ? ['TEX'] : []), 'BACK'];
+      if (!noTex && this.backTexOf(r)) defs.push('BACKTEX');
+      return this.variant('mesh', defs);
+    };
     /** 묶음 안 구간이 있으면 [보통, 강조] 그릴 목록(없으면 null — 옛 캐시는 지운다). wire면 와이어프레임용 */
     const meshLists = (r: MeshRec, wire = false): [DrawList, DrawList] | null => {
       const p = st.parts?.(r.src.id);
@@ -1196,44 +1673,116 @@ export class Renderer3d {
     /** 보통·강조로 나눠 그물 그리기(구간이 없으면 통째로) */
     const meshDrawParts = (r: MeshRec, color: Rgba, alpha: number, tint: number, cull: boolean): void => {
       const L = meshLists(r);
-      if (!L) meshDraw(r, r.model, color, alpha, tint, cull);
+      const model = mm(r);
+      if (!L) meshDraw(r, model, color, alpha, tint, cull);
       else {
-        meshDraw(r, r.model, color, alpha, tint, cull, L[0]);
-        meshDraw(r, r.model, color, alpha, 0.5, cull, L[1]);
+        meshDraw(r, model, color, alpha, tint, cull, L[0]);
+        meshDraw(r, model, color, alpha, 0.5, cull, L[1]);
       }
     };
 
     const visibleMeshes = this.meshes.filter((r) => vis(r.src.id, r.src.group));
 
+    // 1a) 해 그림자 깊이 그림(판이 바뀌었을 때만 다시): 불투명 그물을 해 쪽 평행 투영으로
+    if (light && st.shadow && shadedLike && !flat) {
+      const sh = st.shadow;
+      let m = this.shadowMap;
+      // 크기: 256 ~ min(8192, GPU 무늬 한도), 수가 아니면 2048. 만들지 못한 크기는 다시 시도하지 않는다(그림자 없이)
+      const maxTex = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
+      const size = Math.max(256, Math.min(8192, maxTex, Number.isFinite(sh.size) ? Math.round(sh.size) : 2048));
+      if ((!m || m.size !== size) && this.shadowFailed !== size) {
+        m = this.makeShadowMap(size);
+        if (!m) this.shadowFailed = size;
+      }
+      if (m && m.version !== sh.version) {
+        const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+        m.vp = this.lightViewProj(light.dir, sh.box);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, m.fb);
+        gl.viewport(0, 0, size, size);
+        gl.clearDepth(1);
+        gl.depthMask(true);
+        gl.clear(gl.DEPTH_BUFFER_BIT);
+        gl.colorMask(false, false, false, false);
+        gl.enable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.enable(gl.POLYGON_OFFSET_FILL);
+        gl.polygonOffset(2, 4);
+        const dp = this.variant('depth', multi ? ['CLIPN'] : sec ? ['CLIP'] : []);
+        gl.useProgram(dp.p);
+        for (const r of visibleMeshes) {
+          if (transOf(r)) continue;
+          const model = mm(r);
+          const lv = model ? mat4Mul(m.vp, model, this.d4a) : m.vp;
+          this.m4a.set(lv);
+          gl.uniformMatrix4fv(this.loc(dp, 'u_mvp'), false, this.m4a);
+          if (sec) {
+            const c = clipOf(model)!;
+            gl.uniform4f(this.loc(dp, 'u_clip'), c[0], c[1], c[2], c[3]);
+          }
+          if (multi) this.setClips(dp, clipsOf(r.src.id, model)!);
+          const L = meshLists(r);
+          if (!L) this.drawMeshGeometry(r, null);
+          else for (const l of L) this.drawMeshGeometry(r, l);
+        }
+        gl.disable(gl.POLYGON_OFFSET_FILL);
+        gl.colorMask(true, true, true, true);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+        gl.viewport(0, 0, devW, devH);
+        m.version = sh.version;
+      }
+      shadowOn = !!m && m.size === size;
+    } else if (this.shadowMap) this.dropShadow();
+    // 외곽선을 끄면 깊이 그림 버퍼도 놓는다
+    if (!st.profiles && this.profTex) this.dropProfile();
+
     // 1) 불투명 면(무늬 없는 것 먼저, 그다음 올린 무늬가 있는 것 — 프로그램을 한 번씩만 바꾼다)
-    if (mode === 'shaded' || mode === 'shadedEdges') {
+    if (shadedLike) {
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1, 1);
       let textured = false;
       meshUse(sceneMeshProg());
+      let backs = false;
       for (const r of visibleMeshes) {
-        if (r.transparent) continue;
-        if (this.texOf(r)) {
+        if (transOf(r)) continue;
+        if (r.back && backOf(r)) {
+          backs = true;
+          continue;
+        }
+        if (texOfR(r)) {
           textured = true;
           continue;
         }
-        meshDrawParts(r, r.src.color, 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+        meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
       if (textured) {
-        meshUse(this.meshTex(!!sec));
+        meshUse(texProg());
         for (const r of visibleMeshes)
-          if (!r.transparent && this.texOf(r)) meshDrawParts(r, r.src.color, 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+          if (!transOf(r) && texOfR(r) && !(r.back && backOf(r))) meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
+      // 뒷면 색·무늬가 있는 그물(그물마다 맞는 변종)
+      if (backs)
+        for (const r of visibleMeshes) {
+          if (transOf(r) || !r.back || !backOf(r)) continue;
+          const p = progFor(r);
+          if (p !== cur) meshUse(p);
+          meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+        }
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
       // 1b) 잘린 면 채우기
-      if (capsOn && sec) this.drawCaps(f, devW, devH, sec, visibleMeshes, st, stats, meshUse, meshDraw, () => cur, (r) => meshLists(r));
+      if (capsOn) {
+        // 반투명·범위·색은 겉모습·모드(숨은 선·단색)를 반영한 값으로(겉모습이 없고 예전 모드면 장면 값 그대로)
+        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf });
+        const plain = meshExtra.length ? this.variant('mesh', [...meshExtra, ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('mesh', ['CLIPN']) : this.mesh;
+        if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, (r) => meshLists(r), (pl) => (capPlane = pl), mm, plain);
+      }
     }
 
     // 1c) 단면 테두리(교선): 면 위에 깊이를 따져 굵게
-    if (sec && this.cutSeg) {
+    const cutStyle = multi ?? sec;
+    if (cutStyle && this.cutSeg) {
       gl.enable(gl.BLEND);
-      this.drawLines(f, this.cutSeg, this.cutSeg.model, { color: sec.color, vcol: false, width: sec.width, dashed: false, alpha: 1, first: 0, count: this.cutSeg.n, bias: 2e-5 }, st, stats);
+      this.drawLines(f, this.cutSeg, this.cutSeg.model, { color: cutStyle.color, vcol: false, width: cutStyle.width, dashed: false, alpha: 1, first: 0, count: this.cutSeg.n, bias: 2e-5 }, st, stats);
       gl.disable(gl.BLEND);
     }
 
@@ -1243,35 +1792,45 @@ export class Renderer3d {
       gl.enable(gl.BLEND);
       for (const r of visibleMeshes) {
         const hi = st.highlight.has(r.src.id);
-        const c = r.src.color;
-        const col: Rgba = hi ? hiTint : mode === 'shadedEdges' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
+        const c = colOf(r);
+        const col: Rgba = hi ? hiTint : flat ? st.colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
+        const model = mm(r);
         if (r.edges) {
           const ep = st.parts?.(r.src.id);
           const eparts = ep?.edges;
-          const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: 1, clip: clipOf(r.model) };
+          const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaOf(r.src.id), clip: clipOf(model), clips: clipsOf(r.src.id, model) };
           if (!ep || !eparts) {
             if (r.edges.parts) this.dropParts(r.edges);
-            this.drawLines(f, r.edges, r.model, { ...eo, first: 0, count: r.edges.n }, st, stats);
+            this.drawLines(f, r.edges, model, { ...eo, first: 0, count: r.edges.n }, st, stats);
           } else {
             // 윤곽선 구간(숨김·강조)
             const c = this.partCache(r.edges, ep.ver);
-            this.drawLineList(f, r.edges, r.model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
-            this.drawLineList(f, r.edges, r.model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
+            this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
+            this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
           }
-        } else if (mode === 'wireframe') {
+        } else if (mode === 'wireframe' || flat) {
           // 윤곽선이 없는 그물: 삼각형 변(X-ray에서는 반투명 면만)
           const w = this.wireOf(r);
-          const clip = clipOf(r.model);
-          const p = clip ? this.thinClip() : this.thinP;
+          const clip = clipOf(model);
+          const wclips = clipsOf(r.src.id, model);
+          const p = fog
+            ? this.variant('thin', ['FOG', ...(wclips ? ['CLIPN'] : clip ? ['CLIP'] : [])])
+            : wclips
+              ? this.variant('thin', ['CLIPN'])
+              : clip
+                ? this.thinClip()
+                : this.thinP;
           gl.useProgram(p.p);
-          this.m4a.set(r.model ? mat4Mul(f.viewProj, r.model, this.d4a) : f.viewProj);
+          this.m4a.set(model ? mat4Mul(f.viewProj, model, this.d4a) : f.viewProj);
           gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
           gl.uniform4f(this.loc(p, 'u_color'), col[0], col[1], col[2], col[3]);
           gl.uniform1f(this.loc(p, 'u_vcol'), 0);
-          gl.uniform1f(this.loc(p, 'u_alpha'), 1);
+          gl.uniform1f(this.loc(p, 'u_alpha'), alphaOf(r.src.id));
           gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
           gl.uniform1f(this.loc(p, 'u_bias'), 0);
           if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+          if (wclips) this.setClips(p, wclips);
+          if (fog) this.setLineFog(p, f, model, fog);
           const L = meshLists(r, true);
           if (!L) {
             gl.bindVertexArray(w.vao);
@@ -1300,6 +1859,71 @@ export class Renderer3d {
       gl.disable(gl.BLEND);
     }
 
+    // 2b) 숨은 선 모드: 면 뒤 윤곽선을 흐린 점선으로(깊이 비교를 뒤집어)
+    if (flat && st.hiddenEdges && st.hiddenEdges > 0) {
+      gl.enable(gl.BLEND);
+      gl.depthFunc(gl.GREATER);
+      gl.depthMask(false);
+      for (const r of visibleMeshes) {
+        if (!r.edges) continue;
+        const model = mm(r);
+        this.drawLines(f, r.edges, model, { color: st.colors.line, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges, first: 0, count: r.edges.n, clip: clipOf(model), clips: clipsOf(r.src.id, model) }, st, stats);
+      }
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      gl.disable(gl.BLEND);
+    }
+
+    // 2c) 외곽선(실루엣): 불투명 그물만 깊이 그림에 따로 그려 깊이가 끊기는 곳을 칠한다
+    if (st.profiles && shadedLike && visibleMeshes.length) {
+      const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+      const fb = this.profileTarget(devW, devH);
+      if (fb) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.viewport(0, 0, devW, devH);
+        gl.clearDepth(1);
+        gl.depthMask(true);
+        gl.clear(gl.DEPTH_BUFFER_BIT);
+        gl.colorMask(false, false, false, false);
+        const dc = stats.drawCalls, tr = stats.triangles;
+        meshUse(sceneMeshProg());
+        for (const r of visibleMeshes) {
+          if (transOf(r)) continue;
+          const p = progFor(r);
+          if (p !== cur) meshUse(p);
+          meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
+        }
+        gl.disable(gl.CULL_FACE);
+        stats.drawCalls = dc;
+        stats.triangles = tr;
+        gl.colorMask(true, true, true, true);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+        gl.viewport(0, 0, devW, devH);
+        const pp = (this.profileP ??= this.program(FULL_VS, PROFILE_FS));
+        gl.useProgram(pp.p);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, this.profTex!.tex);
+        gl.uniform1i(this.loc(pp, 'u_depth'), 1);
+        gl.uniform2f(this.loc(pp, 'u_texel'), 1 / devW, 1 / devH);
+        gl.uniform1f(this.loc(pp, 'u_r'), Math.max(1, st.profiles.width / 2));
+        const pc = st.profiles.color;
+        gl.uniform4f(this.loc(pp, 'u_color'), pc[0], pc[1], pc[2], pc[3]);
+        gl.uniform1f(this.loc(pp, 'u_ortho'), ortho);
+        gl.disable(gl.DEPTH_TEST);
+        gl.depthMask(false);
+        gl.enable(gl.BLEND);
+        gl.bindVertexArray(this.emptyVao);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        stats.drawCalls++;
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+        gl.enable(gl.DEPTH_TEST);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE0);
+        lastTex = null;
+      }
+    }
+
     // 3) 선분 묶음
     for (const r of this.lines) {
       const l = r.src;
@@ -1307,18 +1931,21 @@ export class Renderer3d {
       const hi = st.highlight.has(l.id);
       const range = st.ranges.get(l.id);
       const count = range ? Math.max(0, Math.min(r.n, Math.floor(range.count))) : r.n;
-      const color = l.color ?? st.colors.line;
-      const base = { color: hi ? hiTint : color, vcol: !!r.col && !hi, width: (l.width ?? 1) + (hi ? 1 : 0), dashed: !!l.dashed, clip: clipOf(r.model) };
-      const blend = (l.color?.[3] ?? 1) < 1 || !!r.col;
+      const lo = lookOf(l.id);
+      const color = lo?.color ?? l.color ?? st.colors.line;
+      const model = lm(r, l.id);
+      const la = lo?.alpha ?? 1;
+      const base = { color: hi ? hiTint : color, vcol: !!r.col && !hi && !lo?.color, width: (l.width ?? 1) + (hi ? 1 : 0), dashed: !!l.dashed, clip: clipOf(model), clips: clipsOf(l.id, model) };
+      const blend = (lo?.color ? lo.color[3] < 1 : (l.color?.[3] ?? 1) < 1 || !!r.col) || la < 1;
       const p = st.parts?.(l.id);
       if (!p && r.parts) this.dropParts(r);
       if (blend) gl.enable(gl.BLEND);
       if (!p) {
-        if (count > 0) this.drawLines(f, r, r.model, { ...base, alpha: 1, first: 0, count }, st, stats);
+        if (count > 0) this.drawLines(f, r, model, { ...base, alpha: la, first: 0, count }, st, stats);
         if (range && range.ghost > 0 && count < r.n) {
           gl.enable(gl.BLEND);
           gl.depthMask(false);
-          this.drawLines(f, r, r.model, { ...base, alpha: range.ghost, first: count, count: r.n - count }, st, stats);
+          this.drawLines(f, r, model, { ...base, alpha: range.ghost * la, first: count, count: r.n - count }, st, stats);
           gl.depthMask(true);
         }
       } else {
@@ -1328,14 +1955,14 @@ export class Renderer3d {
         const lh = this.lineList(r, c, p.prims, true, l.positions, l.colors);
         const hiBase = { ...base, color: hiTint, vcol: false, width: (l.width ?? 1) + 1 };
         if (count > 0) {
-          this.drawLineList(f, r, r.model, ln, 0, count, { ...base, alpha: 1 }, st, stats);
-          this.drawLineList(f, r, r.model, lh, 0, count, { ...hiBase, alpha: 1 }, st, stats);
+          this.drawLineList(f, r, model, ln, 0, count, { ...base, alpha: la }, st, stats);
+          this.drawLineList(f, r, model, lh, 0, count, { ...hiBase, alpha: la }, st, stats);
         }
         if (range && range.ghost > 0 && count < r.n) {
           gl.enable(gl.BLEND);
           gl.depthMask(false);
-          this.drawLineList(f, r, r.model, ln, count, r.n, { ...base, alpha: range.ghost }, st, stats);
-          this.drawLineList(f, r, r.model, lh, count, r.n, { ...hiBase, alpha: range.ghost }, st, stats);
+          this.drawLineList(f, r, model, ln, count, r.n, { ...base, alpha: range.ghost * la }, st, stats);
+          this.drawLineList(f, r, model, lh, count, r.n, { ...hiBase, alpha: range.ghost * la }, st, stats);
           gl.depthMask(true);
         }
       }
@@ -1344,7 +1971,7 @@ export class Renderer3d {
 
     // 4) 점
     if (this.points.length) {
-      const p = this.pointP;
+      const p = fog ? this.variant('point', ['FOG', ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('point', ['CLIPN']) : this.pointP;
       gl.useProgram(p.p);
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, vpF);
       gl.uniform2f(this.loc(p, 'u_viewport'), devW, devH);
@@ -1354,16 +1981,21 @@ export class Renderer3d {
       for (const r of this.points) {
         if (!vis(r.src.id, r.src.group) || !r.n) continue;
         const hi = st.highlight.has(r.src.id);
-        const c = hi ? hiTint : r.src.color ?? st.colors.point;
-        if (r.model || shifted) {
-          this.m4a.set(r.model ? mat4Mul(f.viewProj, r.model, this.d4a) : f.viewProj);
+        const po = lookOf(r.src.id);
+        const c0 = hi ? hiTint : po?.color ?? r.src.color ?? st.colors.point;
+        const c: Rgba = po?.alpha !== undefined && po.alpha < 1 ? [c0[0], c0[1], c0[2], c0[3] * po.alpha] : c0;
+        const model = lm(r, r.src.id);
+        if (model || shifted) {
+          this.m4a.set(model ? mat4Mul(f.viewProj, model, this.d4a) : f.viewProj);
           gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
-          shifted = !!r.model;
+          shifted = !!model;
         }
         if (sec) {
-          const k = clipOf(r.model)!;
+          const k = clipOf(model)!;
           gl.uniform4f(this.loc(p, 'u_clip'), k[0], k[1], k[2], k[3]);
         }
+        if (multi) this.setClips(p, clipsOf(r.src.id, model)!);
+        if (fog) this.setLineFog(p, f, model, fog);
         const draw = (vao: WebGLVertexArrayObject, n: number, c: Rgba, big: boolean): void => {
           gl.uniform1f(this.loc(p, 'u_size'), Math.max(1, (r.src.size ?? 4) * st.dpr + (big ? 2 * st.dpr : 0)));
           gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
@@ -1400,7 +2032,7 @@ export class Renderer3d {
     if (st.segHighlight && this.hiSeg) {
       const s = st.segHighlight;
       const r = this.hiSeg;
-      const base = { color: s.color, vcol: false, width: s.width, dashed: false, first: 0, count: r.n, clip: clipOf(r.model) };
+      const base = { color: s.color, vcol: false, width: s.width, dashed: false, first: 0, count: r.n, clip: clipOf(r.model), clips: clipsOf('__hiseg', r.model) };
       gl.enable(gl.BLEND);
       if (s.hidden > 0) {
         gl.depthFunc(gl.GREATER);
@@ -1448,13 +2080,13 @@ export class Renderer3d {
 
     // 7) 반투명 면(X-ray 포함): 뒤에서 앞으로
     const xray = mode === 'xray';
-    const trans = mode === 'wireframe' ? [] : visibleMeshes.filter((r) => xray || r.transparent);
+    const trans = mode === 'wireframe' || flat ? [] : visibleMeshes.filter((r) => xray || transOf(r));
     if (trans.length) {
       const eye = f.eye;
       const fwd: V3 = [-f.basis.back[0], -f.basis.back[1], -f.basis.back[2]];
       // center는 이미 세계 좌표(행렬·원점을 거친 범위의 가운데)
       const depth = (r: MeshRec): number => {
-        const c = r.center;
+        const c = centerOf(r);
         return (c[0] - eye[0]) * fwd[0] + (c[1] - eye[1]) * fwd[1] + (c[2] - eye[2]) * fwd[2];
       };
       trans.sort((a, b) => depth(b) - depth(a));
@@ -1464,8 +2096,25 @@ export class Renderer3d {
       for (const r of trans) {
         const p = progFor(r);
         if (p !== cur) meshUse(p);
-        meshDrawParts(r, r.src.color, xray ? 0.22 : 1, st.highlight.has(r.src.id) ? 0.5 : 0, false);
+        meshDrawParts(r, colOf(r), (xray ? 0.22 : 1) * alphaOf(r.src.id), st.highlight.has(r.src.id) ? 0.5 : 0, false);
       }
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+
+    // 8) 앱 측정 덧그림 선: 가려진 부분은 흐리게(깊이 비교를 뒤집어), 보이는 부분은 깊이를 따져 또렷하게. 단면으로 자르지 않는다
+    if (st.annotations && this.annoSeg) {
+      const a = st.annotations;
+      const r = this.annoSeg;
+      const base = { color: [1, 1, 1, 1] as Rgba, vcol: true, width: a.width, dashed: false, first: 0, count: r.n, noFog: true };
+      gl.enable(gl.BLEND);
+      gl.depthMask(false);
+      if (a.hidden > 0) {
+        gl.depthFunc(gl.GREATER);
+        this.drawLines(f, r, r.model, { ...base, alpha: a.hidden }, st, stats);
+        gl.depthFunc(gl.LEQUAL);
+      }
+      this.drawLines(f, r, r.model, { ...base, alpha: 1, bias: 2e-5 }, st, stats);
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }
@@ -1473,35 +2122,87 @@ export class Renderer3d {
   }
 
   /**
-   * 잘린 면 채우기(스텐실 홀짝). 그물마다: 화면 사각형만 스텐실을 비우고 → 잘린 그물을 색·깊이 없이 뒤집어 그리고(INVERT) →
-   * 스텐실이 1인 곳에 평면 ∩ 범위 다각형을 칠한다. 닫힌 그물이면 1인 화소는 평면 위 입체 안쪽뿐이다.
+   * 잘린 면을 채울 단위: 그물 하나(Mesh3d.closed 또는 caps 'all'), 또는 같은 capGroup의 불투명 그물들(재질별로 나뉜 닫힌 입체).
+   * 평면 하나(section)면 그 평면, 여러 평면(sections)이면 평면마다 그 평면이 자르는 그물로 만들고, 다른 평면들은 채운 면을 자르는 데 쓴다.
+   * capGroup이 없는 장면은 예전과 같은 차례·같은 그물이다.
+   */
+  private capUnits(
+    meshes: readonly MeshRec[],
+    sec: SectionDraw | null,
+    multi: SectionsDraw | null,
+    lk: { trans: (r: MeshRec) => boolean; box: (r: MeshRec) => Box3; color: (r: MeshRec) => Rgba } | null,
+  ): CapUnit[] {
+    const out: CapUnit[] = [];
+    const trans = (r: MeshRec): boolean => (lk ? lk.trans(r) : r.transparent);
+    const boxOf = (r: MeshRec): Box3 => (lk ? lk.box(r) : r.box);
+    const colOf = (r: MeshRec): Rgba => (lk ? lk.color(r) : r.src.color);
+    const build = (plane: Plane4, caps: 'closed' | 'all' | 'none', inScope: (r: MeshRec) => boolean, others: (r: MeshRec) => Plane4[]): void => {
+      if (caps === 'none') return;
+      const groups = new Map<string, CapUnit>();
+      for (const r of meshes) {
+        if (trans(r) || !inScope(r)) continue;
+        const g = r.src.capGroup;
+        if (g !== undefined) {
+          const u = groups.get(g);
+          if (u) {
+            u.meshes.push(r);
+            u.box = unionBox(u.box, boxOf(r));
+          } else {
+            const nu: CapUnit = { meshes: [r], box: boxOf(r), plane, others: others(r), color: colOf(r), group: true };
+            groups.set(g, nu);
+            out.push(nu);
+          }
+          continue;
+        }
+        if ((caps === 'all' || r.src.closed === true) && boxStraddles(boxOf(r), plane)) out.push({ meshes: [r], box: boxOf(r), plane, others: others(r), color: colOf(r), group: false });
+      }
+      // 묶음 단위는 합친 범위가 평면을 걸칠 때만
+      for (let i = out.length - 1; i >= 0; i--) if (out[i]!.group && out[i]!.plane === plane && !boxStraddles(out[i]!.box, plane)) out.splice(i, 1);
+    };
+    if (multi)
+      multi.planes.forEach((q, k) =>
+        build(
+          q.plane,
+          q.caps,
+          (r) => multi.of(r.src.id).includes(k),
+          (r) => multi.of(r.src.id).filter((i) => i !== k).map((i) => multi.planes[i]!.plane),
+        ),
+      );
+    else if (sec) build(sec.plane, sec.caps, () => true, () => []);
+    return out;
+  }
+
+  /**
+   * 잘린 면 채우기(스텐실 홀짝). 단위마다: 화면 사각형만 스텐실을 비우고 → 그 평면 하나로만 자른 그물(들)을 색·깊이 없이 뒤집어 그리고(INVERT) →
+   * 스텐실이 1인 곳에 평면 ∩ 범위 다각형을 칠한다(여러 평면이면 다른 평면들로 다각형을 자른다). 닫힌 그물이면 1인 화소는 평면 위 입체 안쪽뿐이다.
    */
   private drawCaps(
     f: ViewFrame,
     devW: number,
     devH: number,
-    sec: SectionDraw,
-    meshes: readonly MeshRec[],
+    units: readonly CapUnit[],
+    multi: SectionsDraw | null,
     st: RenderState,
     stats: RenderStats,
     meshUse: (p: Prog) => void,
     meshDraw: (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null) => void,
     current: () => Prog,
     lists: (r: MeshRec) => [DrawList, DrawList] | null,
+    setCapPlane: (p: Plane4 | null) => void,
+    modelOf: (r: MeshRec) => ArrayLike<number> | undefined,
+    plainP: Prog,
   ): void {
     const gl = this.gl;
-    const list = meshes.filter((r) => !r.transparent && (sec.caps === 'all' || r.src.closed === true) && boxStraddles(r.box, sec.plane));
-    if (!list.length) return;
     const clipP = this.meshClip();
-    const plainP = this.mesh;
+    const secColor = multi ? multi.color : st.section!.color;
     gl.enable(gl.STENCIL_TEST);
     gl.enable(gl.SCISSOR_TEST);
     gl.stencilMask(0xff);
     const ortho = f.projection === 'orthographic' ? 1 : 0;
-    for (const r of list) {
-      const poly = planeBoxPolygon(r.box, sec.plane);
+    for (const u of units) {
+      const poly = planeBoxPolygon(u.box, u.plane);
       if (poly.length < 3 || poly.length > CAP_MAX_VERTS) continue;
-      const rect = this.screenRect(f, r.box, devW, devH);
+      const rect = this.screenRect(f, u.box, devW, devH);
       if (!rect) continue;
       gl.scissor(rect.x, rect.y, rect.w, rect.h);
       gl.clear(gl.STENCIL_BUFFER_BIT);
@@ -1511,14 +2212,18 @@ export class Renderer3d {
       gl.disable(gl.DEPTH_TEST);
       gl.stencilFunc(gl.ALWAYS, 0, 1);
       gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+      if (multi) setCapPlane(u.plane);
       if (current() !== clipP) meshUse(clipP);
       // 화면에 보이는 그리기가 아니므로 통계에서 뺀다
       const dc = stats.drawCalls, tr = stats.triangles;
-      const L = lists(r);
-      if (!L) meshDraw(r, r.model, r.src.color, 1, 0, false);
-      else for (const l of L) meshDraw(r, r.model, r.src.color, 1, 0, false, l);
+      for (const r of u.meshes) {
+        const L = lists(r);
+        if (!L) meshDraw(r, modelOf(r), r.src.color, 1, 0, false);
+        else for (const l of L) meshDraw(r, modelOf(r), r.src.color, 1, 0, false, l);
+      }
       stats.drawCalls = dc;
       stats.triangles = tr;
+      if (multi) setCapPlane(null);
       // 채우기: 평면 다각형(가운데 기준 좌표 + 이동 행렬 — 큰 좌표에서도 정밀)
       gl.colorMask(true, true, true, true);
       gl.depthMask(true);
@@ -1539,19 +2244,21 @@ export class Renderer3d {
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, d, 0, poly.length * 3);
       meshUse(plainP);
       gl.uniform1f(this.loc(plainP, 'u_ortho'), ortho);
-      const mv = mat4Mul(f.view, translation(c), this.d4a);
+      const T = translation(c);
+      const mv = mat4Mul(f.view, T, this.d4a);
       this.m4a.set(mat4Mul(f.proj, mv, this.d4b));
       this.m4b.set(mv);
       normalMatrix(mv, this.m3);
       gl.uniformMatrix4fv(this.loc(plainP, 'u_mvp'), false, this.m4a);
       gl.uniformMatrix4fv(this.loc(plainP, 'u_mv'), false, this.m4b);
       gl.uniformMatrix3fv(this.loc(plainP, 'u_nmat'), false, this.m3);
-      const mc = r.src.color, sc = sec.color;
+      if (multi) this.setClips(plainP, u.others.map((q) => planeToLocal(q, T)));
+      const mc = u.color, sc = secColor;
       const k = 0.25;
       gl.uniform4f(this.loc(plainP, 'u_color'), mc[0] + (sc[0] - mc[0]) * k, mc[1] + (sc[1] - mc[1]) * k, mc[2] + (sc[2] - mc[2]) * k, 1);
       gl.uniform1f(this.loc(plainP, 'u_vcol'), 0);
       gl.uniform1f(this.loc(plainP, 'u_hasNrm'), 0);
-      const hi = st.highlight.has(r.src.id) ? 0.5 : 0;
+      const hi = u.meshes.some((r) => st.highlight.has(r.src.id)) ? 0.5 : 0;
       const ht = st.colors.highlight;
       gl.uniform4f(this.loc(plainP, 'u_tint'), ht[0], ht[1], ht[2], hi);
       gl.uniform1f(this.loc(plainP, 'u_alpha'), 1);
@@ -1575,23 +2282,28 @@ export class Renderer3d {
     f: ViewFrame,
     r: LineRec,
     matrix: ArrayLike<number> | undefined,
-    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number; bias?: number; clip?: Plane4 | null },
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean },
     st: RenderState,
     stats: RenderStats,
   ): void {
     const gl = this.gl;
     if (o.count <= 0) return;
+    const clips = o.clips ?? null;
     const mvp = this.m4a;
     mvp.set(matrix ? mat4Mul(f.viewProj, matrix, this.d4a) : f.viewProj);
     const wDev = o.width * st.dpr;
     const fast = st.interacting && r.n > FAST_LINES_WHILE_MOVING;
     const wide = !fast && (o.dashed || wDev > 1.01);
     const clip = o.clip ?? null;
+    const fog = !o.noFog && st.fog ? st.fog : null;
     if (wide) {
-      const p = this.wideP;
+      const p = fog ? this.variant('wide', ['FOG', ...(clips ? ['CLIPN'] : [])]) : clips ? this.variant('wide', ['CLIPN']) : this.wideP;
       gl.useProgram(p.p);
+      if (clips) this.setClips(p, clips);
+      if (fog) this.setLineFog(p, f, matrix, fog);
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-      gl.uniform2f(this.loc(p, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
+      if (st.viewport) gl.uniform2f(this.loc(p, 'u_viewport'), st.viewport[0], st.viewport[1]);
+      else gl.uniform2f(this.loc(p, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
       gl.uniform1f(this.loc(p, 'u_width'), wDev);
       gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
       gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
@@ -1606,8 +2318,16 @@ export class Renderer3d {
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, o.count);
       if (o.first) this.bindWide(r.pos, r.col, 0);
     } else {
-      const p = clip ? this.thinClip() : this.thinP;
+      const p = fog
+        ? this.variant('thin', ['FOG', ...(clips ? ['CLIPN'] : clip ? ['CLIP'] : [])])
+        : clips
+          ? this.variant('thin', ['CLIPN'])
+          : clip
+            ? this.thinClip()
+            : this.thinP;
       gl.useProgram(p.p);
+      if (clips) this.setClips(p, clips);
+      if (fog) this.setLineFog(p, f, matrix, fog);
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
       gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
       gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);

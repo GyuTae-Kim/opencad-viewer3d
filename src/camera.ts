@@ -1,6 +1,6 @@
 /**
  * 카메라: 대상점 둘레 턴테이블(방위각 yaw = Z축 둘레, 앙각 pitch ∈ [−90°, 90°]).
- * Z가 위인 CAD 습관(AutoCAD 3DORBIT 제한 궤도)에 맞춘다. 굴림(roll)은 없다.
+ * Z가 위인 CAD 습관(AutoCAD 3DORBIT 제한 궤도)에 맞춘다. 굴림(roll)·렌즈 이동(shiftX·shiftY)은 0.7.0에서 더한 선택 값(없으면 0).
  *
  * yaw = 0, pitch = 0 이면 앞(−Y 쪽)에서 +Y를 본다(화면 오른쪽 = +X, 위 = +Z).
  * 눈 방향(대상 → 눈) = (sin yaw·cos pitch, −cos yaw·cos pitch, sin pitch)
@@ -26,6 +26,14 @@ export interface CameraState {
   projection: Projection;
   /** 세로 시야각(라디안) */
   fovY: number;
+  /** 굴림(라디안, 0.7.0 선택): 화면 위 방향을 보는 축 둘레로 돌린다(+면 카메라가 반시계로 기울어 장면은 시계로 돈다). 없으면 0 */
+  roll?: number;
+  /**
+   * 렌즈 이동(0.7.0 선택, 정규 장치 좌표 — 화면 반폭·반높이의 몇 배): 보는 방향은 그대로 두고 그림만 옮긴다(축 어긋난 투영).
+   * 2점 투시(세로선을 곧게)는 앙각 0으로 보고 shiftY로 올린다. 없으면 0
+   */
+  shiftX?: number;
+  shiftY?: number;
 }
 
 export interface CameraBasis {
@@ -78,7 +86,18 @@ export function basisFromAngles(yaw: number, pitch: number): CameraBasis {
   return { right, up, back };
 }
 
-export const cameraBasis = (c: CameraState): CameraBasis => basisFromAngles(c.yaw, c.pitch);
+/** 카메라 틀(굴림 포함) */
+export function cameraBasis(c: CameraState): CameraBasis {
+  const b = basisFromAngles(c.yaw, c.pitch);
+  const r = c.roll;
+  if (!r) return b;
+  const cr = Math.cos(r), sr = Math.sin(r);
+  return {
+    right: [b.right[0] * cr + b.up[0] * sr, b.right[1] * cr + b.up[1] * sr, b.right[2] * cr + b.up[2] * sr],
+    up: [b.up[0] * cr - b.right[0] * sr, b.up[1] * cr - b.right[1] * sr, b.up[2] * cr - b.right[2] * sr],
+    back: b.back,
+  };
+}
 
 export function cameraEye(c: CameraState): V3 {
   return add(c.target, scale(cameraBasis(c).back, c.distance));
@@ -119,6 +138,8 @@ export interface ViewFrame {
   pixelPerDepth: number;
   /** 평행: 한 화소의 세계 길이 */
   pixelConst: number;
+  /** 렌즈 이동(정규 장치 좌표, 0.7.0 — 없으면 0) */
+  shift?: readonly [number, number];
 }
 
 export function viewMatrix(eye: V3, b: CameraBasis): Mat4 {
@@ -169,11 +190,19 @@ export function computeFrame(c: CameraState, width: number, height: number, sphe
     const hh = c.distance * tanV;
     proj = orthographic(-hh * aspect, hh * aspect, -hh, hh, near, far);
   }
+  // 렌즈 이동: 정규 장치 좌표에서 (sx, sy)만큼 — 클립 x·y에 w의 그 배수를 더한다
+  const sx = c.shiftX ?? 0, sy = c.shiftY ?? 0;
+  if (sx || sy) for (let j = 0; j < 4; j++) {
+    proj[j * 4] = proj[j * 4]! + sx * proj[j * 4 + 3]!;
+    proj[j * 4 + 1] = proj[j * 4 + 1]! + sy * proj[j * 4 + 3]!;
+  }
   const viewProj = mat4Mul(proj, view);
   const invViewProj = mat4Invert(viewProj) ?? new Float64Array(16);
   const pixelPerDepth = (2 * tanV) / h;
   const pixelConst = (2 * c.distance * tanV) / h;
-  return { width: w, height: h, projection: c.projection, eye, basis, view, proj, viewProj, invViewProj, near, far, pixelPerDepth, pixelConst };
+  const out: ViewFrame = { width: w, height: h, projection: c.projection, eye, basis, view, proj, viewProj, invViewProj, near, far, pixelPerDepth, pixelConst };
+  if (sx || sy) out.shift = [sx, sy];
+  return out;
 }
 
 /**
@@ -310,7 +339,7 @@ export function zoomCamera(c: CameraState, factor: number, anchor: readonly numb
 /** 두 카메라 사이 보간(t ∈ [0, 1]). yaw는 짧은 쪽으로 돈다 */
 export function lerpCamera(a: CameraState, b: CameraState, t: number): CameraState {
   const dy = wrapAngle(b.yaw - a.yaw);
-  return {
+  const out: CameraState = {
     target: lerp3(a.target, b.target, t),
     distance: Math.exp(Math.log(a.distance) + (Math.log(b.distance) - Math.log(a.distance)) * t),
     yaw: wrapAngle(a.yaw + dy * t),
@@ -318,4 +347,57 @@ export function lerpCamera(a: CameraState, b: CameraState, t: number): CameraSta
     projection: b.projection,
     fovY: a.fovY + (b.fovY - a.fovY) * t,
   };
+  // 굴림·렌즈 이동은 어느 한쪽에 있을 때만(없으면 예전과 같은 객체 모양)
+  const L = (k: 'roll' | 'shiftX' | 'shiftY'): void => {
+    if (a[k] === undefined && b[k] === undefined) return;
+    const x = a[k] ?? 0, y = b[k] ?? 0;
+    out[k] = k === 'roll' ? wrapAngle(x + wrapAngle(y - x) * t) : x + (y - x) * t;
+  };
+  L('roll');
+  L('shiftX');
+  L('shiftY');
+  return out;
+}
+
+/**
+ * 창 확대(zoomToRect): 화면 사각형 [x0, x1]×[y0, y1](화소)이 화면을 채우게 한다. 사각형 가운데 깊이 depth의 점을 화면 가운데로 옮긴 뒤
+ * 그 점을 중심으로 max(사각형 폭/화면 폭, 높이/화면 높이)만큼 확대한다(그 깊이에서 사각형이 화면에 꼭 맞는다). 방향은 그대로
+ */
+export function rectZoomCamera(c: CameraState, f: ViewFrame, x0: number, y0: number, x1: number, y1: number, depth: number, limits?: { min: number; max: number }): CameraState {
+  const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+  if (!(w > 0) || !(h > 0)) return c;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const anchor = rayAtDepth(f, screenRay(f, cx, cy), depth);
+  const panned = panCamera(c, f, f.width / 2 - cx, f.height / 2 - cy, depth);
+  return zoomCamera(panned, Math.max(w / f.width, h / f.height), anchor, limits);
+}
+
+/** 걷기에서 고개를 들고 숙이는 한계(라디안, 거의 수직까지) */
+export const LOOK_PITCH_LIMIT = (89 * Math.PI) / 180;
+
+/**
+ * 둘러보기(눈은 제자리): 방위각·앙각만 바꾸고 대상점을 눈 앞 distance에 다시 둔다.
+ * dYaw > 0이면 왼쪽으로, dPitch > 0이면 아래로 고개를 돌린다(끌기 = 장면을 잡아 끄는 쪽과 같은 부호는 부르는 쪽이 정한다)
+ */
+export function lookCamera(c: CameraState, dYaw: number, dPitch: number): CameraState {
+  const eye = cameraEye(c);
+  const yaw = wrapAngle(c.yaw + dYaw);
+  const pitch = clamp(c.pitch + dPitch, -LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT);
+  const back = basisFromAngles(yaw, pitch).back;
+  return { ...c, yaw, pitch, target: sub(eye, scale(back, c.distance)) };
+}
+
+/** 걷기: 눈과 대상점을 함께 옮긴다. forward·right는 수평(앞 = 보는 쪽을 바닥에 내린 방향), up은 세계 +Z(세계 단위) */
+export function walkCamera(c: CameraState, forward: number, right: number, up = 0): CameraState {
+  const cy = Math.cos(c.yaw), sy = Math.sin(c.yaw);
+  // 수평 앞 = −back의 수평 성분 방향 = (−sin yaw, cos yaw), 오른쪽 = (cos yaw, sin yaw)
+  const dx = -sy * forward + cy * right, dy = cy * forward + sy * right;
+  return { ...c, target: [c.target[0] + dx, c.target[1] + dy, c.target[2] + up] };
+}
+
+/** 서기: 눈을 바닥 점 p에서 eyeHeight 위(+Z)에 두고 방향·거리는 그대로 */
+export function standCamera(c: CameraState, p: readonly number[], eyeHeight: number): CameraState {
+  const back = cameraBasis(c).back;
+  const eye: V3 = [p[0]!, p[1]!, p[2]! + eyeHeight];
+  return { ...c, target: sub(eye, scale(back, c.distance)) };
 }

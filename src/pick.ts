@@ -118,6 +118,8 @@ export interface LinePickOpts {
   maxDepth?: number;
   /** 단면 평면(positions와 같은 좌표): 값 > 0 쪽 부분은 고르지 않는다(선분은 평면에서 잘라 남는 부분만 잰다) */
   clip?: Readonly<Plane4> | null;
+  /** 여러 단면 평면(주면 clip 대신 — 모두의 남는 쪽만) */
+  clips?: readonly Readonly<Plane4>[] | null;
   /** true를 돌려주는 선분 번호는 건너뛴다(숨긴 구간) */
   skip?: ((i: number) => boolean) | null;
 }
@@ -128,6 +130,7 @@ export function pickSegments(f: ViewFrame, positions: Float32Array, bvh: Bvh | n
   const limit = Math.min(n, opts.limit ?? n);
   const maxDepth = opts.maxDepth ?? Infinity;
   const clip = opts.clip ?? null;
+  const clips = opts.clips ?? null;
   const skip = opts.skip ?? null;
   const P = positions;
   const cands: LinePick[] = [];
@@ -136,7 +139,24 @@ export function pickSegments(f: ViewFrame, positions: Float32Array, bvh: Bvh | n
     const o = i * 6;
     let ax = P[o]!, ay = P[o + 1]!, az = P[o + 2]!, bx = P[o + 3]!, by = P[o + 4]!, bz = P[o + 5]!;
     let s0 = 0, s1 = 1;
-    if (clip) {
+    if (clips) {
+      // 평면마다 남는 구간을 좁히고, 끝점은 원래 끝점에서 다시 만든다
+      const ex = bx - ax, ey = by - ay, ez = bz - az;
+      for (const c of clips) {
+        const r = segmentKeptRange(c, ax + ex * s0, ay + ey * s0, az + ez * s0, ax + ex * s1, ay + ey * s1, az + ez * s1);
+        if (!r) return;
+        const d = s1 - s0;
+        [s0, s1] = [s0 + d * r[0], s0 + d * r[1]];
+      }
+      if (s0 > 0 || s1 < 1) {
+        bx = ax + ex * s1;
+        by = ay + ey * s1;
+        bz = az + ez * s1;
+        ax += ex * s0;
+        ay += ey * s0;
+        az += ez * s0;
+      }
+    } else if (clip) {
       const r = segmentKeptRange(clip, ax, ay, az, bx, by, bz);
       if (!r) return;
       if (r[0] > 0 || r[1] < 1) {
@@ -184,16 +204,18 @@ export function pickPointSet(
   cy: number,
   tolPx: number,
   maxDepth = Infinity,
-  clip?: Readonly<Plane4> | null,
+  clip?: Readonly<Plane4> | readonly Readonly<Plane4>[] | null,
   skip?: ((i: number) => boolean) | null,
 ): PointPick | null {
   const n = Math.floor(positions.length / 3);
   const P = positions;
   const cands: PointPick[] = [];
+  // 평면 하나 또는 여럿(모두의 남는 쪽)
+  const planes: readonly Readonly<Plane4>[] | null = !clip ? null : typeof clip[0] === 'number' ? [clip as Readonly<Plane4>] : (clip as readonly Readonly<Plane4>[]);
   const test = (i: number): void => {
     if (skip && skip(i)) return;
     const p: V3 = [P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!];
-    if (clip && planeValue(clip, p[0], p[1], p[2]) > 0) return;
+    if (planes) for (const c of planes) if (planeValue(c, p[0], p[1], p[2]) > 0) return;
     const s = projectToScreen(f, p);
     if (!s) return;
     const d = Math.hypot(s[0] - cx, s[1] - cy);
@@ -273,4 +295,133 @@ export function snapToNearest(f: ViewFrame, candidates: readonly V3[], cx: numbe
     }
   }
   return best;
+}
+
+/** 3×3(4×4의 왼쪽 위) 행렬 노름의 위 한계 √(‖A‖₁·‖A‖∞) — 로컬 질의 반지름을 보수적으로 늘릴 때 */
+export function normBound3(m: ArrayLike<number>): number {
+  let c = 0, r = 0;
+  for (let j = 0; j < 3; j++) c = Math.max(c, Math.abs(m[j * 4]!) + Math.abs(m[j * 4 + 1]!) + Math.abs(m[j * 4 + 2]!));
+  for (let i = 0; i < 3; i++) r = Math.max(r, Math.abs(m[i]!) + Math.abs(m[4 + i]!) + Math.abs(m[8 + i]!));
+  return Math.sqrt(c * r);
+}
+
+/**
+ * 모형 행렬(로컬 → 세계)이 걸린 선분 배열에서 커서 tolPx 안의 선분을 모두 모은다(세계 좌표 결과). 그물 윤곽선(Mesh3d.edges) 고르기에 쓴다.
+ * BVH 질의는 광선을 로컬로 옮겨 하고(반지름은 역행렬 노름 한계만큼 넉넉히), 후보마다 끝점을 세계로 옮겨 화면 거리를 정확히 잰다.
+ * clips(세계 평면들)가 있으면 잘린 쪽 부분은 빼고 잰다. skip(선분 번호)이 true면 건너뛴다.
+ */
+export function segmentCandidates(
+  f: ViewFrame,
+  positions: Float32Array,
+  bvh: Bvh | null,
+  model: ArrayLike<number> | undefined | null,
+  cx: number,
+  cy: number,
+  tolPx: number,
+  opts: { clips?: readonly Readonly<Plane4>[] | null; skip?: ((i: number) => boolean) | null } = {},
+): LinePick[] {
+  const n = Math.floor(positions.length / 6);
+  const P = positions;
+  const M = model ?? null;
+  const clips = opts.clips ?? null;
+  const skip = opts.skip ?? null;
+  const out: LinePick[] = [];
+  const test = (i: number): void => {
+    if (i >= n || (skip && skip(i))) return;
+    const o = i * 6;
+    let a: V3 = [P[o]!, P[o + 1]!, P[o + 2]!], b: V3 = [P[o + 3]!, P[o + 4]!, P[o + 5]!];
+    if (M) {
+      a = transformPoint(M, a);
+      b = transformPoint(M, b);
+    }
+    let s0 = 0, s1 = 1;
+    if (clips)
+      for (const c of clips) {
+        const r = segmentKeptRange(c, a[0] + (b[0] - a[0]) * s0, a[1] + (b[1] - a[1]) * s0, a[2] + (b[2] - a[2]) * s0, a[0] + (b[0] - a[0]) * s1, a[1] + (b[1] - a[1]) * s1, a[2] + (b[2] - a[2]) * s1);
+        if (!r) return;
+        const d = s1 - s0;
+        [s0, s1] = [s0 + d * r[0], s0 + d * r[1]];
+      }
+    const ax = a[0] + (b[0] - a[0]) * s0, ay = a[1] + (b[1] - a[1]) * s0, az = a[2] + (b[2] - a[2]) * s0;
+    const bx = a[0] + (b[0] - a[0]) * s1, by = a[1] + (b[1] - a[1]) * s1, bz = a[2] + (b[2] - a[2]) * s1;
+    const h = segmentScreenPick(f, ax, ay, az, bx, by, bz, cx, cy);
+    if (!h || !(h.distPx <= tolPx)) return;
+    if (f.projection === 'perspective' && h.depth < f.near * 0.999) return;
+    out.push({ index: i, t: s0 + (s1 - s0) * h.t, point: h.point, distPx: h.distPx, depth: h.depth });
+  };
+  if (bvh) {
+    const ray = screenRay(f, cx, cy);
+    const c = pickCone(f, ray.origin, tolPx);
+    let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k;
+    if (M) {
+      const inv = mat4Invert(M);
+      if (!inv) return out;
+      const s = normBound3(inv);
+      lo = transformPoint(inv, ray.origin);
+      const d = transformDir(inv, ray.dir);
+      const l = Math.hypot(d[0], d[1], d[2]);
+      if (!(l > 0)) return out;
+      // 로컬 단위 방향의 매개변수 τ = l·t, 로컬 반지름 ≤ s·(r0 + k·t)
+      ld = [d[0] / l, d[1] / l, d[2] / l];
+      r0 = c.r0 * s;
+      k = (c.k * s) / l;
+    }
+    queryCone(bvh, lo, ld, r0, k, Infinity, (i) => {
+      test(i);
+    });
+  } else for (let i = 0; i < n; i++) test(i);
+  return out;
+}
+
+/**
+ * 모형 행렬(로컬 → 세계)이 걸린 점 배열에서 커서 tolPx 안의 점을 모두 모은다(세계 좌표 결과). 묶음 행렬(setItemMatrix)이 걸린 점 묶음에 쓴다.
+ * clips(세계 평면들)의 잘린 쪽 점은 뺀다. skip(점 번호)이 true면 건너뛴다.
+ */
+export function pointCandidates(
+  f: ViewFrame,
+  positions: Float32Array,
+  bvh: Bvh | null,
+  model: ArrayLike<number> | undefined | null,
+  cx: number,
+  cy: number,
+  tolPx: number,
+  opts: { clips?: readonly Readonly<Plane4>[] | null; skip?: ((i: number) => boolean) | null } = {},
+): PointPick[] {
+  const n = Math.floor(positions.length / 3);
+  const P = positions;
+  const M = model ?? null;
+  const out: PointPick[] = [];
+  const test = (i: number): void => {
+    if (i >= n || (opts.skip && opts.skip(i))) return;
+    let p: V3 = [P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!];
+    if (M) p = transformPoint(M, p);
+    if (opts.clips) for (const c of opts.clips) if (planeValue(c, p[0], p[1], p[2]) > 0) return;
+    const s = projectToScreen(f, p);
+    if (!s) return;
+    const d = Math.hypot(s[0] - cx, s[1] - cy);
+    if (!(d <= tolPx)) return;
+    if (f.projection === 'perspective' && s[2] < f.near * 0.999) return;
+    out.push({ index: i, point: p, distPx: d, depth: s[2] });
+  };
+  if (bvh) {
+    const ray = screenRay(f, cx, cy);
+    const c = pickCone(f, ray.origin, tolPx);
+    let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k;
+    if (M) {
+      const inv = mat4Invert(M);
+      if (!inv) return out;
+      const s = normBound3(inv);
+      lo = transformPoint(inv, ray.origin);
+      const d = transformDir(inv, ray.dir);
+      const l = Math.hypot(d[0], d[1], d[2]);
+      if (!(l > 0)) return out;
+      ld = [d[0] / l, d[1] / l, d[2] / l];
+      r0 = c.r0 * s;
+      k = (c.k * s) / l;
+    }
+    queryCone(bvh, lo, ld, r0, k, Infinity, (i) => {
+      test(i);
+    });
+  } else for (let i = 0; i < n; i++) test(i);
+  return out;
 }

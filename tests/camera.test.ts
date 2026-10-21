@@ -245,3 +245,100 @@ describe('조작', () => {
     expect(lerpCamera(a, b, 1).yaw).toBeCloseTo(b.yaw, 12);
   });
 });
+
+describe('창 확대', () => {
+  it('사각형 가운데 깊이의 점이 화면 가운데로, 사각형 모서리가 화면 가장자리로', async () => {
+    const { rectZoomCamera, computeFrame, projectToScreen, rayAtDepth, screenRay, defaultCamera } = await import('../src/camera');
+    for (const projection of ['perspective', 'orthographic'] as const) {
+      const c = { ...defaultCamera(), target: [10, 5, 2] as [number, number, number], distance: 80, projection };
+      const f = computeFrame(c, 800, 600, { center: [10, 5, 2], radius: 40 });
+      const depth = 75;
+      const [x0, y0, x1, y1] = [500, 120, 660, 240];
+      const mid = rayAtDepth(f, screenRay(f, 580, 180), depth);
+      const corner = rayAtDepth(f, screenRay(f, 660, 180), depth);
+      const c2 = rectZoomCamera(c, f, x0, y0, x1, y1, depth);
+      const f2 = computeFrame(c2, 800, 600, { center: [10, 5, 2], radius: 40 });
+      const m = projectToScreen(f2, mid)!;
+      expect(m[0]).toBeCloseTo(400, 6);
+      expect(m[1]).toBeCloseTo(300, 6);
+      // 폭이 더 꽉 찬다(160/800 > 120/600): 사각형 오른쪽 가운데가 화면 오른쪽 끝
+      expect(projectToScreen(f2, corner)![0]).toBeCloseTo(800, 4);
+      expect(c2.yaw).toBe(c.yaw);
+      expect(c2.distance).toBeLessThan(c.distance);
+    }
+  });
+});
+
+describe('걷기 카메라', () => {
+  it('둘러보기는 눈을 제자리에 두고, 앙각은 ±89°에서 멈춘다', async () => {
+    const { lookCamera, cameraEye, defaultCamera, LOOK_PITCH_LIMIT } = await import('../src/camera');
+    const c = { ...defaultCamera(), target: [5, 6, 7] as [number, number, number], distance: 12 };
+    const e0 = cameraEye(c);
+    const c2 = lookCamera(c, 0.7, -0.3);
+    const e1 = cameraEye(c2);
+    for (let k = 0; k < 3; k++) expect(e1[k]).toBeCloseTo(e0[k]!, 9);
+    expect(c2.yaw).toBeCloseTo(c.yaw + 0.7, 12);
+    expect(c2.distance).toBe(12);
+    expect(lookCamera(c, 0, 10).pitch).toBeCloseTo(LOOK_PITCH_LIMIT, 12);
+  });
+
+  it('걷기는 수평 앞·오른쪽과 위로 눈·대상점을 함께 옮기고, 서기는 눈을 바닥 점 위 눈높이에', async () => {
+    const { walkCamera, standCamera, cameraEye, cameraBasis, defaultCamera } = await import('../src/camera');
+    const c = { ...defaultCamera(), yaw: 0.4, pitch: -0.2, target: [0, 0, 0] as [number, number, number], distance: 10 };
+    const w = walkCamera(c, 3, 0, 0);
+    const b = cameraBasis(c).back;
+    const h = Math.hypot(b[0], b[1]);
+    // 앞으로 3 = 보는 방향(−back)의 수평 성분 방향으로 3
+    expect(w.target[0]).toBeCloseTo((-b[0] / h) * 3, 9);
+    expect(w.target[1]).toBeCloseTo((-b[1] / h) * 3, 9);
+    expect(w.target[2]).toBe(0);
+    const r = walkCamera(c, 0, 2, 1);
+    expect(r.target[0]).toBeCloseTo(Math.cos(0.4) * 2, 9);
+    expect(r.target[2]).toBe(1);
+    const s = standCamera(c, [100, 200, 5], 1.6);
+    const e = cameraEye(s);
+    expect(e[0]).toBeCloseTo(100, 9);
+    expect(e[1]).toBeCloseTo(200, 9);
+    expect(e[2]).toBeCloseTo(6.6, 9);
+    expect(s.yaw).toBe(c.yaw);
+  });
+});
+
+describe('굴림·렌즈 이동', () => {
+  it('굴림은 화면 오른쪽·위를 보는 축 둘레로 돌리고 보는 방향은 그대로', async () => {
+    const { cameraBasis, defaultCamera } = await import('../src/camera');
+    const c = defaultCamera();
+    const b0 = cameraBasis(c);
+    const b1 = cameraBasis({ ...c, roll: Math.PI / 2 });
+    for (let k = 0; k < 3; k++) {
+      expect(b1.back[k]).toBeCloseTo(b0.back[k]!, 12);
+      expect(b1.right[k]).toBeCloseTo(b0.up[k]!, 12);
+      expect(b1.up[k]).toBeCloseTo(-b0.right[k]!, 12);
+    }
+    // 굴림이 없으면 예전 틀과 같다
+    expect(cameraBasis({ ...c, roll: 0 })).toEqual(b0);
+  });
+
+  it('렌즈 이동은 대상점을 화면에서 반폭·반높이의 그 배수만큼 옮기고, 광선과 투영이 서로 맞는다', async () => {
+    const { computeFrame, projectToScreen, screenRay, defaultCamera, lerpCamera } = await import('../src/camera');
+    for (const projection of ['perspective', 'orthographic'] as const) {
+      const c = { ...defaultCamera(), target: [1, 2, 3] as [number, number, number], distance: 50, projection };
+      const f0 = computeFrame(c, 800, 600, { center: [1, 2, 3], radius: 20 });
+      const f1 = computeFrame({ ...c, shiftX: 0.25, shiftY: -0.5 }, 800, 600, { center: [1, 2, 3], radius: 20 });
+      const p0 = projectToScreen(f0, [1, 2, 3])!, p1 = projectToScreen(f1, [1, 2, 3])!;
+      expect(p1[0] - p0[0]).toBeCloseTo(0.25 * 400, 6);
+      expect(p1[1] - p0[1]).toBeCloseTo(0.5 * 300, 6);
+      expect(f1.shift).toEqual([0.25, -0.5]);
+      expect(f0.shift).toBeUndefined();
+      // 화면 점 → 광선 위 점 → 화면 점
+      const r = screenRay(f1, 123, 456);
+      const q = projectToScreen(f1, [r.origin[0] + r.dir[0] * 30, r.origin[1] + r.dir[1] * 30, r.origin[2] + r.dir[2] * 30])!;
+      expect(q[0]).toBeCloseTo(123, 6);
+      expect(q[1]).toBeCloseTo(456, 6);
+    }
+    // 보간: 둘 다 없으면 키가 없다
+    const a = defaultCamera();
+    expect('roll' in lerpCamera(a, a, 0.5)).toBe(false);
+    expect(lerpCamera(a, { ...a, roll: 1 }, 0.5).roll).toBeCloseTo(0.5, 12);
+  });
+});
