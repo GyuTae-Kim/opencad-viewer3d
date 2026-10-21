@@ -13,7 +13,7 @@
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d } from './types';
-import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
 import { type IndexRange, mergeRanges, partitionRanges, rangeTester } from './ranges';
 import { type Bvh, type PrimKind, buildBvh } from './bvh';
 import {
@@ -39,7 +39,7 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub, transform4, translation } from './math';
+import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene } from './scenepick';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
@@ -251,6 +251,24 @@ export interface ProjectedPoint {
   visible: boolean;
 }
 
+/** 묶음 겉모습(itemLook): 바꾼 것만 있다 */
+export interface ItemLookState {
+  /** 불투명도 0~1 */
+  opacity?: number;
+  /** false면 고르기·측정·가림에서 뺀다 */
+  pickable: boolean;
+  color?: Rgba;
+  /** 세계에 더 건 행렬(열 우선 4×4) */
+  matrix?: Float64Array;
+}
+
+interface LookState {
+  alpha?: number;
+  pickable?: boolean;
+  color?: Rgba;
+  matrix?: Float64Array;
+}
+
 /** pick(x, y, opts) 선택 */
 export interface PickOptions {
   /** 포인터 종류('touch'면 터치 허용 거리) */
@@ -413,6 +431,11 @@ export class Viewer3d {
   private measureHover: { p: V3; vertex: boolean } | null = null;
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
+  /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
+  private looks = new Map<string, LookState>();
+  /** 묶음 행렬을 건 묶음 수(있으면 보이는 범위를 다시 모은다) */
+  private lookMoves = 0;
+  private lineModels = new WeakMap<LineSet3d | PointSet3d, ArrayLike<number>>();
   /** 앱 측정 덧그림(setAnnotations)과 계산한 모양 */
   private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number } | null = null;
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
@@ -567,6 +590,9 @@ export class Viewer3d {
     this.hi.clear();
     this.ranges.clear();
     this.rangeSel.clear();
+    this.looks.clear();
+    this.lookMoves = 0;
+    this.lineModels = new WeakMap();
     this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
@@ -605,6 +631,8 @@ export class Viewer3d {
     if (this.disposed) return;
     const hadSection = !!this.sec;
     this.rangeSel.clear();
+    this.looks.clear();
+    this.lookMoves = 0;
     this.upload = null;
     this.sceneRef = null;
     this.items.clear();
@@ -1511,7 +1539,92 @@ export class Viewer3d {
     const kind = it.kind === 'line' ? 'segment' : 'point';
     const bvh = this.bvhFor(kind, it.item.positions, undefined, true);
     const o = it.item.origin;
-    return bvh ? { kind, positions: it.item.positions, bvh, model: hasOrigin(o) ? translation(o) : undefined, skip } : null;
+    return bvh ? { kind, positions: it.item.positions, bvh, model: this.lineModel(it.item) ?? (hasOrigin(o) ? translation(o) : undefined), skip } : null;
+  }
+
+  // ───────────────────────── 묶음 겉모습 ─────────────────────────
+
+  /**
+   * 묶음(그물·선·점 id) 불투명도 0~1(묶음 색 알파에 곱한다, null이면 되돌림). 1보다 작으면 반투명 차례에 뒤에서 앞으로 그린다.
+   * pickable: false면 고르기·측정·가림(덧그림·윤곽선)에서 뺀다(유령처럼 흐리게 둘 때). null로 되돌리면 pickable도 true로
+   */
+  setItemOpacity(id: string, alpha: number | null, opts: { pickable?: boolean } = {}): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (alpha === null) {
+      delete l.alpha;
+      delete l.pickable;
+    } else {
+      l.alpha = Math.min(1, Math.max(0, Number(alpha) || 0));
+      if (opts.pickable !== undefined) l.pickable = opts.pickable;
+    }
+    this.setLook(id, l, false);
+  }
+
+  /** 묶음 색 바꾸기(정점 색·무늬 대신 이 색 — 태그·부품별 색). CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림 */
+  setItemColor(id: string, color: Rgba | string | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (color === null) delete l.color;
+    else l.color = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
+    this.setLook(id, l, false);
+  }
+
+  /**
+   * 묶음에 세계 행렬을 더 건다(열 우선 4×4, 세계' = matrix · 세계 — 분해도·움직이기). null이면 되돌림.
+   * 그리기·고르기·측정·범위(전체 보기)·단면·최근접점이 모두 이 행렬을 따른다. 큰 좌표면 행렬을 장면 원점 근처에서 만든다
+   */
+  setItemMatrix(id: string, matrix: ArrayLike<number> | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (matrix === null) delete l.matrix;
+    else if (matrix.length >= 16 && Array.from(matrix).slice(0, 16).every((v) => Number.isFinite(v))) l.matrix = Float64Array.from(Array.from(matrix).slice(0, 16));
+    else return;
+    this.setLook(id, l, true);
+  }
+
+  /** 묶음 겉모습(바꾼 것만, 없으면 null) */
+  itemLook(id: string): ItemLookState | null {
+    const l = this.looks.get(id);
+    if (!l) return null;
+    const out: ItemLookState = { pickable: l.pickable !== false };
+    if (l.alpha !== undefined) out.opacity = l.alpha;
+    if (l.color) out.color = l.color;
+    if (l.matrix) out.matrix = new Float64Array(l.matrix);
+    return out;
+  }
+
+  /** 모든 묶음 겉모습을 되돌린다 */
+  clearItemLooks(): void {
+    if (!this.looks.size) return;
+    const moved = this.lookMoves > 0;
+    this.looks.clear();
+    this.lookChanged(moved);
+  }
+
+  private setLook(id: string, l: LookState, moved: boolean): void {
+    if (!this.items.has(id)) return;
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix) this.looks.delete(id);
+    else this.looks.set(id, l);
+    this.lookChanged(moved);
+  }
+
+  private lookChanged(moved: boolean): void {
+    let n = 0;
+    for (const l of this.looks.values()) if (l.matrix) n++;
+    this.lookMoves = n;
+    this.visLists = null;
+    if (moved) {
+      this.boxes = new WeakMap();
+      this.models = new WeakMap();
+      this.lineModels = new WeakMap();
+      for (const r of this.rangeSel.values()) r.box = null;
+      this.visBox = null;
+      this.cutDirty = true;
+      this.wheelAnchor = null;
+    }
+    if (this.measuring) this.measureHover = null;
+    this.invalidate();
   }
 
   /** 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다 */
@@ -1650,7 +1763,7 @@ export class Viewer3d {
     if (!s) return (this.visBox = emptyBox());
     let ranged = false;
     for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
-    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged) return (this.visBox = this.allBox);
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoves) return (this.visBox = this.allBox);
     let b = emptyBox();
     for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
@@ -1660,7 +1773,12 @@ export class Viewer3d {
   private visibleBoundsOf(it: Item): Box3 {
     const r = this.rangeSel.get(it.item.id);
     if (!r || !r.hidden.length || !r.parts) return this.boundsOf(it.item);
-    return (r.box ??= itemRangesBounds(it.item, rangeKind(it), r.parts.prims));
+    if (!r.box) {
+      r.box = itemRangesBounds(it.item, rangeKind(it), r.parts.prims);
+      const lm = this.looks.get(it.item.id)?.matrix;
+      if (lm) r.box = transformBox(r.box, lm);
+    }
+    return r.box;
   }
 
   private rebuildGrid(): void {
@@ -1831,15 +1949,41 @@ export class Viewer3d {
   /** 묶음 세계 범위(원점·행렬 반영, 장면마다 캐시) */
   private boundsOf(it: AnyItem): Box3 {
     let b = this.boxes.get(it);
-    if (!b) this.boxes.set(it, (b = itemBounds(it)));
+    if (!b) {
+      b = itemBounds(it);
+      const lm = this.looks.get(it.id)?.matrix;
+      if (lm) b = transformBox(b, lm);
+      this.boxes.set(it, b);
+    }
     return b;
   }
 
-  /** 그물 모형 행렬 = matrix · T(origin)(장면마다 캐시) */
+  /** 그물 모형 행렬 = (묶음 행렬 setItemMatrix ·) matrix · T(origin)(장면마다 캐시) */
   private modelOf(m: Mesh3d): ArrayLike<number> | undefined {
     let e = this.models.get(m);
-    if (!e) this.models.set(m, (e = { m: modelMatrix(m.matrix, m.origin) }));
+    if (!e) {
+      let mm = modelMatrix(m.matrix, m.origin);
+      const lm = this.looks.get(m.id)?.matrix;
+      if (lm) mm = mm ? mat4Mul(lm, mm) : lm;
+      this.models.set(m, (e = { m: mm }));
+    }
     return e.m;
+  }
+
+  /** 선분·점 묶음의 모형 행렬: 묶음 행렬(setItemMatrix)이 있을 때만(원점 포함), 없으면 undefined(예전처럼 원점만 옮긴다) */
+  private lineModel(it: LineSet3d | PointSet3d): ArrayLike<number> | undefined {
+    const lm = this.looks.get(it.id)?.matrix;
+    if (!lm) return undefined;
+    let e = this.lineModels.get(it);
+    if (!e) this.lineModels.set(it, (e = hasOrigin(it.origin) ? mat4Mul(lm, translation(it.origin)) : lm));
+    return e;
+  }
+
+  /** 불투명 그물인지(겉모습 색·불투명도 반영) */
+  private meshOpaque(m: Mesh3d): boolean {
+    const l = this.looks.get(m.id);
+    if (!l) return m.color[3] >= 0.999;
+    return (l.color ? l.color[3] : m.color[3]) * (l.alpha ?? 1) >= 0.999;
   }
 
   /** 보이는 묶음 목록(고르기용, 보이기를 바꿀 때까지 다시 쓴다) */
@@ -1847,7 +1991,7 @@ export class Viewer3d {
     if (this.visLists) return this.visLists;
     const meshes: Mesh3d[] = [], lines: LineSet3d[] = [], points: PointSet3d[] = [];
     for (const it of this.items.values()) {
-      if (!this.visible(it.item.id, it.item.group)) continue;
+      if (!this.visible(it.item.id, it.item.group) || this.looks.get(it.item.id)?.pickable === false) continue;
       if (it.kind === 'mesh') meshes.push(it.item);
       else if (it.kind === 'line') lines.push(it.item);
       else points.push(it.item);
@@ -1880,15 +2024,17 @@ export class Viewer3d {
   }
 
   private cappedBy(m: Mesh3d, s: Section | null | undefined): boolean {
-    if (!s || s.caps === 'none' || (this.mode !== 'shaded' && this.mode !== 'shadedEdges') || m.color[3] < 0.999 || !this.renderer.canFillSection) return false;
+    if (!s || s.caps === 'none' || (this.mode !== 'shaded' && this.mode !== 'shadedEdges') || !this.meshOpaque(m) || !this.renderer.canFillSection) return false;
     return s.caps === 'all' || m.closed === true || m.capGroup !== undefined;
   }
 
   /** 고르기·가림 판정의 단면 선택(평면 하나면 예전 그대로 clip, 여러 단면이면 묶음마다 clips) */
-  private clipOpts(): Pick<ScenePickOptions, 'clip' | 'clips' | 'caps' | 'capGroup'> {
-    if (!this.multiSection) return { clip: this.sectionPlane(), caps: (m) => this.capped(m), capGroup: (m) => m.capGroup };
+  private clipOpts(): Pick<ScenePickOptions, 'clip' | 'clips' | 'caps' | 'capGroup' | 'opaque' | 'itemModel'> {
+    // 겉모습(불투명도·묶음 행렬)이 있을 때만 그 판정을 넘긴다(없으면 예전 규칙 그대로)
+    const lk = this.looks.size ? { opaque: (m: Mesh3d) => this.meshOpaque(m), itemModel: (it: LineSet3d | PointSet3d) => this.lineModel(it) } : {};
+    if (!this.multiSection) return { clip: this.sectionPlane(), caps: (m) => this.capped(m), capGroup: (m) => m.capGroup, ...lk };
     const all = this.allSecs();
-    return { clips: (it) => this.clipsFor(it.id), caps: (m, k) => this.cappedBy(m, all[this.secOf(m.id)[k ?? 0]!]), capGroup: (m) => m.capGroup };
+    return { clips: (it) => this.clipsFor(it.id), caps: (m, k) => this.cappedBy(m, all[this.secOf(m.id)[k ?? 0]!]), capGroup: (m) => m.capGroup, ...lk };
   }
 
   /**
@@ -2278,6 +2424,7 @@ export class Viewer3d {
         : null,
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
+      look: this.looks.size ? (id) => this.looks.get(id) : null,
     });
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();

@@ -6,6 +6,7 @@ export { VIEW_KEYS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
   GroupInfo,
+  ItemLookState,
   MarkerOptions,
   MeasureFormat,
   MeasureResult,

@@ -372,3 +372,56 @@ export function segmentCandidates(
   } else for (let i = 0; i < n; i++) test(i);
   return out;
 }
+
+/**
+ * 모형 행렬(로컬 → 세계)이 걸린 점 배열에서 커서 tolPx 안의 점을 모두 모은다(세계 좌표 결과). 묶음 행렬(setItemMatrix)이 걸린 점 묶음에 쓴다.
+ * clips(세계 평면들)의 잘린 쪽 점은 뺀다. skip(점 번호)이 true면 건너뛴다.
+ */
+export function pointCandidates(
+  f: ViewFrame,
+  positions: Float32Array,
+  bvh: Bvh | null,
+  model: ArrayLike<number> | undefined | null,
+  cx: number,
+  cy: number,
+  tolPx: number,
+  opts: { clips?: readonly Readonly<Plane4>[] | null; skip?: ((i: number) => boolean) | null } = {},
+): PointPick[] {
+  const n = Math.floor(positions.length / 3);
+  const P = positions;
+  const M = model ?? null;
+  const out: PointPick[] = [];
+  const test = (i: number): void => {
+    if (i >= n || (opts.skip && opts.skip(i))) return;
+    let p: V3 = [P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!];
+    if (M) p = transformPoint(M, p);
+    if (opts.clips) for (const c of opts.clips) if (planeValue(c, p[0], p[1], p[2]) > 0) return;
+    const s = projectToScreen(f, p);
+    if (!s) return;
+    const d = Math.hypot(s[0] - cx, s[1] - cy);
+    if (!(d <= tolPx)) return;
+    if (f.projection === 'perspective' && s[2] < f.near * 0.999) return;
+    out.push({ index: i, point: p, distPx: d, depth: s[2] });
+  };
+  if (bvh) {
+    const ray = screenRay(f, cx, cy);
+    const c = pickCone(f, ray.origin, tolPx);
+    let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k;
+    if (M) {
+      const inv = mat4Invert(M);
+      if (!inv) return out;
+      const s = normBound3(inv);
+      lo = transformPoint(inv, ray.origin);
+      const d = transformDir(inv, ray.dir);
+      const l = Math.hypot(d[0], d[1], d[2]);
+      if (!(l > 0)) return out;
+      ld = [d[0] / l, d[1] / l, d[2] / l];
+      r0 = c.r0 * s;
+      k = (c.k * s) / l;
+    }
+    queryCone(bvh, lo, ld, r0, k, Infinity, (i) => {
+      test(i);
+    });
+  } else for (let i = 0; i < n; i++) test(i);
+  return out;
+}

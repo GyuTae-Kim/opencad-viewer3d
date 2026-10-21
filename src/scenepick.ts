@@ -11,7 +11,7 @@ import { itemBounds } from './bounds';
 import { type Bvh, type PrimKind, countRayHits, rayBoxEntry, safeInv } from './bvh';
 import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth, worldPerPixel } from './camera';
 import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint } from './math';
-import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, segmentCandidates, snapToNearest } from './pick';
+import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, pointCandidates, segmentCandidates, snapToNearest } from './pick';
 import { SNAP_PX } from './pointer';
 import { type Plane4, planeShift, planeValue, rayKeptInterval, rayKeptIntervalN } from './section';
 
@@ -62,6 +62,13 @@ export interface ScenePickOptions {
   edges?: boolean;
   /** 숨긴 윤곽선 구간 판정(Mesh3d.edges의 선분 번호) */
   edgeHidden?: (m: Mesh3d) => ((i: number) => boolean) | null | undefined;
+  /** 불투명 그물인지(가림·잘린 면 판정). 없으면 color 알파 ≥ 0.999 */
+  opaque?: (m: Mesh3d) => boolean;
+  /**
+   * 선분·점 묶음의 모형 행렬(로컬 positions → 세계, 묶음 원점 포함). 행렬을 돌려주면 그 행렬로 고르고(setItemMatrix),
+   * undefined면 예전처럼 원점만 옮겨 고른다
+   */
+  itemModel?: (it: LineSet3d | PointSet3d) => ArrayLike<number> | undefined;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
@@ -147,7 +154,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
           cap = { m: e.m, point, depth: viewDepth(f, point) };
           break;
         }
-    if (cap && cap.m.color[3] >= 0.999 && o.occlude) occl = cap.depth * (1 + 1e-4) + 1e-9;
+    if (cap && (o.opaque ? o.opaque(cap.m) : cap.m.color[3] >= 0.999) && o.occlude) occl = cap.depth * (1 + 1e-4) + 1e-9;
   }
   if (!multi && (!clip || interval) && !cap) {
     for (const m of items.meshes) {
@@ -157,7 +164,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval, o.hidden?.(m));
       if (!h) continue;
       if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
-      if (o.occlude && m.color[3] >= 0.999) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
+      if (o.occlude && (o.opaque ? o.opaque(m) : m.color[3] >= 0.999)) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
     }
   }
 
@@ -166,6 +173,14 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
   for (const p of items.points) {
     const bvh = o.bvh('point', p.positions, undefined);
     if (skip(bvh, p.positions.length / 3)) continue;
+    const pm = o.itemModel?.(p);
+    if (pm) {
+      // 묶음 행렬이 걸린 점 묶음: 세계에서 재고 가림 깊이로 거른다
+      const pl = planesOf(p);
+      for (const h of pointCandidates(f, p.positions, bvh, pm, x, y, tol + (p.size ?? 4) / 2, { clips: pl.length ? pl : null, skip: o.hidden?.(p) }))
+        if (h.depth <= occl) pts.push({ p, i: h.index, point: h.point, distPx: h.distPx, depth: h.depth });
+      continue;
+    }
     const fl = shiftFrame(f, p.origin);
     const pc = multi ? planesOf(p).map((c) => planeShift(c, p.origin)) : clip ? planeShift(clip, p.origin) : null;
     const h = pickPointSet(fl, p.positions, bvh, x, y, tol + (p.size ?? 4) / 2, occl, pc, o.hidden?.(p));
@@ -185,6 +200,16 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     if (!boxHit(b) && !nearBox(f, b, x, y, tl)) continue;
     const bvh = o.bvh('segment', l.positions, undefined);
     if (skip(bvh, l.positions.length / 6)) continue;
+    const lmod = o.itemModel?.(l);
+    if (lmod) {
+      // 묶음 행렬이 걸린 선분 묶음: 세계에서 재고(그리기 범위 앞쪽만) 가림 깊이로 거른다
+      const pl = planesOf(l);
+      const lim = o.limit?.(l.id) ?? Infinity;
+      const hid = o.hidden?.(l);
+      for (const h of segmentCandidates(f, l.positions, bvh, lmod, x, y, tl, { clips: pl.length ? pl : null, skip: (i) => i >= lim || !!hid?.(i) }))
+        if (h.depth <= occl) lns.push({ l, i: h.index, point: h.point, distPx: h.distPx, depth: h.depth });
+      continue;
+    }
     const fl = shiftFrame(f, l.origin);
     const h = pickSegments(
       fl,
@@ -202,7 +227,12 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
   const ln = chooseNearest(lns);
   if (ln) {
     const P = ln.l.positions, k = ln.i * 6;
-    const ends = [addOrigin([P[k]!, P[k + 1]!, P[k + 2]!], ln.l.origin), addOrigin([P[k + 3]!, P[k + 4]!, P[k + 5]!], ln.l.origin)].filter(multi ? keptBy(planesOf(ln.l)) : kept);
+    const lmod = o.itemModel?.(ln.l);
+    const ends = (
+      lmod
+        ? [transformPoint(lmod, [P[k]!, P[k + 1]!, P[k + 2]!]), transformPoint(lmod, [P[k + 3]!, P[k + 4]!, P[k + 5]!])]
+        : [addOrigin([P[k]!, P[k + 1]!, P[k + 2]!], ln.l.origin), addOrigin([P[k + 3]!, P[k + 4]!, P[k + 5]!], ln.l.origin)]
+    ).filter(multi ? keptBy(planesOf(ln.l)) : kept);
     const v = snapToNearest(f, ends, x, y, snapPx);
     const id = ln.l.segmentIds?.[ln.i] ?? ln.i;
     return { pick: { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i }, snap: v ?? ln.point, vertex: !!v };
@@ -301,7 +331,7 @@ function pickMeshesMulti(
     const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, model, pl.length ? [iv.t0, iv.t1] : null, o.hidden?.(m));
     if (!h) continue;
     if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
-    if (o.occlude && m.color[3] >= 0.999) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
+    if (o.occlude && (o.opaque ? o.opaque(m) : m.color[3] >= 0.999)) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
   }
   let cap: { m: Mesh3d; point: V3; depth: number; n: V3 } | null = null;
   for (const e of groups.values()) {
@@ -315,7 +345,7 @@ function pickMeshesMulti(
   // 잘린 면이 그물 맞음보다 앞이면 잘린 면(아니면 그물)
   if (cap && mesh && mesh.h.depth < cap.depth) cap = null;
   if (cap) {
-    if (cap.m.color[3] >= 0.999 && o.occlude) occl = Math.min(occl, cap.depth * (1 + 1e-4) + 1e-9);
+    if ((o.opaque ? o.opaque(cap.m) : cap.m.color[3] >= 0.999) && o.occlude) occl = Math.min(occl, cap.depth * (1 + 1e-4) + 1e-9);
     mesh = null;
   }
   return { mesh, cap, occl };
@@ -386,7 +416,7 @@ export function occludingDepth(f: ViewFrame, x: number, y: number, items: SceneP
     const groups = new Map<string, number>();
     const capAt = (): number => viewDepth(f, [ray.origin[0] + ray.dir[0] * t0, ray.origin[1] + ray.dir[1] * t0, ray.origin[2] + ray.dir[2] * t0]);
     for (const m of items.meshes) {
-      if (m.color[3] < 0.999 || !o.caps(m) || !boxHit(bounds(m))) continue;
+      if (!(o.opaque ? o.opaque(m) : m.color[3] >= 0.999) || !o.caps(m) || !boxHit(bounds(m))) continue;
       const bvh = o.bvh('triangle', m.positions, m.indices);
       if (!bvh) continue;
       const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
@@ -408,7 +438,7 @@ export function occludingDepth(f: ViewFrame, x: number, y: number, items: SceneP
     if (best === Infinity) for (const n of groups.values()) if (n % 2 === 1) best = capAt();
   }
   for (const m of items.meshes) {
-    if (m.color[3] < 0.999 || !boxHit(bounds(m))) continue;
+    if (!(o.opaque ? o.opaque(m) : m.color[3] >= 0.999) || !boxHit(bounds(m))) continue;
     const bvh = o.bvh('triangle', m.positions, m.indices);
     if (!bvh) continue;
     const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval, o.hidden?.(m));
