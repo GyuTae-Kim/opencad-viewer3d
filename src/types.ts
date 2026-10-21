@@ -124,6 +124,11 @@ export interface LineSet3d {
   segmentIds?: Uint32Array;
   /** 좌표 원점(세계 좌표, 선택). 있으면 positions는 이 점 기준(세계 = origin + position). Mesh3d.origin 참고 */
   origin?: [number, number, number];
+  /**
+   * 모형 모서리 묶음이면 true(0.7.1, 선택): 숨은 선 모드의 숨은 윤곽선 점선(Viewer3d.setRenderOptions({ hiddenEdges }))을
+   * 그물 윤곽선(Mesh3d.edges)처럼 이 묶음에도 그린다 — 면 뒤로 가려진 부분만 흐린 점선으로. 모서리를 선분 묶음으로 주는 해석기(SketchUp)용
+   */
+  hiddenEdges?: boolean;
 }
 
 /** 점 묶음(구멍 중심·측정점 등) */

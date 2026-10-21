@@ -1875,15 +1875,34 @@ export class Renderer3d {
       gl.disable(gl.BLEND);
     }
 
-    // 2b) 숨은 선 모드: 면 뒤 윤곽선을 흐린 점선으로(깊이 비교를 뒤집어)
+    // 2b) 숨은 선 모드: 면 뒤 윤곽선을 흐린 점선으로(깊이 비교를 뒤집어). 숨긴 구간(setHiddenRanges)은 빼고 묶음 불투명도를 곱한다.
+    // 모형 모서리 선분 묶음(LineSet3d.hiddenEdges)도 그리기 범위 안쪽을 함께(선분 묶음은 아직 깊이에 없어 면만 가린다)
     if (flat && st.hiddenEdges && st.hiddenEdges > 0) {
       gl.enable(gl.BLEND);
       gl.depthFunc(gl.GREATER);
       gl.depthMask(false);
+      /** 선분 레코드 하나를 [0, count) 안에서 숨은 점선으로(구간이 있으면 보통·강조 구간 모두, 숨긴 구간은 빼고) */
+      const dashHidden = (rec: LineRec, id: string, model: ArrayLike<number> | undefined, count: number, parts: readonly RangePart[] | null | undefined, ver: number, positions: Float32Array, colors: Float32Array | undefined): void => {
+        const o = { color: st.colors.line, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges! * alphaOf(id), clip: clipOf(model), clips: clipsOf(id, model) };
+        if (!parts) {
+          this.drawLines(f, rec, model, { ...o, first: 0, count }, st, stats);
+          return;
+        }
+        const c = this.partCache(rec, ver);
+        for (const hi of [false, true]) this.drawLineList(f, rec, model, this.lineList(rec, c, parts, hi, positions, colors), 0, count, o, st, stats);
+      };
       for (const r of visibleMeshes) {
         if (!r.edges) continue;
-        const model = mm(r);
-        this.drawLines(f, r.edges, model, { color: st.colors.line, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges, first: 0, count: r.edges.n, clip: clipOf(model), clips: clipsOf(r.src.id, model) }, st, stats);
+        const ep = st.parts?.(r.src.id);
+        dashHidden(r.edges, r.src.id, mm(r), r.edges.n, ep?.edges, ep?.ver ?? 0, r.src.edges!, undefined);
+      }
+      for (const r of this.lines) {
+        const l = r.src;
+        if (l.hiddenEdges !== true || !vis(l.id, l.group)) continue;
+        const range = st.ranges.get(l.id);
+        const count = range ? Math.max(0, Math.min(r.n, Math.floor(range.count))) : r.n;
+        const p = st.parts?.(l.id);
+        if (count > 0) dashHidden(r, l.id, lm(r, l.id), count, p?.prims, p?.ver ?? 0, l.positions, l.colors);
       }
       gl.depthMask(true);
       gl.depthFunc(gl.LEQUAL);
