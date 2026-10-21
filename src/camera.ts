@@ -1,6 +1,6 @@
 /**
  * 카메라: 대상점 둘레 턴테이블(방위각 yaw = Z축 둘레, 앙각 pitch ∈ [−90°, 90°]).
- * Z가 위인 CAD 습관(AutoCAD 3DORBIT 제한 궤도)에 맞춘다. 굴림(roll)은 없다.
+ * Z가 위인 CAD 습관(AutoCAD 3DORBIT 제한 궤도)에 맞춘다. 굴림(roll)·렌즈 이동(shiftX·shiftY)은 0.7.0에서 더한 선택 값(없으면 0).
  *
  * yaw = 0, pitch = 0 이면 앞(−Y 쪽)에서 +Y를 본다(화면 오른쪽 = +X, 위 = +Z).
  * 눈 방향(대상 → 눈) = (sin yaw·cos pitch, −cos yaw·cos pitch, sin pitch)
@@ -26,6 +26,14 @@ export interface CameraState {
   projection: Projection;
   /** 세로 시야각(라디안) */
   fovY: number;
+  /** 굴림(라디안, 0.7.0 선택): 화면 위 방향을 보는 축 둘레로 돌린다(+면 카메라가 반시계로 기울어 장면은 시계로 돈다). 없으면 0 */
+  roll?: number;
+  /**
+   * 렌즈 이동(0.7.0 선택, 정규 장치 좌표 — 화면 반폭·반높이의 몇 배): 보는 방향은 그대로 두고 그림만 옮긴다(축 어긋난 투영).
+   * 2점 투시(세로선을 곧게)는 앙각 0으로 보고 shiftY로 올린다. 없으면 0
+   */
+  shiftX?: number;
+  shiftY?: number;
 }
 
 export interface CameraBasis {
@@ -78,7 +86,18 @@ export function basisFromAngles(yaw: number, pitch: number): CameraBasis {
   return { right, up, back };
 }
 
-export const cameraBasis = (c: CameraState): CameraBasis => basisFromAngles(c.yaw, c.pitch);
+/** 카메라 틀(굴림 포함) */
+export function cameraBasis(c: CameraState): CameraBasis {
+  const b = basisFromAngles(c.yaw, c.pitch);
+  const r = c.roll;
+  if (!r) return b;
+  const cr = Math.cos(r), sr = Math.sin(r);
+  return {
+    right: [b.right[0] * cr + b.up[0] * sr, b.right[1] * cr + b.up[1] * sr, b.right[2] * cr + b.up[2] * sr],
+    up: [b.up[0] * cr - b.right[0] * sr, b.up[1] * cr - b.right[1] * sr, b.up[2] * cr - b.right[2] * sr],
+    back: b.back,
+  };
+}
 
 export function cameraEye(c: CameraState): V3 {
   return add(c.target, scale(cameraBasis(c).back, c.distance));
@@ -171,11 +190,19 @@ export function computeFrame(c: CameraState, width: number, height: number, sphe
     const hh = c.distance * tanV;
     proj = orthographic(-hh * aspect, hh * aspect, -hh, hh, near, far);
   }
+  // 렌즈 이동: 정규 장치 좌표에서 (sx, sy)만큼 — 클립 x·y에 w의 그 배수를 더한다
+  const sx = c.shiftX ?? 0, sy = c.shiftY ?? 0;
+  if (sx || sy) for (let j = 0; j < 4; j++) {
+    proj[j * 4] = proj[j * 4]! + sx * proj[j * 4 + 3]!;
+    proj[j * 4 + 1] = proj[j * 4 + 1]! + sy * proj[j * 4 + 3]!;
+  }
   const viewProj = mat4Mul(proj, view);
   const invViewProj = mat4Invert(viewProj) ?? new Float64Array(16);
   const pixelPerDepth = (2 * tanV) / h;
   const pixelConst = (2 * c.distance * tanV) / h;
-  return { width: w, height: h, projection: c.projection, eye, basis, view, proj, viewProj, invViewProj, near, far, pixelPerDepth, pixelConst };
+  const out: ViewFrame = { width: w, height: h, projection: c.projection, eye, basis, view, proj, viewProj, invViewProj, near, far, pixelPerDepth, pixelConst };
+  if (sx || sy) out.shift = [sx, sy];
+  return out;
 }
 
 /**
@@ -312,7 +339,7 @@ export function zoomCamera(c: CameraState, factor: number, anchor: readonly numb
 /** 두 카메라 사이 보간(t ∈ [0, 1]). yaw는 짧은 쪽으로 돈다 */
 export function lerpCamera(a: CameraState, b: CameraState, t: number): CameraState {
   const dy = wrapAngle(b.yaw - a.yaw);
-  return {
+  const out: CameraState = {
     target: lerp3(a.target, b.target, t),
     distance: Math.exp(Math.log(a.distance) + (Math.log(b.distance) - Math.log(a.distance)) * t),
     yaw: wrapAngle(a.yaw + dy * t),
@@ -320,6 +347,16 @@ export function lerpCamera(a: CameraState, b: CameraState, t: number): CameraSta
     projection: b.projection,
     fovY: a.fovY + (b.fovY - a.fovY) * t,
   };
+  // 굴림·렌즈 이동은 어느 한쪽에 있을 때만(없으면 예전과 같은 객체 모양)
+  const L = (k: 'roll' | 'shiftX' | 'shiftY'): void => {
+    if (a[k] === undefined && b[k] === undefined) return;
+    const x = a[k] ?? 0, y = b[k] ?? 0;
+    out[k] = k === 'roll' ? wrapAngle(x + wrapAngle(y - x) * t) : x + (y - x) * t;
+  };
+  L('roll');
+  L('shiftX');
+  L('shiftY');
+  return out;
 }
 
 /**

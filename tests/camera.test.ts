@@ -303,3 +303,42 @@ describe('걷기 카메라', () => {
     expect(s.yaw).toBe(c.yaw);
   });
 });
+
+describe('굴림·렌즈 이동', () => {
+  it('굴림은 화면 오른쪽·위를 보는 축 둘레로 돌리고 보는 방향은 그대로', async () => {
+    const { cameraBasis, defaultCamera } = await import('../src/camera');
+    const c = defaultCamera();
+    const b0 = cameraBasis(c);
+    const b1 = cameraBasis({ ...c, roll: Math.PI / 2 });
+    for (let k = 0; k < 3; k++) {
+      expect(b1.back[k]).toBeCloseTo(b0.back[k]!, 12);
+      expect(b1.right[k]).toBeCloseTo(b0.up[k]!, 12);
+      expect(b1.up[k]).toBeCloseTo(-b0.right[k]!, 12);
+    }
+    // 굴림이 없으면 예전 틀과 같다
+    expect(cameraBasis({ ...c, roll: 0 })).toEqual(b0);
+  });
+
+  it('렌즈 이동은 대상점을 화면에서 반폭·반높이의 그 배수만큼 옮기고, 광선과 투영이 서로 맞는다', async () => {
+    const { computeFrame, projectToScreen, screenRay, defaultCamera, lerpCamera } = await import('../src/camera');
+    for (const projection of ['perspective', 'orthographic'] as const) {
+      const c = { ...defaultCamera(), target: [1, 2, 3] as [number, number, number], distance: 50, projection };
+      const f0 = computeFrame(c, 800, 600, { center: [1, 2, 3], radius: 20 });
+      const f1 = computeFrame({ ...c, shiftX: 0.25, shiftY: -0.5 }, 800, 600, { center: [1, 2, 3], radius: 20 });
+      const p0 = projectToScreen(f0, [1, 2, 3])!, p1 = projectToScreen(f1, [1, 2, 3])!;
+      expect(p1[0] - p0[0]).toBeCloseTo(0.25 * 400, 6);
+      expect(p1[1] - p0[1]).toBeCloseTo(0.5 * 300, 6);
+      expect(f1.shift).toEqual([0.25, -0.5]);
+      expect(f0.shift).toBeUndefined();
+      // 화면 점 → 광선 위 점 → 화면 점
+      const r = screenRay(f1, 123, 456);
+      const q = projectToScreen(f1, [r.origin[0] + r.dir[0] * 30, r.origin[1] + r.dir[1] * 30, r.origin[2] + r.dir[2] * 30])!;
+      expect(q[0]).toBeCloseTo(123, 6);
+      expect(q[1]).toBeCloseTo(456, 6);
+    }
+    // 보간: 둘 다 없으면 키가 없다
+    const a = defaultCamera();
+    expect('roll' in lerpCamera(a, a, 0.5)).toBe(false);
+    expect(lerpCamera(a, { ...a, roll: 1 }, 0.5).roll).toBeCloseTo(0.5, 12);
+  });
+});

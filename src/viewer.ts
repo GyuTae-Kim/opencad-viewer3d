@@ -799,6 +799,7 @@ export class Viewer3d {
 
   // ───────────────────────── 보기 ─────────────────────────
 
+  /** 지금 카메라(굴림·렌즈 이동은 있을 때만 들어 있다) */
   getCamera(): CameraState {
     return { ...this.cam, target: [...this.cam.target] as V3 };
   }
@@ -831,10 +832,35 @@ export class Viewer3d {
     this.setViewDir(VIEW_DIRS[name], animate);
   }
 
-  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기 */
+  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로) */
   setViewDir(dir: readonly number[], animate = this.opts.animate): void {
     const a = dirToAngles(dir, 0);
-    this.goto(fitCamera({ ...this.cam, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
+    const { roll: _r, shiftX: _x, shiftY: _y, ...base } = this.cam;
+    void _r, _x, _y;
+    this.goto(fitCamera({ ...base, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
+  }
+
+  /** 카메라 굴림(라디안, 0.7.0): 화면 위 방향을 보는 축 둘레로(+면 카메라가 반시계로 기울어 장면은 시계로). 0이면 없앤다 */
+  setRoll(rad: number): void {
+    if (!Number.isFinite(rad)) return;
+    this.finishAnim();
+    const { roll: _r, ...base } = this.cam;
+    void _r;
+    this.cam = rad ? { ...base, roll: rad } : base;
+    this.invalidate();
+  }
+
+  /**
+   * 렌즈 이동(0.7.0, 정규 장치 좌표 — 화면 반폭·반높이의 몇 배): 보는 방향은 그대로 두고 그림만 옮긴다(축 어긋난 투영).
+   * 2점 투시: 앙각을 0으로 두고 shiftY로 위아래를 맞춘다(세로선이 곧다). 둘 다 0이면 없앤다. 표준 뷰(setView)는 0으로 돌린다
+   */
+  setLensShift(x: number, y: number): void {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    this.finishAnim();
+    const { shiftX: _x, shiftY: _y, ...base } = this.cam;
+    void _x, _y;
+    this.cam = x || y ? { ...base, shiftX: x, shiftY: y } : base;
+    this.invalidate();
   }
 
   setProjection(p: Projection): void {
@@ -2879,7 +2905,7 @@ export class Viewer3d {
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
     this.frameMs = performance.now() - t0;
-    const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}`;
+    const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}|${this.cam.fovY}|${this.cam.roll ?? 0}|${this.cam.shiftX ?? 0}|${this.cam.shiftY ?? 0}`;
     if (key !== this.lastCamKey) {
       this.lastCamKey = key;
       const c = this.getCamera();
