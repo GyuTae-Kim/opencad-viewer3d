@@ -270,6 +270,31 @@ interface LookState {
   matrix?: Float64Array;
 }
 
+/** setLighting 선택 */
+export interface LightingOptions {
+  sun: {
+    /** 해 쪽 세계 방향(길이 상관없음) */
+    direction: readonly number[];
+    /** 세기(기본 0.85) */
+    intensity?: number;
+    /** 해 빛 색(기본 흰색) */
+    color?: Rgba | string;
+  };
+  /** 주변광(기본 0.35) */
+  ambient?: number;
+  /** 그림자: true 또는 { size: 깊이 그림 한 변(기본 2048), bias: 깊이 치우침(기본 0.0015) } */
+  shadows?: boolean | { size?: number; bias?: number };
+}
+
+/** setFog 선택 */
+export interface FogOptions {
+  /** 안개 색(기본 바탕색) */
+  color?: Rgba | string;
+  /** 눈 깊이(세계 단위): start부터 섞기 시작해 end에서 안개 색 */
+  start: number;
+  end: number;
+}
+
 /** setBackground 선택: 색은 CSS 색 문자열 또는 RGBA 0~1 */
 export interface BackgroundOptions {
   /** 한 색 바탕(테마 바탕 대신) */
@@ -462,6 +487,11 @@ export class Viewer3d {
   private measureFmt: MeasureFormat | null = null;
   /** 바탕 바꾸기(한 색·하늘·땅) */
   private bgOpt: BackgroundOptions | null = null;
+  /** 해 조명·그림자, 안개 */
+  private lightOpt: LightingOptions | null = null;
+  private fogOpt: FogOptions | null = null;
+  /** 그림자 깊이 그림 판(그림자를 바꾸는 상태가 바뀔 때마다 늘린다) */
+  private shadowVer = 0;
   /** 보여 주기 선택(외곽선·숨은 점선) */
   private renderOpts: { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } = { profiles: null, hiddenEdges: 0 };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
@@ -639,6 +669,7 @@ export class Viewer3d {
       this.secMore = [];
     }
     this.secIdx.clear();
+    this.shadowVer++;
     this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
     const inc = opts.incremental;
@@ -842,6 +873,30 @@ export class Viewer3d {
     return { sky, skyHorizon: c(bg.skyHorizon, sky), ground, groundHorizon: c(bg.groundHorizon, ground) };
   }
 
+  /**
+   * 해 조명(0.7.0, 기본은 꺼짐 — 예전 고정 조명): sun.direction = 해 쪽 세계 방향(예: [0.4, −0.6, 0.7]), intensity(기본 0.85)·color, ambient(기본 0.35).
+   * shadows면 해 쪽 평행 투영 깊이 그림(기본 2048², 3×3 PCF)으로 그림자를 드리운다 — 장면·보이기·단면·겉모습·조명이 바뀔 때만 다시 그린다. null이면 끈다
+   */
+  setLighting(o: LightingOptions | null): void {
+    this.lightOpt = o ? { ...o, sun: { ...o.sun, direction: [...o.sun.direction] } } : null;
+    this.shadowVer++;
+    this.invalidate();
+  }
+
+  get lighting(): LightingOptions | null {
+    return this.lightOpt ? { ...this.lightOpt, sun: { ...this.lightOpt.sun } } : null;
+  }
+
+  /** 선형 안개(0.7.0, 기본 꺼짐): 눈 깊이 start(세계 단위)부터 end까지 color(기본 바탕색)로 섞는다. 그물·선·점(덧그림 제외). null이면 끈다 */
+  setFog(o: FogOptions | null): void {
+    this.fogOpt = o && Number.isFinite(o.start) && Number.isFinite(o.end) ? { ...o } : null;
+    this.invalidate();
+  }
+
+  get fog(): FogOptions | null {
+    return this.fogOpt ? { ...this.fogOpt } : null;
+  }
+
   /** 지금 보여 주기 선택 */
   get renderOptions(): { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } {
     const p = this.renderOpts.profiles;
@@ -944,6 +999,7 @@ export class Viewer3d {
   }
 
   private visibilityChanged(): void {
+    this.shadowVer++;
     this.visBox = null;
     this.visLists = null;
     this.cutDirty = true;
@@ -1268,6 +1324,7 @@ export class Viewer3d {
   }
 
   private sectionChanged(): void {
+    this.shadowVer++;
     this.cutDirty = true;
     this.secIdx.clear();
     this.wheelAnchor = null;
@@ -1379,6 +1436,7 @@ export class Viewer3d {
   /** 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만) */
   private pumpUpload(budgetMs: number): void {
     const done = this.renderer.uploadSome(budgetMs);
+    this.shadowVer++;
     const p = this.renderer.uploadProgress;
     const s = this.sceneRef;
     const total = s ? s.meshes.length + s.lines.length + (s.points?.length ?? 0) : 0;
@@ -1685,6 +1743,7 @@ export class Viewer3d {
   }
 
   private lookChanged(moved: boolean): void {
+    this.shadowVer++;
     let n = 0;
     for (const l of this.looks.values()) if (l.matrix) n++;
     this.lookMoves = n;
@@ -2638,7 +2697,21 @@ export class Viewer3d {
     const bgColor = bg?.color === undefined ? null : typeof bg.color === 'string' ? this.rgba(bg.color) : bg.color;
     const colors = bgColor ? { ...this.colors, background: bgColor } : this.colors;
     const sky = bg && (bg.sky !== undefined || bg.ground !== undefined) ? this.skyColors(bg, colors.background) : null;
+    const L = this.lightOpt;
+    let light: RenderState['light'] = null;
+    if (L) {
+      const d = L.sun.direction;
+      const l = Math.hypot(d[0]!, d[1]!, d[2]!) || 1;
+      const k = L.sun.intensity ?? 0.85;
+      const c = L.sun.color === undefined ? ([1, 1, 1, 1] as Rgba) : typeof L.sun.color === 'string' ? this.rgba(L.sun.color) : L.sun.color;
+      light = { dir: [d[0]! / l, d[1]! / l, d[2]! / l], color: [c[0] * k, c[1] * k, c[2] * k, 1], ambient: L.ambient ?? 0.35 };
+    }
+    const shadows = L?.shadows;
+    const F = this.fogOpt;
     return {
+      light,
+      shadow: L && shadows ? { box: this.visibleBox(), size: (typeof shadows === 'object' ? shadows.size : undefined) ?? 2048, bias: (typeof shadows === 'object' ? shadows.bias : undefined) ?? 0.0015, version: this.shadowVer } : null,
+      fog: F ? { color: F.color === undefined ? colors.background : typeof F.color === 'string' ? this.rgba(F.color) : F.color, start: F.start, end: F.end } : null,
       mode: this.mode,
       colors,
       sky,

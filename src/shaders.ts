@@ -13,6 +13,8 @@
  * - FLAT(그물 변종, 숨은 선 모드): 조명 없이 색 그대로(바탕색으로 채워 뒤의 선을 가린다).
  * - 윤곽(PROFILE): 그물만 그린 깊이 그림에서 화면 화소 반지름 둘레의 깊이 2차 차분이 크면(실루엣) 그 색을 칠한다.
  *   원근 깊이 버퍼 값은 1/z에 대해 1차라 평면은 2차 차분이 0이다. 허용치는 (1 − 깊이)에 비례(가까운 곳·먼 곳 같은 상대 기준).
+ * - 해(SUN, 0.7.0): 고정 보조광 대신 세계 방향 해 하나(시점 공간으로 옮긴 u_sunDir)·주변광. SHADOW면 해 쪽 평행 투영 깊이 그림을
+ *   sampler2DShadow로 3×3 PCF해 그늘을 곱한다. FOG(그물·선·점)면 눈 깊이로 선형 안개 색을 섞는다.
  * - 무늬(TEX를 정의한 그물 변종): 무늬 좌표 a_uv(정점마다 (u, v) 또는 원근 무늬 (u·q, v·q, q))를 보간해 조각에서 q로 나누고
  *   u_tex(REPEAT·밉맵)를 읽어 rgb를 바꾼다. u_texAlpha가 1이면 그림 알파를 불투명도에 곱한다(반투명 차례). 무늬가 없는 그물은 예전 셰이더 그대로.
  */
@@ -49,9 +51,16 @@ out vec3 v_uv;
 #ifdef CLIPN
 out vec3 v_lpos;
 #endif
+#ifdef SHADOW
+uniform mat4 u_shadowM;
+out vec4 v_spos;
+#endif
 void main() {
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;
+#ifdef SHADOW
+  v_spos = u_shadowM * vec4(a_pos, 1.0);
+#endif
   v_nrm = u_nmat * a_nrm;
   v_col = u_vcol > 0.5 ? a_col : u_color;
 #ifdef CLIP
@@ -88,6 +97,29 @@ in vec3 v_lpos;
 uniform vec4 u_clips[6];
 uniform int u_nclip;
 #endif
+#ifdef SUN
+uniform vec3 u_sunDir;
+uniform vec3 u_sunCol;
+uniform float u_amb;
+#endif
+#ifdef SHADOW
+in vec4 v_spos;
+uniform highp sampler2DShadow u_shadow;
+uniform vec2 u_shadowTexel;
+uniform float u_shadowBias;
+float shadowAt() {
+  vec3 p = v_spos.xyz / v_spos.w;
+  if (p.x <= 0.0 || p.x >= 1.0 || p.y <= 0.0 || p.y >= 1.0 || p.z >= 1.0) return 1.0;
+  float s = 0.0;
+  for (int i = -1; i <= 1; i++)
+    for (int j = -1; j <= 1; j++) s += texture(u_shadow, vec3(p.xy + vec2(float(i), float(j)) * u_shadowTexel, p.z - u_shadowBias));
+  return s / 9.0;
+}
+#endif
+#ifdef FOG
+uniform vec4 u_fogCol;
+uniform vec2 u_fog;
+#endif
 void main() {
   vec3 V = u_ortho > 0.5 ? vec3(0.0, 0.0, 1.0) : normalize(-v_vpos);
   vec3 ng = cross(dFdx(v_vpos), dFdy(v_vpos));
@@ -115,16 +147,30 @@ void main() {
   vec3 L2 = normalize(vec3(0.6, -0.3, 0.45));
   float dif = 0.30 + 0.60 * max(dot(n, L1), 0.0) + 0.20 * max(dot(n, L2), 0.0);
   float spec = pow(max(dot(n, normalize(L1 + V)), 0.0), 48.0) * 0.2;
+#ifdef SUN
+  float sh = 1.0;
+#ifdef SHADOW
+  sh = shadowAt();
+#endif
+  float nl = max(dot(n, u_sunDir), 0.0) * sh;
+  spec = pow(max(dot(n, normalize(u_sunDir + V)), 0.0), 48.0) * 0.2 * nl;
+#endif
   vec4 base = v_col;
 #ifdef TEX
   vec4 t = texture(u_tex, v_uv.xy / v_uv.z);
   base = vec4(t.rgb, v_col.a * mix(1.0, t.a, u_texAlpha));
 #endif
   vec3 c = base.rgb * dif + vec3(spec);
+#ifdef SUN
+  c = base.rgb * (vec3(u_amb) + u_sunCol * nl) + vec3(spec);
+#endif
 #ifdef FLAT
   c = base.rgb;
 #endif
   c = mix(c, u_tint.rgb, u_tint.a);
+#ifdef FOG
+  c = mix(c, u_fogCol.rgb, clamp((-v_vpos.z - u_fog.x) / max(u_fog.y - u_fog.x, 1e-9), 0.0, 1.0));
+#endif
   o_color = vec4(c, base.a * u_alpha);
 }`;
 
@@ -150,6 +196,10 @@ out float v_w;
 #ifdef CLIPN
 uniform vec4 u_clips[6];
 uniform int u_nclip;
+#endif
+#ifdef FOG
+uniform vec4 u_mvz;
+out float v_fd;
 #endif
 void main() {
   vec3 p0 = a_p0;
@@ -205,6 +255,9 @@ void main() {
   v_col = vec4(col.rgb, col.a * u_alpha);
   v_alongW = (a_corner.x * len + ext * hw) * c.w;
   v_w = c.w;
+#ifdef FOG
+  v_fd = -dot(u_mvz, vec4(mix(p0, p1, a_corner.x), 1.0));
+#endif
 }`;
 
 export const WIDE_FS = `#version 300 es
@@ -214,12 +267,20 @@ in float v_alongW;
 in float v_w;
 uniform vec2 u_dash;
 out vec4 o_color;
+#ifdef FOG
+in float v_fd;
+uniform vec4 u_fogCol;
+uniform vec2 u_fog;
+#endif
 void main() {
   if (u_dash.x > 0.0) {
     float along = v_alongW / v_w;
     if (mod(along, u_dash.x + u_dash.y) > u_dash.x) discard;
   }
   o_color = v_col;
+#ifdef FOG
+  o_color.rgb = mix(o_color.rgb, u_fogCol.rgb, clamp((v_fd - u_fog.x) / max(u_fog.y - u_fog.x, 1e-9), 0.0, 1.0));
+#endif
 }`;
 
 export const THIN_VS = `#version 300 es
@@ -240,10 +301,17 @@ out float v_clip;
 #ifdef CLIPN
 out vec3 v_lpos;
 #endif
+#ifdef FOG
+uniform vec4 u_mvz;
+out float v_fd;
+#endif
 void main() {
   vec4 c = u_mvp * vec4(a_pos, 1.0);
   c.z -= u_bias * c.w;
   gl_Position = c;
+#ifdef FOG
+  v_fd = -dot(u_mvz, vec4(a_pos, 1.0));
+#endif
   vec4 col = u_vcol > 0.5 ? a_col : u_color;
   if (u_override.a > 0.0) col = u_override;
   v_col = vec4(col.rgb, col.a * u_alpha);
@@ -267,6 +335,11 @@ in vec3 v_lpos;
 uniform vec4 u_clips[6];
 uniform int u_nclip;
 #endif
+#ifdef FOG
+in float v_fd;
+uniform vec4 u_fogCol;
+uniform vec2 u_fog;
+#endif
 void main() {
 #ifdef CLIP
   if (v_clip > 0.0) discard;
@@ -278,6 +351,9 @@ void main() {
   }
 #endif
   o_color = v_col;
+#ifdef FOG
+  o_color.rgb = mix(o_color.rgb, u_fogCol.rgb, clamp((v_fd - u_fog.x) / max(u_fog.y - u_fog.x, 1e-9), 0.0, 1.0));
+#endif
 }`;
 
 export const POINT_VS = `#version 300 es
@@ -294,8 +370,15 @@ out vec2 v_c;
 uniform vec4 u_clips[6];
 uniform int u_nclip;
 #endif
+#ifdef FOG
+uniform vec4 u_mvz;
+out float v_fd;
+#endif
 void main() {
   vec4 c = u_mvp * vec4(a_pos, 1.0);
+#ifdef FOG
+  v_fd = -dot(u_mvz, vec4(a_pos, 1.0));
+#endif
   if (c.w <= 0.0 || c.z < -c.w || dot(u_clip, vec4(a_pos, 1.0)) > 0.0) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
@@ -323,11 +406,19 @@ uniform float u_size;
 uniform vec4 u_color;
 uniform vec4 u_ring;
 out vec4 o_color;
+#ifdef FOG
+in float v_fd;
+uniform vec4 u_fogCol;
+uniform vec2 u_fog;
+#endif
 void main() {
   float r = length(v_c);
   float R = u_size * 0.5;
   if (r > R) discard;
   o_color = r > R - max(1.0, R * 0.25) ? u_ring : u_color;
+#ifdef FOG
+  o_color.rgb = mix(o_color.rgb, u_fogCol.rgb, clamp((v_fd - u_fog.x) / max(u_fog.y - u_fog.x, 1e-9), 0.0, 1.0));
+#endif
 }`;
 
 /** 화면 전체 삼각형(정점 번호로 만든다 — 버퍼 없음) */
@@ -389,4 +480,50 @@ void main() {
   vec3 d = normalize(u_fwd + n.x * u_tan.x * u_right + n.y * u_tan.y * u_up);
   float e = d.z;
   o_color = e >= 0.0 ? mix(u_skyH, u_sky, sqrt(clamp(e, 0.0, 1.0))) : mix(u_groundH, u_ground, sqrt(clamp(-e, 0.0, 1.0)));
+}`;
+
+/** 깊이만 그리기(그림자 깊이 그림): 단면 변종(CLIP·CLIPN)도 같은 규칙으로 버린다 */
+export const DEPTH_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+uniform mat4 u_mvp;
+#ifdef CLIP
+uniform vec4 u_clip;
+out float v_clip;
+#endif
+#ifdef CLIPN
+out vec3 v_lpos;
+#endif
+void main() {
+  gl_Position = u_mvp * vec4(a_pos, 1.0);
+#ifdef CLIP
+  v_clip = dot(u_clip, vec4(a_pos, 1.0));
+#endif
+#ifdef CLIPN
+  v_lpos = a_pos;
+#endif
+}`;
+
+export const DEPTH_FS = `#version 300 es
+precision highp float;
+#ifdef CLIP
+in float v_clip;
+#endif
+#ifdef CLIPN
+in vec3 v_lpos;
+uniform vec4 u_clips[6];
+uniform int u_nclip;
+#endif
+out vec4 o_color;
+void main() {
+#ifdef CLIP
+  if (v_clip > 0.0) discard;
+#endif
+#ifdef CLIPN
+  for (int i = 0; i < 6; i++) {
+    if (i >= u_nclip) break;
+    if (dot(u_clips[i], vec4(v_lpos, 1.0)) > 0.0) discard;
+  }
+#endif
+  o_color = vec4(1.0);
 }`;
