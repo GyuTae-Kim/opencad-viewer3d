@@ -15,9 +15,9 @@ export const TEXTURE_BUDGET = 256 * 1024 * 1024;
 export const TEXTURE_MIN_SIDE = 64;
 
 /** 그물 무늬 좌표의 정점당 값 수(0 = 무늬 좌표 없음 또는 짧음) */
-export function uvComponents(m: Pick<Mesh3d, 'positions' | 'uvs'>): 0 | 2 | 3 {
+export function uvComponents(m: Pick<Mesh3d, 'positions' | 'uvs'>, uvs: Float32Array | undefined = m.uvs): 0 | 2 | 3 {
   const nv = Math.floor(m.positions.length / 3);
-  const uv = m.uvs;
+  const uv = uvs;
   if (!uv || nv === 0) return 0;
   if (uv.length >= nv * 3) return 3;
   if (uv.length >= nv * 2) return 2;

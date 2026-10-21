@@ -15,6 +15,7 @@
  *   원근 깊이 버퍼 값은 1/z에 대해 1차라 평면은 2차 차분이 0이다. 허용치는 (1 − 깊이)에 비례(가까운 곳·먼 곳 같은 상대 기준).
  * - 해(SUN, 0.7.0): 고정 보조광 대신 세계 방향 해 하나(시점 공간으로 옮긴 u_sunDir)·주변광. SHADOW면 해 쪽 평행 투영 깊이 그림을
  *   sampler2DShadow로 3×3 PCF해 그늘을 곱한다. FOG(그물·선·점)면 눈 깊이로 선형 안개 색을 섞는다.
+ * - 뒷면(BACK·BACKTEX, 0.7.0): gl_FrontFacing으로 뒷면이면 Mesh3d.backColor(u_backColor, a < 0이면 앞면 그대로)나 뒷면 무늬(u_tex2, 좌표 a_uv2)를 칠한다.
  * - 무늬(TEX를 정의한 그물 변종): 무늬 좌표 a_uv(정점마다 (u, v) 또는 원근 무늬 (u·q, v·q, q))를 보간해 조각에서 q로 나누고
  *   u_tex(REPEAT·밉맵)를 읽어 rgb를 바꾼다. u_texAlpha가 1이면 그림 알파를 불투명도에 곱한다(반투명 차례). 무늬가 없는 그물은 예전 셰이더 그대로.
  */
@@ -55,11 +56,19 @@ out vec3 v_lpos;
 uniform mat4 u_shadowM;
 out vec4 v_spos;
 #endif
+#ifdef BACKTEX
+layout(location=4) in vec3 a_uv2;
+uniform float u_uvq2;
+out vec3 v_uv2;
+#endif
 void main() {
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;
 #ifdef SHADOW
   v_spos = u_shadowM * vec4(a_pos, 1.0);
+#endif
+#ifdef BACKTEX
+  v_uv2 = u_uvq2 > 0.5 ? a_uv2 : vec3(a_uv2.xy, 1.0);
 #endif
   v_nrm = u_nmat * a_nrm;
   v_col = u_vcol > 0.5 ? a_col : u_color;
@@ -120,6 +129,15 @@ float shadowAt() {
 uniform vec4 u_fogCol;
 uniform vec2 u_fog;
 #endif
+#ifdef BACK
+uniform vec4 u_backColor;
+uniform float u_flipFace;
+#endif
+#ifdef BACKTEX
+in vec3 v_uv2;
+uniform sampler2D u_tex2;
+uniform float u_tex2Alpha;
+#endif
 void main() {
   vec3 V = u_ortho > 0.5 ? vec3(0.0, 0.0, 1.0) : normalize(-v_vpos);
   vec3 ng = cross(dFdx(v_vpos), dFdy(v_vpos));
@@ -159,6 +177,16 @@ void main() {
 #ifdef TEX
   vec4 t = texture(u_tex, v_uv.xy / v_uv.z);
   base = vec4(t.rgb, v_col.a * mix(1.0, t.a, u_texAlpha));
+#endif
+#ifdef BACK
+  // 뒷면(감김이 시계 방향 — 거울 행렬이면 뒤집어): 뒷면 색·뒷면 무늬
+  if (gl_FrontFacing == (u_flipFace > 0.5)) {
+    if (u_backColor.a >= 0.0) base = vec4(u_backColor.rgb, v_col.a);
+#ifdef BACKTEX
+    vec4 t2 = texture(u_tex2, v_uv2.xy / v_uv2.z);
+    base = vec4(t2.rgb, v_col.a * mix(1.0, t2.a, u_tex2Alpha));
+#endif
+  }
 #endif
   vec3 c = base.rgb * dif + vec3(spec);
 #ifdef SUN

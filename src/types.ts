@@ -69,6 +69,15 @@ export interface Mesh3d {
    * 고르기·측정도 돌린 자리로 한다. 범위는 원점 둘레 기둥(돌려도 변하지 않게)
    */
   billboard?: { origin: [number, number, number]; axis?: 'z'; front?: [number, number, number] };
+  /**
+   * 뒷면 색(0.7.0, 선택): 삼각형 감김이 화면에서 시계 방향인 쪽(바깥에서 반시계로 감은 그물의 안쪽)을 이 색으로(rgb, 불투명도는 color 알파).
+   * SketchUp 면의 뒷면 재질처럼. matrix가 거울(행렬식 < 0)이면 앞뒤를 맞춰 뒤집는다
+   */
+  backColor?: Rgba;
+  /** 뒷면 무늬 그림 id(Scene3d.textures). 좌표는 backUvs(없으면 uvs) */
+  backTexture?: string;
+  /** 뒷면 무늬 좌표(uvs와 같은 꼴 — 정점마다 2값 또는 3값) */
+  backUvs?: Float32Array;
 }
 
 /**

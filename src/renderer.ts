@@ -195,6 +195,8 @@ interface Prog {
   sun?: boolean;
   shadow?: boolean;
   fog?: boolean;
+  back?: boolean;
+  backTex?: boolean;
 }
 
 /** 겉모습 행렬을 합친 모형 행렬 캐시(행렬·원래 모형이 같으면 다시 쓴다 — 균일 변수 캐시가 같은 객체로 알아보게) */
@@ -253,6 +255,8 @@ interface MeshRec {
   /** 무늬 그림의 알파를 불투명도에 곱하는지(Texture3d.alpha — 반투명 차례에 그린다) */
   texAlpha: boolean;
   transparent: boolean;
+  /** 뒷면(Mesh3d.backColor·backTexture): 색(없으면 null)·뒷면 무늬 id·좌표 값 수·무늬 알파 */
+  back: { color: Rgba | null; tex: string | null; uv: 0 | 2 | 3; texAlpha: boolean } | null;
   /** 로컬 → 세계 = matrix · T(origin)(원점이 없으면 matrix 그대로, 둘 다 없으면 undefined) */
   model: ArrayLike<number> | undefined;
   /** 세계 범위(행렬·원점 반영) */
@@ -647,6 +651,8 @@ export class Renderer3d {
       sun: defs.includes('SUN'),
       shadow: defs.includes('SHADOW'),
       fog: defs.includes('FOG'),
+      back: defs.includes('BACK'),
+      backTex: defs.includes('BACKTEX'),
     };
     this.variants.set(key, p);
     return p;
@@ -784,6 +790,14 @@ export class Renderer3d {
       gl.enableVertexAttribArray(3);
       gl.vertexAttribPointer(3, uv, gl.FLOAT, false, uv * 4, 0);
     }
+    // 뒷면 무늬 좌표(backUvs, 없으면 uvs)
+    const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
+    const buv = buvs ? uvComponents(m, buvs) : 0;
+    if (buv) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(buvs!));
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, buv, gl.FLOAT, false, buv * 4, 0);
+    }
     return { hasNormals, hasColors };
   }
 
@@ -813,7 +827,13 @@ export class Renderer3d {
     }
     const edges = m.edges && m.edges.length >= 6 ? this.lineRec(m.id, m.group, m.edges, undefined) : null;
     const box = meshBounds(m);
+    // 뒷면 색·무늬(없으면 null — 예전 그대로)
+    const buv = m.backTexture && this.texSrc.has(m.backTexture) ? uvComponents(m, m.backUvs ?? m.uvs) : 0;
+    const bcol = m.backColor && m.backColor.length >= 3 ? m.backColor : null;
+    const back = bcol || buv ? { color: bcol, tex: buv ? m.backTexture! : null, uv: buv, texAlpha: buv > 0 && this.texSrc.get(m.backTexture!)!.alpha === true } : null;
+    if (back?.texAlpha) transparent = true;
     return {
+      back,
       src: m,
       vao,
       count,
@@ -1104,6 +1124,8 @@ export class Renderer3d {
     for (const m of scene.meshes) {
       const t = m.texture !== undefined ? this.texSrc.get(m.texture) : undefined;
       if (t && uvComponents(m)) used.set(t.id, t);
+      const bt = m.backTexture !== undefined ? this.texSrc.get(m.backTexture) : undefined;
+      if (bt && uvComponents(m, m.backUvs ?? m.uvs)) used.set(bt.id, bt);
     }
     let dropped = false;
     for (const [id, rec] of this.textures)
@@ -1202,6 +1224,13 @@ export class Renderer3d {
       } else if (r.state === 'failed') s.failed++;
     }
     return s;
+  }
+
+  /** 그물의 올린 뒷면 무늬(없거나 아직이면 null) */
+  private backTexOf(r: MeshRec): WebGLTexture | null {
+    if (!r.back?.tex) return null;
+    const t = this.textures.get(r.back.tex);
+    return t && t.state === 'ready' ? t.tex : null;
   }
 
   /** 그물의 올린 무늬(없거나 아직이면 null) */
@@ -1549,6 +1578,23 @@ export class Renderer3d {
         gl.uniform1f(this.loc(p, 'u_uvq'), r.uv === 3 ? 1 : 0);
         gl.uniform1f(this.loc(p, 'u_texAlpha'), r.texAlpha ? 1 : 0);
       }
+      if (p.back) {
+        const bc = r.back?.color;
+        if (bc) gl.uniform4f(this.loc(p, 'u_backColor'), bc[0], bc[1], bc[2], 1);
+        else gl.uniform4f(this.loc(p, 'u_backColor'), 0, 0, 0, -1);
+        // 거울 행렬(행렬식 < 0)이면 감김이 뒤집힌다
+        const M = matrix;
+        const det = M ? M[0]! * (M[5]! * M[10]! - M[6]! * M[9]!) - M[4]! * (M[1]! * M[10]! - M[2]! * M[9]!) + M[8]! * (M[1]! * M[6]! - M[2]! * M[5]!) : 1;
+        gl.uniform1f(this.loc(p, 'u_flipFace'), det < 0 ? 1 : 0);
+        if (p.backTex) {
+          gl.activeTexture(gl.TEXTURE3);
+          gl.bindTexture(gl.TEXTURE_2D, this.backTexOf(r));
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(this.loc(p, 'u_tex2'), 3);
+          gl.uniform1f(this.loc(p, 'u_uvq2'), r.back?.uv === 3 ? 1 : 0);
+          gl.uniform1f(this.loc(p, 'u_tex2Alpha'), r.back?.texAlpha ? 1 : 0);
+        }
+      }
       const m = matrix ?? null;
       if (m !== lastMat) {
         lastMat = m;
@@ -1603,8 +1649,15 @@ export class Renderer3d {
     };
     const sceneMeshProg = (): Prog => progOf(false);
     const texProg = (): Prog => progOf(true);
-    /** 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종) */
-    const progFor = (r: MeshRec): Prog => (texOfR(r) ? texProg() : sceneMeshProg());
+    /** 뒷면 변종이 필요한 그물인지(단색·숨은 선 모드, 색 바꾸기는 뒷면 없이) */
+    const backOf = (r: MeshRec): boolean => !!r.back && !mono && !flat && !lookOf(r.src.id)?.color && (!!r.back.color || (!noTex && !!this.backTexOf(r)));
+    /** 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종, 뒷면이 있으면 뒷면 변종) */
+    const progFor = (r: MeshRec): Prog => {
+      if (!backOf(r)) return texOfR(r) ? texProg() : sceneMeshProg();
+      const defs = [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(texOfR(r) ? ['TEX'] : []), 'BACK'];
+      if (!noTex && this.backTexOf(r)) defs.push('BACKTEX');
+      return this.variant('mesh', defs);
+    };
     /** 묶음 안 구간이 있으면 [보통, 강조] 그릴 목록(없으면 null — 옛 캐시는 지운다). wire면 와이어프레임용 */
     const meshLists = (r: MeshRec, wire = false): [DrawList, DrawList] | null => {
       const p = st.parts?.(r.src.id);
@@ -1679,8 +1732,13 @@ export class Renderer3d {
       gl.polygonOffset(1, 1);
       let textured = false;
       meshUse(sceneMeshProg());
+      let backs = false;
       for (const r of visibleMeshes) {
         if (transOf(r)) continue;
+        if (r.back && backOf(r)) {
+          backs = true;
+          continue;
+        }
         if (texOfR(r)) {
           textured = true;
           continue;
@@ -1690,8 +1748,16 @@ export class Renderer3d {
       if (textured) {
         meshUse(texProg());
         for (const r of visibleMeshes)
-          if (!transOf(r) && texOfR(r)) meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+          if (!transOf(r) && texOfR(r) && !(r.back && backOf(r))) meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
+      // 뒷면 색·무늬가 있는 그물(그물마다 맞는 변종)
+      if (backs)
+        for (const r of visibleMeshes) {
+          if (transOf(r) || !r.back || !backOf(r)) continue;
+          const p = progFor(r);
+          if (p !== cur) meshUse(p);
+          meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+        }
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
       // 1b) 잘린 면 채우기
