@@ -1190,7 +1190,8 @@ export class Renderer3d {
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
       gl.uniformMatrix4fv(this.loc(p, 'u_mv'), false, this.m4b);
       gl.uniformMatrix3fv(this.loc(p, 'u_nmat'), false, this.m3);
-      if (p === this.meshC) {
+      // 무늬 단면 변종(CLIP+TEX)도 평면을 받는다(0.6.0까지는 빠져 무늬 그물이 단면에 잘리지 않았다)
+      if (p === this.meshC || p === this.meshTC) {
         const c = (capPlane ? planeToLocal(capPlane, model) : clipOf(model)) ?? NO_CLIP;
         gl.uniform4f(this.loc(p, 'u_clip'), c[0], c[1], c[2], c[3]);
       }
