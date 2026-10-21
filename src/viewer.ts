@@ -39,9 +39,10 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub, transform4 } from './math';
+import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub, transform4, translation } from './math';
 import { type PickDetail, type ScenePickItems, occludingDepth, pickScene } from './scenepick';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
+import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
 import { countIdsUpTo } from './playback';
 import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance } from './pointer';
 import {
@@ -1315,6 +1316,31 @@ export class Viewer3d {
     const cut = this.pointCut(p);
     const occluded = !!opts.occlusion && onScreen && !cut && this.occludedAt(f, p, x, y, true);
     return { x, y, depth, behind, onScreen, occluded, visible: onScreen && !cut && !occluded };
+  }
+
+  /**
+   * 두 묶음(그물·선분·점 묶음 id) 사이 가장 가까운 두 점과 거리(세계 좌표). 묶음 원점·행렬을 반영하고 숨긴 구간은 뺀다.
+   * 이미 만든 BVH를 쓴다(없으면 만든다). 서로 걸치면 거리 0. maxDistance를 주면 그보다 멀면 null. 없는 id·빈 묶음도 null
+   */
+  closestPoints(idA: string, idB: string, opts: { maxDistance?: number } = {}): ClosestResult | null {
+    const a = this.closestShape(idA), b = this.closestShape(idB);
+    if (!a || !b) return null;
+    return closestBetween(a, b, opts);
+  }
+
+  private closestShape(id: string): ClosestShape | null {
+    const it = this.items.get(id);
+    if (!it) return null;
+    const skip = this.rangeSel.get(id)?.test ?? null;
+    if (it.kind === 'mesh') {
+      const m = it.item;
+      const bvh = this.bvhFor('triangle', m.positions, m.indices, true);
+      return bvh ? { kind: 'triangle', positions: m.positions, indices: m.indices, bvh, model: this.modelOf(m), skip } : null;
+    }
+    const kind = it.kind === 'line' ? 'segment' : 'point';
+    const bvh = this.bvhFor(kind, it.item.positions, undefined, true);
+    const o = it.item.origin;
+    return bvh ? { kind, positions: it.item.positions, bvh, model: hasOrigin(o) ? translation(o) : undefined, skip } : null;
   }
 
   /** 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다 */

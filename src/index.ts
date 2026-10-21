@@ -24,6 +24,7 @@ export type {
 export type { Plane4, SectionAxis } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
+export { type ClosestResult, closestBetween } from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_LABELS } from './camera';
