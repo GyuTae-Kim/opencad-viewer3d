@@ -45,6 +45,30 @@ export function meshLineKind(m: Pick<Mesh3d, 'edges' | 'triangleEdges'>, mode: R
   return (mode === 'wireframe' || mode === 'hiddenLine') && m.triangleEdges !== false ? 'triangles' : null;
 }
 
+/** 면을 채우는 음영 계열 모드(음영·음영+윤곽·숨은 선·단색·무늬 없음): 불투명 면을 먼저 그려 깊이로 서로 가린다 */
+export function isShadedLike(mode: RenderMode): boolean {
+  return mode === 'shaded' || mode === 'shadedEdges' || mode === 'hiddenLine' || mode === 'monochrome' || mode === 'noTexture';
+}
+
+/**
+ * 외곽선(RenderState.profiles)을 그리는 모드: 음영 계열과, 0.7.2부터 와이어프레임.
+ * 외곽선은 어느 모드에서나 불투명 그물만 그린 맨 앞 깊이 그림의 실루엣이다(바깥 테두리·구멍·앞 그물이 뒤 그물 위에 겹친 테두리).
+ * 와이어프레임은 면이 서로 가리지 않지만 외곽선은 이 맨 앞 그림을 따르므로 앞 그물에 가린 뒤 그물의 외곽선은 그 자리에서 끊긴다.
+ * X-ray는 그리지 않는다: 반투명 면이 이미 모양을 보여 주고(모서리 없는 면도 사라지지 않는다), 모든 면을 비쳐 보이는 모드에서
+ * 맨 앞 깊이 실루엣은 비쳐 보이는 뒤 그물의 외곽선을 앞 그물 자리에서 끊어 그림과 어긋난다
+ */
+export function drawsProfiles(mode: RenderMode): boolean {
+  return mode === 'wireframe' || isShadedLike(mode);
+}
+
+/**
+ * 외곽선 굵기(장치 화소)를 1화소로 그리는지(0.7.2): 1.5 미만이면 끊긴 곳 앞쪽 화소만 칠한다.
+ * 그 이상은 0.7.1 그대로 끊긴 곳 양쪽을 굵기/2(최소 1)씩 — 가장 가는 것이 2화소
+ */
+export function profileOnePixel(width: number): boolean {
+  return width < 1.5;
+}
+
 export interface RenderColors {
   /** 단색 모드 면 색(없으면 밝은 회색) */
   monochrome?: Rgba;
@@ -153,7 +177,10 @@ export interface RenderState {
   transparent?: boolean;
   /** 숨은 선 모드에서 면 뒤의 윤곽선을 이 불투명도의 점선으로(0·없으면 안 그림) */
   hiddenEdges?: number;
-  /** 화면 공간 외곽선(실루엣): 굵기(장치 화소)·색. 음영 계열 모드에서만 */
+  /**
+   * 화면 공간 외곽선(실루엣): 굵기(장치 화소)·색. 음영 계열 모드와 와이어프레임(0.7.2)에서(drawsProfiles).
+   * 굵기 1.5 미만은 끊긴 곳 앞쪽 1화소만(0.7.2 — 0.7.1까지는 2화소로 그렸다), 그 이상은 0.7.1 그대로 양쪽 굵기/2씩
+   */
   profiles?: { width: number; color: Rgba } | null;
   /** 하늘·땅 바탕(없으면 colors.background 한 색) */
   sky?: { sky: Rgba; skyHorizon: Rgba; ground: Rgba; groundHorizon: Rgba } | null;
@@ -654,13 +681,13 @@ export class Renderer3d {
     return (rec.lookM = { src: m, base, model: base ? mat4Mul(m, base) : m });
   }
 
-  /** 0.7.0 변종 프로그램(기본 원본 + #define 이름들). 같은 묶음은 한 번만 만든다 */
-  private variant(base: 'mesh' | 'wide' | 'thin' | 'point' | 'depth', defs: readonly string[]): Prog {
+  /** 0.7.0 변종 프로그램(기본 원본 + #define 이름들). 같은 묶음은 한 번만 만든다. profile = 외곽선(0.7.2 ONE) */
+  private variant(base: 'mesh' | 'wide' | 'thin' | 'point' | 'depth' | 'profile', defs: readonly string[]): Prog {
     const key = `${base}:${[...defs].sort().join(',')}`;
     let p = this.variants.get(key);
     if (p) return p;
     const [vs, fs] =
-      base === 'mesh' ? [MESH_VS, MESH_FS] : base === 'wide' ? [WIDE_VS, WIDE_FS] : base === 'thin' ? [THIN_VS, THIN_FS] : base === 'depth' ? [DEPTH_VS, DEPTH_FS] : [POINT_VS, POINT_FS];
+      base === 'mesh' ? [MESH_VS, MESH_FS] : base === 'wide' ? [WIDE_VS, WIDE_FS] : base === 'thin' ? [THIN_VS, THIN_FS] : base === 'depth' ? [DEPTH_VS, DEPTH_FS] : base === 'profile' ? [FULL_VS, PROFILE_FS] : [POINT_VS, POINT_FS];
     p = {
       ...this.program(withDefines(vs, ...defs), withDefines(fs, ...defs)),
       clip1: defs.includes('CLIP'),
@@ -1451,7 +1478,7 @@ export class Renderer3d {
     const flat = mode === 'hiddenLine';
     const noTex = flat || mode === 'monochrome' || mode === 'noTexture';
     const mono: Rgba | null = mode === 'monochrome' ? (st.colors.monochrome ?? MONO_COLOR) : null;
-    const shadedLike = mode === 'shaded' || mode === 'shadedEdges' || mode === 'hiddenLine' || mode === 'monochrome' || mode === 'noTexture';
+    const shadedLike = isShadedLike(mode);
     /** 그물 셰이더에 더 넣을 정의 */
     const meshExtra: string[] = flat ? ['FLAT'] : [];
     const light = st.light ?? null;
@@ -1909,8 +1936,9 @@ export class Renderer3d {
       gl.disable(gl.BLEND);
     }
 
-    // 2c) 외곽선(실루엣): 불투명 그물만 깊이 그림에 따로 그려 깊이가 끊기는 곳을 칠한다
-    if (st.profiles && shadedLike && visibleMeshes.length) {
+    // 2c) 외곽선(실루엣): 불투명 그물만 깊이 그림에 따로 그려 깊이가 끊기는 곳을 칠한다.
+    // 와이어프레임(0.7.2)도 같은 길: 이 깊이 그림은 자기 버퍼라 기본 깊이(선만 있다)와 상관없다
+    if (st.profiles && drawsProfiles(mode) && visibleMeshes.length) {
       const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
       const fb = this.profileTarget(devW, devH);
       if (fb) {
@@ -1934,7 +1962,8 @@ export class Renderer3d {
         gl.colorMask(true, true, true, true);
         gl.bindFramebuffer(gl.FRAMEBUFFER, target);
         gl.viewport(0, 0, devW, devH);
-        const pp = (this.profileP ??= this.program(FULL_VS, PROFILE_FS));
+        // 굵기 1.5 미만(0.7.2): 앞쪽 1화소 변종. 그 밖에는 0.7.1 프로그램 그대로
+        const pp = profileOnePixel(st.profiles.width) ? this.variant('profile', ['ONE']) : (this.profileP ??= this.program(FULL_VS, PROFILE_FS));
         gl.useProgram(pp.p);
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, this.profTex!.tex);

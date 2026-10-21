@@ -895,7 +895,8 @@ export class Viewer3d {
   }
 
   /**
-   * 보여 주기 선택(0.7.0): profiles = 화면 공간 외곽선(실루엣, true 또는 { width: CSS 화소(기본 2), color }),
+   * 보여 주기 선택(0.7.0): profiles = 화면 공간 외곽선(실루엣, true 또는 { width: CSS 화소(기본 2), color } — 음영 계열 모드와
+   * 와이어프레임(0.7.2)에서 그리고 X-ray에서는 그리지 않는다. 굵기가 장치 화소 1.5 미만이면(width 1 · 화소 비율 1) 1화소로(0.7.2)),
    * hiddenEdges = 숨은 선 모드에서 면 뒤 윤곽선을 흐린 점선으로(true = 0.35, 또는 불투명도). 주지 않은 것은 그대로, null이면 끈다.
    * 점선은 그물 윤곽선(Mesh3d.edges)과 LineSet3d.hiddenEdges가 true인 선분 묶음에 그리고(0.7.1), 숨긴 구간은 빼고 묶음 불투명도를 곱한다
    */
