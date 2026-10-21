@@ -9,6 +9,7 @@ export type {
   MarkerOptions,
   MeasureResult,
   PickEvent,
+  PickOptions,
   ProjectedPoint,
   RangeSelection,
   SectionCaps,

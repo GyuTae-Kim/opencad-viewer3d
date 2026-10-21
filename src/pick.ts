@@ -274,3 +274,79 @@ export function snapToNearest(f: ViewFrame, candidates: readonly V3[], cx: numbe
   }
   return best;
 }
+
+/** 3×3(4×4의 왼쪽 위) 행렬 노름의 위 한계 √(‖A‖₁·‖A‖∞) — 로컬 질의 반지름을 보수적으로 늘릴 때 */
+export function normBound3(m: ArrayLike<number>): number {
+  let c = 0, r = 0;
+  for (let j = 0; j < 3; j++) c = Math.max(c, Math.abs(m[j * 4]!) + Math.abs(m[j * 4 + 1]!) + Math.abs(m[j * 4 + 2]!));
+  for (let i = 0; i < 3; i++) r = Math.max(r, Math.abs(m[i]!) + Math.abs(m[4 + i]!) + Math.abs(m[8 + i]!));
+  return Math.sqrt(c * r);
+}
+
+/**
+ * 모형 행렬(로컬 → 세계)이 걸린 선분 배열에서 커서 tolPx 안의 선분을 모두 모은다(세계 좌표 결과). 그물 윤곽선(Mesh3d.edges) 고르기에 쓴다.
+ * BVH 질의는 광선을 로컬로 옮겨 하고(반지름은 역행렬 노름 한계만큼 넉넉히), 후보마다 끝점을 세계로 옮겨 화면 거리를 정확히 잰다.
+ * clips(세계 평면들)가 있으면 잘린 쪽 부분은 빼고 잰다. skip(선분 번호)이 true면 건너뛴다.
+ */
+export function segmentCandidates(
+  f: ViewFrame,
+  positions: Float32Array,
+  bvh: Bvh | null,
+  model: ArrayLike<number> | undefined | null,
+  cx: number,
+  cy: number,
+  tolPx: number,
+  opts: { clips?: readonly Readonly<Plane4>[] | null; skip?: ((i: number) => boolean) | null } = {},
+): LinePick[] {
+  const n = Math.floor(positions.length / 6);
+  const P = positions;
+  const M = model ?? null;
+  const clips = opts.clips ?? null;
+  const skip = opts.skip ?? null;
+  const out: LinePick[] = [];
+  const test = (i: number): void => {
+    if (i >= n || (skip && skip(i))) return;
+    const o = i * 6;
+    let a: V3 = [P[o]!, P[o + 1]!, P[o + 2]!], b: V3 = [P[o + 3]!, P[o + 4]!, P[o + 5]!];
+    if (M) {
+      a = transformPoint(M, a);
+      b = transformPoint(M, b);
+    }
+    let s0 = 0, s1 = 1;
+    if (clips)
+      for (const c of clips) {
+        const r = segmentKeptRange(c, a[0] + (b[0] - a[0]) * s0, a[1] + (b[1] - a[1]) * s0, a[2] + (b[2] - a[2]) * s0, a[0] + (b[0] - a[0]) * s1, a[1] + (b[1] - a[1]) * s1, a[2] + (b[2] - a[2]) * s1);
+        if (!r) return;
+        const d = s1 - s0;
+        [s0, s1] = [s0 + d * r[0], s0 + d * r[1]];
+      }
+    const ax = a[0] + (b[0] - a[0]) * s0, ay = a[1] + (b[1] - a[1]) * s0, az = a[2] + (b[2] - a[2]) * s0;
+    const bx = a[0] + (b[0] - a[0]) * s1, by = a[1] + (b[1] - a[1]) * s1, bz = a[2] + (b[2] - a[2]) * s1;
+    const h = segmentScreenPick(f, ax, ay, az, bx, by, bz, cx, cy);
+    if (!h || !(h.distPx <= tolPx)) return;
+    if (f.projection === 'perspective' && h.depth < f.near * 0.999) return;
+    out.push({ index: i, t: s0 + (s1 - s0) * h.t, point: h.point, distPx: h.distPx, depth: h.depth });
+  };
+  if (bvh) {
+    const ray = screenRay(f, cx, cy);
+    const c = pickCone(f, ray.origin, tolPx);
+    let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k;
+    if (M) {
+      const inv = mat4Invert(M);
+      if (!inv) return out;
+      const s = normBound3(inv);
+      lo = transformPoint(inv, ray.origin);
+      const d = transformDir(inv, ray.dir);
+      const l = Math.hypot(d[0], d[1], d[2]);
+      if (!(l > 0)) return out;
+      // 로컬 단위 방향의 매개변수 τ = l·t, 로컬 반지름 ≤ s·(r0 + k·t)
+      ld = [d[0] / l, d[1] / l, d[2] / l];
+      r0 = c.r0 * s;
+      k = (c.k * s) / l;
+    }
+    queryCone(bvh, lo, ld, r0, k, Infinity, (i) => {
+      test(i);
+    });
+  } else for (let i = 0; i < n; i++) test(i);
+  return out;
+}

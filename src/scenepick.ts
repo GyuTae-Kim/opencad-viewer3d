@@ -9,9 +9,9 @@
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d } from './types';
 import { itemBounds } from './bounds';
 import { type Bvh, type PrimKind, countRayHits, rayBoxEntry, safeInv } from './bvh';
-import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth } from './camera';
+import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth, worldPerPixel } from './camera';
 import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint } from './math';
-import { chooseNearest, pickMeshRay, pickPointSet, pickSegments, snapToNearest } from './pick';
+import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, segmentCandidates, snapToNearest } from './pick';
 import { SNAP_PX } from './pointer';
 import { type Plane4, planeShift, planeValue, rayKeptInterval } from './section';
 
@@ -51,6 +51,10 @@ export interface ScenePickOptions {
   caps?: (m: Mesh3d) => boolean;
   /** 묶음 안 숨긴 구간: 기본 도형 번호(삼각형·선분·점)가 숨겨졌는지 판정하는 함수(숨긴 것이 없으면 null) */
   hidden?: (it: Mesh3d | LineSet3d | PointSet3d) => ((i: number) => boolean) | null | undefined;
+  /** 그물 윤곽선(Mesh3d.edges)도 고른다(선분 다음, 면보다 먼저) — kind 'edge' */
+  edges?: boolean;
+  /** 숨긴 윤곽선 구간 판정(Mesh3d.edges의 선분 번호) */
+  edgeHidden?: (m: Mesh3d) => ((i: number) => boolean) | null | undefined;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
@@ -158,6 +162,34 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     return { pick: { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i }, snap: v ?? ln.point, vertex: !!v };
   }
 
+  // 그물 윤곽선(켰을 때): 면보다 먼저. 음영 모드면 그 점에서 다시 광선을 쏴 면에 가린 윤곽선은 뺀다
+  if (o.edges) {
+    const eds: { m: Mesh3d; i: number; point: V3; distPx: number; depth: number }[] = [];
+    for (const m of items.meshes) {
+      const E = m.edges;
+      if (!E || E.length < 6) continue;
+      const b = bounds(m);
+      if (!boxHit(b) && !nearBox(f, b, x, y, tol)) continue;
+      const bvh = o.bvh('segment', E, undefined);
+      if (skip(bvh, E.length / 6)) continue;
+      const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
+      for (const h of segmentCandidates(f, E, bvh, model, x, y, tol, { clips: clip ? [clip] : null, skip: o.edgeHidden?.(m) })) eds.push({ m, i: h.index, point: h.point, distPx: h.distPx, depth: h.depth });
+    }
+    const ed = chooseVisible(eds, (c) => !o.occlude || edgeVisible(f, c.point, c.depth, items, o));
+    if (ed) {
+      const P = ed.m.edges!, k = ed.i * 6;
+      const model = o.model ? o.model(ed.m) : modelMatrix(ed.m.matrix, ed.m.origin);
+      const ends = [
+        [P[k]!, P[k + 1]!, P[k + 2]!],
+        [P[k + 3]!, P[k + 4]!, P[k + 5]!],
+      ]
+        .map((p) => (model ? transformPoint(model, p) : (p as V3)))
+        .filter(kept);
+      const v = snapToNearest(f, ends, x, y, snapPx);
+      return { pick: { kind: 'edge', id: ed.m.id, index: ed.i, point: ed.point, raw: ed.i }, snap: v ?? ed.point, vertex: !!v };
+    }
+  }
+
   if (cap) {
     let n = normalize([clip![0], clip![1], clip![2]]);
     if (n[0] * ray.dir[0] + n[1] * ray.dir[1] + n[2] * ray.dir[2] > 0) n = [-n[0], -n[1], -n[2]];
@@ -172,6 +204,26 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     };
   }
   return null;
+}
+
+/** 화면 거리 차례로 보아 visible을 처음 통과한 것(그 거리에서 TIE_PX 안의 통과한 것들 중 가장 앞) */
+function chooseVisible<T extends { distPx: number; depth: number }>(cands: T[], visible: (c: T) => boolean): T | null {
+  cands.sort((a, b) => a.distPx - b.distPx);
+  let best: T | null = null;
+  for (const c of cands) {
+    if (best && c.distPx > best.distPx + TIE_PX) break;
+    if (!visible(c)) continue;
+    if (!best || c.depth < best.depth) best = c;
+  }
+  return best;
+}
+
+/** 윤곽선 위 점이 불투명 면에 가리지 않는지(그 점 화면 자리에서 광선을 다시 쏜다 — 점이 면 위에 있으면 보인다) */
+function edgeVisible(f: ViewFrame, p: V3, depth: number, items: ScenePickItems, o: ScenePickOptions): boolean {
+  const s = projectToScreen(f, p);
+  if (!s) return false;
+  const od = occludingDepth(f, s[0], s[1], items, o);
+  return !(od < depth - Math.max(Math.abs(depth) * 1e-4, worldPerPixel(f, depth) * 2, 1e-9));
 }
 
 function addOrigin(p: V3, o: readonly number[] | undefined): V3 {

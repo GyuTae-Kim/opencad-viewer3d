@@ -91,6 +91,11 @@ export interface Viewer3dOptions {
    * 측정 점을 꼭짓점·끝점에 붙잡는 거리도 이 값(10보다 작으면 10)까지 넓힌다
    */
   touchPickTolerance?: number;
+  /**
+   * 그물 윤곽선(Mesh3d.edges)도 고른다(기본 false): 누르기·측정·onPick이 선분 다음, 면보다 먼저 kind 'edge'(그물 id, edges 선분 번호)를 돌려준다.
+   * 허용 거리는 선분과 같다(터치는 touchPickTolerance). 음영 모드에서는 면에 가린 윤곽선은 고르지 않는다. setPickEdges로 바꾼다
+   */
+  pickEdges?: boolean;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
   /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
@@ -217,6 +222,14 @@ export interface ProjectedPoint {
   visible: boolean;
 }
 
+/** pick(x, y, opts) 선택 */
+export interface PickOptions {
+  /** 포인터 종류('touch'면 터치 허용 거리) */
+  pointerType?: string;
+  /** 그물 윤곽선도 고른다(주지 않으면 Viewer3dOptions.pickEdges) */
+  edges?: boolean;
+}
+
 /** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
 export interface AnnotationOptions {
   /** 가려진 부분(선·점·글자)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 그리지 않는다) */
@@ -240,6 +253,8 @@ interface RangeState {
   parts: ItemParts | null;
   /** 숨긴 기본 도형 판정(고르기·단면 테두리) */
   test: ((i: number) => boolean) | null;
+  /** 숨긴 윤곽선 판정(윤곽선 고르기) */
+  eTest: ((i: number) => boolean) | null;
   /** 보이는 구간만의 세계 범위(처음 필요할 때) */
   box: Box3 | null;
 }
@@ -393,6 +408,7 @@ export class Viewer3d {
       animate: opts.animate ?? true,
       pickTolerance: opts.pickTolerance ?? PICK_TOLERANCE_PX,
       touchPickTolerance: opts.touchPickTolerance ?? TOUCH_PICK_TOLERANCE_PX,
+      pickEdges: opts.pickEdges ?? false,
       maxPixelRatio: opts.maxPixelRatio ?? 2,
       textureLimit: opts.textureLimit ?? TEXTURE_LIMIT,
       textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
@@ -1102,7 +1118,7 @@ export class Viewer3d {
 
   private rangeState(id: string): RangeState {
     let r = this.rangeSel.get(id);
-    if (!r) this.rangeSel.set(id, (r = { hidden: [], hi: [], eHidden: [], eHi: [], parts: null, test: null, box: null }));
+    if (!r) this.rangeSel.set(id, (r = { hidden: [], hi: [], eHidden: [], eHi: [], parts: null, test: null, eTest: null, box: null }));
     return r;
   }
 
@@ -1120,6 +1136,7 @@ export class Viewer3d {
     if ((r.eHidden.length || r.eHi.length) && it.kind === 'mesh' && it.item.edges) edges = partitionRanges(Math.floor(it.item.edges.length / 6), r.eHidden, r.eHi);
     r.parts = { ver: ++this.rangeVer, prims, edges };
     r.test = rangeTester(r.hidden);
+    r.eTest = rangeTester(r.eHidden);
     r.box = null;
   }
 
@@ -1209,9 +1226,26 @@ export class Viewer3d {
     return () => this.camCbs.delete(cb);
   }
 
-  /** 화면 점(캔버스 기준 CSS 화소)에서 고르기. pointerType이 'touch'면 터치 허용 거리(touchPickTolerance)로, 아니면 pickTolerance로 */
-  pick(x: number, y: number, pointerType?: string): Pick3d | null {
-    return this.pickDetail(x, y, true, pointerType)?.pick ?? null;
+  /**
+   * 화면 점(캔버스 기준 CSS 화소)에서 고르기. 두 번째 인자는 포인터 종류 문자열 또는 { pointerType, edges }:
+   * pointerType이 'touch'면 터치 허용 거리(touchPickTolerance)로, 아니면 pickTolerance로. edges면 그물 윤곽선도 고른다(주지 않으면 pickEdges 선택)
+   */
+  pick(x: number, y: number, opts?: string | PickOptions): Pick3d | null {
+    const o = typeof opts === 'string' ? { pointerType: opts } : (opts ?? {});
+    return this.pickDetail(x, y, true, o.pointerType, o.edges)?.pick ?? null;
+  }
+
+  /** 누르기·측정·onPick이 그물 윤곽선도 고르는지(Viewer3dOptions.pickEdges) */
+  setPickEdges(on: boolean): void {
+    if (this.opts.pickEdges === on) return;
+    this.opts.pickEdges = on;
+    if (this.measuring) this.measureHover = null;
+    if (on) this.scheduleBvh();
+    this.invalidate();
+  }
+
+  get pickEdges(): boolean {
+    return this.opts.pickEdges;
   }
 
   /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
@@ -1519,6 +1553,7 @@ export class Viewer3d {
     if (!s) return;
     const tasks: { n: number; run: () => void }[] = [];
     for (const m of s.meshes) tasks.push({ n: m.indices?.length ?? m.positions.length, run: () => this.bvhFor('triangle', m.positions, m.indices, true) });
+    if (this.opts.pickEdges) for (const m of s.meshes) if (m.edges && m.edges.length >= 6) tasks.push({ n: m.edges.length, run: () => this.bvhFor('segment', m.edges!, undefined, true) });
     for (const l of s.lines) tasks.push({ n: l.positions.length, run: () => this.bvhFor('segment', l.positions, undefined, true) });
     for (const p of s.points ?? []) tasks.push({ n: p.positions.length, run: () => this.bvhFor('point', p.positions, undefined, true) });
     tasks.sort((a, b) => a.n - b.n);
@@ -1596,11 +1631,12 @@ export class Viewer3d {
     return (this.visLists = { meshes, lines, points });
   }
 
-  /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance) */
-  private pickDetail(x: number, y: number, build = true, pointerType?: string): PickDetail | null {
+  /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도 */
+  private pickDetail(x: number, y: number, build = true, pointerType?: string, edges = this.opts.pickEdges): PickDetail | null {
     if (!this.sceneRef) return null;
     const t = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance);
     return pickScene(this.frame(), x, y, this.visibleItems(), {
+      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
       tol: t.tol,
       snap: t.snap,
       occlude: this.mode === 'shaded' || this.mode === 'shadedEdges',

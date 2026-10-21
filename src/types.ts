@@ -133,10 +133,11 @@ export interface Scene3d {
 
 /** 뷰어가 고르기 결과로 돌려주는 것 */
 export interface Pick3d {
-  kind: 'mesh' | 'line' | 'point';
-  /** Mesh3d·LineSet3d·PointSet3d의 id */
+  /** 'edge'는 그물 윤곽선(Mesh3d.edges) — 윤곽선 고르기를 켰을 때만(0.7.0, Viewer3dOptions.pickEdges·pick(x, y, { edges })) */
+  kind: 'mesh' | 'line' | 'point' | 'edge';
+  /** Mesh3d·LineSet3d·PointSet3d의 id('edge'면 그 윤곽선을 가진 그물 id) */
   id: string;
-  /** 선분·점의 원본 식별 번호(segmentIds·pointIds), 그물이면 삼각형 번호 */
+  /** 선분·점의 원본 식별 번호(segmentIds·pointIds), 그물이면 삼각형 번호, 'edge'면 Mesh3d.edges의 선분 번호 */
   index: number;
   /** 고른 세계 좌표(묶음 origin을 더한 값) */
   point: [number, number, number];
