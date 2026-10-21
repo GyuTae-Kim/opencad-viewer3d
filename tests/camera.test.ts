@@ -268,3 +268,38 @@ describe('창 확대', () => {
     }
   });
 });
+
+describe('걷기 카메라', () => {
+  it('둘러보기는 눈을 제자리에 두고, 앙각은 ±89°에서 멈춘다', async () => {
+    const { lookCamera, cameraEye, defaultCamera, LOOK_PITCH_LIMIT } = await import('../src/camera');
+    const c = { ...defaultCamera(), target: [5, 6, 7] as [number, number, number], distance: 12 };
+    const e0 = cameraEye(c);
+    const c2 = lookCamera(c, 0.7, -0.3);
+    const e1 = cameraEye(c2);
+    for (let k = 0; k < 3; k++) expect(e1[k]).toBeCloseTo(e0[k]!, 9);
+    expect(c2.yaw).toBeCloseTo(c.yaw + 0.7, 12);
+    expect(c2.distance).toBe(12);
+    expect(lookCamera(c, 0, 10).pitch).toBeCloseTo(LOOK_PITCH_LIMIT, 12);
+  });
+
+  it('걷기는 수평 앞·오른쪽과 위로 눈·대상점을 함께 옮기고, 서기는 눈을 바닥 점 위 눈높이에', async () => {
+    const { walkCamera, standCamera, cameraEye, cameraBasis, defaultCamera } = await import('../src/camera');
+    const c = { ...defaultCamera(), yaw: 0.4, pitch: -0.2, target: [0, 0, 0] as [number, number, number], distance: 10 };
+    const w = walkCamera(c, 3, 0, 0);
+    const b = cameraBasis(c).back;
+    const h = Math.hypot(b[0], b[1]);
+    // 앞으로 3 = 보는 방향(−back)의 수평 성분 방향으로 3
+    expect(w.target[0]).toBeCloseTo((-b[0] / h) * 3, 9);
+    expect(w.target[1]).toBeCloseTo((-b[1] / h) * 3, 9);
+    expect(w.target[2]).toBe(0);
+    const r = walkCamera(c, 0, 2, 1);
+    expect(r.target[0]).toBeCloseTo(Math.cos(0.4) * 2, 9);
+    expect(r.target[2]).toBe(1);
+    const s = standCamera(c, [100, 200, 5], 1.6);
+    const e = cameraEye(s);
+    expect(e[0]).toBeCloseTo(100, 9);
+    expect(e[1]).toBeCloseTo(200, 9);
+    expect(e[2]).toBeCloseTo(6.6, 9);
+    expect(s.yaw).toBe(c.yaw);
+  });
+});

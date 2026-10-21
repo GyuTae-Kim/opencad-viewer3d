@@ -23,15 +23,19 @@ import {
   type ViewName,
   VIEW_DIRS,
   cameraBasis,
+  cameraEye,
   computeFrame,
   defaultCamera,
   dirToAngles,
   fitCamera,
   lerpCamera,
   orbitCamera,
+  lookCamera,
   panCamera,
   projectToScreen,
   rectZoomCamera,
+  standCamera,
+  walkCamera,
   rayAtDepth,
   worldPerPixel,
   screenRay,
@@ -408,6 +412,8 @@ const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(p
 /** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
 export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
+/** 걷기 키(소문자 또는 키 이름) */
+const WALK_KEYS = new Set(['w', 'a', 's', 'd', 'q', 'e', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown']);
 
 export class Viewer3d {
   readonly host: HTMLElement;
@@ -485,6 +491,13 @@ export class Viewer3d {
   private measureHover: { p: V3; vertex: boolean } | null = null;
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
+  /** 조작 방식(궤도·걷기)과 걷기 상태 */
+  private nav: 'orbit' | 'walk' = 'orbit';
+  private walkOpts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {};
+  private walkKeys = new Set<string>();
+  private walkFast = false;
+  private walkIn = { forward: 0, right: 0, up: 0, turn: 0, look: 0 };
+  private walkT = 0;
   /** 바탕 바꾸기(한 색·하늘·땅) */
   private bgOpt: BackgroundOptions | null = null;
   /** 해 조명·그림자, 안개 */
@@ -901,6 +914,102 @@ export class Viewer3d {
   get renderOptions(): { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } {
     const p = this.renderOpts.profiles;
     return { profiles: p ? { ...p } : null, hiddenEdges: this.renderOpts.hiddenEdges };
+  }
+
+  /**
+   * 조작 방식(0.7.0): 'orbit'(기본, 대상점 둘레 궤도) 또는 'walk'(1인칭 — 끌기 = 제자리에서 둘러보기, 휠·W/S·↑/↓ = 앞뒤, A/D = 옆, ←/→ = 돌기,
+   * Q/E·PageDown/PageUp = 아래·위, Shift = 빠르게, 두 번 누르기 = 그 자리에 서기(눈높이), 터치 두 손가락 = 벌려 앞으로·끌어 옆/위아래).
+   * opts: eyeHeight(세계 단위, 기본 단위별 1.6 m), speed(초당 세계 단위, 기본 보이는 범위 반지름의 0.4), tapToStand(기본 true).
+   * 걷기로 바꿀 때 눈은 제자리에 두고 대상점을 눈높이만큼 앞에 둔다. 앱의 가상 조이스틱은 setWalkInput으로
+   */
+  setNavigation(mode: 'orbit' | 'walk', opts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {}): void {
+    this.walkOpts = { ...this.walkOpts, ...opts };
+    if (mode === this.nav) return;
+    this.finishAnim();
+    this.nav = mode;
+    this.walkKeys.clear();
+    this.walkIn = { forward: 0, right: 0, up: 0, turn: 0, look: 0 };
+    if (mode === 'walk') {
+      const eye = cameraEye(this.cam);
+      const back = cameraBasis(this.cam).back;
+      const d = Math.max(this.eyeHeight(), 1e-6);
+      this.cam = { ...this.cam, distance: d, target: [eye[0] - back[0] * d, eye[1] - back[1] * d, eye[2] - back[2] * d] };
+    }
+    this.invalidate();
+  }
+
+  get navigation(): 'orbit' | 'walk' {
+    return this.nav;
+  }
+
+  /**
+   * 걷기 입력(가상 조이스틱 등): forward·right·up은 −1~1(초당 speed배), turn·look은 −1~1(초당 약 90°, 왼쪽·아래가 +).
+   * 0이 아닌 값이 있는 동안 프레임마다 움직인다. 모두 0이면 멈춘다
+   */
+  setWalkInput(i: { forward?: number; right?: number; up?: number; turn?: number; look?: number }): void {
+    const c = (v: number | undefined): number => Math.max(-1, Math.min(1, Number(v) || 0));
+    this.walkIn = { forward: c(i.forward), right: c(i.right), up: c(i.up), turn: c(i.turn), look: c(i.look) };
+    this.invalidate();
+  }
+
+  /** 1인칭 한 걸음(세계 단위): 수평 앞·오른쪽, 세계 위 */
+  walkBy(forward: number, right: number, up = 0): void {
+    this.finishAnim();
+    this.cam = walkCamera(this.cam, forward, right, up);
+    this.invalidate();
+  }
+
+  /** 제자리에서 고개 돌리기(라디안, 왼쪽·아래가 +) */
+  lookBy(dYaw: number, dPitch: number): void {
+    this.finishAnim();
+    this.cam = lookCamera(this.cam, dYaw, dPitch);
+    this.invalidate();
+  }
+
+  /** 세로 시야각(도, 10~120). 원근에서 보이는 넓이를 바꾼다(평행에서는 확대와 같다) */
+  setFov(deg: number): void {
+    if (!Number.isFinite(deg)) return;
+    this.finishAnim();
+    this.cam = { ...this.cam, fovY: (Math.max(10, Math.min(120, deg)) * Math.PI) / 180 };
+    this.invalidate();
+  }
+
+  get fov(): number {
+    return (this.cam.fovY * 180) / Math.PI;
+  }
+
+  /** 걷기 빠르기(초당 세계 단위) */
+  private walkSpeed(): number {
+    return this.walkOpts.speed ?? Math.max(boxSphere(this.visibleBox()).radius * 0.4, 1e-6);
+  }
+
+  /** 눈높이(세계 단위): 정하지 않았으면 장면 단위로 1.6 m */
+  private eyeHeight(): number {
+    if (this.walkOpts.eyeHeight !== undefined) return this.walkOpts.eyeHeight;
+    const u = this.sceneRef?.units;
+    return u === 'mm' ? 1600 : u === 'inch' ? 63 : u === 'm' ? 1.6 : Math.max(boxSphere(this.visibleBox()).radius * 0.1, 1e-6);
+  }
+
+  /** 걷기: 누른 키·조이스틱 입력만큼 이 프레임 움직이고, 입력이 남아 있으면 다음 프레임을 부른다 */
+  private stepWalk(now: number): void {
+    const K = this.walkKeys, I = this.walkIn;
+    const key = (a: string, b: string): number => (K.has(a) || K.has(b) ? 1 : 0);
+    const fw = key('w', 'ArrowUp') - key('s', 'ArrowDown') + I.forward;
+    const rt = key('d', 'd') - key('a', 'a') + I.right;
+    const up = key('e', 'PageUp') - key('q', 'PageDown') + I.up;
+    const tn = key('ArrowLeft', 'ArrowLeft') - key('ArrowRight', 'ArrowRight') + I.turn;
+    const lk = I.look;
+    if (!fw && !rt && !up && !tn && !lk) {
+      this.walkT = 0;
+      return;
+    }
+    const dt = this.walkT ? Math.min(0.1, Math.max(0, (now - this.walkT) / 1000)) : 1 / 60;
+    this.walkT = now;
+    const v = this.walkSpeed() * (this.walkFast ? 3 : 1) * dt;
+    this.anim = null;
+    if (fw || rt || up) this.cam = walkCamera(this.cam, fw * v, rt * v, up * v);
+    if (tn || lk) this.cam = lookCamera(this.cam, tn * dt * (Math.PI / 2), lk * dt * (Math.PI / 2));
+    this.invalidate();
   }
 
   /** 대상점 둘레 회전(라디안) */
@@ -2338,6 +2447,12 @@ export class Viewer3d {
     const n = clickCount(this.lastClick, now, x, y, type);
     this.lastClick = { t: now, x, y, n };
     const d = this.pickDetail(x, y, true, type);
+    // 걷기: 두 번 누르면 그 자리에 선다(눈높이 위)
+    if (this.nav === 'walk' && n === 2 && d && this.walkOpts.tapToStand !== false) {
+      this.finishAnim();
+      this.cam = standCamera(this.cam, d.pick.point, this.eyeHeight());
+      this.invalidate();
+    }
     if (this.measuring) {
       if (!d) return;
       if (this.measurePts.length >= 2) {
@@ -2394,6 +2509,10 @@ export class Viewer3d {
       if (e.button === 1) e.preventDefault();
     });
     this.on<KeyboardEvent>(cv, 'keydown', (e) => this.onKey(e));
+    this.on<KeyboardEvent>(cv, 'keyup', (e) => {
+      if (this.opts.keyboard && this.handleKeyUp(e)) e.stopPropagation();
+    });
+    this.on(cv, 'blur', () => this.walkKeys.clear());
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
@@ -2521,6 +2640,14 @@ export class Viewer3d {
       const dist = Math.hypot(a!.x - b!.x, a!.y - b!.y);
       const cx = (a!.x + b!.x) / 2, cy = (a!.y + b!.y) / 2;
       const t = this.touch;
+      if (this.nav === 'walk') {
+        // 걷기: 벌리면 앞으로, 두 손가락을 끌면 옆·위아래로(장면을 잡아 끄는 쪽)
+        const k = this.walkSpeed() * 0.01;
+        this.cam = walkCamera(this.cam, (dist - t.dist) * k, -(cx - t.cx) * k, (cy - t.cy) * k);
+        this.touch = { dist, cx, cy };
+        this.invalidate();
+        return;
+      }
       const f = this.frame();
       this.cam = panCamera(this.cam, f, cx - t.cx, cy - t.cy);
       if (dist > 1 && t.dist > 1) {
@@ -2553,8 +2680,11 @@ export class Viewer3d {
     d.lx = p.x;
     d.ly = p.y;
     this.wheelAnchor = null;
-    if (d.mode === 'orbit') this.cam = orbitCamera(this.cam, -dx * ROT_PER_PX, dy * ROT_PER_PX, d.pivot);
-    else this.cam = panCamera(this.cam, this.frame(), dx, dy, d.depth ?? this.cam.distance);
+    if (d.mode === 'orbit') {
+      // 걷기: 눈은 제자리에 두고 고개만 돌린다(장면을 잡아 끄는 쪽으로)
+      if (this.nav === 'walk') this.cam = lookCamera(this.cam, dx * ROT_PER_PX * 0.5, -dy * ROT_PER_PX * 0.5);
+      else this.cam = orbitCamera(this.cam, -dx * ROT_PER_PX, dy * ROT_PER_PX, d.pivot);
+    } else this.cam = panCamera(this.cam, this.frame(), dx, dy, d.depth ?? this.cam.distance);
     this.invalidate();
   }
 
@@ -2594,6 +2724,12 @@ export class Viewer3d {
     this.finishAnim();
     const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.cssH : 1;
     const delta = Math.max(-400, Math.min(400, e.deltaY * k));
+    if (this.nav === 'walk') {
+      // 걷기: 휠은 앞뒤로 걷는다
+      this.cam = walkCamera(this.cam, -delta * this.walkSpeed() * 0.002, 0, 0);
+      this.invalidate();
+      return;
+    }
     const factor = Math.exp(delta * (e.ctrlKey ? 0.006 : 0.0015));
     const p = this.local(e);
     const f = this.frame();
@@ -2613,11 +2749,27 @@ export class Viewer3d {
    */
   handleKey(e: KeyboardEvent): boolean {
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    // 걷기: W·A·S·D·화살표·Q·E·PageUp·PageDown은 누르는 동안 움직인다(handleKeyUp으로 멈춘다)
+    if (this.nav === 'walk' && WALK_KEYS.has(e.key.length === 1 ? e.key.toLowerCase() : e.key)) {
+      this.walkKeys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+      this.walkFast = e.shiftKey;
+      this.invalidate();
+      e.preventDefault();
+      return true;
+    }
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
     else if (e.key === 'Escape' && this.measurePts.length) this.clearMeasure();
     else return false;
     e.preventDefault();
+    return true;
+  }
+
+  /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true */
+  handleKeyUp(e: KeyboardEvent): boolean {
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (!this.walkKeys.delete(k)) return false;
+    this.walkFast = e.shiftKey;
     return true;
   }
 
@@ -2658,6 +2810,7 @@ export class Viewer3d {
       this.overlay.width = w;
       this.overlay.height = h;
     }
+    if (this.nav === 'walk') this.stepWalk(now);
     const f = this.frame();
     // 측정 중 커서 아래 붙잡을 점
     if (this.measuring && this.hoverAt && !this.drag) {

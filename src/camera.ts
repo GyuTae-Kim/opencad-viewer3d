@@ -334,3 +334,33 @@ export function rectZoomCamera(c: CameraState, f: ViewFrame, x0: number, y0: num
   const panned = panCamera(c, f, f.width / 2 - cx, f.height / 2 - cy, depth);
   return zoomCamera(panned, Math.max(w / f.width, h / f.height), anchor, limits);
 }
+
+/** 걷기에서 고개를 들고 숙이는 한계(라디안, 거의 수직까지) */
+export const LOOK_PITCH_LIMIT = (89 * Math.PI) / 180;
+
+/**
+ * 둘러보기(눈은 제자리): 방위각·앙각만 바꾸고 대상점을 눈 앞 distance에 다시 둔다.
+ * dYaw > 0이면 왼쪽으로, dPitch > 0이면 아래로 고개를 돌린다(끌기 = 장면을 잡아 끄는 쪽과 같은 부호는 부르는 쪽이 정한다)
+ */
+export function lookCamera(c: CameraState, dYaw: number, dPitch: number): CameraState {
+  const eye = cameraEye(c);
+  const yaw = wrapAngle(c.yaw + dYaw);
+  const pitch = clamp(c.pitch + dPitch, -LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT);
+  const back = basisFromAngles(yaw, pitch).back;
+  return { ...c, yaw, pitch, target: sub(eye, scale(back, c.distance)) };
+}
+
+/** 걷기: 눈과 대상점을 함께 옮긴다. forward·right는 수평(앞 = 보는 쪽을 바닥에 내린 방향), up은 세계 +Z(세계 단위) */
+export function walkCamera(c: CameraState, forward: number, right: number, up = 0): CameraState {
+  const cy = Math.cos(c.yaw), sy = Math.sin(c.yaw);
+  // 수평 앞 = −back의 수평 성분 방향 = (−sin yaw, cos yaw), 오른쪽 = (cos yaw, sin yaw)
+  const dx = -sy * forward + cy * right, dy = cy * forward + sy * right;
+  return { ...c, target: [c.target[0] + dx, c.target[1] + dy, c.target[2] + up] };
+}
+
+/** 서기: 눈을 바닥 점 p에서 eyeHeight 위(+Z)에 두고 방향·거리는 그대로 */
+export function standCamera(c: CameraState, p: readonly number[], eyeHeight: number): CameraState {
+  const back = cameraBasis(c).back;
+  const eye: V3 = [p[0]!, p[1]!, p[2]! + eyeHeight];
+  return { ...c, target: sub(eye, scale(back, c.distance)) };
+}
