@@ -324,6 +324,8 @@ export class Renderer3d {
   private skyP: Prog | null = null;
   /** 해 그림자 깊이 그림과 그때의 빛 행렬(판이 같으면 다시 쓴다) */
   private shadowMap: { tex: WebGLTexture; fb: WebGLFramebuffer; size: number; version: number; vp: Float64Array } | null = null;
+  /** 만들지 못한 그림자 깊이 그림 크기(같은 크기는 다시 시도하지 않는다) */
+  private shadowFailed = 0;
   private m4c = new Float32Array(16);
   private emptyVao: WebGLVertexArrayObject | null = null;
   private quadWide!: WebGLBuffer;
@@ -1685,8 +1687,13 @@ export class Renderer3d {
     if (light && st.shadow && shadedLike && !flat) {
       const sh = st.shadow;
       let m = this.shadowMap;
-      const size = Math.max(256, Math.min(8192, Math.round(sh.size)));
-      if (!m || m.size !== size) m = this.makeShadowMap(size);
+      // 크기: 256 ~ min(8192, GPU 무늬 한도), 수가 아니면 2048. 만들지 못한 크기는 다시 시도하지 않는다(그림자 없이)
+      const maxTex = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
+      const size = Math.max(256, Math.min(8192, maxTex, Number.isFinite(sh.size) ? Math.round(sh.size) : 2048));
+      if ((!m || m.size !== size) && this.shadowFailed !== size) {
+        m = this.makeShadowMap(size);
+        if (!m) this.shadowFailed = size;
+      }
       if (m && m.version !== sh.version) {
         const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
         m.vp = this.lightViewProj(light.dir, sh.box);
@@ -1723,8 +1730,10 @@ export class Renderer3d {
         gl.viewport(0, 0, devW, devH);
         m.version = sh.version;
       }
-      shadowOn = !!m;
-    }
+      shadowOn = !!m && m.size === size;
+    } else if (this.shadowMap) this.dropShadow();
+    // 외곽선을 끄면 깊이 그림 버퍼도 놓는다
+    if (!st.profiles && this.profTex) this.dropProfile();
 
     // 1) 불투명 면(무늬 없는 것 먼저, 그다음 올린 무늬가 있는 것 — 프로그램을 한 번씩만 바꾼다)
     if (shadedLike) {
@@ -1762,7 +1771,8 @@ export class Renderer3d {
       gl.disable(gl.CULL_FACE);
       // 1b) 잘린 면 채우기
       if (capsOn) {
-        const units = this.capUnits(visibleMeshes, sec, multi, look ? { trans: transOf, box: boxOf, color: colOf } : null);
+        // 반투명·범위·색은 겉모습·모드(숨은 선·단색)를 반영한 값으로(겉모습이 없고 예전 모드면 장면 값 그대로)
+        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf });
         const plain = meshExtra.length ? this.variant('mesh', [...meshExtra, ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('mesh', ['CLIPN']) : this.mesh;
         if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, (r) => meshLists(r), (pl) => (capPlane = pl), mm, plain);
       }

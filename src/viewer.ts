@@ -50,7 +50,7 @@ import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotat
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
-import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance } from './pointer';
+import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import {
   AXIS_DIRS,
   type Plane4,
@@ -365,6 +365,12 @@ interface RangeState {
   box: Box3 | null;
 }
 
+/** 쓸 수 있는 마주 보기 설정인지(origin이 수 셋 이상 — 배열·형식 배열 모두) */
+function hasBillboard(m: Mesh3d): boolean {
+  const o = m.billboard?.origin as ArrayLike<number> | undefined;
+  return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
+}
+
 const rangeKind = (it: Item): 'triangle' | 'segment' | 'point' => (it.kind === 'mesh' ? 'triangle' : it.kind === 'line' ? 'segment' : 'point');
 
 /** 묶음의 기본 도형 수(그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점) */
@@ -409,12 +415,14 @@ interface Drag {
 const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif";
 const ROT_PER_PX = 0.0085;
 const CUBE_CSS = 112;
+/** 그림 저장 2D 캔버스 넓이 한도(화소): iOS Safari 캔버스 한도(약 16.7 Mpx = 4096²) */
+export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
+/** 그림 저장 한 변 한도(화소) */
+const SNAPSHOT_MAX_SIDE = 16384;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
 export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
-/** 걷기 키(소문자 또는 키 이름) */
-const WALK_KEYS = new Set(['w', 'a', 's', 'd', 'q', 'e', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown']);
 
 export class Viewer3d {
   readonly host: HTMLElement;
@@ -499,6 +507,8 @@ export class Viewer3d {
   private nav: 'orbit' | 'walk' = 'orbit';
   private walkOpts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {};
   private walkKeys = new Set<string>();
+  /** 걷기 키 떼기 듣기를 푸는 함수(누르고 있는 동안만) */
+  private walkRelease: (() => void) | null = null;
   private walkFast = false;
   private walkIn = { forward: 0, right: 0, up: 0, turn: 0, look: 0 };
   private walkT = 0;
@@ -517,7 +527,7 @@ export class Viewer3d {
   private lookMoves = 0;
   private lineModels = new WeakMap<LineSet3d | PointSet3d, ArrayLike<number>>();
   /** 앱 측정 덧그림(setAnnotations)과 계산한 모양 */
-  private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number } | null = null;
+  private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number; box: Box3 | null } | null = null;
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
@@ -662,7 +672,7 @@ export class Viewer3d {
     const hadSection = !!this.sec;
     this.sceneRef = scene;
     this.items.clear();
-    this.bbList = scene.meshes.filter((m) => !!m.billboard && Array.isArray(m.billboard.origin));
+    this.bbList = scene.meshes.filter((m) => hasBillboard(m));
     this.bbCamKey = '';
     for (const m of scene.meshes) this.items.set(m.id, { kind: 'mesh', item: m });
     for (const l of scene.lines) this.items.set(l.id, { kind: 'line', item: l });
@@ -753,6 +763,7 @@ export class Viewer3d {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.listenWalkRelease(false);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     clearTimeout(this.bvhTimer);
@@ -961,6 +972,7 @@ export class Viewer3d {
     this.finishAnim();
     this.nav = mode;
     this.walkKeys.clear();
+    this.listenWalkRelease(false);
     this.walkIn = { forward: 0, right: 0, up: 0, turn: 0, look: 0 };
     if (mode === 'walk') {
       const eye = cameraEye(this.cam);
@@ -1924,11 +1936,21 @@ export class Viewer3d {
       return;
     }
     const copy = list.map((a) => ({ ...a }));
+    const geo = copy.map((a) => annotationGeometry(a));
+    // 선·점이 닿는 범위(가까운·먼 면에 넣는다)
+    const box = emptyBox();
+    for (const g of geo) {
+      if (!g) continue;
+      for (let i = 0; i + 2 < g.segs.length; i += 3) expandPoint(box, g.segs[i]!, g.segs[i + 1]!, g.segs[i + 2]!);
+      for (const p of g.dots) expandPoint(box, p[0], p[1], p[2]);
+      expandPoint(box, g.labelAt[0], g.labelAt[1], g.labelAt[2]);
+    }
     this.annos = {
       list: copy,
-      geo: copy.map((a) => annotationGeometry(a)),
+      geo,
       hidden: Math.min(1, Math.max(0, opts.hidden ?? 0.35)),
       width: Math.max(0.5, opts.width ?? 2),
+      box: boxIsEmpty(box) ? null : box,
     };
     this.uploadAnnotations();
     this.invalidate();
@@ -2019,42 +2041,71 @@ export class Viewer3d {
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
   }
 
-  /** 화면 밖 그리기로 그림 만들기(toBlob 선택) */
+  /** 화면 밖 그리기로 그림 만들기(toBlob 선택). 실패하면 무엇이 문제인지 적은 Error로 거절한다 */
   private async snapshotBlob(o: SnapshotOptions): Promise<Blob> {
     const type = o.type ?? 'image/png';
-    const data = this.renderImage(o);
-    const c = document.createElement('canvas');
-    c.width = data.width;
-    c.height = data.height;
-    c.getContext('2d')!.putImageData(data, 0, 0);
-    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, o.quality));
+    const c = this.renderCanvas(o);
+    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error(`그림을 만들지 못했습니다(${c.width}×${c.height})`))), type, o.quality));
   }
 
   /**
-   * 화면 밖에서 그린 화소(ImageData, 덧그림 포함). scale·transparent·overlays는 toBlob 선택과 같다.
+   * 화면 밖 그림의 실제 크기와 배율(화면 CSS 화소 대비). scale을 GPU 한 변 한도·2D 캔버스 넓이 한도(SNAPSHOT_MAX_PIXELS,
+   * iOS Safari도 되는 4096² 화소)에 맞춰 줄인 값이다 — toBlob·renderImage가 이 크기로 그린다
+   */
+  snapshotSize(o: Pick<SnapshotOptions, 'scale'> = {}): { width: number; height: number; scale: number } {
+    const gl = this.gl;
+    const dpr = this.dpr || 1;
+    const lost = !this.gpu;
+    const maxRb = lost ? 4096 : Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 4096;
+    const vp = lost ? null : (gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array | null);
+    const maxSide = Math.min(maxRb, vp?.[0] ?? maxRb, vp?.[1] ?? maxRb, SNAPSHOT_MAX_SIDE);
+    const want = Number.isFinite(o.scale) && o.scale! > 0 ? Math.min(16, Math.max(0.1, o.scale!)) : 1;
+    let k = want * dpr;
+    const W0 = this.cssW * k, H0 = this.cssH * k;
+    k *= Math.min(1, maxSide / W0, maxSide / H0, Math.sqrt(SNAPSHOT_MAX_PIXELS / (W0 * H0)));
+    // 화면 캔버스와 같은 반올림(1배면 화면 그림과 같은 크기)
+    const width = Math.max(1, Math.round(this.cssW * k)), height = Math.max(1, Math.round(this.cssH * k));
+    return { width, height, scale: width / this.cssW / dpr };
+  }
+
+  /**
+   * 화면 밖에서 그린 화소(ImageData, 덧그림 포함). scale·transparent·overlays는 toBlob 선택과 같다(실제 크기는 snapshotSize).
    * GPU 다중 표본 버퍼에 그리고 읽어 온다(화면 캔버스는 건드리지 않는다)
    */
   renderImage(o: Omit<SnapshotOptions, 'type' | 'quality'> = {}): ImageData {
+    if (o.overlays === false) return this.renderPixels(o).data;
+    const c = this.renderCanvas(o);
+    return c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+  }
+
+  /** 화면 밖 그림을 2D 캔버스 하나에(덧그림은 같은 캔버스 위에 같은 배율로) */
+  private renderCanvas(o: Omit<SnapshotOptions, 'type' | 'quality'>): HTMLCanvasElement {
+    const { data, f, k } = this.renderPixels(o);
+    const c = document.createElement('canvas');
+    c.width = data.width;
+    c.height = data.height;
+    const ctx = c.getContext('2d');
+    if (!ctx) throw new Error(`그림 저장용 2D 캔버스를 만들지 못했습니다(${data.width}×${data.height} — 기기 한도를 넘었을 수 있습니다)`);
+    ctx.putImageData(data, 0, 0);
+    if (o.overlays ?? true) this.drawOverlayOn(ctx, f, k);
+    return c;
+  }
+
+  /** GPU에 화면 밖으로 그려 화소를 읽는다(읽은 버퍼를 그대로 ImageData로 — 위아래 뒤집기·알파 곱 풀기는 그 자리에서) */
+  private renderPixels(o: Omit<SnapshotOptions, 'type' | 'quality'>): { data: ImageData; f: ViewFrame; k: number } {
     if (!this.gpu) throw new Error('3D 보기 문맥이 없어 그림을 만들 수 없습니다');
     if (this.renderer.uploading) this.pumpUpload(Infinity);
     const gl = this.gl;
-    const dpr = this.dpr || 1;
-    const maxRb = Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 4096;
-    const vp = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array;
-    const maxSide = Math.min(maxRb, vp?.[0] ?? maxRb, vp?.[1] ?? maxRb);
-    let k = Math.max(0.1, Math.min(16, o.scale ?? 1)) * dpr;
-    const fit = (): void => {
-      const W = this.cssW * k, H = this.cssH * k;
-      const s = Math.min(1, maxSide / W, maxSide / H, Math.sqrt(40e6 / (W * H)));
-      k *= s;
-    };
-    fit();
-    const W = Math.max(1, Math.round(this.cssW * k)), H = Math.max(1, Math.round(this.cssH * k));
-    const samples = Math.min(4, Number(gl.getParameter(gl.MAX_SAMPLES)) || 0, W * H > 16e6 ? 0 : 4);
+    const { width: W, height: H } = this.snapshotSize(o);
+    const k = W / this.cssW;
+    // 다중 표본은 GPU 메모리를 표본 수만큼 쓴다: 크면 줄이고 아주 크면 한 표본(배율 자체가 덜 계단지게 한다)
+    const maxS = Number(gl.getParameter(gl.MAX_SAMPLES)) || 0;
+    const samples = Math.min(maxS, W * H <= 4.2e6 ? 4 : W * H <= 8.4e6 ? 2 : 0);
     const f = this.frame();
     // 그리기 버퍼: 다중 표본 색·깊이·스텐실 → 한 표본 색으로 풀기
     const fb = gl.createFramebuffer()!, rbC = gl.createRenderbuffer()!, rbD = gl.createRenderbuffer()!;
     const fb2 = gl.createFramebuffer()!, rb2 = gl.createRenderbuffer()!;
+    let data: ImageData;
     try {
       gl.bindRenderbuffer(gl.RENDERBUFFER, rbC);
       if (samples > 0) gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, W, H);
@@ -2065,7 +2116,7 @@ export class Viewer3d {
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rbC);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, rbD);
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('그림 저장용 GPU 버퍼를 만들지 못했습니다');
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`그림 저장용 GPU 버퍼를 만들지 못했습니다(${W}×${H})`);
       if (this.cutDirty) {
         if (this.sec) this.updateCut();
         else {
@@ -2073,13 +2124,12 @@ export class Viewer3d {
           this.renderer.setSectionLines(null);
         }
       }
-      const overlays = o.overlays ?? true;
       const st = this.renderState(f, k);
       st.viewport = [W, H];
       if (o.transparent) st.transparent = true;
-      if (!overlays) st.annotations = null;
+      if (o.overlays === false) st.annotations = null;
       this.renderer.render(f, W, H, st);
-      // 한 표본으로 풀어 읽는다
+      // 한 표본으로 풀어 읽는다(ImageData 버퍼에 바로)
       gl.bindRenderbuffer(gl.RENDERBUFFER, rb2);
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb2);
@@ -2088,43 +2138,8 @@ export class Viewer3d {
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb2);
       gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb2);
-      const px = new Uint8Array(W * H * 4);
-      gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
-      // 아래에서 위로 → 위에서 아래로, 투명 바탕이면 알파 곱을 푼다
-      const out = new ImageData(W, H);
-      const D = out.data;
-      const row = W * 4;
-      for (let y = 0; y < H; y++) {
-        const src = (H - 1 - y) * row, dst = y * row;
-        if (!o.transparent) {
-          // 불투명 바탕: 섞기가 알파 채널에 남긴 값은 버린다(화면 캔버스처럼)
-          D.set(px.subarray(src, src + row), dst);
-          for (let i = 3; i < row; i += 4) D[dst + i] = 255;
-        } else
-          for (let i = 0; i < row; i += 4) {
-            const a = px[src + i + 3]!;
-            D[dst + i + 3] = a;
-            if (a > 0) {
-              D[dst + i] = Math.min(255, Math.round((px[src + i]! * 255) / a));
-              D[dst + i + 1] = Math.min(255, Math.round((px[src + i + 1]! * 255) / a));
-              D[dst + i + 2] = Math.min(255, Math.round((px[src + i + 2]! * 255) / a));
-            }
-          }
-      }
-      if (!overlays) return out;
-      // 덧그림은 2D 캔버스에 같은 배율로 그려 위에 얹는다
-      const c = document.createElement('canvas');
-      c.width = W;
-      c.height = H;
-      const ctx = c.getContext('2d')!;
-      ctx.putImageData(out, 0, 0);
-      const oc = document.createElement('canvas');
-      oc.width = W;
-      oc.height = H;
-      const octx = oc.getContext('2d')!;
-      this.drawOverlayOn(octx, f, W / this.cssW);
-      ctx.drawImage(oc, 0, 0);
-      return ctx.getImageData(0, 0, W, H);
+      data = new ImageData(W, H);
+      gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(data.data.buffer, data.data.byteOffset, data.data.byteLength));
     } finally {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.bindRenderbuffer(gl.RENDERBUFFER, null);
@@ -2135,6 +2150,27 @@ export class Viewer3d {
       gl.deleteRenderbuffer(rb2);
       this.invalidate();
     }
+    // 아래에서 위로 → 위에서 아래로(줄 하나 임시), 투명 바탕이면 알파 곱을 풀고 아니면 알파를 채운다
+    const D = data.data;
+    const row = W * 4;
+    const tmp = new Uint8ClampedArray(row);
+    for (let y = 0; y < H >> 1; y++) {
+      const a = y * row, b = (H - 1 - y) * row;
+      tmp.set(D.subarray(a, a + row));
+      D.copyWithin(a, b, b + row);
+      D.set(tmp, b);
+    }
+    if (o.transparent) {
+      for (let i = 0; i < D.length; i += 4) {
+        const a = D[i + 3]!;
+        if (a > 0 && a < 255) {
+          D[i] = Math.min(255, Math.round((D[i]! * 255) / a));
+          D[i + 1] = Math.min(255, Math.round((D[i + 1]! * 255) / a));
+          D[i + 2] = Math.min(255, Math.round((D[i + 2]! * 255) / a));
+        }
+      }
+    } else for (let i = 3; i < D.length; i += 4) D[i] = 255;
+    return { data, f, k };
   }
 
   /**
@@ -2334,6 +2370,8 @@ export class Viewer3d {
       const g = this.grid;
       b = unionBox(b, { min: [g.x0, g.y0, g.z], max: [g.x1, g.y1, g.z] });
     }
+    // 덧그림도 가까운·먼 면 안에(장면 밖에 둔 측정이 잘리지 않게)
+    if (this.annos?.box) b = unionBox(b, this.annos.box);
     if (this.marker) {
       const m = this.marker;
       const s = this.markerScale(null);
@@ -2368,24 +2406,28 @@ export class Viewer3d {
       const lm = this.looks.get(it.id)?.matrix;
       if (lm) b = transformBox(b, lm);
       // 마주 보는 그물: 돌려도 변하지 않는 기둥 범위
-      const bb = (it as Mesh3d).billboard;
-      if (bb && this.items.get(it.id)?.kind === 'mesh') b = billboardBounds(b, bb.origin);
+      if (this.items.get(it.id)?.kind === 'mesh' && hasBillboard(it as Mesh3d)) b = billboardBounds(b, (it as Mesh3d).billboard!.origin);
       this.boxes.set(it, b);
     }
     return b;
   }
 
-  /** 마주 보는 그물의 지금 카메라 돌림(세계, 원점 둘레) */
-  private billboardRot(m: Mesh3d): ArrayLike<number> {
+  /** 마주 보는 그물의 지금 카메라 돌림 각(라디안) */
+  private billboardAngleOf(m: Mesh3d): number {
     const bb = m.billboard!;
     const c = this.cam;
     const to = towardCamera(bb.origin, cameraEye(c), cameraBasis(c).back, c.projection === 'perspective', c.yaw);
-    return billboardMatrix(bb.origin, billboardAngle(bb.front ?? [0, -1, 0], to));
+    return billboardAngle(bb.front ?? [0, -1, 0], to);
+  }
+
+  /** 마주 보는 그물의 지금 카메라 돌림(세계, 원점 둘레) */
+  private billboardRot(m: Mesh3d): ArrayLike<number> {
+    return billboardMatrix(m.billboard!.origin, this.billboardAngleOf(m));
   }
 
   /** 그물 모형 행렬 = (마주 보기 돌림 ·)(묶음 행렬 setItemMatrix ·) matrix · T(origin)(마주 보기가 아니면 장면마다 캐시) */
   private modelOf(m: Mesh3d): ArrayLike<number> | undefined {
-    if (m.billboard) {
+    if (hasBillboard(m)) {
       let base = modelMatrix(m.matrix, m.origin);
       const lm = this.looks.get(m.id)?.matrix;
       if (lm) base = base ? mat4Mul(lm, base) : lm;
@@ -2514,10 +2556,12 @@ export class Viewer3d {
     this.lastClick = { t: now, x, y, n };
     const d = this.pickDetail(x, y, true, type);
     // 걷기: 두 번 누르면 그 자리에 선다(눈높이 위)
+    // 서기에 쓴 두 번째 누르기는 고르기·측정으로 알리지 않는다(첫 누르기는 이미 clicks 1로 알렸다)
     if (this.nav === 'walk' && n === 2 && d && this.walkOpts.tapToStand !== false) {
       this.finishAnim();
       this.cam = standCamera(this.cam, d.pick.point, this.eyeHeight());
       this.invalidate();
+      return;
     }
     if (this.measuring) {
       if (!d) return;
@@ -2578,7 +2622,10 @@ export class Viewer3d {
     this.on<KeyboardEvent>(cv, 'keyup', (e) => {
       if (this.opts.keyboard && this.handleKeyUp(e)) e.stopPropagation();
     });
-    this.on(cv, 'blur', () => this.walkKeys.clear());
+    this.on(cv, 'blur', () => {
+      this.walkKeys.clear();
+      this.listenWalkRelease(false);
+    });
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
@@ -2815,10 +2862,13 @@ export class Viewer3d {
    */
   handleKey(e: KeyboardEvent): boolean {
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
-    // 걷기: W·A·S·D·화살표·Q·E·PageUp·PageDown은 누르는 동안 움직인다(handleKeyUp으로 멈춘다)
-    if (this.nav === 'walk' && WALK_KEYS.has(e.key.length === 1 ? e.key.toLowerCase() : e.key)) {
-      this.walkKeys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+    // 걷기: W·A·S·D·화살표·Q·E·PageUp·PageDown(물리 키 — 한글 입력기에서도)은 누르는 동안 움직인다.
+    // 떼기는 창 keyup·창 흐려짐·탭 숨김을 뷰어가 스스로 듣는다(앱이 창 keydown만 넘겨도 멈춘다)
+    const wk = this.nav === 'walk' ? walkKeyOf(e) : null;
+    if (wk) {
+      this.walkKeys.add(wk);
       this.walkFast = e.shiftKey;
+      this.listenWalkRelease(true);
       this.invalidate();
       e.preventDefault();
       return true;
@@ -2833,10 +2883,42 @@ export class Viewer3d {
 
   /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true */
   handleKeyUp(e: KeyboardEvent): boolean {
-    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    if (!this.walkKeys.delete(k)) return false;
+    const k = walkKeyOf(e);
+    if (!k || !this.walkKeys.delete(k)) return false;
     this.walkFast = e.shiftKey;
+    if (!this.walkKeys.size) this.listenWalkRelease(false);
     return true;
+  }
+
+  /** 걷기 키를 누르고 있는 동안만 창 keyup·blur·visibilitychange를 들어 떼기를 놓치지 않는다 */
+  private listenWalkRelease(on: boolean): void {
+    if (on === !!this.walkRelease) return;
+    if (!on) {
+      this.walkRelease!();
+      this.walkRelease = null;
+      return;
+    }
+    const up = (e: KeyboardEvent): void => {
+      const k = walkKeyOf(e);
+      if (k) this.walkKeys.delete(k);
+      this.walkFast = e.shiftKey;
+      if (!this.walkKeys.size) this.listenWalkRelease(false);
+    };
+    const clear = (): void => {
+      this.walkKeys.clear();
+      this.listenWalkRelease(false);
+    };
+    const vis = (): void => {
+      if (document.visibilityState === 'hidden') clear();
+    };
+    window.addEventListener('keyup', up, true);
+    window.addEventListener('blur', clear);
+    document.addEventListener('visibilitychange', vis);
+    this.walkRelease = () => {
+      window.removeEventListener('keyup', up, true);
+      window.removeEventListener('blur', clear);
+      document.removeEventListener('visibilitychange', vis);
+    };
   }
 
   private onKey(e: KeyboardEvent): void {
@@ -2879,7 +2961,9 @@ export class Viewer3d {
     if (this.nav === 'walk') this.stepWalk(now);
     // 마주 보는 그물: 카메라가 바뀌면 그림자·단면 테두리·고르기 목록이 따라 바뀐다
     if (this.bbList.length) {
-      const k = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}`;
+      // 돌림 각이 하나라도 바뀌었을 때만(카메라가 움직여도 각이 같으면 그림자·테두리는 그대로)
+      let k = '';
+      for (const m of this.bbList) k += `${this.billboardAngleOf(m).toFixed(9)},`;
       if (k !== this.bbCamKey) {
         this.bbCamKey = k;
         this.shadowVer++;

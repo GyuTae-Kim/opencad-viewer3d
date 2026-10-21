@@ -2,7 +2,7 @@
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
 export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
-export { VIEW_KEYS, Viewer3d } from './viewer';
+export { SNAPSHOT_MAX_PIXELS, VIEW_KEYS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
   BackgroundOptions,
@@ -51,6 +51,8 @@ export {
   TOUCH_DRAG_START_PX,
   TOUCH_PICK_TOLERANCE_PX,
   dragStartPx,
+  walkKeyOf,
+  type WalkKey,
   isTouch,
   pickTolerance,
   type PickTolerance,

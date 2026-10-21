@@ -70,3 +70,34 @@ export interface LastClick {
 export function clickCount(last: LastClick, t: number, x: number, y: number, pointerType: string | null | undefined): 1 | 2 {
   return last.n === 1 && t - last.t < DOUBLE_CLICK_MS && Math.hypot(x - last.x, y - last.y) < doubleClickPx(pointerType) ? 2 : 1;
 }
+
+/** 걷기 키 이름(소문자 글자 또는 키 이름) */
+export type WalkKey = 'w' | 'a' | 's' | 'd' | 'q' | 'e' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight' | 'PageUp' | 'PageDown';
+
+const WALK_CODES: Readonly<Record<string, WalkKey>> = {
+  KeyW: 'w',
+  KeyA: 'a',
+  KeyS: 's',
+  KeyD: 'd',
+  KeyQ: 'q',
+  KeyE: 'e',
+  ArrowUp: 'ArrowUp',
+  ArrowDown: 'ArrowDown',
+  ArrowLeft: 'ArrowLeft',
+  ArrowRight: 'ArrowRight',
+  PageUp: 'PageUp',
+  PageDown: 'PageDown',
+};
+
+/**
+ * 걷기 키 찾기: 물리 키(code — 한글 입력기에서 ㅈㅁㄴㅇㅂㄷ가 나와도 W·A·S·D·Q·E 자리)를 먼저 보고, code가 없으면 key(대소문자 무시)로.
+ * 걷기 키가 아니면 null
+ */
+export function walkKeyOf(e: { code?: string; key?: string }): WalkKey | null {
+  const c = e.code ? WALK_CODES[e.code] : undefined;
+  if (c) return c;
+  if (e.code && e.code !== 'Unidentified') return null;
+  const k = e.key ?? '';
+  const n = k.length === 1 ? k.toLowerCase() : k;
+  return (Object.values(WALK_CODES) as string[]).includes(n) ? (n as WalkKey) : null;
+}
