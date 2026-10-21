@@ -39,7 +39,7 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub } from './math';
+import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub, transform4 } from './math';
 import { type PickDetail, type ScenePickItems, occludingDepth, pickScene } from './scenepick';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { countIdsUpTo } from './playback';
@@ -98,6 +98,11 @@ export interface Viewer3dOptions {
   pickEdges?: boolean;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
+  /**
+   * 측정 글 꼴(내장 측정과 글을 주지 않은 거리 덧그림): 거리·성분·두 점·장면 단위를 받아 글 줄들을 돌려준다.
+   * 앱이 단위(파일·mm·in)·자릿수·언어를 맞출 때 쓴다. 없으면 기본("거리 … mm" / "ΔX … ΔY … ΔZ …"). setMeasureFormat으로 바꾼다
+   */
+  formatMeasure?: MeasureFormat | null;
   /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
   textureLimit?: number;
   /** 무늬 그림 전체 GPU 예산(바이트, 기본 256 MB — RGBA·밉맵 어림). 넘으면 모든 무늬를 같은 비로 줄인다 */
@@ -208,17 +213,23 @@ export interface MarkerOptions {
   color?: Rgba;
 }
 
+/** 측정 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat): 받은 값으로 글 줄들을 만든다 */
+export type MeasureFormat = (m: MeasureResult & { units: Scene3d['units'] }) => string[];
+
 /** project() 결과: 세계 점의 캔버스 위치(CSS 화소, 왼쪽 위 원점)와 보이는지 */
 export interface ProjectedPoint {
+  /** 캔버스 CSS 화소. behind면 눈 뒤 점을 원근 나눗셈한 자리(화면에서 거울처럼 뒤집힌 쪽 — 화살표 방향을 정할 때만 쓴다) */
   x: number;
   y: number;
   /** 눈에서 본 깊이(앞쪽이 양수, 세계 단위) */
   depth: number;
-  /** 눈 앞에 있고 캔버스 안에 들어오는지 */
+  /** 원근에서 눈 뒤(깊이 ≤ 0)에 있는지(평행 투영은 늘 false) */
+  behind: boolean;
+  /** 눈 앞(가까운 면 안쪽)에 있고 캔버스 안에 들어오는지 */
   onScreen: boolean;
   /** 불투명 면에 가렸는지(occlusion을 줬고 음영 모드일 때만 따진다, 아니면 false) */
   occluded: boolean;
-  /** onScreen이고 단면에 잘리지 않았고 가리지 않았는지 */
+  /** onScreen이고 단면에 잘리지 않았고 (occlusion을 줬으면) 가리지 않았는지 */
   visible: boolean;
 }
 
@@ -315,7 +326,7 @@ export class Viewer3d {
   private cctx: CanvasRenderingContext2D;
   private gl: WebGL2RenderingContext;
   private renderer: Renderer3d;
-  private opts: Required<Omit<Viewer3dOptions, 'theme' | 'projection' | 'renderMode'>>;
+  private opts: Required<Omit<Viewer3dOptions, 'theme' | 'projection' | 'renderMode' | 'formatMeasure'>>;
   private themeOpt: Viewer3dOptions['theme'];
   private theme: Viewer3dTheme = DARK_THEME;
   private colors!: RenderColors;
@@ -375,6 +386,8 @@ export class Viewer3d {
   private measuring = false;
   private measurePts: V3[] = [];
   private measureHover: { p: V3; vertex: boolean } | null = null;
+  /** 측정 글 꼴(없으면 기본) */
+  private measureFmt: MeasureFormat | null = null;
   /** 앱 측정 덧그림(setAnnotations)과 계산한 모양 */
   private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number } | null = null;
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
@@ -414,6 +427,7 @@ export class Viewer3d {
       textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
     };
     this.themeOpt = opts.theme;
+    this.measureFmt = opts.formatMeasure ?? null;
     this.gridOn = this.opts.grid;
     this.mode = opts.renderMode ?? 'shadedEdges';
     this.cam = { ...defaultCamera(), projection: opts.projection ?? 'perspective' };
@@ -1287,16 +1301,26 @@ export class Viewer3d {
    * 세계 점 → 캔버스 위치(CSS 화소, 왼쪽 위 원점)·깊이·보이는지. 앱이 화면 위에 자기 표시(글자·단추)를 붙일 때 쓴다.
    * occlusion이면 음영 모드에서 그 점이 불투명 면에 가렸는지도 따진다(고르기와 같은 광선 — 점이 면 위에 있으면 보인다).
    */
-  project(p: readonly number[], opts: { occlusion?: boolean } = {}): ProjectedPoint {
+  project(p: readonly number[], opts: { occlusion?: boolean } = {}): ProjectedPoint | null {
+    if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) return null;
     const f = this.frame();
     const depth = viewDepth(f, p);
-    const s = projectToScreen(f, p);
-    if (!s || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) return { x: NaN, y: NaN, depth, onScreen: false, occluded: false, visible: false };
-    const front = f.projection === 'orthographic' || depth >= f.near * 0.999;
-    const onScreen = front && s[0] >= 0 && s[0] <= this.cssW && s[1] >= 0 && s[1] <= this.cssH;
+    const c = transform4(f.viewProj, p[0]!, p[1]!, p[2]!);
+    if (!(Math.abs(c[3]) > 1e-12)) return null;
+    const x = ((c[0] / c[3] + 1) / 2) * f.width, y = ((1 - c[1] / c[3]) / 2) * f.height;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const behind = f.projection === 'perspective' && c[3] <= 0;
+    const front = f.projection === 'orthographic' || (!behind && depth >= f.near * 0.999);
+    const onScreen = front && x >= 0 && x <= this.cssW && y >= 0 && y <= this.cssH;
     const cut = this.pointCut(p);
-    const occluded = !!opts.occlusion && onScreen && !cut && this.occludedAt(f, p, s[0], s[1], true);
-    return { x: s[0], y: s[1], depth, onScreen, occluded, visible: onScreen && !cut && !occluded };
+    const occluded = !!opts.occlusion && onScreen && !cut && this.occludedAt(f, p, x, y, true);
+    return { x, y, depth, behind, onScreen, occluded, visible: onScreen && !cut && !occluded };
+  }
+
+  /** 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다 */
+  setMeasureFormat(fn: MeasureFormat | null): void {
+    this.measureFmt = fn ?? null;
+    this.invalidate();
   }
 
   /**
@@ -2111,7 +2135,12 @@ export class Viewer3d {
         ctx.fill();
         ctx.stroke();
       }
-      const lines = annotationText(an, g, (v) => this.fmt(v), unit);
+      const fm = this.measureFmt;
+      let lines: string[];
+      if (fm && an.kind === 'distance' && an.label === undefined) {
+        const [p, q] = g.dots as [V3, V3];
+        lines = fm({ a: [...p] as V3, b: [...q] as V3, distance: g.value, dx: q[0] - p[0], dy: q[1] - p[1], dz: q[2] - p[2], units: this.sceneRef?.units ?? 'unknown' });
+      } else lines = annotationText(an, g, (v) => this.fmt(v), unit);
       const at = projectToScreen(f, g.labelAt);
       if (!lines.length || !at) return;
       const hid = occl && this.occludedAt(f, g.labelAt, at[0], at[1], false);
@@ -2232,7 +2261,7 @@ export class Viewer3d {
       ctx.stroke();
     };
     const label = (at: V3 | null, lines: string[]): void => {
-      if (!at) return;
+      if (!at || !lines.length) return;
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((s) => ctx.measureText(s).width)) + 14;
       const h = lines.length * 16 + 8;
@@ -2266,7 +2295,13 @@ export class Viewer3d {
       const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
       const mid = sa && sb ? ([(sa[0] + sb[0]) / 2, (sa[1] + sb[1]) / 2, 0] as V3) : sb ?? sa;
       const u = unit ? ` ${unit}` : '';
-      label(mid, [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`]);
+      const fm = this.measureFmt;
+      label(
+        mid,
+        fm
+          ? fm({ a: [...a] as V3, b: [...b] as V3, distance: Math.hypot(dx, dy, dz), dx, dy, dz, units: this.sceneRef?.units ?? 'unknown' })
+          : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
+      );
     }
     for (const p of pts) dotAt(P(p), false);
     if (hover) dotAt(P(hover.p), hover.vertex);

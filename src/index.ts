@@ -7,6 +7,7 @@ export type {
   AnnotationOptions,
   GroupInfo,
   MarkerOptions,
+  MeasureFormat,
   MeasureResult,
   PickEvent,
   PickOptions,
