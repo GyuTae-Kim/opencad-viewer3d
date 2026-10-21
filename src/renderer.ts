@@ -18,7 +18,7 @@ import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
 import { type V3, hasOrigin, mat4Mul, modelMatrix, normalMatrix, translation } from './math';
 import { boxCenter, meshBounds, transformBox, unionBox } from './bounds';
-import { FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
+import { FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, SKY_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
@@ -139,6 +139,8 @@ export interface RenderState {
   hiddenEdges?: number;
   /** 화면 공간 외곽선(실루엣): 굵기(장치 화소)·색. 음영 계열 모드에서만 */
   profiles?: { width: number; color: Rgba } | null;
+  /** 하늘·땅 바탕(없으면 colors.background 한 색) */
+  sky?: { sky: Rgba; skyHorizon: Rgba; ground: Rgba; groundHorizon: Rgba } | null;
   /** 앱 측정 덧그림 선(setAnnotationLines로 올린 것)을 그릴 때: 굵기(화면 화소)·가려진 부분 불투명도(0이면 안 그림) */
   annotations?: { width: number; hidden: number } | null;
 }
@@ -306,6 +308,7 @@ export class Renderer3d {
   /** 외곽선: 깊이 그림(그물만)과 그 그리기 버퍼, 화면 전체 삼각형 프로그램 */
   private profTex: { tex: WebGLTexture; fb: WebGLFramebuffer; w: number; h: number } | null = null;
   private profileP: Prog | null = null;
+  private skyP: Prog | null = null;
   private emptyVao: WebGLVertexArrayObject | null = null;
   private quadWide!: WebGLBuffer;
   private quadPoint!: WebGLBuffer;
@@ -368,6 +371,7 @@ export class Renderer3d {
     this.meshTC = null;
     this.variants.clear();
     this.profileP = null;
+    this.skyP = null;
     const an = gl.getExtension('EXT_texture_filter_anisotropic');
     this.aniso = an ? { ext: an, max: Number(gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 1 } : null;
     this.quadWide = gl.createBuffer()!;
@@ -407,6 +411,7 @@ export class Renderer3d {
     this.variants.clear();
     this.profTex = null;
     this.profileP = null;
+    this.skyP = null;
     this.emptyVao = null;
     this.pending = null;
     this.texGen++;
@@ -453,6 +458,35 @@ export class Renderer3d {
   private meshTex(clip: boolean): Prog {
     if (clip) return (this.meshTC ??= { ...this.program(withDefines(MESH_VS, 'CLIP', 'TEX'), withDefines(MESH_FS, 'CLIP', 'TEX')), clip1: true, tex: true });
     return (this.meshT ??= { ...this.program(withDefines(MESH_VS, 'TEX'), withDefines(MESH_FS, 'TEX')), tex: true });
+  }
+
+  /** 하늘·땅 바탕을 화면 전체 삼각형으로(깊이는 쓰지 않는다) */
+  private drawSky(f: ViewFrame, sky: NonNullable<RenderState['sky']>, devW: number, devH: number): void {
+    const gl = this.gl;
+    const p = (this.skyP ??= this.program(FULL_VS, SKY_FS));
+    gl.useProgram(p.p);
+    const b = f.basis;
+    gl.uniform3f(this.loc(p, 'u_right'), b.right[0], b.right[1], b.right[2]);
+    gl.uniform3f(this.loc(p, 'u_up'), b.up[0], b.up[1], b.up[2]);
+    gl.uniform3f(this.loc(p, 'u_fwd'), -b.back[0], -b.back[1], -b.back[2]);
+    const tanV = (f.pixelPerDepth * f.height) / 2;
+    gl.uniform2f(this.loc(p, 'u_tan'), tanV * (f.width / f.height), tanV);
+    gl.uniform2f(this.loc(p, 'u_shift'), f.shift?.[0] ?? 0, f.shift?.[1] ?? 0);
+    const c = (n: string, v: Rgba): void => gl.uniform4f(this.loc(p, n), v[0], v[1], v[2], v[3]);
+    c('u_sky', sky.sky);
+    c('u_skyH', sky.skyHorizon);
+    c('u_ground', sky.ground);
+    c('u_groundH', sky.groundHorizon);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.depthMask(false);
+    this.emptyVao ??= gl.createVertexArray();
+    gl.bindVertexArray(this.emptyVao);
+    gl.viewport(0, 0, devW, devH);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
+    gl.enable(gl.DEPTH_TEST);
+    gl.bindVertexArray(null);
   }
 
   /** 외곽선 깊이 그림 버퍼(크기가 바뀌면 다시 만든다). 만들지 못하면 null */
@@ -899,7 +933,7 @@ export class Renderer3d {
     gl.deleteBuffer(this.quadPoint);
     gl.deleteBuffer(this.capBuf);
     gl.deleteVertexArray(this.capVao);
-    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC, this.profileP, ...this.variants.values()]) if (p) gl.deleteProgram(p.p);
+    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC, this.profileP, this.skyP, ...this.variants.values()]) if (p) gl.deleteProgram(p.p);
     this.variants.clear();
     this.profileP = null;
     this.dropProfile();
@@ -1247,6 +1281,7 @@ export class Renderer3d {
       gl.stencilMask(0xff);
     }
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | (capsOn ? gl.STENCIL_BUFFER_BIT : 0));
+    if (st.sky && !st.transparent) this.drawSky(f, st.sky, devW, devH);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);

@@ -119,6 +119,8 @@ export interface ViewFrame {
   pixelPerDepth: number;
   /** 평행: 한 화소의 세계 길이 */
   pixelConst: number;
+  /** 렌즈 이동(정규 장치 좌표, 0.7.0 — 없으면 0) */
+  shift?: readonly [number, number];
 }
 
 export function viewMatrix(eye: V3, b: CameraBasis): Mat4 {

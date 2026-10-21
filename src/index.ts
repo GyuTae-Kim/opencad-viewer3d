@@ -5,6 +5,7 @@ export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, Textur
 export { VIEW_KEYS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
+  BackgroundOptions,
   GroupInfo,
   ItemLookState,
   MarkerOptions,

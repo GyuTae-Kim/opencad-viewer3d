@@ -270,6 +270,20 @@ interface LookState {
   matrix?: Float64Array;
 }
 
+/** setBackground 선택: 색은 CSS 색 문자열 또는 RGBA 0~1 */
+export interface BackgroundOptions {
+  /** 한 색 바탕(테마 바탕 대신) */
+  color?: Rgba | string;
+  /** 하늘(지평선 위) 꼭대기 색 — sky나 ground를 주면 기울기 바탕 */
+  sky?: Rgba | string;
+  /** 지평선 근처 하늘 색(없으면 sky) */
+  skyHorizon?: Rgba | string;
+  /** 땅(지평선 아래) 바닥 쪽 색 */
+  ground?: Rgba | string;
+  /** 지평선 근처 땅 색(없으면 ground) */
+  groundHorizon?: Rgba | string;
+}
+
 /** toBlob(선택)·renderImage 선택 */
 export interface SnapshotOptions {
   /** 그림 꼴(기본 'image/png') */
@@ -446,6 +460,8 @@ export class Viewer3d {
   private measureHover: { p: V3; vertex: boolean } | null = null;
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
+  /** 바탕 바꾸기(한 색·하늘·땅) */
+  private bgOpt: BackgroundOptions | null = null;
   /** 보여 주기 선택(외곽선·숨은 점선) */
   private renderOpts: { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } = { profiles: null, hiddenEdges: 0 };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
@@ -804,6 +820,26 @@ export class Viewer3d {
       this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
     }
     this.invalidate();
+  }
+
+  /**
+   * 바탕(0.7.0): color = 한 색(테마 바탕 대신 — 앱이 파일 스타일을 따를 때), sky·ground = 지평선 위·아래 색(주면 하늘·땅 기울기 바탕 —
+   * 지평선은 카메라 앙각을 따라 움직인다), skyHorizon·groundHorizon = 지평선 근처 색(없으면 각각 sky·ground). null이면 테마 바탕으로.
+   * 색은 CSS 색 문자열 또는 RGBA 0~1. 투명 바탕 그림 저장에는 그리지 않는다
+   */
+  setBackground(o: BackgroundOptions | null): void {
+    this.bgOpt = o ? { ...o } : null;
+    this.invalidate();
+  }
+
+  get background(): BackgroundOptions | null {
+    return this.bgOpt ? { ...this.bgOpt } : null;
+  }
+
+  private skyColors(bg: BackgroundOptions, base: Rgba): { sky: Rgba; skyHorizon: Rgba; ground: Rgba; groundHorizon: Rgba } {
+    const c = (v: Rgba | string | undefined, d: Rgba): Rgba => (v === undefined ? d : typeof v === 'string' ? this.rgba(v) : v);
+    const sky = c(bg.sky, base), ground = c(bg.ground, base);
+    return { sky, skyHorizon: c(bg.skyHorizon, sky), ground, groundHorizon: c(bg.groundHorizon, ground) };
   }
 
   /** 지금 보여 주기 선택 */
@@ -2598,9 +2634,14 @@ export class Viewer3d {
       const s = this.markerScale(f);
       marker = { kind: m.kind, matrix: placeMatrix(m.pos, m.opts.axis ?? [0, 0, 1], s), color: m.opts.color ?? this.rgba(this.theme.marker) };
     }
+    const bg = this.bgOpt;
+    const bgColor = bg?.color === undefined ? null : typeof bg.color === 'string' ? this.rgba(bg.color) : bg.color;
+    const colors = bgColor ? { ...this.colors, background: bgColor } : this.colors;
+    const sky = bg && (bg.sky !== undefined || bg.ground !== undefined) ? this.skyColors(bg, colors.background) : null;
     return {
       mode: this.mode,
-      colors: this.colors,
+      colors,
+      sky,
       dpr,
       visible: (id, g) => this.visible(id, g),
       highlight: this.hi,

@@ -366,3 +366,27 @@ void main() {
   if (e < 0.5) discard;
   o_color = u_color;
 }`;
+
+/**
+ * 하늘·땅 바탕(0.7.0): 화소마다 눈에서 본 세계 방향의 높이(z 성분)로 지평선 위는 하늘(지평선 색 → 꼭대기 색),
+ * 아래는 땅(지평선 색 → 바닥 색)을 칠한다. 평행 투영도 같은 시야각의 원근 방향으로 셈해 지평선이 앙각을 따라 움직인다.
+ */
+export const SKY_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform vec3 u_fwd;
+uniform vec2 u_tan;
+uniform vec2 u_shift;
+uniform vec4 u_sky;
+uniform vec4 u_skyH;
+uniform vec4 u_ground;
+uniform vec4 u_groundH;
+out vec4 o_color;
+void main() {
+  vec2 n = v_uv * 2.0 - 1.0 - u_shift;
+  vec3 d = normalize(u_fwd + n.x * u_tan.x * u_right + n.y * u_tan.y * u_up);
+  float e = d.z;
+  o_color = e >= 0.0 ? mix(u_skyH, u_sky, sqrt(clamp(e, 0.0, 1.0))) : mix(u_groundH, u_ground, sqrt(clamp(-e, 0.0, 1.0)));
+}`;
