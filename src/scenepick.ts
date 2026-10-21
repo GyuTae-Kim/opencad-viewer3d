@@ -12,6 +12,7 @@ import { type Bvh, type PrimKind, countRayHits, rayBoxEntry, safeInv } from './b
 import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth } from './camera';
 import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint } from './math';
 import { chooseNearest, pickMeshRay, pickPointSet, pickSegments, snapToNearest } from './pick';
+import { SNAP_PX } from './pointer';
 import { type Plane4, planeShift, planeValue, rayKeptInterval } from './section';
 
 export interface PickDetail {
@@ -30,6 +31,8 @@ export interface ScenePickItems {
 export interface ScenePickOptions {
   /** 고르기 허용 거리(화면 화소) */
   tol: number;
+  /** 측정 점을 꼭짓점·끝점에 붙잡는 거리(화면 화소, 기본 10) */
+  snap?: number;
   /** 불투명 면이 그 뒤 선분·점을 가리는지(음영 모드) */
   occlude: boolean;
   /** BVH 얻기(없으면 null — 그때는 모두 훑는다) */
@@ -56,6 +59,7 @@ const FAST_SCAN_LIMIT = 20_000;
 export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickItems, o: ScenePickOptions): PickDetail | null {
   const ray = screenRay(f, x, y);
   const tol = o.tol;
+  const snapPx = o.snap ?? SNAP_PX;
   const bounds = o.bounds ?? itemBounds;
   const clip = o.clip ?? null;
   const ix = safeInv(ray.dir[0]), iy = safeInv(ray.dir[1]), iz = safeInv(ray.dir[2]);
@@ -149,7 +153,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
   if (ln) {
     const P = ln.l.positions, k = ln.i * 6;
     const ends = [addOrigin([P[k]!, P[k + 1]!, P[k + 2]!], ln.l.origin), addOrigin([P[k + 3]!, P[k + 4]!, P[k + 5]!], ln.l.origin)].filter(kept);
-    const v = snapToNearest(f, ends, x, y, 10);
+    const v = snapToNearest(f, ends, x, y, snapPx);
     const id = ln.l.segmentIds?.[ln.i] ?? ln.i;
     return { pick: { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i }, snap: v ?? ln.point, vertex: !!v };
   }
@@ -160,7 +164,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     return { pick: { kind: 'mesh', id: cap.m.id, index: -1, point: cap.point, raw: -1, normal: n, section: true }, snap: cap.point, vertex: false };
   }
   if (mesh) {
-    const v = snapToNearest(f, mesh.h.corners.filter(kept), x, y, 10);
+    const v = snapToNearest(f, mesh.h.corners.filter(kept), x, y, snapPx);
     return {
       pick: { kind: 'mesh', id: mesh.m.id, index: mesh.h.tri, point: mesh.h.point, raw: mesh.h.tri, normal: mesh.h.normal },
       snap: v ?? mesh.h.point,
