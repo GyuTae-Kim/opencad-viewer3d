@@ -58,6 +58,11 @@ export interface Mesh3d {
   uvs?: Float32Array;
   /** 무늬 그림 id(Scene3d.textures). 있으면 color·colors의 rgb 대신 무늬 그림을 칠하고, 불투명도는 color(colors) 알파를 따른다 */
   texture?: string;
+  /**
+   * 잘린 면을 함께 채우는 묶음 이름(0.7.0, 선택). 재질별로 나뉜 그물들이 함께 하나의 닫힌 입체를 이루면 같은 이름을 준다 —
+   * 단면에서 그 그물들의 교차를 더해 안쪽을 한 번에 채운다(그물 하나하나는 closed가 아니어도 된다). 채운 면 색은 처음 그물 색
+   */
+  capGroup?: string;
 }
 
 /**

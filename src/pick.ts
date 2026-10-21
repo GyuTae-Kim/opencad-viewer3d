@@ -118,6 +118,8 @@ export interface LinePickOpts {
   maxDepth?: number;
   /** 단면 평면(positions와 같은 좌표): 값 > 0 쪽 부분은 고르지 않는다(선분은 평면에서 잘라 남는 부분만 잰다) */
   clip?: Readonly<Plane4> | null;
+  /** 여러 단면 평면(주면 clip 대신 — 모두의 남는 쪽만) */
+  clips?: readonly Readonly<Plane4>[] | null;
   /** true를 돌려주는 선분 번호는 건너뛴다(숨긴 구간) */
   skip?: ((i: number) => boolean) | null;
 }
@@ -128,6 +130,7 @@ export function pickSegments(f: ViewFrame, positions: Float32Array, bvh: Bvh | n
   const limit = Math.min(n, opts.limit ?? n);
   const maxDepth = opts.maxDepth ?? Infinity;
   const clip = opts.clip ?? null;
+  const clips = opts.clips ?? null;
   const skip = opts.skip ?? null;
   const P = positions;
   const cands: LinePick[] = [];
@@ -136,7 +139,24 @@ export function pickSegments(f: ViewFrame, positions: Float32Array, bvh: Bvh | n
     const o = i * 6;
     let ax = P[o]!, ay = P[o + 1]!, az = P[o + 2]!, bx = P[o + 3]!, by = P[o + 4]!, bz = P[o + 5]!;
     let s0 = 0, s1 = 1;
-    if (clip) {
+    if (clips) {
+      // 평면마다 남는 구간을 좁히고, 끝점은 원래 끝점에서 다시 만든다
+      const ex = bx - ax, ey = by - ay, ez = bz - az;
+      for (const c of clips) {
+        const r = segmentKeptRange(c, ax + ex * s0, ay + ey * s0, az + ez * s0, ax + ex * s1, ay + ey * s1, az + ez * s1);
+        if (!r) return;
+        const d = s1 - s0;
+        [s0, s1] = [s0 + d * r[0], s0 + d * r[1]];
+      }
+      if (s0 > 0 || s1 < 1) {
+        bx = ax + ex * s1;
+        by = ay + ey * s1;
+        bz = az + ez * s1;
+        ax += ex * s0;
+        ay += ey * s0;
+        az += ez * s0;
+      }
+    } else if (clip) {
       const r = segmentKeptRange(clip, ax, ay, az, bx, by, bz);
       if (!r) return;
       if (r[0] > 0 || r[1] < 1) {
@@ -184,16 +204,18 @@ export function pickPointSet(
   cy: number,
   tolPx: number,
   maxDepth = Infinity,
-  clip?: Readonly<Plane4> | null,
+  clip?: Readonly<Plane4> | readonly Readonly<Plane4>[] | null,
   skip?: ((i: number) => boolean) | null,
 ): PointPick | null {
   const n = Math.floor(positions.length / 3);
   const P = positions;
   const cands: PointPick[] = [];
+  // 평면 하나 또는 여럿(모두의 남는 쪽)
+  const planes: readonly Readonly<Plane4>[] | null = !clip ? null : typeof clip[0] === 'number' ? [clip as Readonly<Plane4>] : (clip as readonly Readonly<Plane4>[]);
   const test = (i: number): void => {
     if (skip && skip(i)) return;
     const p: V3 = [P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!];
-    if (clip && planeValue(clip, p[0], p[1], p[2]) > 0) return;
+    if (planes) for (const c of planes) if (planeValue(c, p[0], p[1], p[2]) > 0) return;
     const s = projectToScreen(f, p);
     if (!s) return;
     const d = Math.hypot(s[0] - cx, s[1] - cy);

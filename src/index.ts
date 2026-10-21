@@ -16,12 +16,14 @@ export type {
   SectionCaps,
   SectionHandle,
   SectionOptions,
+  SectionPlane,
   SectionState,
   SegmentHighlightOptions,
   Viewer3dOptions,
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
+export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
 export { type ClosestResult, closestBetween } from './closest';

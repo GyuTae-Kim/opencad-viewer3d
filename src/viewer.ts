@@ -40,7 +40,7 @@ import {
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub, transform4, translation } from './math';
-import { type PickDetail, type ScenePickItems, occludingDepth, pickScene } from './scenepick';
+import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene } from './scenepick';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
 import { countIdsUpTo } from './playback';
@@ -54,6 +54,9 @@ import {
   planeBoxPolygon,
   planeFrom,
   planeToLocal,
+  MAX_SECTION_PLANES,
+  clipPolygon,
+  clipSegments,
   planeValue,
   rangeFraction,
   sectionDragDistance,
@@ -155,6 +158,20 @@ export interface SectionState {
   caps: SectionCaps;
   outline: boolean;
   plane: boolean;
+  /** 이 평면이 자르는 묶음 id(setSections에서 정했을 때만) */
+  items?: string[];
+  /** setSections에서 준 식별자 */
+  id?: string;
+}
+
+/** setSections의 평면 하나: normal·p = offset의 법선 쪽을 잘라 낸다 */
+export interface SectionPlane extends SectionOptions {
+  normal: readonly number[];
+  offset: number;
+  /** 이 평면이 자르는 묶음 id(없으면 모두) */
+  items?: readonly string[] | null;
+  /** 앱이 붙이는 식별자(state.id로 돌려준다) */
+  id?: string;
 }
 
 /** 화면에서 단면 평면을 끌 손잡이 정보(Viewer3d.sectionHandle) */
@@ -293,6 +310,9 @@ interface Section {
   caps: SectionCaps;
   outline: boolean;
   plane: boolean;
+  /** 이 평면이 자르는 묶음 id(없으면 모두) */
+  items: Set<string> | null;
+  id?: string;
 }
 
 interface Drag {
@@ -343,6 +363,10 @@ export class Viewer3d {
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
   private segHi: { positions: Float32Array; opts: SegmentHighlightOptions } | null = null;
   private sec: Section | null = null;
+  /** 둘째 평면부터(setSections) */
+  private secMore: Section[] = [];
+  /** 묶음 id → 자르는 평면 번호(단면이 바뀌면 비운다) */
+  private secIdx = new Map<string, number[]>();
   /** 단면 테두리를 다시 계산할지(평면·장면·보이기가 바뀌면) */
   private cutDirty = true;
   /** 묶음 세계 범위·모형 행렬 캐시(장면을 바꾸면 새로) */
@@ -395,7 +419,7 @@ export class Viewer3d {
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
   private pickCbs = new Set<(p: Pick3d | null, e: PickEvent) => void>();
-  private sectionCbs = new Set<(s: SectionState | null) => void>();
+  private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
@@ -551,7 +575,11 @@ export class Viewer3d {
     this.models = new WeakMap();
     this.visLists = null;
     this.cutDirty = true;
-    if (!opts.keepView) this.sec = null;
+    if (!opts.keepView) {
+      this.sec = null;
+      this.secMore = [];
+    }
+    this.secIdx.clear();
     this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
     const inc = opts.incremental;
@@ -591,6 +619,8 @@ export class Viewer3d {
     this.models = new WeakMap();
     this.visLists = null;
     this.sec = null;
+    this.secMore = [];
+    this.secIdx.clear();
     this.cutDirty = true;
     this.usesOrigin = false;
     this.wheelAnchor = null;
@@ -636,6 +666,7 @@ export class Viewer3d {
     this.segHi = null;
     this.marker = null;
     this.sec = null;
+    this.secMore = [];
     this.measurePts = [];
     this.measureHover = null;
     this.bvhs = new WeakMap();
@@ -901,31 +932,66 @@ export class Viewer3d {
    * 단면 보기: 평면 normal·p = offset의 법선 쪽(normal·p > offset)을 잘라 낸다. null이면 끈다.
    * normal은 길이와 상관없다(단위로 맞추고 offset도 같은 비율로 나눈다). 축 방향 법선이면 축 단면(axis)으로 기억한다.
    * 잘린 쪽은 그물·선·점·윤곽선·강조 선분 모두 그리지 않고, 고르기·측정·확대 기준점에서도 무시한다.
+   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
    */
   setSection(s: { normal: readonly number[]; offset: number } | null, opts: SectionOptions = {}): void {
     if (this.disposed) return;
     if (!s) {
-      if (!this.sec) return;
+      if (!this.sec && !this.secMore.length) return;
       this.sec = null;
+      this.secMore = [];
       this.sectionChanged();
       return;
     }
-    const pf = planeFrom(s.normal, s.offset);
-    if (!pf) return;
+    const n = this.makeSection(s.normal, s.offset, this.sectionOpts(opts));
+    if (!n) return;
+    this.sec = n;
+    this.secMore = [];
+    this.sectionChanged();
+  }
+
+  /**
+   * 여러 단면 평면(0.7.0, 최대 MAX_SECTION_PLANES = 6 — 상자 단면): 모든 평면의 남는 쪽(교집합)만 남긴다. null·빈 목록이면 끈다.
+   * 평면마다 items(그 평면이 자르는 묶음 id, 없으면 모두)·caps·outline·plane을 따로 줄 수 있다(주지 않으면 opts, 그다음 기본값).
+   * 첫 평면이 예전 단면 API(section·setSectionPosition·sectionHandle …의 기본 번호 0)의 평면이다.
+   */
+  setSections(list: readonly SectionPlane[] | null, opts: SectionOptions = {}): void {
+    if (this.disposed) return;
+    if (!list || !list.length) return this.setSection(null);
+    const out: Section[] = [];
+    for (const q of list.slice(0, MAX_SECTION_PLANES)) {
+      const base = { caps: q.caps ?? opts.caps ?? 'closed', outline: q.outline ?? opts.outline ?? true, plane: q.plane ?? opts.plane ?? true };
+      const n = this.makeSection(q.normal, q.offset, base);
+      if (!n) continue;
+      if (q.items) n.items = new Set(q.items);
+      if (q.id !== undefined) n.id = q.id;
+      out.push(n);
+    }
+    if (!out.length) return this.setSection(null);
+    this.sec = out[0]!;
+    this.secMore = out.slice(1);
+    this.sectionChanged();
+  }
+
+  /** normal·p = offset 평면 → 단면(축 방향이면 축 단면). 법선이 0이거나 수가 아니면 null */
+  private makeSection(normal: readonly number[], offset: number, o: Pick<Section, 'caps' | 'outline' | 'plane'>): Section | null {
+    const pf = planeFrom(normal, offset);
+    if (!pf) return null;
     const n = pf.normal;
     // ±축이면 축 단면으로(dir = +축, 음의 축은 flip)
     const ai = [0, 1, 2].find((i) => Math.abs(n[i]!) === 1 && n[(i + 1) % 3] === 0 && n[(i + 2) % 3] === 0);
     const ax = ai === undefined ? null : (['x', 'y', 'z'] as const)[ai]!;
     if (ax) {
       const neg = n[ai!]! < 0;
-      this.sec = { ...this.sectionOpts(opts), dir: [...AXIS_DIRS[ax]] as V3, flip: neg, pos: neg ? -pf.offset : pf.offset, axis: ax };
-    } else this.sec = { ...this.sectionOpts(opts), dir: n, flip: false, pos: pf.offset, axis: null };
-    this.sectionChanged();
+      return { ...o, dir: [...AXIS_DIRS[ax]] as V3, flip: neg, pos: neg ? -pf.offset : pf.offset, axis: ax, items: null };
+    }
+    return { ...o, dir: n, flip: false, pos: pf.offset, axis: null, items: null };
   }
 
   /**
    * 축 단면: axis(x·y·z)에 수직인 평면을 둔다. value는 장면 범위 안 위치 0~1(0 = 최소, 1 = 최대 좌표)이고 world면 그 축 좌표.
    * 기본은 +축 쪽(좌표가 위치보다 큰 쪽)을 잘라 낸다. flip이면 반대쪽. flip을 주지 않으면 같은 축의 앞 값을 지킨다.
+   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
    */
   setSectionAxis(axis: SectionAxis, value: number, opts: SectionOptions & { flip?: boolean; world?: boolean } = {}): void {
     if (this.disposed) return;
@@ -933,13 +999,14 @@ export class Viewer3d {
     const flip = opts.flip ?? (this.sec?.axis === axis ? this.sec.flip : false);
     const pos = opts.world ? value : this.rangeAt(dir, value);
     if (!Number.isFinite(pos)) return;
-    this.sec = { ...this.sectionOpts(opts), dir, flip, pos, axis };
+    this.sec = { ...this.sectionOpts(opts), dir, flip, pos, axis, items: null };
+    this.secMore = [];
     this.sectionChanged();
   }
 
-  /** 지금 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position) */
-  setSectionPosition(value: number, opts: { world?: boolean } = {}): void {
-    const s = this.sec;
+  /** 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position). index는 평면 번호(기본 0) */
+  setSectionPosition(value: number, opts: { world?: boolean; index?: number } = {}): void {
+    const s = this.secAt(opts.index);
     if (!s) return;
     const pos = opts.world ? value : this.rangeAt(s.dir, value);
     if (!Number.isFinite(pos) || pos === s.pos) return;
@@ -947,9 +1014,9 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** 잘라 내는 쪽을 뒤집는다(flip을 주면 그 값으로) */
-  flipSection(flip?: boolean): void {
-    const s = this.sec;
+  /** 잘라 내는 쪽을 뒤집는다(flip을 주면 그 값으로). index는 평면 번호(기본 0) */
+  flipSection(flip?: boolean, index = 0): void {
+    const s = this.secAt(index);
     if (!s) return;
     const f = flip ?? !s.flip;
     if (f === s.flip) return;
@@ -957,21 +1024,28 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시) */
-  setSectionOptions(opts: SectionOptions): void {
-    const s = this.sec;
+  /** 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시). index는 평면 번호(기본 0) */
+  setSectionOptions(opts: SectionOptions, index = 0): void {
+    const s = this.secAt(index);
     if (!s) return;
-    Object.assign(s, this.sectionOpts(opts));
+    Object.assign(s, { caps: opts.caps ?? s.caps, outline: opts.outline ?? s.outline, plane: opts.plane ?? s.plane });
     this.sectionChanged();
   }
 
-  /** 지금 단면 상태(없으면 null) */
+  /** 지금 단면 상태(첫 평면, 없으면 null) */
   get section(): SectionState | null {
-    const s = this.sec;
-    if (!s) return null;
+    return this.sec ? this.sectionState(this.sec) : null;
+  }
+
+  /** 모든 단면 평면 상태(차례대로, 없으면 빈 목록) */
+  get sections(): SectionState[] {
+    return this.allSecs().map((s) => this.sectionState(s));
+  }
+
+  private sectionState(s: Section): SectionState {
     const r = boxRange(this.allBox, s.dir);
     const k = s.flip ? -1 : 1;
-    return {
+    const st: SectionState = {
       normal: [s.dir[0] * k, s.dir[1] * k, s.dir[2] * k],
       offset: s.pos * k,
       axis: s.axis,
@@ -985,6 +1059,9 @@ export class Viewer3d {
       outline: s.outline,
       plane: s.plane,
     };
+    if (s.items) st.items = [...s.items];
+    if (s.id !== undefined) st.id = s.id;
+    return st;
   }
 
   /** 장면 범위를 방향(축 또는 벡터 — 단위로 맞춘다)으로 잰 [min, max]. 슬라이더 눈금·단위 표시에 쓴다 */
@@ -995,10 +1072,10 @@ export class Viewer3d {
 
   /**
    * 화면에서 단면을 끌 손잡이 정보: 장면 가운데를 평면에 내린 점의 화면 위치와 법선의 화면 방향·배율.
-   * 앱은 이 점에 손잡이를 그리고, 끈 화소를 moveSectionByPixels로 넘기면 된다. 단면이 없거나 점이 눈 뒤면 null.
+   * 앱은 이 점에 손잡이를 그리고, 끈 화소를 moveSectionByPixels로 넘기면 된다. 단면이 없거나 점이 눈 뒤면 null. index는 평면 번호(기본 0)
    */
-  sectionHandle(): SectionHandle | null {
-    const s = this.sec;
+  sectionHandle(index = 0): SectionHandle | null {
+    const s = this.secAt(index);
     if (!s) return null;
     const c = this.sectionCenter(s);
     return sectionScreenAxis(this.frame(), c, this.sectionNormal(s));
@@ -1006,10 +1083,10 @@ export class Viewer3d {
 
   /**
    * 화면 끌기(CSS 화소)만큼 단면을 법선 방향으로 옮기고 새 범위 위치 t(0~1)를 돌려준다.
-   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null.
+   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null. index는 평면 번호(기본 0)
    */
-  moveSectionByPixels(dx: number, dy: number): number | null {
-    const s = this.sec;
+  moveSectionByPixels(dx: number, dy: number, index = 0): number | null {
+    const s = this.secAt(index);
     if (!s) return null;
     const d = sectionDragDistance(this.frame(), this.sectionCenter(s), this.sectionNormal(s), dx, dy);
     if (Number.isFinite(d) && d !== 0) {
@@ -1024,6 +1101,39 @@ export class Viewer3d {
     return { caps: o.caps ?? p?.caps ?? 'closed', outline: o.outline ?? p?.outline ?? true, plane: o.plane ?? p?.plane ?? true };
   }
 
+  /** 모든 단면 평면(첫 평면이 앞) */
+  private allSecs(): Section[] {
+    return this.sec ? [this.sec, ...this.secMore] : [];
+  }
+
+  private secAt(index = 0): Section | null {
+    return index === 0 ? this.sec : (this.secMore[index - 1] ?? null);
+  }
+
+  /** 여러 단면 그리기·고르기를 쓰는지(평면이 둘 이상이거나 범위를 정한 평면이 있다) — 아니면 예전 평면 하나 경로 */
+  private get multiSection(): boolean {
+    return !!this.sec && (this.secMore.length > 0 || !!this.sec.items);
+  }
+
+  /** 묶음 id를 자르는 평면 번호들(범위를 정하지 않은 평면은 모두를 자른다). 단면이 바뀔 때까지 기억한다 */
+  private secOf(id: string): readonly number[] {
+    let r = this.secIdx.get(id);
+    if (!r) {
+      r = [];
+      this.allSecs().forEach((s, i) => {
+        if (!s.items || s.items.has(id)) r!.push(i);
+      });
+      this.secIdx.set(id, r);
+    }
+    return r;
+  }
+
+  /** 묶음을 자르는 세계 평면들 */
+  private clipsFor(id: string): Plane4[] {
+    const all = this.allSecs();
+    return this.secOf(id).map((i) => this.planeOf(all[i]!));
+  }
+
   /** dir 방향 범위 안 위치 t → dir·p 값 */
   private rangeAt(dir: readonly number[], t: number): number {
     const r = boxRange(this.allBox, dir);
@@ -1034,12 +1144,17 @@ export class Viewer3d {
     return s.flip ? [-s.dir[0], -s.dir[1], -s.dir[2]] : [s.dir[0], s.dir[1], s.dir[2]];
   }
 
-  /** 세계 단면 평면(값 > 0 쪽을 버린다) */
+  /** 단면 하나의 세계 평면(값 > 0 쪽을 버린다) */
+  private planeOf(s: Section): Plane4 {
+    const n = this.sectionNormal(s);
+    return [n[0], n[1], n[2], s.flip ? s.pos : -s.pos];
+  }
+
+  /** 세계 단면 평면(첫 평면, 값 > 0 쪽을 버린다) */
   private sectionPlane(): Plane4 | null {
     const s = this.sec;
     if (!s) return null;
-    const n = this.sectionNormal(s);
-    return [n[0], n[1], n[2], s.flip ? s.pos : -s.pos];
+    return this.planeOf(s);
   }
 
   /** 장면 가운데를 평면에 내린 점 */
@@ -1051,6 +1166,7 @@ export class Viewer3d {
 
   private sectionChanged(): void {
     this.cutDirty = true;
+    this.secIdx.clear();
     this.wheelAnchor = null;
     if (this.measuring) this.measureHover = null;
     this.invalidate();
@@ -1058,9 +1174,10 @@ export class Viewer3d {
   }
 
   /**
-   * 단면이 바뀔 때마다 알림(앱 호출·손잡이 끌기·setScene/clear로 꺼짐·장면 범위가 바뀜·문맥 복구). 꺼지면 null. 돌려준 함수로 끊는다
+   * 단면이 바뀔 때마다 알림(앱 호출·손잡이 끌기·setScene/clear로 꺼짐·장면 범위가 바뀜·문맥 복구). 꺼지면 null. 돌려준 함수로 끊는다.
+   * 두 번째 인자는 모든 평면 상태(여러 단면일 때)
    */
-  onSectionChange(cb: (s: SectionState | null) => void): () => void {
+  onSectionChange(cb: (s: SectionState | null, all: SectionState[]) => void): () => void {
     this.sectionCbs.add(cb);
     return () => this.sectionCbs.delete(cb);
   }
@@ -1068,7 +1185,8 @@ export class Viewer3d {
   private emitSection(): void {
     if (!this.sectionCbs.size) return;
     const st = this.section;
-    for (const cb of this.sectionCbs) cb(st);
+    const all = this.sections;
+    for (const cb of this.sectionCbs) cb(st, all);
   }
 
   // ───────────────────────── 묶음 안 구간 ─────────────────────────
@@ -1174,6 +1292,7 @@ export class Viewer3d {
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
   private updateCut(): void {
     this.cutDirty = false;
+    if (this.multiSection) return this.updateCutMulti();
     const s = this.sceneRef;
     const plane = this.sectionPlane();
     if (!s || !plane || !this.sec!.outline) {
@@ -1219,6 +1338,58 @@ export class Viewer3d {
       }
     }
     if (this.gpu) this.renderer.setSectionLines(all, origin);
+  }
+
+  /** 여러 단면의 테두리: 평면마다 그 평면이 자르는 보이는 그물과의 교선을 모으고, 그 그물을 자르는 다른 평면들로 다시 자른다 */
+  private updateCutMulti(): void {
+    const sc = this.sceneRef;
+    const all = this.allSecs();
+    if (!sc || !all.some((q) => q.outline)) {
+      if (this.gpu) this.renderer.setSectionLines(null);
+      return;
+    }
+    const origin: V3 = boxIsEmpty(this.allBox) ? [0, 0, 0] : boxCenter(this.allBox);
+    const world: number[] = [];
+    all.forEach((q, k) => {
+      if (!q.outline) return;
+      const plane = this.planeOf(q);
+      for (const it of this.items.values()) {
+        if (it.kind !== 'mesh') continue;
+        const m = it.item;
+        const idx = this.secOf(m.id);
+        if (!idx.includes(k) || !this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
+        const model = this.modelOf(m);
+        const segs = sectionSegments(m.positions, m.indices, planeToLocal(plane, model), this.bvhFor('triangle', m.positions, m.indices, false), this.rangeSel.get(m.id)?.test);
+        if (!segs.length) continue;
+        // 로컬 → 세계(double)
+        const w: number[] = new Array(segs.length);
+        const M = model;
+        for (let i = 0; i < segs.length; i += 3) {
+          const x = segs[i]!, y = segs[i + 1]!, z = segs[i + 2]!;
+          if (M) {
+            w[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]!;
+            w[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]!;
+            w[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]!;
+          } else {
+            w[i] = x;
+            w[i + 1] = y;
+            w[i + 2] = z;
+          }
+        }
+        const others = idx.filter((i) => i !== k).map((i) => this.planeOf(all[i]!));
+        for (const v of others.length ? clipSegments(w, others) : w) world.push(v);
+      }
+    });
+    let out: Float32Array | null = null;
+    if (world.length) {
+      out = new Float32Array(world.length);
+      for (let i = 0; i < world.length; i += 3) {
+        out[i] = world[i]! - origin[0];
+        out[i + 1] = world[i + 1]! - origin[1];
+        out[i + 2] = world[i + 2]! - origin[2];
+      }
+    }
+    if (this.gpu) this.renderer.setSectionLines(out, origin);
   }
 
   // ───────────────────────── 고르기·측정 ─────────────────────────
@@ -1413,10 +1584,14 @@ export class Viewer3d {
   }
 
   /** 세계 점이 단면에 잘리는 쪽에 있는지 */
+  /** 세계 점이 단면(범위를 정하지 않은 평면)의 잘린 쪽에 있는지 */
   private pointCut(p: readonly number[]): boolean {
-    const plane = this.sectionPlane();
-    if (!plane) return false;
-    return planeValue(plane, p[0]!, p[1]!, p[2]!) > 1e-9 * (Math.abs(plane[3]) + 1);
+    for (const q of this.allSecs()) {
+      if (q.items) continue;
+      const plane = this.planeOf(q);
+      if (planeValue(plane, p[0]!, p[1]!, p[2]!) > 1e-9 * (Math.abs(plane[3]) + 1)) return true;
+    }
+    return false;
   }
 
   /** 음영 모드에서 세계 점 p(화면 x, y)가 불투명 면에 가렸는지. build면 BVH가 없을 때 만든다 */
@@ -1428,8 +1603,7 @@ export class Viewer3d {
       limit: (id) => this.ranges.get(id)?.count,
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
-      clip: this.sectionPlane(),
-      caps: (m) => this.capped(m),
+      ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
     return od < d - Math.max(Math.abs(d) * 1e-4, worldPerPixel(f, d) * 2, 1e-9);
@@ -1695,17 +1869,26 @@ export class Viewer3d {
       limit: (id) => this.ranges.get(id)?.count,
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
-      clip: this.sectionPlane(),
-      caps: (m) => this.capped(m),
+      ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
   }
 
-  /** 단면에서 잘린 면을 채워 그리는 그물인지(렌더러의 채우기 조건과 같다) */
+  /** 단면에서 잘린 면을 채워 그리는 그물인지(렌더러의 채우기 조건과 같다). capGroup이 있는 그물은 묶음으로 채운다 */
   private capped(m: Mesh3d): boolean {
-    const s = this.sec;
+    return this.cappedBy(m, this.sec);
+  }
+
+  private cappedBy(m: Mesh3d, s: Section | null | undefined): boolean {
     if (!s || s.caps === 'none' || (this.mode !== 'shaded' && this.mode !== 'shadedEdges') || m.color[3] < 0.999 || !this.renderer.canFillSection) return false;
-    return s.caps === 'all' || m.closed === true;
+    return s.caps === 'all' || m.closed === true || m.capGroup !== undefined;
+  }
+
+  /** 고르기·가림 판정의 단면 선택(평면 하나면 예전 그대로 clip, 여러 단면이면 묶음마다 clips) */
+  private clipOpts(): Pick<ScenePickOptions, 'clip' | 'clips' | 'caps' | 'capGroup'> {
+    if (!this.multiSection) return { clip: this.sectionPlane(), caps: (m) => this.capped(m), capGroup: (m) => m.capGroup };
+    const all = this.allSecs();
+    return { clips: (it) => this.clipsFor(it.id), caps: (m, k) => this.cappedBy(m, all[this.secOf(m.id)[k ?? 0]!]), capGroup: (m) => m.capGroup };
   }
 
   /**
@@ -2089,7 +2272,10 @@ export class Viewer3d {
           }
         : null,
       interacting: this.interacting,
-      section: this.sec ? { plane: this.sectionPlane()!, caps: this.sec.caps, color: this.sectionColor, width: 2 } : null,
+      section: this.sec && !this.multiSection ? { plane: this.sectionPlane()!, caps: this.sec.caps, color: this.sectionColor, width: 2 } : null,
+      sections: this.multiSection
+        ? { planes: this.allSecs().map((q) => ({ plane: this.planeOf(q), caps: q.caps })), of: (id) => this.secOf(id), color: this.sectionColor, width: 2 }
+        : null,
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
     });
@@ -2126,7 +2312,8 @@ export class Viewer3d {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (this.sec?.plane) this.drawSectionPlane(ctx, f);
+    if (this.multiSection) this.drawSectionPlanes(ctx, f);
+    else if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
     if (this.annos) this.drawAnnotations(ctx, f);
     this.drawMeasure(ctx, f);
@@ -2215,6 +2402,38 @@ export class Viewer3d {
     ctx.lineWidth = 1;
     ctx.setLineDash([6, 4]);
     ctx.stroke();
+    ctx.restore();
+  }
+
+  /** 여러 단면의 평면 위치: 평면마다 다각형을 범위를 정하지 않은 다른 평면들로 잘라 옅게 칠한다 */
+  private drawSectionPlanes(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+    const b = this.allBox;
+    if (boxIsEmpty(b)) return;
+    const all = this.allSecs();
+    const pad = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) * 0.04 || 1;
+    const box: Box3 = { min: [b.min[0] - pad, b.min[1] - pad, b.min[2] - pad], max: [b.max[0] + pad, b.max[1] + pad, b.max[2] + pad] };
+    const col = this.theme.section ?? DARK_THEME.section!;
+    ctx.save();
+    all.forEach((q, k) => {
+      if (!q.plane) return;
+      let poly = planeBoxPolygon(box, this.planeOf(q));
+      all.forEach((o, j) => {
+        if (j !== k && !o.items && poly.length) poly = clipPolygon(poly, this.planeOf(o));
+      });
+      const pts = poly.map((p) => projectToScreen(f, p));
+      if (pts.length < 3 || pts.some((p) => !p)) return;
+      ctx.beginPath();
+      pts.forEach((p, i) => (i ? ctx.lineTo(p![0], p![1]) : ctx.moveTo(p![0], p![1])));
+      ctx.closePath();
+      ctx.globalAlpha = 0.07;
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.globalAlpha = 0.65;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+    });
     ctx.restore();
   }
 
