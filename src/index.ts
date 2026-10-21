@@ -4,10 +4,12 @@
 export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
 export { VIEW_KEYS, Viewer3d } from './viewer';
 export type {
+  AnnotationOptions,
   GroupInfo,
   MarkerOptions,
   MeasureResult,
   PickEvent,
+  ProjectedPoint,
   RangeSelection,
   SectionCaps,
   SectionHandle,
@@ -20,6 +22,7 @@ export type {
 export type { Plane4, SectionAxis } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
+export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_LABELS } from './camera';
 export type { RenderMode, TextureStats } from './renderer';

@@ -191,3 +191,51 @@ export function nearBox(f: ViewFrame, b: Box3, x: number, y: number, tol: number
   }
   return x >= x0 - tol && x <= x1 + tol && y >= y0 - tol && y <= y1 + tol;
 }
+
+/**
+ * 화면 점(x, y)에서 보이는 불투명 면(음영 모드의 가림)까지의 깊이. 없으면 Infinity.
+ * 단면이 있으면 남는 쪽 면과 잘린 면(채운 면)만 본다. 덧그림·project의 가림 판정에 쓴다(고르기 결과와 같은 규칙).
+ */
+export function occludingDepth(f: ViewFrame, x: number, y: number, items: ScenePickItems, o: Omit<ScenePickOptions, 'tol' | 'occlude'>): number {
+  const ray = screenRay(f, x, y);
+  const bounds = o.bounds ?? itemBounds;
+  const clip = o.clip ?? null;
+  const ix = safeInv(ray.dir[0]), iy = safeInv(ray.dir[1]), iz = safeInv(ray.dir[2]);
+  const arr = new Float64Array(6);
+  const boxHit = (b: Box3): boolean => {
+    const pad = (Math.abs(b.max[0] - b.min[0]) + Math.abs(b.max[1] - b.min[1]) + Math.abs(b.max[2] - b.min[2])) * 1e-6 + 1e-9;
+    arr.set([b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]]);
+    return rayBoxEntry(arr, 0, ray.origin[0], ray.origin[1], ray.origin[2], ix, iy, iz, Infinity, pad) !== Infinity;
+  };
+  const interval = clip ? rayKeptInterval(clip, ray.origin, ray.dir) : null;
+  if (clip && !interval) return Infinity;
+  let best = Infinity;
+  if (clip && interval && interval[0] > 0 && o.caps) {
+    const t0 = interval[0];
+    for (const m of items.meshes) {
+      if (m.color[3] < 0.999 || !o.caps(m) || !boxHit(bounds(m))) continue;
+      const bvh = o.bvh('triangle', m.positions, m.indices);
+      if (!bvh) continue;
+      const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
+      let lo: readonly number[] = ray.origin, ld: readonly number[] = ray.dir;
+      if (model) {
+        const inv = mat4Invert(model);
+        if (!inv) continue;
+        lo = transformPoint(inv, ray.origin);
+        ld = transformDir(inv, ray.dir);
+      }
+      if (countRayHits(bvh, m.positions, m.indices, lo, ld, t0, o.hidden?.(m)) % 2 === 1) {
+        best = viewDepth(f, [ray.origin[0] + ray.dir[0] * t0, ray.origin[1] + ray.dir[1] * t0, ray.origin[2] + ray.dir[2] * t0]);
+        break;
+      }
+    }
+  }
+  for (const m of items.meshes) {
+    if (m.color[3] < 0.999 || !boxHit(bounds(m))) continue;
+    const bvh = o.bvh('triangle', m.positions, m.indices);
+    if (!bvh) continue;
+    const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval, o.hidden?.(m));
+    if (h && h.depth < best) best = h.depth;
+  }
+  return best;
+}

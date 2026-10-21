@@ -32,6 +32,7 @@ import {
   panCamera,
   projectToScreen,
   rayAtDepth,
+  worldPerPixel,
   screenRay,
   viewDepth,
   zoomCamera,
@@ -39,7 +40,8 @@ import {
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub } from './math';
-import { type PickDetail, type ScenePickItems, pickScene } from './scenepick';
+import { type PickDetail, type ScenePickItems, occludingDepth, pickScene } from './scenepick';
+import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { countIdsUpTo } from './playback';
 import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance } from './pointer';
 import {
@@ -51,6 +53,7 @@ import {
   planeBoxPolygon,
   planeFrom,
   planeToLocal,
+  planeValue,
   rangeFraction,
   sectionDragDistance,
   sectionScreenAxis,
@@ -200,6 +203,28 @@ export interface MarkerOptions {
   color?: Rgba;
 }
 
+/** project() 결과: 세계 점의 캔버스 위치(CSS 화소, 왼쪽 위 원점)와 보이는지 */
+export interface ProjectedPoint {
+  x: number;
+  y: number;
+  /** 눈에서 본 깊이(앞쪽이 양수, 세계 단위) */
+  depth: number;
+  /** 눈 앞에 있고 캔버스 안에 들어오는지 */
+  onScreen: boolean;
+  /** 불투명 면에 가렸는지(occlusion을 줬고 음영 모드일 때만 따진다, 아니면 false) */
+  occluded: boolean;
+  /** onScreen이고 단면에 잘리지 않았고 가리지 않았는지 */
+  visible: boolean;
+}
+
+/** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
+export interface AnnotationOptions {
+  /** 가려진 부분(선·점·글자)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 그리지 않는다) */
+  hidden?: number;
+  /** 선 굵기(화면 화소, 기본 2) */
+  width?: number;
+}
+
 export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats };
 
 type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } | { kind: 'point'; item: PointSet3d };
@@ -335,6 +360,8 @@ export class Viewer3d {
   private measuring = false;
   private measurePts: V3[] = [];
   private measureHover: { p: V3; vertex: boolean } | null = null;
+  /** 앱 측정 덧그림(setAnnotations)과 계산한 모양 */
+  private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number } | null = null;
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
@@ -1220,6 +1247,110 @@ export class Viewer3d {
     return { a, b, distance: Math.hypot(dx, dy, dz), dx, dy, dz };
   }
 
+  // ───────────────────────── 화면 위치·측정 덧그림 ─────────────────────────
+
+  /**
+   * 세계 점 → 캔버스 위치(CSS 화소, 왼쪽 위 원점)·깊이·보이는지. 앱이 화면 위에 자기 표시(글자·단추)를 붙일 때 쓴다.
+   * occlusion이면 음영 모드에서 그 점이 불투명 면에 가렸는지도 따진다(고르기와 같은 광선 — 점이 면 위에 있으면 보인다).
+   */
+  project(p: readonly number[], opts: { occlusion?: boolean } = {}): ProjectedPoint {
+    const f = this.frame();
+    const depth = viewDepth(f, p);
+    const s = projectToScreen(f, p);
+    if (!s || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) return { x: NaN, y: NaN, depth, onScreen: false, occluded: false, visible: false };
+    const front = f.projection === 'orthographic' || depth >= f.near * 0.999;
+    const onScreen = front && s[0] >= 0 && s[0] <= this.cssW && s[1] >= 0 && s[1] <= this.cssH;
+    const cut = this.pointCut(p);
+    const occluded = !!opts.occlusion && onScreen && !cut && this.occludedAt(f, p, s[0], s[1], true);
+    return { x: s[0], y: s[1], depth, onScreen, occluded, visible: onScreen && !cut && !occluded };
+  }
+
+  /**
+   * 앱 측정 덧그림: 거리(a–b)·각(꼭짓점 a, 팔 b·c)·반지름(중심 a, 원 위 b, normal을 주면 원도)·점(a)을 내장 측정과 같은 모양으로 그린다.
+   * 선은 깊이를 따져 가려진 부분을 흐리게(opts.hidden), 점·글자는 가려지면 흐리게 그린다. 단면으로 자르지 않고 그림 저장(toBlob)에도 담긴다.
+   * 앞의 덧그림을 모두 바꾸고 null이면 지운다. 장면을 바꿔도 남는다(앱이 지운다).
+   */
+  setAnnotations(list: readonly Annotation3d[] | null, opts: AnnotationOptions = {}): void {
+    if (this.disposed) return;
+    if (!list || !list.length) {
+      if (!this.annos) return;
+      this.annos = null;
+      if (this.gpu) this.renderer.setAnnotationLines(null, null);
+      this.invalidate();
+      return;
+    }
+    const copy = list.map((a) => ({ ...a }));
+    this.annos = {
+      list: copy,
+      geo: copy.map((a) => annotationGeometry(a)),
+      hidden: Math.min(1, Math.max(0, opts.hidden ?? 0.35)),
+      width: Math.max(0.5, opts.width ?? 2),
+    };
+    this.uploadAnnotations();
+    this.invalidate();
+  }
+
+  /** 지금 측정 덧그림(복사본, 없으면 빈 목록) */
+  get annotations(): Annotation3d[] {
+    return this.annos ? this.annos.list.map((a) => ({ ...a })) : [];
+  }
+
+  /** 덧그림 선을 첫 점 기준 좌표로 모아 올린다(큰 좌표에서도 정밀하게) */
+  private uploadAnnotations(): void {
+    const A = this.annos;
+    if (!this.gpu) return;
+    if (!A) {
+      this.renderer.setAnnotationLines(null, null);
+      return;
+    }
+    let n = 0;
+    for (const g of A.geo) if (g) n += g.segs.length;
+    const first = A.geo.find((g) => g)?.dots[0];
+    if (!n || !first) {
+      this.renderer.setAnnotationLines(null, null);
+      return;
+    }
+    const o: V3 = [first[0], first[1], first[2]];
+    const pos = new Float32Array(n);
+    const col = new Float32Array((n / 3) * 4);
+    let k = 0, c = 0;
+    A.geo.forEach((g, i) => {
+      if (!g) return;
+      const rgba = this.rgba(A.list[i]!.color ?? this.theme.measure);
+      for (let j = 0; j < g.segs.length; j += 3) {
+        pos[k++] = g.segs[j]! - o[0];
+        pos[k++] = g.segs[j + 1]! - o[1];
+        pos[k++] = g.segs[j + 2]! - o[2];
+        col.set(rgba, c);
+        c += 4;
+      }
+    });
+    this.renderer.setAnnotationLines(pos, col, o);
+  }
+
+  /** 세계 점이 단면에 잘리는 쪽에 있는지 */
+  private pointCut(p: readonly number[]): boolean {
+    const plane = this.sectionPlane();
+    if (!plane) return false;
+    return planeValue(plane, p[0]!, p[1]!, p[2]!) > 1e-9 * (Math.abs(plane[3]) + 1);
+  }
+
+  /** 음영 모드에서 세계 점 p(화면 x, y)가 불투명 면에 가렸는지. build면 BVH가 없을 때 만든다 */
+  private occludedAt(f: ViewFrame, p: readonly number[], x: number, y: number, build: boolean): boolean {
+    if (!this.sceneRef || (this.mode !== 'shaded' && this.mode !== 'shadedEdges')) return false;
+    const d = viewDepth(f, p);
+    const od = occludingDepth(f, x, y, this.visibleItems(), {
+      bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
+      limit: (id) => this.ranges.get(id)?.count,
+      bounds: (it) => this.boundsOf(it),
+      model: (m) => this.modelOf(m),
+      clip: this.sectionPlane(),
+      caps: (m) => this.capped(m),
+      hidden: (it) => this.rangeSel.get(it.id)?.test,
+    });
+    return od < d - Math.max(Math.abs(d) * 1e-4, worldPerPixel(f, d) * 2, 1e-9);
+  }
+
   // ───────────────────────── 출력 ─────────────────────────
 
   /** 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로 */
@@ -1328,6 +1459,8 @@ export class Viewer3d {
       highlight: c(theme.highlight),
     };
     this.sectionColor = c(theme.section ?? base.section ?? DARK_THEME.section!);
+    // 덧그림 기본색(측정 색)이 테마를 따른다
+    if (this.annos) this.uploadAnnotations();
   }
 
   /** CSS 색 → RGBA. 직접 못 읽으면 2D 캔버스로 정규화해서 읽는다 */
@@ -1581,6 +1714,7 @@ export class Viewer3d {
       this.renderer.init();
       if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload });
       if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
+      this.uploadAnnotations();
       // 단면 테두리도 GPU 자료라 다시 올린다
       this.cutDirty = true;
       this.rebuildGrid();
@@ -1871,6 +2005,7 @@ export class Viewer3d {
       interacting: this.interacting,
       section: this.sec ? { plane: this.sectionPlane()!, caps: this.sec.caps, color: this.sectionColor, width: 2 } : null,
       parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
+      annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
     });
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
@@ -1907,7 +2042,64 @@ export class Viewer3d {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
+    if (this.annos) this.drawAnnotations(ctx, f);
     this.drawMeasure(ctx, f);
+  }
+
+  /** 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게 */
+  private drawAnnotations(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+    const A = this.annos!;
+    const th = this.theme;
+    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
+    // 점이 많으면 끄는 동안은 가림을 따지지 않는다(놓으면 다시 그린다)
+    let anchors = 0;
+    for (const g of A.geo) if (g) anchors += g.dots.length + 1;
+    const occl = !this.interacting || anchors <= 64;
+    const hiddenA = A.hidden;
+    ctx.save();
+    A.geo.forEach((g, i) => {
+      if (!g) return;
+      const an = A.list[i]!;
+      const color = an.color ?? th.measure;
+      for (const p of g.dots) {
+        const s = projectToScreen(f, p);
+        if (!s) continue;
+        const hid = occl && this.occludedAt(f, p, s[0], s[1], false);
+        if (hid && hiddenA <= 0) continue;
+        ctx.globalAlpha = hid ? hiddenA : 1;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = th.textBg;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(s[0], s[1], 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      const lines = annotationText(an, g, (v) => this.fmt(v), unit);
+      const at = projectToScreen(f, g.labelAt);
+      if (!lines.length || !at) return;
+      const hid = occl && this.occludedAt(f, g.labelAt, at[0], at[1], false);
+      if (hid && hiddenA <= 0) return;
+      ctx.globalAlpha = hid ? Math.max(hiddenA, 0.5) : 1;
+      ctx.font = `12px ${FONT}`;
+      const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 14;
+      const h = lines.length * 16 + 8;
+      let x = at[0] + 10, y = at[1] - h - 8;
+      x = Math.min(Math.max(4, x), this.cssW - w - 4);
+      y = Math.min(Math.max(4, y), this.cssH - h - 4);
+      ctx.fillStyle = th.textBg;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = th.text;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      lines.forEach((t, k) => ctx.fillText(t, x + 7, y + 5 + k * 16));
+    });
+    ctx.restore();
   }
 
   /** 단면 평면 위치: 평면 ∩ 장면 범위(조금 넓힌) 다각형을 옅게 칠하고 점선 테두리 */

@@ -100,6 +100,8 @@ export interface RenderState {
   section?: SectionDraw | null;
   /** 묶음 안 구간(숨김·강조). 없는 묶음은 통째로 그린다 */
   parts?: (id: string) => ItemParts | undefined;
+  /** 앱 측정 덧그림 선(setAnnotationLines로 올린 것)을 그릴 때: 굵기(화면 화소)·가려진 부분 불투명도(0이면 안 그림) */
+  annotations?: { width: number; hidden: number } | null;
 }
 
 export interface RenderStats {
@@ -244,6 +246,8 @@ export class Renderer3d {
   private hiSeg: LineRec | null = null;
   /** 단면 테두리 선분(평면이 바뀔 때마다 바뀐다 — 강조 선분처럼 따로 둔다) */
   private cutSeg: LineRec | null = null;
+  /** 앱 측정 덧그림 선(정점 색). 장면을 바꿔도 남는다(앱이 지운다) */
+  private annoSeg: LineRec | null = null;
   stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0 };
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
@@ -315,6 +319,7 @@ export class Renderer3d {
     this.markers.clear();
     this.hiSeg = null;
     this.cutSeg = null;
+    this.annoSeg = null;
     this.meshC = null;
     this.thinC = null;
     this.meshT = null;
@@ -674,6 +679,12 @@ export class Renderer3d {
     this.cutSeg = this.dynLines('__cut', positions, origin);
   }
 
+  /** 앱 측정 덧그림 선 바꾸기(선분 쌍, origin 기준 좌표, 정점마다 rgba 색, null이면 없음) */
+  setAnnotationLines(positions: Float32Array | null, colors: Float32Array | null, origin?: readonly number[] | null): void {
+    this.deleteDyn(this.annoSeg);
+    this.annoSeg = this.dynLines('__anno', positions, origin, colors);
+  }
+
   /** 격자 선분 바꾸기(null이면 없음). origin이 있으면 선분은 그 점 기준 좌표(gridLines(g, origin)) */
   setGrid(g: GridLines | null, origin?: readonly number[] | null): void {
     if (this.grid) {
@@ -725,6 +736,7 @@ export class Renderer3d {
   dispose(): void {
     this.clear();
     this.setGrid(null);
+    this.setAnnotationLines(null, null);
     const gl = this.gl;
     for (const v of this.vaos) gl.deleteVertexArray(v);
     for (const b of this.arrayBufs.values()) gl.deleteBuffer(b);
@@ -1466,6 +1478,23 @@ export class Renderer3d {
         if (p !== cur) meshUse(p);
         meshDrawParts(r, r.src.color, xray ? 0.22 : 1, st.highlight.has(r.src.id) ? 0.5 : 0, false);
       }
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+
+    // 8) 앱 측정 덧그림 선: 가려진 부분은 흐리게(깊이 비교를 뒤집어), 보이는 부분은 깊이를 따져 또렷하게. 단면으로 자르지 않는다
+    if (st.annotations && this.annoSeg) {
+      const a = st.annotations;
+      const r = this.annoSeg;
+      const base = { color: [1, 1, 1, 1] as Rgba, vcol: true, width: a.width, dashed: false, first: 0, count: r.n };
+      gl.enable(gl.BLEND);
+      gl.depthMask(false);
+      if (a.hidden > 0) {
+        gl.depthFunc(gl.GREATER);
+        this.drawLines(f, r, r.model, { ...base, alpha: a.hidden }, st, stats);
+        gl.depthFunc(gl.LEQUAL);
+      }
+      this.drawLines(f, r, r.model, { ...base, alpha: 1, bias: 2e-5 }, st, stats);
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }
