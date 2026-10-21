@@ -6,6 +6,7 @@
  *   &section=z:0.5   처음부터 단면(축:범위 안 위치 0~1, 뒤에 :flip을 붙이면 반대쪽)
  *   &incremental=1   장면을 여러 프레임에 나눠 올린다(진행은 아래 상태 줄)
  *   &tex=1           무늬 상자·원근 무늬 판을 더한다(바둑판 BMP, 맨 위 왼쪽 칸이 빨강)
+ * 0.7.0 단추: 숨은 선·단색·무늬 없음 모드, 외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { buildBvh } from './bvh';
@@ -88,6 +89,9 @@ const modes: [RenderMode, string][] = [
   ['shadedEdges', '음영+윤곽'],
   ['wireframe', '와이어'],
   ['xray', 'X-ray'],
+  ['hiddenLine', '숨은 선'],
+  ['monochrome', '단색'],
+  ['noTexture', '무늬 없음'],
 ];
 const modeBtns = modes.map(([m, l]) =>
   button(l, () => {
@@ -108,6 +112,26 @@ button('테마', () => {
 });
 let gridOn = true;
 button('격자', () => viewer.setGridVisible((gridOn = !gridOn)));
+// 0.7.0 보여 주기(눌러서 켜고 끄기)
+const toggle = (label: string, on: (v: boolean) => void, title?: string): void => {
+  let v = false;
+  const b = button(label, () => {
+    v = !v;
+    on(v);
+    b.setAttribute('aria-pressed', String(v));
+  }, title);
+};
+toggle('외곽선', (v) => viewer.setRenderOptions({ profiles: v }));
+toggle('숨은 점선', (v) => viewer.setRenderOptions({ hiddenEdges: v }), '숨은 선 모드에서 면 뒤 윤곽선');
+toggle('하늘', (v) => viewer.setBackground(v ? { sky: '#5d8fd0', skyHorizon: '#cfe0f2', ground: '#6d6656', groundHorizon: '#b3ad9c' } : null));
+toggle('해', (v) => viewer.setLighting(v ? { sun: { direction: [-0.4, -0.6, 0.8] } } : null));
+toggle('그림자', (v) => viewer.setLighting(v ? { sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true } : null));
+toggle('안개', (v) => {
+  const c = viewer.getCamera();
+  viewer.setFog(v ? { start: c.distance * 0.7, end: c.distance * 1.6 } : null);
+});
+toggle('걷기', (v) => viewer.setNavigation(v ? 'walk' : 'orbit'), '끌기 = 둘러보기, WASD·화살표·휠 = 걷기, 두 번 누르기 = 서기');
+toggle('윤곽선 고르기', (v) => viewer.setPickEdges(v));
 button('PNG', () => {
   void viewer.toBlob('image/png').then((b) => {
     const a = document.createElement('a');
