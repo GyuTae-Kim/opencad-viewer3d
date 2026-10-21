@@ -4,7 +4,9 @@
  * 조작
  * - 마우스: 왼쪽 끌기 = 궤도 회전(커서 아래 점 둘레), 가운데·오른쪽 끌기 = 이동, Shift+가운데 끌기 = 회전,
  *   휠 = 커서 쪽으로 확대·축소, 가운데 두 번 누르기 = 전체 보기, 왼쪽 누르기 = 고르기(측정 모드면 점 찍기)
- * - 터치: 한 손가락 = 회전, 두 손가락 = 이동·핀치 확대
+ * - 터치: 한 손가락 = 회전(TOUCH_DRAG_START_PX = 10화소 넘게 움직일 때부터, 그 안에서 떼면 누르기),
+ *   두 손가락 = 이동·핀치 확대(한 손가락을 먼저 떼면 남은 손가락은 모두 뗄 때까지 회전도 누르기도 하지 않는다).
+ *   터치로 누르면 고르기·측정 붙잡기 허용 거리가 넓다(touchPickTolerance, 기본 14화소)
  * - 키(캔버스에 초점이 있을 때): F = 전체 보기, 1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각, Esc = 측정 지우기
  * - 오른쪽 위 뷰 큐브: 면·모서리·구석을 누르면 그 방향 표준 뷰, 끌면 회전
  *
@@ -39,6 +41,7 @@ import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, modelMatrix, placeMatrix, sub } from './math';
 import { type PickDetail, type ScenePickItems, pickScene } from './scenepick';
 import { countIdsUpTo } from './playback';
+import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance } from './pointer';
 import {
   AXIS_DIRS,
   type Plane4,
@@ -78,8 +81,13 @@ export interface Viewer3dOptions {
   renderMode?: RenderMode;
   /** 표준 뷰·전체 보기를 부드럽게(기본 true) */
   animate?: boolean;
-  /** 고르기 허용 거리(화면 화소, 기본 6) */
+  /** 고르기 허용 거리(화면 화소, 기본 6) — 마우스·펜 */
   pickTolerance?: number;
+  /**
+   * 터치로 누를 때(누르기·측정 점 찍기·측정 중 터치 미리 보기)의 고르기 허용 거리(화면 화소, 기본 14).
+   * 측정 점을 꼭짓점·끝점에 붙잡는 거리도 이 값(10보다 작으면 10)까지 넓힌다
+   */
+  touchPickTolerance?: number;
   /** 장치 화소 비율 상한(기본 2) */
   maxPixelRatio?: number;
   /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
@@ -153,7 +161,7 @@ export interface PickEvent {
   ctrlKey: boolean;
   shiftKey: boolean;
   metaKey: boolean;
-  /** 1 = 한 번, 2 = 두 번째 누르기(바로 앞 누르기와 0.45초·6화소 안 — 두 번 누르기 판별). 세 번째는 다시 1 */
+  /** 1 = 한 번, 2 = 두 번째 누르기(바로 앞 누르기와 0.45초·6화소(터치 24화소) 안 — 두 번 누르기 판별). 세 번째는 다시 1 */
   clicks: number;
   /** 누른 단추(0 = 왼쪽)와 포인터 종류('mouse'·'touch'·'pen') */
   button: number;
@@ -238,6 +246,8 @@ interface Section {
 interface Drag {
   mode: 'orbit' | 'pan' | 'touch';
   button: number;
+  /** 누른 포인터 종류(끌기 시작 거리를 가른다) */
+  pointerType: string;
   sx: number;
   sy: number;
   lx: number;
@@ -249,7 +259,6 @@ interface Drag {
 
 const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif";
 const ROT_PER_PX = 0.0085;
-const DRAG_START_PX = 4;
 const CUBE_CSS = 112;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
@@ -326,11 +335,12 @@ export class Viewer3d {
   private measuring = false;
   private measurePts: V3[] = [];
   private measureHover: { p: V3; vertex: boolean } | null = null;
-  private hoverAt: { x: number; y: number } | null = null;
+  /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
+  private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
   private pickCbs = new Set<(p: Pick3d | null, e: PickEvent) => void>();
   private sectionCbs = new Set<(s: SectionState | null) => void>();
-  private lastClick = { t: 0, x: 0, y: 0, n: 0 };
+  private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
   private rangeVer = 0;
@@ -354,7 +364,8 @@ export class Viewer3d {
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
       animate: opts.animate ?? true,
-      pickTolerance: opts.pickTolerance ?? 6,
+      pickTolerance: opts.pickTolerance ?? PICK_TOLERANCE_PX,
+      touchPickTolerance: opts.touchPickTolerance ?? TOUCH_PICK_TOLERANCE_PX,
       maxPixelRatio: opts.maxPixelRatio ?? 2,
       textureLimit: opts.textureLimit ?? TEXTURE_LIMIT,
       textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
@@ -1171,9 +1182,9 @@ export class Viewer3d {
     return () => this.camCbs.delete(cb);
   }
 
-  /** 화면 점(캔버스 기준 CSS 화소)에서 고르기 */
-  pick(x: number, y: number): Pick3d | null {
-    return this.pickDetail(x, y)?.pick ?? null;
+  /** 화면 점(캔버스 기준 CSS 화소)에서 고르기. pointerType이 'touch'면 터치 허용 거리(touchPickTolerance)로, 아니면 pickTolerance로 */
+  pick(x: number, y: number, pointerType?: string): Pick3d | null {
+    return this.pickDetail(x, y, true, pointerType)?.pick ?? null;
   }
 
   /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
@@ -1452,10 +1463,13 @@ export class Viewer3d {
     return (this.visLists = { meshes, lines, points });
   }
 
-  private pickDetail(x: number, y: number, build = true): PickDetail | null {
+  /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance) */
+  private pickDetail(x: number, y: number, build = true, pointerType?: string): PickDetail | null {
     if (!this.sceneRef) return null;
+    const t = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance);
     return pickScene(this.frame(), x, y, this.visibleItems(), {
-      tol: this.opts.pickTolerance,
+      tol: t.tol,
+      snap: t.snap,
       occlude: this.mode === 'shaded' || this.mode === 'shadedEdges',
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, build),
       fast: !build,
@@ -1494,10 +1508,10 @@ export class Viewer3d {
 
   private click(x: number, y: number, e?: PointerEvent): void {
     const now = performance.now();
-    const lc = this.lastClick;
-    const n = lc.n === 1 && now - lc.t < 450 && Math.hypot(x - lc.x, y - lc.y) < 6 ? 2 : 1;
+    const type = e?.pointerType || 'mouse';
+    const n = clickCount(this.lastClick, now, x, y, type);
     this.lastClick = { t: now, x, y, n };
-    const d = this.pickDetail(x, y);
+    const d = this.pickDetail(x, y, true, type);
     if (this.measuring) {
       if (!d) return;
       if (this.measurePts.length >= 2) {
@@ -1518,7 +1532,7 @@ export class Viewer3d {
       metaKey: !!e?.metaKey,
       clicks: n,
       button: e?.button ?? 0,
-      pointerType: e?.pointerType || 'mouse',
+      pointerType: type,
     };
     for (const cb of this.pickCbs) cb(d ? d.pick : null, ev);
   }
@@ -1633,11 +1647,11 @@ export class Viewer3d {
     this.pointers.set(e.pointerId, p);
     this.finishAnim();
     if (e.pointerType === 'touch') {
-      if (this.pointers.size === 1) this.drag = { mode: 'orbit', button: 0, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
+      if (this.pointers.size === 1) this.drag = { mode: 'orbit', button: 0, pointerType: 'touch', sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
       else if (this.pointers.size === 2) {
-        const [a, b] = [...this.pointers.values()];
-        this.drag = { mode: 'touch', button: 0, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: true, pivot: null, depth: null };
-        this.touch = { dist: Math.hypot(a!.x - b!.x, a!.y - b!.y), cx: (a!.x + b!.x) / 2, cy: (a!.y + b!.y) / 2 };
+        // 두 손가락 이동·핀치(앞의 핀치 뒤 남겨 둔 손가락에 새 손가락이 닿아도 여기서 다시 시작한다)
+        this.drag = { mode: 'touch', button: 0, pointerType: 'touch', sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: true, pivot: null, depth: null };
+        this.touch = this.pinchState();
         this.interacting = true;
       }
       return;
@@ -1654,7 +1668,13 @@ export class Viewer3d {
       this.lastMiddle = { t: now, x: p.x, y: p.y };
     }
     const mode: Drag['mode'] = e.button === 0 ? 'orbit' : e.button === 1 && e.shiftKey ? 'orbit' : 'pan';
-    this.drag = { mode, button: e.button, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
+    this.drag = { mode, button: e.button, pointerType: e.pointerType, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
+  }
+
+  /** 지금 누른 손가락 앞의 둘로 핀치 기준(거리·가운데) */
+  private pinchState(): { dist: number; cx: number; cy: number } {
+    const [a, b] = [...this.pointers.values()];
+    return { dist: Math.hypot(a!.x - b!.x, a!.y - b!.y), cx: (a!.x + b!.x) / 2, cy: (a!.y + b!.y) / 2 };
   }
 
   private onMove(e: PointerEvent): void {
@@ -1662,7 +1682,7 @@ export class Viewer3d {
     const d = this.drag;
     if (!d || !this.pointers.has(e.pointerId)) {
       if (this.measuring && !d) {
-        this.hoverAt = p;
+        this.hoverAt = { x: p.x, y: p.y, pointerType: e.pointerType || 'mouse' };
         this.invalidate();
       }
       return;
@@ -1685,9 +1705,14 @@ export class Viewer3d {
       return;
     }
     if (!d.moved) {
-      if (Math.hypot(p.x - d.sx, p.y - d.sy) < DRAG_START_PX) return;
+      if (!dragStarted(p.x - d.sx, p.y - d.sy, d.pointerType)) return;
       d.moved = true;
       this.interacting = true;
+      // 터치는 끌기 시작 거리가 커서 그만큼을 한꺼번에 돌리면 튀어 보인다 — 여기서부터 움직인 만큼만 돌린다
+      if (isTouch(d.pointerType)) {
+        d.lx = p.x;
+        d.ly = p.y;
+      }
       // 회전 중심·이동 깊이: 누른 곳 아래 점(이미 만든 BVH만 써서 끊김이 없게)
       const hit = this.pickDetail(d.sx, d.sy, false);
       const f = this.frame();
@@ -1711,11 +1736,17 @@ export class Viewer3d {
     const d = this.drag;
     if (!had || !d) return;
     if (d.mode === 'touch') {
+      if (this.pointers.size >= 2) {
+        // 셋째 손가락을 뗐다: 남은 둘로 핀치 기준을 다시 잡는다(짝이 바뀌어도 튀지 않게)
+        this.touch = this.pinchState();
+        return;
+      }
       if (this.pointers.size === 1) {
-        // 남은 손가락으로 회전을 이어 간다
-        const [q] = [...this.pointers.values()];
-        this.drag = { mode: 'orbit', button: 0, sx: q!.x, sy: q!.y, lx: q!.x, ly: q!.y, moved: true, pivot: null, depth: null };
+        // 두 손가락 몸짓 뒤 남은 손가락은 모두 뗄 때까지 무시한다(회전·누르기 없음 — 핀치를 끝내다 모형이 돌지 않게).
+        // 새 손가락이 닿으면 onDown에서 두 손가락 몸짓을 다시 시작한다
         this.touch = null;
+        this.interacting = false;
+        this.invalidate();
         return;
       }
     } else if (!cancel && !d.moved && (d.button === 0 || e.pointerType === 'touch')) {
@@ -1803,7 +1834,7 @@ export class Viewer3d {
     const f = this.frame();
     // 측정 중 커서 아래 붙잡을 점
     if (this.measuring && this.hoverAt && !this.drag) {
-      const d = this.pickDetail(this.hoverAt.x, this.hoverAt.y);
+      const d = this.pickDetail(this.hoverAt.x, this.hoverAt.y, true, this.hoverAt.pointerType);
       this.measureHover = d ? { p: d.snap, vertex: d.vertex } : null;
       this.hoverAt = null;
     }

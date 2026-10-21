@@ -29,3 +29,16 @@ export type { GridZ } from './grid';
 export type { Viewer3dTheme } from './theme';
 export { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS } from './theme';
 export { sceneBounds } from './bounds';
+export {
+  DOUBLE_CLICK_PX,
+  DRAG_START_PX,
+  PICK_TOLERANCE_PX,
+  SNAP_PX,
+  TOUCH_DOUBLE_TAP_PX,
+  TOUCH_DRAG_START_PX,
+  TOUCH_PICK_TOLERANCE_PX,
+  dragStartPx,
+  isTouch,
+  pickTolerance,
+  type PickTolerance,
+} from './pointer';
