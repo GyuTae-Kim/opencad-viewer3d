@@ -48,7 +48,19 @@ import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
 import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, snapLimit, withinSnapLimit } from './snap';
-import { type MeasureInference, type SnapAxis, axisSnap, inferenceCandidates, normalizeInference } from './inference';
+import {
+  type InferenceLock,
+  type MeasureInference,
+  type SnapAxis,
+  axisLock,
+  axisSnap,
+  inferenceCandidates,
+  lockFromSnap,
+  lockedSnap,
+  normalizeInference,
+  parallelSnap,
+  unitDir,
+} from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
@@ -235,6 +247,15 @@ export interface MeasureResult {
    */
   axisA?: SnapAxis;
   axisB?: SnapAxis;
+  /**
+   * 방향 추론의 단위 방향(0.10.0): snapA·snapB가 첫 점을 지나는 선 위의 점('axis' — +X·+Y·+Z, 'parallel' — 기준 선분 방향,
+   * 'perpendicular' — 첫 점 → 수직 발)일 때만. 다른 종류면 없다. 방향 추론은 첫 점을 찍은 뒤에만 되므로 지금은 directionB만 실린다
+   */
+  directionA?: V3;
+  directionB?: V3;
+  /** 추론 잠금(0.10.0 — Shift·setMeasureInferenceLock)으로 잠근 선 위에 찍은 점이면 true(아니면 없다) */
+  lockedA?: boolean;
+  lockedB?: boolean;
 }
 
 /** 걷기 선택(Viewer3d.setNavigation('walk', opts)) */
@@ -280,7 +301,9 @@ export interface MeasureSnapOptions {
   /**
    * 추론 붙잡기(0.9.0, 기본 꺼짐): intersections = 커서 둘레 두 선분(선분 묶음·윤곽선)의 3D 교차점, perpendicular = 첫 측정 점에서
    * 커서 둘레 선분으로 내린 수직 발, axes = 첫 측정 점에서 X·Y·Z 축 방향(점 붙잡기가 없을 때만 — 축 색 안내선). true면 셋 모두.
-   * 그물 윤곽선은 측정 중 윤곽선을 고를 때만(edges 또는 pickEdges) 쓴다
+   * 그물 윤곽선은 측정 중 윤곽선을 고를 때만(edges 또는 pickEdges) 쓴다.
+   * 0.10.0(true에 들지 않는다 — 따로 켠다): parallel = 첫 측정 점에서 커서가 앞서 지나간 선분과 나란한 방향(점 붙잡기가 없을 때만, 축과 견줘 가까운 것 —
+   * 자홍 안내선), lock = Shift를 누르고 있는 동안 지금 방향 추론(축·나란함·수직)을 잠근다(Viewer3d.setMeasureInferenceLock은 이 선택과 상관없이 된다)
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -297,7 +320,19 @@ export interface MeasureHoverSnap {
   snap: SnapKind | null;
   /** 축 붙잡기(snap === 'axis')면 그 축 */
   axis?: SnapAxis;
+  /** 0.10.0: 방향 추론(축·나란함·수직)이면 첫 점을 지나는 그 선의 단위 방향 — 앱이 "Shift로 잠그기" 안내를 보일 때 */
+  direction?: V3;
+  /** 0.10.0: 추론 잠금 중(잠근 선 위의 점)이면 true */
+  locked?: boolean;
+  /** 0.10.0: 나란함의 기준 선분·수직 발의 선분(세계 끝점 둘) */
+  edge?: [V3, V3];
+  /** 0.10.0: 잠금 중 커서 아래 붙잡은 점(꼭짓점 등)을 잠근 선에 수직으로 내려 찍을 때 그 점과 종류 */
+  from?: V3;
+  fromSnap?: SnapKind;
 }
+
+/** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
+export type MeasureInferenceLock = InferenceLock & { source: 'shift' | 'api' };
 
 export interface GroupInfo {
   name: string;
@@ -432,6 +467,19 @@ export interface AnnotationOptions {
 export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats };
 
 type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } | { kind: 'point'; item: PointSet3d };
+/**
+ * 측정 점 고르기 결과(미리 보기·누르기): 찍을 점·붙잡았는지·종류, 0.9.0 축 붙잡기의 축,
+ * 0.10.0 방향 추론의 단위 방향·잠갔는지·기준 선분·잠근 선으로 옮겨 온 점과 그 종류
+ */
+type MeasurePick = { p: V3; vertex: boolean; kind: SnapKind | null; axis?: SnapAxis; direction?: V3; locked?: boolean; edge?: [V3, V3]; from?: V3; fromSnap?: SnapKind };
+/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금 — 있는 것만) */
+const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
+  const r: MeasurePointSnap = { kind: s.kind };
+  if (s.axis) r.axis = s.axis;
+  if (s.direction) r.direction = s.direction;
+  if (s.locked) r.locked = true;
+  return r;
+};
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
 
 /** 묶음 하나의 구간 상태(숨김·강조, 합친 것)와 그로부터 만든 것 */
@@ -582,7 +630,14 @@ export class Viewer3d {
 
   private measuring = false;
   private measurePts: V3[] = [];
-  private measureHover: { p: V3; vertex: boolean; kind: SnapKind | null; axis?: SnapAxis } | null = null;
+  private measureHover: MeasurePick | null = null;
+  /** 추론 잠금(0.10.0 — Shift·setMeasureInferenceLock). 첫 점이 있을 때만 쓰고, 두 점째를 찍거나 측정을 지우면 푼다 */
+  private inferLock: MeasureInferenceLock | null = null;
+  /** Shift가 눌려 있는지(0.10.0 — 누르는 순간에만 잠근다)와 그동안 창 keyup·blur 듣기를 푸는 함수 */
+  private shiftDown = false;
+  private shiftRelease: (() => void) | null = null;
+  /** 나란함 추론의 기준 선분(0.10.0 — 측정 중 커서가 마지막으로 지나간 선분·윤곽선, 세계 끝점 둘) */
+  private parallelRef: [V3, V3] | null = null;
   /**
    * 측정 붙잡기 선택(0.8.0, 없으면 0.7.2 규칙 그대로)과 늘 후보인 앱 점(세계 xyz·종류·묶음 id),
    * 추론 붙잡기(0.9.0)와 앱 점 색인(0.9.0 — 점이 SNAP_INDEX_MIN개 이상일 때 처음 쓸 때 만든다)
@@ -804,6 +859,7 @@ export class Viewer3d {
     this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
+    this.inferLock = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
@@ -851,6 +907,7 @@ export class Viewer3d {
     this.segHi = null;
     this.measurePts = [];
     this.measureHover = null;
+    this.inferLock = null;
     this.marker = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
@@ -880,6 +937,7 @@ export class Viewer3d {
     if (this.disposed) return;
     this.disposed = true;
     this.listenWalkRelease(false);
+    this.listenShiftRelease(false);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     clearTimeout(this.bvhTimer);
@@ -908,6 +966,7 @@ export class Viewer3d {
     this.secMore = [];
     this.measurePts = [];
     this.measureHover = null;
+    this.inferLock = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
@@ -1989,6 +2048,9 @@ export class Viewer3d {
       }
       if (o.edges) this.scheduleBvh();
     }
+    // 0.10.0: 추론 잠금·나란함 기준 선분은 붙잡기 선택과 함께 새로
+    this.inferLock = null;
+    this.parallelRef = null;
     if (this.measuring) this.measureHover = null;
     this.invalidate();
   }
@@ -2039,7 +2101,89 @@ export class Viewer3d {
     if (!h) return null;
     const r: MeasureHoverSnap = { point: [...h.p] as V3, snap: h.kind };
     if (h.axis) r.axis = h.axis;
+    if (h.direction) r.direction = [...h.direction] as V3;
+    if (h.locked) r.locked = true;
+    if (h.edge) r.edge = [[...h.edge[0]] as V3, [...h.edge[1]] as V3];
+    if (h.from) {
+      r.from = [...h.from] as V3;
+      if (h.fromSnap) r.fromSnap = h.fromSnap;
+    }
     return r;
+  }
+
+  /**
+   * 측정 추론 잠금(0.10.0 — 터치처럼 Shift가 없을 때 앱 단추로): true = 지금 미리 보기의 방향 추론(축·나란함·수직)을 잠근다,
+   * 'x'·'y'·'z' = 그 축 방향으로 잠근다(첫 점을 찍기 전에 줘도 된다), false·null = 푼다. 잠갔으면 true를 돌려준다.
+   * 잠그면 첫 점을 지나는 그 선 위에만 찍고(커서가 꼭짓점 같은 점 붙잡기 위면 그 점을 선에 수직으로 내린 자리), 두 점째를 찍거나
+   * 측정을 지우거나(clearMeasure·측정 모드 끄기·장면 바꾸기) 붙잡기 선택을 바꾸면 풀린다. 측정 모드이고 setMeasureSnap이 켜져 있어야 한다.
+   * Shift 잠금(setMeasureSnap({ inference: { lock: true } }))과 같은 상태라 이 함수로 Shift 잠금도 푼다
+   */
+  setMeasureInferenceLock(lock: boolean | SnapAxis | null): boolean {
+    if (lock === false || lock === null || lock === undefined) {
+      this.releaseLock();
+      return false;
+    }
+    if (!this.snapOpt || !this.measuring) return false;
+    const l: InferenceLock | null =
+      lock === true ? (this.measurePts.length === 1 ? lockFromSnap(this.measureHover) : null) : lock === 'x' || lock === 'y' || lock === 'z' ? axisLock(lock) : null;
+    if (!l) return false;
+    this.inferLock = { ...l, source: 'api' };
+    this.rehover();
+    return true;
+  }
+
+  /** 지금 측정 추론 잠금(0.10.0 — 종류·단위 방향·축·기준 선분·잠근 길). 없으면 null */
+  get measureInferenceLock(): MeasureInferenceLock | null {
+    const l = this.inferLock;
+    if (!l) return null;
+    const r: MeasureInferenceLock = { kind: l.kind, direction: [...l.direction] as V3, source: l.source };
+    if (l.axis) r.axis = l.axis;
+    if (l.edge) r.edge = [[...l.edge[0]] as V3, [...l.edge[1]] as V3];
+    return r;
+  }
+
+  /** 추론 잠금을 푼다(있으면 미리 보기를 다시 구한다) */
+  private releaseLock(): void {
+    if (!this.inferLock) return;
+    this.inferLock = null;
+    this.rehover();
+  }
+
+  /**
+   * Shift 눌림(0.10.0 — 포인터 이동의 shiftKey, 캔버스·handleKey의 Shift keydown·keyup): 누르는 순간 지금 미리 보기의 방향 추론을 잠그고
+   * (setMeasureSnap({ inference: { lock: true } })일 때만), 떼면 Shift로 잠근 것을 푼다. 누르고 있는 동안 창 keyup·blur도 들어 떼기를 놓치지 않는다
+   */
+  private setShift(down: boolean): void {
+    if (down === this.shiftDown) return;
+    this.shiftDown = down;
+    const on = !!this.snapOpt?.inference?.lock;
+    this.listenShiftRelease(down && on);
+    if (down) {
+      if (!on || this.inferLock || !this.measuring || this.measurePts.length !== 1) return;
+      const l = lockFromSnap(this.measureHover);
+      if (!l) return;
+      this.inferLock = { ...l, source: 'shift' };
+      this.rehover();
+    } else if (this.inferLock?.source === 'shift') this.releaseLock();
+  }
+
+  private listenShiftRelease(on: boolean): void {
+    if (on === !!this.shiftRelease) return;
+    if (!on) {
+      this.shiftRelease!();
+      this.shiftRelease = null;
+      return;
+    }
+    const up = (e: KeyboardEvent): void => {
+      if (e.key === 'Shift' || !e.shiftKey) this.setShift(false);
+    };
+    const blur = (): void => this.setShift(false);
+    window.addEventListener('keyup', up, true);
+    window.addEventListener('blur', blur);
+    this.shiftRelease = () => {
+      window.removeEventListener('keyup', up, true);
+      window.removeEventListener('blur', blur);
+    };
   }
 
   /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
@@ -2063,6 +2207,7 @@ export class Viewer3d {
     const had = this.measurePts.length > 0;
     this.measurePts = [];
     this.measureHover = null;
+    this.inferLock = null;
     if (had) for (const cb of this.measureCbs) cb(null);
     this.invalidate();
   }
@@ -2833,7 +2978,7 @@ export class Viewer3d {
    * 측정 점 고르기: 화면 점에서 찍을 점과 붙잡은 종류. 붙잡기 선택(setMeasureSnap)이 없으면 0.7.2 그대로(고르기의 꼭짓점·끝점 붙잡기 — d를 주면 그것을 쓴다).
    * 있으면 고르기(윤곽선·가운데 점 선택 반영)의 붙잡은 점, pointsFor 점, 늘 후보인 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것
    */
-  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null): { p: V3; vertex: boolean; kind: SnapKind | null; axis?: SnapAxis } | null {
+  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null): MeasurePick | null {
     const so = this.snapOpt;
     if (!so) {
       const d = d0 !== undefined ? d0 : this.pickDetail(x, y, true, pointerType);
@@ -2845,12 +2990,37 @@ export class Viewer3d {
     const f = this.frame();
     const inf = so.inference;
     const first = this.measurePts.length === 1 ? this.measurePts[0]! : null;
+    // 나란함(0.10.0): 커서가 지나간 선분·윤곽선을 기준으로 기억한다(첫 점을 찍기 전에도)
+    if (inf?.parallel && d?.ends) this.parallelRef = d.ends;
     const cands: Iterable<SnapCandidate> = inf ? this.withInference(f, x, y, snapPx, so.edges ?? this.opts.pickEdges, inf, first, this.snapCandidates(f, x, y, snapPx, d?.pick ?? null)) : this.snapCandidates(f, x, y, snapPx, d?.pick ?? null);
     const r = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
-    // 축(0.9.0): 점 붙잡기가 하나도 없을 때만 첫 점의 축 방향 선에
-    if (inf?.axes && first && (!r || !r.kind)) {
-      const a = axisSnap(f, first, x, y, snapPx);
-      if (a) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis };
+    // 잠금(0.10.0): 첫 점을 지나는 잠근 선 위에만. 점 붙잡기가 있으면 그 점을 선에 수직으로 내린 자리
+    const lock = first ? this.inferLock : null;
+    if (lock && first) {
+      const q = r && r.kind ? r : null;
+      const l = lockedSnap(f, first, lock.direction, x, y, q ? q.p : null);
+      if (!l) return null;
+      const out: MeasurePick = { p: l.p, vertex: true, kind: lock.kind, direction: [...lock.direction] as V3, locked: true };
+      if (lock.axis) out.axis = lock.axis;
+      if (lock.edge) out.edge = lock.edge;
+      if (l.from) {
+        out.from = l.from;
+        out.fromSnap = q!.kind!;
+      }
+      return out;
+    }
+    // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
+    if (first && (!r || !r.kind) && (inf?.axes || inf?.parallel)) {
+      const a = inf.axes ? axisSnap(f, first, x, y, snapPx) : null;
+      const ref = inf.parallel ? this.parallelRef : null;
+      const pr = ref ? parallelSnap(f, first, ref, x, y, snapPx, inf.axes) : null;
+      if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
+      if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
+    }
+    // 수직 발(0.10.0): 첫 점 → 발 방향(잠글 때)
+    if (r && r.kind === 'perpendicular' && first) {
+      const dir = unitDir(first, r.p);
+      if (dir) return { ...r, direction: dir };
     }
     return r;
   }
@@ -2992,9 +3162,11 @@ export class Viewer3d {
       }
       // 같은 점 객체가 두 번 찍혀도 종류를 따로 지키도록 복사해 넣는다(붙잡기 선택이 있을 때만 — 없으면 0.7.2 그대로)
       const p: V3 = this.snapOpt ? [s.p[0], s.p[1], s.p[2]] : s.p;
-      this.measureSnaps.set(p, s.axis ? { kind: s.kind, axis: s.axis } : { kind: s.kind });
+      this.measureSnaps.set(p, pointSnapOf(s));
       this.measurePts.push(p);
       this.measureHover = null;
+      // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다
+      if (this.measurePts.length === 2) this.inferLock = null;
       const m = this.measurement();
       if (m) for (const cb of this.measureCbs) cb(m);
       this.invalidate();
@@ -3170,6 +3342,8 @@ export class Viewer3d {
     const d = this.drag;
     if (!d || !this.pointers.has(e.pointerId)) {
       if (this.measuring && !d) {
+        // Shift를 누른 채 움직이면(0.10.0) 앞 미리 보기의 방향 추론을 잠그고, 뗀 채 움직이면 푼다
+        this.setShift(e.shiftKey);
         this.hoverAt = { x: p.x, y: p.y, pointerType: e.pointerType || 'mouse' };
         this.invalidate();
       }
@@ -3291,6 +3465,11 @@ export class Viewer3d {
    */
   handleKey(e: KeyboardEvent): boolean {
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    // Shift(0.10.0): 측정 추론 잠금(setMeasureSnap({ inference: { lock: true } })일 때). 기본 동작은 막지 않으므로 false
+    if (e.key === 'Shift') {
+      this.setShift(true);
+      return false;
+    }
     // 걷기: W·A·S·D·화살표·Q·E·PageUp·PageDown(물리 키 — 한글 입력기에서도)은 누르는 동안 움직인다.
     // 떼기는 창 keyup·창 흐려짐·탭 숨김을 뷰어가 스스로 듣는다(앱이 창 keydown만 넘겨도 멈춘다)
     const wk = this.nav === 'walk' ? walkKeyOf(e) : null;
@@ -3312,6 +3491,7 @@ export class Viewer3d {
 
   /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true */
   handleKeyUp(e: KeyboardEvent): boolean {
+    if (e.key === 'Shift') this.setShift(false);
     const k = walkKeyOf(e);
     if (!k || !this.walkKeys.delete(k)) return false;
     this.walkFast = e.shiftKey;
@@ -3702,6 +3882,8 @@ export class Viewer3d {
     const hover = this.measuring ? this.measureHover : null;
     if (!pts.length && !hover) return;
     const th = this.theme;
+    const axisColor = (ax: SnapAxis): string => (ax === 'x' ? th.axisX : ax === 'y' ? th.axisY : th.axisZ);
+    const inferColor = th.inference ?? DARK_THEME.inference!;
     const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
     const P = (p: readonly number[]): V3 | null => projectToScreen(f, p);
     const line = (a: V3 | null, b: V3 | null, color: string, width: number, dash: number[]): void => {
@@ -3823,15 +4005,27 @@ export class Viewer3d {
         line(P(k1), P(k2), th.axisY, 1.5, [5, 4]);
         line(P(k2), sb, th.axisZ, 1.5, [5, 4]);
       }
-      // 0.9.0 축 붙잡기 미리 보기: 첫 점에서 그 축 색 안내선
-      const ax = pts.length === 1 && hover?.kind === 'axis' ? hover.axis : undefined;
-      line(sa, sb, ax ? (ax === 'x' ? th.axisX : ax === 'y' ? th.axisY : th.axisZ) : th.measure, 2, pts.length === 2 ? [] : [6, 4]);
+      // 0.9.0 축 붙잡기 미리 보기: 첫 점에서 그 축 색 안내선.
+      // 0.10.0: 나란함·잠근 수직은 추론 색(자홍) 안내선과 기준 선분 점선, 잠금은 바탕 테 위 굵은 실선, 잠근 선으로 옮겨 온 점에서 가는 점선
+      const hk = pts.length === 1 ? hover : null;
+      const guide =
+        hk?.kind === 'axis' && hk.axis ? axisColor(hk.axis) : hk && (hk.kind === 'parallel' || (hk.kind === 'perpendicular' && hk.locked)) ? inferColor : null;
+      if (hk?.edge && (hk.kind === 'parallel' || hk.locked)) {
+        const e0 = P(hk.edge[0]), e1 = P(hk.edge[1]);
+        line(e0, e1, th.textBg, 5, []);
+        line(e0, e1, inferColor, 2.5, [5, 3]);
+      }
+      if (hk?.locked && guide) {
+        line(sa, sb, th.textBg, 6, []);
+        line(sa, sb, guide, 3, []);
+      } else line(sa, sb, guide ?? th.measure, 2, pts.length === 2 ? [] : [6, 4]);
+      if (hk?.from) line(P(hk.from), sb, th.measure, 1.5, [2, 3]);
       const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
       const mid = sa && sb ? ([(sa[0] + sb[0]) / 2, (sa[1] + sb[1]) / 2, 0] as V3) : sb ?? sa;
       const u = unit ? ` ${unit}` : '';
       const fm = this.measureFmt;
       // 글 꼴에는 onMeasure와 같은 결과를 준다(0.9.1 — 붙잡기를 켰으면 snapA·snapB·axisB도. 미리 보기의 B는 커서 아래 붙잡을 점)
-      const snapB = pts[1] ? this.measureSnaps.get(pts[1]) : hover ? { kind: hover.kind, ...(hover.axis ? { axis: hover.axis } : {}) } : undefined;
+      const snapB = pts[1] ? this.measureSnaps.get(pts[1]) : hover ? pointSnapOf(hover) : undefined;
       label(
         mid,
         fm
@@ -3856,7 +4050,69 @@ export class Viewer3d {
           ctx.fill();
           ctx.stroke();
         }
+      } else if (k === 'parallel') {
+        // 0.10.0 나란함: 추론 색 동그라미와 오른쪽 위에 기준 선분 화면 방향의 겹줄(∥)
+        const sp = P(hover.p);
+        if (sp) {
+          ctx.fillStyle = inferColor;
+          ctx.strokeStyle = th.textBg;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sp[0], sp[1], 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          const e0 = hover.edge ? P(hover.edge[0]) : null, e1 = hover.edge ? P(hover.edge[1]) : null;
+          let ux = e0 && e1 ? e1[0] - e0[0] : 1, uy = e0 && e1 ? e1[1] - e0[1] : 0;
+          const ul = Math.hypot(ux, uy);
+          if (ul > 1e-6) {
+            ux /= ul;
+            uy /= ul;
+          } else {
+            ux = 1;
+            uy = 0;
+          }
+          const cx = sp[0] + 12, cy = sp[1] - 12;
+          for (const [color, w] of [
+            [th.textBg, 4],
+            [inferColor, 1.8],
+          ] as const) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = w;
+            ctx.beginPath();
+            for (const s of [-2.5, 2.5]) {
+              ctx.moveTo(cx - uy * s - ux * 5, cy + ux * s - uy * 5);
+              ctx.lineTo(cx - uy * s + ux * 5, cy + ux * s + uy * 5);
+            }
+            ctx.stroke();
+          }
+        }
       } else dotAt(P(hover.p), hover.vertex);
+      // 0.10.0 잠금: 표식 둘레 고리(안내선 색), 옮겨 온 점은 빈 동그라미
+      if (hover.locked) {
+        const sp = P(hover.p);
+        const col = k === 'axis' && hover.axis ? axisColor(hover.axis) : inferColor;
+        if (sp)
+          for (const [color, w] of [
+            [th.textBg, 4.5],
+            [col, 2],
+          ] as const) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = w;
+            ctx.beginPath();
+            ctx.arc(sp[0], sp[1], 9.5, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        const sf = hover.from ? P(hover.from) : null;
+        if (sf) {
+          ctx.fillStyle = th.textBg;
+          ctx.strokeStyle = th.measure;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sf[0], sf[1], 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
     }
     ctx.restore();
   }

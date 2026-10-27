@@ -5,6 +5,9 @@
  *   두 선분 모두 안쪽(끝점에서 허용치보다 먼 곳 — 끝점은 끝점 붙잡기가 맡는다)일 때만. 나란한 선분은 없다
  * - 수직 발: 첫 측정 점에서 커서 둘레 선분으로 내린 수직선의 발(선분 안쪽, 끝점·첫 점에서 허용치보다 먼 곳)
  * - 축: 첫 측정 점을 지나는 X·Y·Z 축 방향 선 가운데 커서 광선에 가장 가까운 점(화면 붙잡기 거리 안). 점 붙잡기가 하나도 없을 때만 쓴다
+ * - 나란함(0.10.0): 첫 측정 점을 지나고 커서가 앞서 지나간 선분(모서리)과 나란한 선 위의 점. 축과 같이 점 붙잡기가 없을 때만
+ * - 잠금(0.10.0): 방향 추론(축·나란함·수직)을 잠그면 첫 점을 지나는 그 선 위에만 찍는다. 커서가 꼭짓점 같은 점 붙잡기 위면
+ *   그 점을 선에 수직으로 내린 자리(SketchUp의 추론 잠금처럼 — 다른 점의 높이·자리를 잠근 방향으로 옮겨 잰다)
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
@@ -20,13 +23,26 @@ export interface MeasureInference {
   perpendicular?: boolean;
   /** 첫 측정 점에서 X·Y·Z 축 방향(축 색 안내선) */
   axes?: boolean;
+  /** 0.10.0: 첫 측정 점에서 커서가 앞서 지나간 선분(선분 묶음·측정 중 고르는 윤곽선)과 나란한 방향(자홍 안내선) */
+  parallel?: boolean;
+  /**
+   * 0.10.0: Shift를 누르고 있는 동안 지금 방향 추론(축·나란함·수직)을 잠근다 — 커서가 선에서 멀어져도 그 선 위에 찍는다.
+   * 터치처럼 Shift가 없으면 앱이 Viewer3d.setMeasureInferenceLock으로 잠근다(이 선택과 상관없이 된다)
+   */
+  lock?: boolean;
 }
 
-/** inference 선택을 세 값으로 편다(true = 모두, 아무것도 켜지 않았으면 null) */
+/**
+ * inference 선택을 다섯 값으로 편다(아무것도 켜지 않았으면 null). true는 0.9.0의 셋(교차점·수직 발·축)만 — 0.10.0의 나란함·잠금은
+ * 따로 켠다(true로 켜 둔 앱의 동작이 바뀌지 않게)
+ */
 export function normalizeInference(o: MeasureInference | boolean | null | undefined): Required<MeasureInference> | null {
   if (!o) return null;
-  const r = o === true ? { intersections: true, perpendicular: true, axes: true } : { intersections: !!o.intersections, perpendicular: !!o.perpendicular, axes: !!o.axes };
-  return r.intersections || r.perpendicular || r.axes ? r : null;
+  const r =
+    o === true
+      ? { intersections: true, perpendicular: true, axes: true, parallel: false, lock: false }
+      : { intersections: !!o.intersections, perpendicular: !!o.perpendicular, axes: !!o.axes, parallel: !!o.parallel, lock: !!o.lock };
+  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock ? r : null;
 }
 
 const d2 = (a: readonly number[], b: readonly number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);
@@ -81,25 +97,117 @@ export function axisSnap(f: ViewFrame, a: readonly number[], x: number, y: numbe
   const sa = projectToScreen(f, a);
   if (sa && Math.hypot(sa[0] - x, sa[1] - y) <= snapPx) return null;
   const ray = screenRay(f, x, y);
-  const o = ray.origin, d = ray.dir;
-  const w0x = a[0]! - o[0], w0y = a[1]! - o[1], w0z = a[2]! - o[2];
-  const ee = d[0] * w0x + d[1] * w0y + d[2] * w0z;
   let best: { p: V3; axis: SnapAxis; distPx: number } | null = null;
   for (const [axis, e] of AXES) {
-    const b = e[0] * d[0] + e[1] * d[1] + e[2] * d[2];
-    const den = 1 - b * b;
-    if (den < 1e-6) continue;
-    const dd = e[0] * w0x + e[1] * w0y + e[2] * w0z;
-    // 축 선 a + t·e와 광선 o + s·d의 가장 가까운 점(둘 다 단위 방향)
-    const t = (b * ee - dd) / den;
-    const p: V3 = [a[0]! + e[0] * t, a[1]! + e[1] * t, a[2]! + e[2] * t];
-    const s = projectToScreen(f, p);
-    if (!s || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) continue;
-    if (f.projection === 'perspective' && s[2] < f.near * 0.999) continue;
-    const dist = Math.hypot(s[0] - x, s[1] - y);
-    if (dist <= snapPx && (!best || dist < best.distPx)) best = { p, axis, distPx: dist };
+    const p = rayLinePoint(ray.origin, ray.dir, a, e);
+    if (!p) continue;
+    const dist = screenDistance(f, p, x, y);
+    if (dist !== null && dist <= snapPx && (!best || dist < best.distPx)) best = { p, axis, distPx: dist };
   }
   return best;
+}
+
+/**
+ * 선 a + t·e(e는 단위 방향)에서 광선 o + s·d(d는 단위 방향)에 가장 가까운 점. 선이 광선과 거의 나란하면(사잇각 사인² < 1e-6) null.
+ * 0.9.0 축 붙잡기의 식 그대로(축·나란함·잠금이 함께 쓴다)
+ */
+export function rayLinePoint(o: readonly number[], d: readonly number[], a: readonly number[], e: readonly number[]): V3 | null {
+  const w0x = a[0]! - o[0]!, w0y = a[1]! - o[1]!, w0z = a[2]! - o[2]!;
+  const ee = d[0]! * w0x + d[1]! * w0y + d[2]! * w0z;
+  const b = e[0]! * d[0]! + e[1]! * d[1]! + e[2]! * d[2]!;
+  const den = 1 - b * b;
+  if (den < 1e-6) return null;
+  const dd = e[0]! * w0x + e[1]! * w0y + e[2]! * w0z;
+  const t = (b * ee - dd) / den;
+  return [a[0]! + e[0]! * t, a[1]! + e[1]! * t, a[2]! + e[2]! * t];
+}
+
+/** 세계 점 p의 화면 자리와 커서(x, y) 사이 화소 거리. 투영할 수 없거나 원근에서 가까운 면보다 앞(눈 뒤 포함)이면 null */
+function screenDistance(f: ViewFrame, p: readonly number[], x: number, y: number): number | null {
+  const s = projectToScreen(f, p);
+  if (!s || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) return null;
+  if (f.projection === 'perspective' && s[2] < f.near * 0.999) return null;
+  return Math.hypot(s[0] - x, s[1] - y);
+}
+
+/** 단위 벡터(길이가 0이거나 수가 아니면 null) */
+export function unitDir(a: readonly number[], b: readonly number[]): V3 | null {
+  const x = b[0]! - a[0]!, y = b[1]! - a[1]!, z = b[2]! - a[2]!;
+  const l = Math.hypot(x, y, z);
+  return l > 0 && Number.isFinite(l) ? [x / l, y / l, z / l] : null;
+}
+
+/** 방향 e가 X·Y·Z 축 가운데 하나와 나란한지(사잇각 약 0.08° 안 — 그 선은 축 붙잡기가 맡는다) */
+export function axisAligned(e: readonly number[]): boolean {
+  return Math.max(Math.abs(e[0]!), Math.abs(e[1]!), Math.abs(e[2]!)) >= 1 - 1e-6;
+}
+
+/**
+ * 나란함(0.10.0): 첫 점 a를 지나고 기준 선분 ref(세계 끝점 둘 — 커서가 앞서 지나간 모서리)와 나란한 선 위에서 커서 광선에 가장 가까운 점.
+ * 화면 snapPx 안일 때만. 커서가 a의 화면 자리 snapPx 안이거나 기준 선분 길이가 0이면 없다. skipAxes면 기준 선분이 축과 나란할 때 뺀다
+ * (축 붙잡기와 같은 선). direction은 기준 선분의 첫 끝점 → 둘째 끝점 쪽 단위 방향
+ */
+export function parallelSnap(
+  f: ViewFrame,
+  a: readonly number[],
+  ref: readonly [readonly number[], readonly number[]],
+  x: number,
+  y: number,
+  snapPx: number,
+  skipAxes: boolean,
+): { p: V3; direction: V3; distPx: number } | null {
+  const e = unitDir(ref[0], ref[1]);
+  if (!e || (skipAxes && axisAligned(e))) return null;
+  const sa = projectToScreen(f, a);
+  if (sa && Math.hypot(sa[0] - x, sa[1] - y) <= snapPx) return null;
+  const ray = screenRay(f, x, y);
+  const p = rayLinePoint(ray.origin, ray.dir, a, e);
+  if (!p) return null;
+  const dist = screenDistance(f, p, x, y);
+  return dist !== null && dist <= snapPx ? { p, direction: e, distPx: dist } : null;
+}
+
+/** 방향 추론 종류(첫 점을 지나는 선): 축·나란함·수직(첫 점 → 수직 발) */
+export type InferenceLockKind = 'axis' | 'parallel' | 'perpendicular';
+
+/** 추론 잠금(0.10.0, Viewer3d.measureInferenceLock): 첫 측정 점을 지나는 선의 종류·단위 방향과 축·기준 선분 */
+export interface InferenceLock {
+  kind: InferenceLockKind;
+  /** 단위 방향(축은 +X·+Y·+Z, 나란함은 기준 선분 방향, 수직은 첫 점 → 수직 발) */
+  direction: V3;
+  /** 축 잠금이면 그 축 */
+  axis?: SnapAxis;
+  /** 나란함·수직의 기준 선분(세계 끝점 둘) */
+  edge?: [V3, V3];
+}
+
+/** 축 잠금(setMeasureInferenceLock('x' | 'y' | 'z')) */
+export function axisLock(axis: SnapAxis): InferenceLock {
+  return { kind: 'axis', axis, direction: axis === 'x' ? [1, 0, 0] : axis === 'y' ? [0, 1, 0] : [0, 0, 1] };
+}
+
+/** 지금 미리 보기(붙잡은 종류·축·방향·기준 선분)에서 잠글 방향 추론. 방향 추론이 아니면 null */
+export function lockFromSnap(h: { kind: string | null; axis?: SnapAxis; direction?: V3; edge?: [V3, V3] } | null | undefined): InferenceLock | null {
+  if (!h || !h.direction) return null;
+  if (h.kind === 'axis') return h.axis ? axisLock(h.axis) : null;
+  if (h.kind === 'parallel' || h.kind === 'perpendicular') return { kind: h.kind, direction: [...h.direction] as V3, ...(h.edge ? { edge: h.edge } : {}) };
+  return null;
+}
+
+/**
+ * 잠근 선(첫 점 a를 지나는 단위 방향 e) 위에 찍을 점. q(커서 아래 붙잡은 점 — 꼭짓점·끝점·중심 등)가 있으면 그 점을 선에 수직으로 내린 자리
+ * (from = q, q가 이미 선 위면 from 없음), 없으면 커서 광선에 가장 가까운 자리(화면 거리 제한 없음). 선이 광선과 나란하거나 그 자리가 눈 뒤면 null
+ */
+export function lockedSnap(f: ViewFrame, a: readonly number[], e: readonly number[], x: number, y: number, q: readonly number[] | null): { p: V3; from?: V3 } | null {
+  if (q) {
+    const t = (q[0]! - a[0]!) * e[0]! + (q[1]! - a[1]!) * e[1]! + (q[2]! - a[2]!) * e[2]!;
+    const p: V3 = [a[0]! + e[0]! * t, a[1]! + e[1]! * t, a[2]! + e[2]! * t];
+    const off = Math.hypot(q[0]! - p[0], q[1]! - p[1], q[2]! - p[2]);
+    return off <= 1e-12 * (1 + Math.hypot(q[0]!, q[1]!, q[2]!)) ? { p } : { p, from: [q[0]!, q[1]!, q[2]!] };
+  }
+  const ray = screenRay(f, x, y);
+  const p = rayLinePoint(ray.origin, ray.dir, a, e);
+  return p && screenDistance(f, p, x, y) !== null ? { p } : null;
 }
 
 /** 커서 둘레 선분(세계 끝점, 묶음 id, 그 묶음의 남는 쪽 판정)과 커서 쪽 깊이에서 한 화소의 세계 길이 */
@@ -113,18 +221,19 @@ export interface NearSegment {
   wpp: number;
 }
 
-/** 추론 후보(세계 점·종류·묶음 id) */
+/** 추론 후보(세계 점·종류·묶음 id, 0.10.0부터 수직 발은 그 선분 — 잠글 때 기준 선분) */
 export interface InferenceCandidate {
   p: V3;
   kind: 'intersection' | 'perpendicular';
   id: string;
+  edge?: [V3, V3];
 }
 
 /**
  * 커서 둘레 선분들에서 교차점·수직 발 후보(교차점 먼저, 선분 차례대로). first = 첫 측정 점(없으면 수직 발 없음).
  * 허용치는 두 선분 쪽 화소 길이의 반(교차)·화소 길이의 반(수직 발 끝점·첫 점 거리)
  */
-export function inferenceCandidates(segs: readonly NearSegment[], first: readonly number[] | null, o: Required<MeasureInference>): InferenceCandidate[] {
+export function inferenceCandidates(segs: readonly NearSegment[], first: readonly number[] | null, o: Pick<Required<MeasureInference>, 'intersections' | 'perpendicular'> & MeasureInference): InferenceCandidate[] {
   const out: InferenceCandidate[] = [];
   if (o.intersections)
     for (let i = 0; i < segs.length; i++)
@@ -136,7 +245,7 @@ export function inferenceCandidates(segs: readonly NearSegment[], first: readonl
   if (o.perpendicular && first)
     for (const s of segs) {
       const p = perpendicularFoot(first, s.a, s.b, 0.5 * s.wpp);
-      if (p && (!s.keep || s.keep(p))) out.push({ p, kind: 'perpendicular', id: s.id });
+      if (p && (!s.keep || s.keep(p))) out.push({ p, kind: 'perpendicular', id: s.id, edge: [s.a, s.b] });
     }
   return out;
 }

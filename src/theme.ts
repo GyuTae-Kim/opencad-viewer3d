@@ -34,6 +34,8 @@ export interface Viewer3dTheme {
   section?: string;
   /** 단색 모드(monochrome) 면 색(없으면 밝은 회색) */
   monochrome?: string;
+  /** 0.10.0 측정 추론의 나란함·수직 안내선과 기준 선분(SketchUp처럼 자홍, 없으면 기본 테마 값) */
+  inference?: string;
 }
 
 export const DARK_THEME: Viewer3dTheme = {
@@ -54,6 +56,7 @@ export const DARK_THEME: Viewer3dTheme = {
   cubeText: '#e8ebf0',
   cubeHover: 'rgba(61,149,240,0.75)',
   section: '#ff5fa2',
+  inference: '#f062f0',
 };
 
 export const LIGHT_THEME: Viewer3dTheme = {
@@ -74,6 +77,7 @@ export const LIGHT_THEME: Viewer3dTheme = {
   cubeText: '#1d2530',
   cubeHover: 'rgba(31,111,209,0.6)',
   section: '#d0246e',
+  inference: '#b31ab3',
 };
 
 /**
@@ -156,6 +160,7 @@ export const THEME_CSS_VARS: Record<keyof Viewer3dTheme, string> = {
   cubeHover: '--v3d-cube-hover',
   section: '--v3d-section',
   monochrome: '--v3d-mono',
+  inference: '--v3d-inference',
 };
 
 /**

@@ -11,18 +11,20 @@ import type { SnapAxis } from './inference';
 import type { V3 } from './math';
 import type { MeasureResult } from './viewer';
 
-/** 측정 점 고르기 결과: 찍을 점, 붙잡았는지, 붙잡은 종류(붙잡지 않았으면 null) */
+/** 측정 점 고르기 결과: 찍을 점, 붙잡았는지, 붙잡은 종류(붙잡지 않았으면 null), 0.10.0부터 그 후보의 선분(수직 발 — 있을 때만) */
 export interface MeasureSnapPick {
   p: V3;
   vertex: boolean;
   kind: SnapKind | null;
+  edge?: [V3, V3];
 }
 
-/** 앱 붙잡기 후보(세계 점·종류·묶음 id) */
+/** 앱 붙잡기 후보(세계 점·종류·묶음 id, 0.10.0부터 추론 후보의 선분) */
 export interface SnapCandidate {
   p: V3;
   kind: SnapKind;
   id?: string;
+  edge?: [V3, V3];
 }
 
 /**
@@ -39,7 +41,7 @@ export function chooseMeasureSnap(
   cands: Iterable<SnapCandidate>,
   visible: (p: V3, sx: number, sy: number, id: string | undefined) => boolean,
 ): MeasureSnapPick | null {
-  let best: { p: V3; kind: SnapKind; dist: number } | null = null;
+  let best: { p: V3; kind: SnapKind; dist: number; edge?: [V3, V3] | undefined } | null = null;
   if (base && base.kind) {
     const s = projectToScreen(f, base.p);
     best = { p: base.p, kind: base.kind, dist: s ? Math.hypot(s[0] - x, s[1] - y) : 0 };
@@ -51,9 +53,9 @@ export function chooseMeasureSnap(
     if (dist > snapPx || (best && dist >= best.dist)) continue;
     if (f.projection === 'perspective' && s[2] < f.near * 0.999) continue;
     if (!visible(c.p, s[0], s[1], c.id)) continue;
-    best = { p: c.p, kind: c.kind, dist };
+    best = { p: c.p, kind: c.kind, dist, edge: c.edge };
   }
-  if (best) return { p: best.p, vertex: true, kind: best.kind };
+  if (best) return best.edge ? { p: best.p, vertex: true, kind: best.kind, edge: best.edge } : { p: best.p, vertex: true, kind: best.kind };
   return base ? { p: base.p, vertex: false, kind: null } : null;
 }
 
@@ -70,15 +72,21 @@ export function withinSnapLimit(order: number | undefined, limit: number | null)
   return limit === null || typeof order !== 'number' || Number.isNaN(order) || order < limit;
 }
 
-/** 찍은 측정 점의 붙잡기: 종류(붙잡지 않았으면 null)와 축 붙잡기('axis')면 그 축 */
+/**
+ * 찍은 측정 점의 붙잡기: 종류(붙잡지 않았으면 null)와 축 붙잡기('axis')면 그 축,
+ * 0.10.0부터 방향 추론(축·나란함·수직)이면 첫 점을 지나는 그 선의 단위 방향과 잠갔는지
+ */
 export interface MeasurePointSnap {
   kind: SnapKind | null;
   axis?: SnapAxis;
+  direction?: V3;
+  locked?: boolean;
 }
 
 /**
  * 두 점 측정 결과(Viewer3d.measurement·onMeasure). snaps를 주면(붙잡기 선택을 켰을 때 — 찍은 점마다, 모르는 점은 undefined) snapA·snapB를 싣고,
- * 0.9.1부터 축 붙잡기('axis')인 점은 그 축을 axisA·axisB로 싣는다(다른 종류면 그 필드가 없다). snaps가 없으면 0.7.2 꼴(a·b·거리·dx dy dz)
+ * 0.9.1부터 축 붙잡기('axis')인 점은 그 축을 axisA·axisB로 싣는다(다른 종류면 그 필드가 없다). snaps가 없으면 0.7.2 꼴(a·b·거리·dx dy dz).
+ * 0.10.0: 방향 추론으로 찍은 점은 directionA·directionB(단위 방향 — 복사본), 잠금(Shift·setMeasureInferenceLock)으로 찍은 점은 lockedA·lockedB = true
  */
 export function measureResult(a: V3, b: V3, snaps?: readonly [MeasurePointSnap | undefined, MeasurePointSnap | undefined] | null): MeasureResult {
   const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
@@ -89,6 +97,10 @@ export function measureResult(a: V3, b: V3, snaps?: readonly [MeasurePointSnap |
     r.snapB = sb?.kind ?? null;
     if (sa?.kind === 'axis' && sa.axis) r.axisA = sa.axis;
     if (sb?.kind === 'axis' && sb.axis) r.axisB = sb.axis;
+    if (sa?.direction) r.directionA = [...sa.direction] as V3;
+    if (sb?.direction) r.directionB = [...sb.direction] as V3;
+    if (sa?.locked) r.lockedA = true;
+    if (sb?.locked) r.lockedB = true;
   }
   return r;
 }

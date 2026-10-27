@@ -26,8 +26,9 @@ interface Ctx {
   h: number;
   /** 장면 좌표 → 세계 좌표(off 장면은 묶음 원점만큼 옮긴다) */
   world(p: readonly number[]): number[];
-  click(x: number, y: number, pointerType?: string): void;
-  hover(x: number, y: number, pointerType?: string): void;
+  /** shift = Shift를 누른 채(0.10.0 추론 잠금 — 그 전 판은 무시한다) */
+  click(x: number, y: number, pointerType?: string, shift?: boolean): void;
+  hover(x: number, y: number, pointerType?: string, shift?: boolean): void;
   /** 세계 점의 화면 위치(project가 없는 판이면 null) */
   at(p: readonly number[]): { x: number; y: number } | null;
 }
@@ -453,6 +454,73 @@ function limitShots(d: 'base' | 'off'): Shot[] {
   ];
 }
 
+/** 0.10.0 추론 잠금이 있는 판인지 */
+const v0100lock: Need = (v, c) => all(v090infer, fn('setMeasureInferenceLock', 'project', 'setGroupVisible'))(v, c);
+
+/**
+ * 0.10.0 추론 보완 표식: 나란함(엇갈린 선분과 나란한 자홍 안내선·기준 선분·∥), Shift 잠금(축 — 작은 상자 구석을 잠근 Z선으로 옮겨 온 점선과 고리),
+ * 앱 잠금(수직 — 수직 발 너머로). 공구 경로는 숨긴다
+ */
+function lockShots(d: 'base' | 'off'): Shot[] {
+  const s = (name: string, setup: Shot['setup'], data: Data = d): Shot => ({
+    name: `${d}-${name}`,
+    data,
+    needs: v0100lock,
+    setup: (c) => {
+      c.v.setGroupVisible('공구 경로', false);
+      return setup(c);
+    },
+  });
+  const out: Shot[] = [
+    // 상자 앞 오른쪽 위 구석에서 Z축 방향을 보다가 Shift를 누른 채 작은 상자 1의 앞 위 구석으로 — 잠근 Z선 위 그 높이(120, 0, 12)
+    s('infer-lock-shift', (c) => {
+      c.v.setMeasureMode(true);
+      c.v.setMeasureSnap({ inference: { axes: true, lock: true } });
+      const a = c.at(c.world([120, 0, 40]));
+      const p = c.at(c.world([120, 0, 95]));
+      const q = c.at(c.world([156, -36, 12]));
+      if (a) c.click(a.x - 1, a.y + 1);
+      if (p) c.hover(p.x + 5, p.y - 2);
+      c.v.renderNow();
+      if (q) c.hover(q.x + 2, q.y + 1, 'mouse', true);
+    }),
+    // 구멍 점에서 상자 앞 윗모서리로 내린 수직 발을 앱 단추로 잠그고(setMeasureInferenceLock(true)) 모서리 너머로
+    s('infer-lock-perp', (c) => {
+      c.v.setMeasureMode(true);
+      c.v.setMeasureSnap({ edges: true, inference: { perpendicular: true } });
+      const a = c.at(c.world([50, 70, 40]));
+      const p = c.at(c.world([50, 0, 40]));
+      const q = c.at(c.world([50, -60, 40]));
+      if (a) c.click(a.x + 1, a.y);
+      if (p) c.hover(p.x + 4, p.y + 1);
+      c.v.renderNow();
+      c.v.setMeasureInferenceLock(true);
+      if (q) c.hover(q.x + 6, q.y + 3);
+    }),
+  ];
+  if (d === 'base')
+    out.push(
+      // 상자 앞 오른쪽 위 구석(120, 0, 40)에서, 엇갈린 선분 하나를 지나간 뒤 그와 나란한 자리(상자 앞 허공)
+      s(
+        'infer-parallel',
+        (c) => {
+          c.v.setMeasureMode(true);
+          c.v.setMeasureSnap({ inference: { axes: true, parallel: true } });
+          const a = c.at([120, 0, 40]);
+          const r = c.at([35, 25, 40.5]);
+          const e = [100 / Math.hypot(100, 60), 60 / Math.hypot(100, 60), 0];
+          const p = c.at([120 - e[0]! * 50, -e[1]! * 50, 40]);
+          if (a) c.click(a.x - 1, a.y + 1);
+          if (r) c.hover(r.x, r.y);
+          c.v.renderNow();
+          if (p) c.hover(p.x + 3, p.y + 2);
+        },
+        'cross',
+      ),
+    );
+  return out;
+}
+
 const SHOTS: Shot[] = [
   ...classicShots('base'),
   ...classicShots('off'),
@@ -466,6 +534,8 @@ const SHOTS: Shot[] = [
   ...itemLineShots('off'),
   ...limitShots('base'),
   ...limitShots('off'),
+  ...lockShots('base'),
+  ...lockShots('off'),
 ];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
@@ -718,7 +788,218 @@ function limitValues(d: 'base' | 'off'): ValueSet {
   };
 }
 
-const VALUES: ValueSet[] = [...valueSets('base'), ...valueSets('off'), walkValues, crossValues, limitValues('base'), limitValues('off')];
+/** 측정 결과 한 줄(0.10.0 방향·잠금까지 — 없는 판·없는 필드는 null) */
+const lockRow = (m: any): unknown[] => [
+  r10s(m.a),
+  r10s(m.b),
+  r10(m.distance),
+  m.snapA ?? null,
+  m.snapB ?? null,
+  m.axisB ?? null,
+  r10s(m.directionB),
+  m.lockedB ?? null,
+];
+
+/**
+ * 0.10.0 추론 잠금 값: 상자 구석 셋에서 (1) 앱 단추 꼴 축 잠금(setMeasureInferenceLock('x'·'y'·'z'))으로 여러 자리를 찍은 결과,
+ * (2) Z축 방향을 보다가 Shift를 누른 채 찍은 결과(작은 상자 구석·구 쪽·빈 곳), (3) 잠금을 푼 뒤 같은 자리. 공구 경로는 숨긴다
+ */
+function lockValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-lock`,
+    data: d,
+    needs: v0100lock,
+    run: (c) => {
+      const { v } = c;
+      const res: unknown[] = [];
+      const off = v.onMeasure((m: any) => m && res.push(lockRow(m)));
+      v.setGroupVisible('공구 경로', false);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ inference: { axes: true, lock: true } });
+      const targets = [
+        [156, -36, 12],
+        [186, -36, 12],
+        [0, 80, 40],
+        [190, 40, 70],
+        [60, 40, 0],
+        [-15, 100, 60],
+      ];
+      // 구석(누를 화소 어긋남은 상자 안쪽으로)과 Z축 방향 미리 보기 자리(다른 꼭짓점이 겹치지 않는 높이)
+      for (const { corner, dx, dy, up } of [
+        { corner: [120, 0, 40], dx: -1, dy: 1, up: 55 },
+        { corner: [0, 0, 40], dx: 1, dy: 1, up: 70 },
+        { corner: [120, 80, 40], dx: -1, dy: 1, up: 50 },
+      ]) {
+        const a = c.at(c.world(corner));
+        const z = c.at(c.world([corner[0]!, corner[1]!, corner[2]! + up]));
+        if (!a || !z) continue;
+        for (const axis of ['x', 'y', 'z', true] as const)
+          for (const t of targets) {
+            const q = c.at(c.world(t));
+            if (!q) continue;
+            v.clearMeasure();
+            c.click(a.x + dx, a.y + dy);
+            // true: 그 축 방향을 먼저 보고(미리 보기) 그 방향을 잠근다
+            if (axis === true) {
+              c.hover(z.x + 5, z.y - 2);
+              v.renderNow();
+            }
+            res.push(['lock', axis, v.measurePointCount, v.setMeasureInferenceLock(axis)]);
+            c.click(q.x + 1.5, q.y - 1);
+            res.push(['after', v.measureInferenceLock]);
+          }
+        // Shift: Z축 방향 미리 보기 → Shift를 누른 채 옮겨 찍기, 떼고 같은 자리
+        for (const t of targets) {
+          const q = c.at(c.world(t));
+          if (!q) continue;
+          for (const sh of [true, false]) {
+            v.clearMeasure();
+            c.click(a.x + dx, a.y + dy);
+            c.hover(z.x + 5, z.y - 2);
+            v.renderNow();
+            const h0 = v.measureHoverSnap;
+            c.hover(q.x + 1.5, q.y - 1, 'mouse', sh);
+            v.renderNow();
+            const h = v.measureHoverSnap;
+            res.push(['hover', sh, h0?.snap ?? null, h ? [r10s(h.point), h.snap, h.axis ?? null, h.locked ?? null, r10s(h.from), h.fromSnap ?? null] : null]);
+            c.click(q.x + 1.5, q.y - 1, 'mouse', sh);
+          }
+        }
+      }
+      // 잠근 채 측정 모드를 끄면 풀린다
+      v.clearMeasure();
+      const a = c.at(c.world([120, 0, 40]));
+      if (a) c.click(a.x - 1, a.y + 1);
+      res.push(['off', v.setMeasureInferenceLock('z'), v.measureInferenceLock?.axis ?? null]);
+      v.setMeasureMode(false);
+      res.push(['off', v.measureInferenceLock]);
+      off();
+      return res;
+    },
+  };
+}
+
+/**
+ * 0.10.0 나란함 값: 상자 위 구석 셋에서 엇갈린 선분 하나를 지나간 뒤 그와 나란한 여러 거리(앞·뒤)를 미리 보고 찍은 결과.
+ * 나란함만 켠 것과 축도 켠 것 둘 다
+ */
+const parallelValues: ValueSet = {
+  name: 'cross-measure-parallel',
+  data: 'cross',
+  needs: v0100lock,
+  run: (c) => {
+    const { v } = c;
+    const res: unknown[] = [];
+    const off = v.onMeasure((m: any) => m && res.push(lockRow(m)));
+    v.setGroupVisible('공구 경로', false);
+    v.setMeasureMode(true);
+    const L = Math.hypot(100, 60);
+    for (const axes of [true, false]) {
+      v.setMeasureSnap({ inference: { axes, parallel: true } });
+      for (const [ref, e] of [
+        [
+          [35, 25, 40.5],
+          [100 / L, 60 / L],
+        ],
+        [
+          [85, 25, 40.5],
+          [100 / L, -60 / L],
+        ],
+      ] as const)
+        for (const { corner, dx, dy } of [
+          { corner: [120, 0, 40], dx: -1, dy: 1 },
+          { corner: [0, 0, 40], dx: 2, dy: 0 },
+          { corner: [120, 80, 40], dx: -1, dy: 1 },
+        ])
+          for (const t of [-70, -40, 25, 45, 80]) {
+            const a = c.at(corner);
+            const r = c.at(ref);
+            const p = c.at([corner[0]! + e[0] * t, corner[1]! + e[1] * t, corner[2]!]);
+            if (!a || !r || !p) continue;
+            v.clearMeasure();
+            c.click(a.x + dx, a.y + dy);
+            c.hover(r.x, r.y);
+            v.renderNow();
+            c.hover(p.x + 3, p.y + 2);
+            v.renderNow();
+            const h = v.measureHoverSnap;
+            res.push(['hover', v.measurePointCount, h ? [r10s(h.point), h.snap, r10s(h.direction), h.edge ? h.edge.map(r10s) : null] : null]);
+            c.click(p.x + 3, p.y + 2);
+          }
+    }
+    off();
+    return res;
+  },
+};
+
+/**
+ * 기본 동작이 그대로인지(0.9.1과 견준다): 0.10.0 선택을 켜지 않고 Shift를 누른 채 미리 보고 찍어도 0.9.1과 같은 결과 —
+ * 축 붙잡기(상자 구석 셋 × 방향)와 추론 모두(true)의 격자 누르기
+ */
+const shiftOffValues: ValueSet = {
+  name: 'base-measure-shift-off',
+  data: 'base',
+  needs: v091axis,
+  run: (c) => {
+    const { v, w, h } = c;
+    const res: unknown[] = [];
+    const off = v.onMeasure((m: any) => res.push(m ? [r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null, m.axisA ?? null, m.axisB ?? null] : null));
+    v.setGroupVisible('공구 경로', false);
+    v.setMeasureMode(true);
+    v.setMeasureSnap({ inference: { axes: true } });
+    for (const corner of [
+      [120, 0, 40],
+      [0, 0, 40],
+    ])
+      for (const t of [[0, 0, 50], [30, 0, 0], [0, -25, 0], [36, -36, -28]]) {
+        const a = c.at(c.world(corner));
+        const z = c.at(c.world([corner[0]!, corner[1]!, corner[2]! + 50]));
+        const q = c.at(c.world(corner.map((x, i) => x + t[i]!)));
+        if (!a || !z || !q) continue;
+        c.click(a.x - 1, a.y + 1);
+        c.hover(z.x + 4, z.y - 2);
+        v.renderNow();
+        c.hover(q.x + 2, q.y - 1, 'mouse', true);
+        v.renderNow();
+        c.click(q.x + 2, q.y - 1, 'mouse', true);
+      }
+    v.setGroupVisible('공구 경로', true);
+    v.setMeasureSnap({ edges: true, inference: true });
+    for (let j = 0; j < 8; j++)
+      for (let i = 0; i < 9; i++) {
+        c.hover(((i + 0.5) * w) / 9, ((j + 0.5) * h) / 8, 'mouse', true);
+        v.renderNow();
+        c.click(((i + 0.5) * w) / 9, ((j + 0.5) * h) / 8, 'mouse', true);
+      }
+    off();
+    return res;
+  },
+};
+
+/** 0.10.0 추론 다섯 가지를 모두 켠 격자 누르기(엇갈린 선분 자료 — 나란함 기준 선분이 계속 바뀐다) */
+const crossAllValues: ValueSet = {
+  name: 'cross-measure-infer-all',
+  data: 'cross',
+  needs: v0100lock,
+  run: (c) => {
+    c.v.setMeasureSnap({ edges: true, inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true } });
+    return measureClicks(c, ['mouse']);
+  },
+};
+
+const VALUES: ValueSet[] = [
+  ...valueSets('base'),
+  ...valueSets('off'),
+  walkValues,
+  crossValues,
+  limitValues('base'),
+  limitValues('off'),
+  lockValues('base'),
+  lockValues('off'),
+  parallelValues,
+  shiftOffValues,
+  crossAllValues,
+];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
 function rangesDemo({ v }: Ctx): void {
@@ -790,7 +1071,7 @@ function makeCtx(d: Data): Ctx {
   const v = viewerOf(d);
   reset(v, d);
   const shift = d === 'off' ? OFFSET : [0, 0, 0];
-  const ptr = (type: string, x: number, y: number, pointerType: string, buttons: number): void => {
+  const ptr = (type: string, x: number, y: number, pointerType: string, buttons: number, shiftKey = false): void => {
     const r = v.canvas.getBoundingClientRect();
     v.canvas.dispatchEvent(
       new PointerEvent(type, {
@@ -800,6 +1081,7 @@ function makeCtx(d: Data): Ctx {
         pointerType,
         button: type === 'pointermove' ? -1 : 0,
         buttons,
+        shiftKey,
         bubbles: true,
         cancelable: true,
         isPrimary: true,
@@ -812,11 +1094,11 @@ function makeCtx(d: Data): Ctx {
     w: W,
     h: H,
     world: (p) => p.map((x, i) => x + shift[i]!),
-    click: (x, y, pt = 'mouse') => {
-      ptr('pointerdown', x, y, pt, 1);
-      ptr('pointerup', x, y, pt, 0);
+    click: (x, y, pt = 'mouse', sh = false) => {
+      ptr('pointerdown', x, y, pt, 1, sh);
+      ptr('pointerup', x, y, pt, 0, sh);
     },
-    hover: (x, y, pt = 'mouse') => ptr('pointermove', x, y, pt, 0),
+    hover: (x, y, pt = 'mouse', sh = false) => ptr('pointermove', x, y, pt, 0, sh),
     at: (p) => {
       if (typeof v.project !== 'function') return null;
       const r = v.project(p);
