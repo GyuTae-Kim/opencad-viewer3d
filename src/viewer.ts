@@ -73,7 +73,7 @@ import {
 import { segmentsById } from './segments';
 import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
+import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
@@ -555,7 +555,13 @@ export class Viewer3d {
   /** 그림자 깊이 그림 판(그림자를 바꾸는 상태가 바뀔 때마다 늘린다) */
   private shadowVer = 0;
   /** 보여 주기 선택(외곽선·숨은 점선) */
-  private renderOpts: { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } = { profiles: null, hiddenEdges: 0 };
+  private renderOpts: {
+    profiles: { width: number; color: Rgba | string | null } | null;
+    hiddenEdges: number;
+    hiddenEdgesShaded: boolean;
+    hiddenEdgeColor: Rgba | string | null;
+    edgeColor: Rgba | string | null;
+  } = { profiles: null, hiddenEdges: 0, hiddenEdgesShaded: false, hiddenEdgeColor: null, edgeColor: null };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
   private looks = new Map<string, LookState>();
   /** 묶음 행렬을 건 묶음 수(있으면 보이는 범위를 다시 모은다) */
@@ -933,17 +939,35 @@ export class Viewer3d {
    * 보여 주기 선택(0.7.0): profiles = 화면 공간 외곽선(실루엣, true 또는 { width: CSS 화소(기본 2), color } — 음영 계열 모드와
    * 와이어프레임(0.7.2)에서 그리고 X-ray에서는 그리지 않는다. 굵기가 장치 화소 1.5 미만이면(width 1 · 화소 비율 1) 1화소로(0.7.2)),
    * hiddenEdges = 숨은 선 모드에서 면 뒤 윤곽선을 흐린 점선으로(true = 0.35, 또는 불투명도). 주지 않은 것은 그대로, null이면 끈다.
-   * 점선은 그물 윤곽선(Mesh3d.edges)과 LineSet3d.hiddenEdges가 true인 선분 묶음에 그리고(0.7.1), 숨긴 구간은 빼고 묶음 불투명도를 곱한다
+   * 점선은 그물 윤곽선(Mesh3d.edges)과 LineSet3d.hiddenEdges가 true인 선분 묶음에 그리고(0.7.1), 숨긴 구간은 빼고 묶음 불투명도를 곱한다.
+   * 0.8.0: hiddenEdges에 { opacity, shaded, color }를 주면 shaded: true일 때 음영 계열 모드에서도 뒤 모서리를 점선으로(SketchUp "뒤 모서리" —
+   * 그물 윤곽선은 보이는 윤곽선을 그리는 음영+윤곽·단색·무늬 없음에서만, 음영에서는 LineSet3d.hiddenEdges 선분 묶음만), color = 점선 색(기본 테마 선 색).
+   * profiles.color·edgeColor에 'contrast'를 주면 바탕(setBackground 색 또는 테마 바탕)과 대비 3:1이 되는 색을 고른다.
+   * edgeColor = 그물 윤곽선(Mesh3d.edges)·삼각형 변 선 색: 색을 주면 선을 그리는 모든 모드에서 그 색(강조색은 그대로),
+   * 'contrast'면 와이어프레임·X-ray·숨은 선에서 모드 색(그물 색·테마 선 색)이 바탕과 3:1이 안 될 때만 테마 선 색(그것도 모자라면 검정·흰색)
    */
-  setRenderOptions(o: { profiles?: boolean | { width?: number; color?: Rgba | string } | null; hiddenEdges?: boolean | number | null }): void {
+  setRenderOptions(o: {
+    profiles?: boolean | { width?: number; color?: Rgba | string } | null;
+    hiddenEdges?: boolean | number | { opacity?: number; shaded?: boolean; color?: Rgba | string | null } | null;
+    edgeColor?: Rgba | string | null;
+  }): void {
     if ('profiles' in o) {
       const p = o.profiles;
       this.renderOpts.profiles = !p ? null : { width: Math.max(1, (typeof p === 'object' ? p.width : undefined) ?? 2), color: typeof p === 'object' ? (p.color ?? null) : null };
     }
     if ('hiddenEdges' in o) {
       const h = o.hiddenEdges;
-      this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+      if (h && typeof h === 'object') {
+        this.renderOpts.hiddenEdges = Math.min(1, Math.max(0, h.opacity ?? 0.35));
+        this.renderOpts.hiddenEdgesShaded = !!h.shaded;
+        this.renderOpts.hiddenEdgeColor = h.color ?? null;
+      } else {
+        this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+        this.renderOpts.hiddenEdgesShaded = false;
+        this.renderOpts.hiddenEdgeColor = null;
+      }
     }
+    if ('edgeColor' in o) this.renderOpts.edgeColor = o.edgeColor ?? null;
     this.invalidate();
   }
 
@@ -991,10 +1015,16 @@ export class Viewer3d {
     return this.fogOpt ? { ...this.fogOpt } : null;
   }
 
-  /** 지금 보여 주기 선택 */
-  get renderOptions(): { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } {
-    const p = this.renderOpts.profiles;
-    return { profiles: p ? { ...p } : null, hiddenEdges: this.renderOpts.hiddenEdges };
+  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도) */
+  get renderOptions(): {
+    profiles: { width: number; color: Rgba | string | null } | null;
+    hiddenEdges: number;
+    hiddenEdgesShaded: boolean;
+    hiddenEdgeColor: Rgba | string | null;
+    edgeColor: Rgba | string | null;
+  } {
+    const r = this.renderOpts;
+    return { profiles: r.profiles ? { ...r.profiles } : null, hiddenEdges: r.hiddenEdges, hiddenEdgesShaded: r.hiddenEdgesShaded, hiddenEdgeColor: r.hiddenEdgeColor, edgeColor: r.edgeColor };
   }
 
   /**
@@ -3188,10 +3218,29 @@ export class Viewer3d {
       profiles: this.renderOpts.profiles
         ? {
             width: this.renderOpts.profiles.width * dpr,
-            color: this.renderOpts.profiles.color === null ? this.colors.line : typeof this.renderOpts.profiles.color === 'string' ? this.rgba(this.renderOpts.profiles.color) : this.renderOpts.profiles.color,
+            color: this.optColor(this.renderOpts.profiles.color, colors.background),
           }
         : null,
+      ...this.lineColorState(colors.background),
     };
+  }
+
+  /** 선택 색(없으면 테마 선 색, 'contrast'면 바탕과 3:1이 되는 테마 선 색·검정·흰색) */
+  private optColor(c: Rgba | string | null, bg: Rgba): Rgba {
+    if (c === null) return this.colors.line;
+    if (c === 'contrast') return contrastLineColor(this.colors.line, bg, this.colors.line);
+    return typeof c === 'string' ? this.rgba(c) : c;
+  }
+
+  /** 0.8.0 선 색 선택을 그리기 상태로(쓰지 않으면 필드를 넣지 않는다 — 0.7.2와 같은 상태) */
+  private lineColorState(bg: Rgba): Pick<RenderState, 'hiddenEdgesShaded' | 'hiddenEdgeColor' | 'edgeColor' | 'edgeContrast'> {
+    const r = this.renderOpts;
+    const o: Pick<RenderState, 'hiddenEdgesShaded' | 'hiddenEdgeColor' | 'edgeColor' | 'edgeContrast'> = {};
+    if (r.hiddenEdgesShaded) o.hiddenEdgesShaded = true;
+    if (r.hiddenEdgeColor !== null) o.hiddenEdgeColor = this.optColor(r.hiddenEdgeColor, bg);
+    if (r.edgeColor === 'contrast') o.edgeContrast = { fallback: this.colors.line };
+    else if (r.edgeColor !== null) o.edgeColor = this.optColor(r.edgeColor, bg);
+    return o;
   }
 
   private drawCube(): void {

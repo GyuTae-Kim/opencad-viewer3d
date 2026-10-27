@@ -130,3 +130,38 @@ export function parseColor(s: string): Rgba | null {
   }
   return null;
 }
+
+/** 상대 휘도(WCAG 2, sRGB 0~1 값 — 알파는 보지 않는다) */
+export function relativeLuminance(c: Rgba): number {
+  const ch = (v: number): number => {
+    const x = Math.min(1, Math.max(0, v));
+    return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2]);
+}
+
+/** 색 c를 알파대로 바탕 bg 위에 얹은 색(불투명) */
+export function overBackground(c: Rgba, bg: Rgba): Rgba {
+  const a = Math.min(1, Math.max(0, c[3]));
+  return [c[0] * a + bg[0] * (1 - a), c[1] * a + bg[1] * (1 - a), c[2] * a + bg[2] * (1 - a), 1];
+}
+
+/** 대비 비(WCAG 2, 1~21). fg는 알파대로 bg 위에 얹어 잰다 */
+export function contrastRatio(fg: Rgba, bg: Rgba): number {
+  const a = relativeLuminance(overBackground(fg, bg)), b = relativeLuminance(bg);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/** 선 대비 기준(WCAG 그래픽 요소 3:1) */
+export const LINE_CONTRAST_MIN = 3;
+
+/**
+ * 바탕 위에서 보일 선 색(0.8.0 — 외곽선·윤곽선 'contrast'): color가 바탕과 min:1 이상 대비하면 그대로, 아니면 fallback(보통 테마 선 색)이,
+ * 그것도 모자라면 검정·흰색 가운데 바탕과 더 대비하는 것(불투명)
+ */
+export function contrastLineColor(color: Rgba, bg: Rgba, fallback: Rgba, min = LINE_CONTRAST_MIN): Rgba {
+  if (contrastRatio(color, bg) >= min) return color;
+  if (contrastRatio(fallback, bg) >= min) return fallback;
+  const black: Rgba = [0, 0, 0, 1], white: Rgba = [1, 1, 1, 1];
+  return contrastRatio(black, bg) >= contrastRatio(white, bg) ? black : white;
+}

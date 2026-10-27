@@ -41,7 +41,7 @@ export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './text
 export type { MarkerKind } from './marker';
 export type { GridZ } from './grid';
 export type { Viewer3dTheme } from './theme';
-export { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS } from './theme';
+export { DARK_THEME, LIGHT_THEME, LINE_CONTRAST_MIN, THEME_CSS_VARS, contrastLineColor, contrastRatio } from './theme';
 export { sceneBounds } from './bounds';
 export {
   DOUBLE_CLICK_PX,

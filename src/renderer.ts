@@ -20,6 +20,7 @@ import { type V3, cross, hasOrigin, mat4Mul, modelMatrix, normalMatrix, normaliz
 import { boxCenter, boxIsEmpty, boxSphere, meshBounds, transformBox, unionBox } from './bounds';
 import { DEPTH_FS, DEPTH_VS, FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, SKY_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
+import { contrastLineColor } from './theme';
 import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
 
@@ -59,6 +60,38 @@ export function isShadedLike(mode: RenderMode): boolean {
  */
 export function drawsProfiles(mode: RenderMode): boolean {
   return mode === 'wireframe' || isShadedLike(mode);
+}
+
+/**
+ * 숨은 점선(뒤 모서리)을 그리는 것(0.8.0): 숨은 선 모드는 0.7.2처럼 그물 윤곽선과 LineSet3d.hiddenEdges 선분 묶음 모두.
+ * shaded(RenderState.hiddenEdgesShaded)면 음영 계열에서도 — 그물 윤곽선은 보이는 윤곽선을 그리는 모드(음영+윤곽·단색·무늬 없음)에서만,
+ * 음영은 선분 묶음만. 와이어프레임·X-ray는 면이 가리지 않으므로 없다
+ */
+export function drawsBackEdges(mode: RenderMode, shaded: boolean): { meshes: boolean; lines: boolean } {
+  if (mode === 'hiddenLine') return { meshes: true, lines: true };
+  if (!shaded || !isShadedLike(mode)) return { meshes: false, lines: false };
+  return { meshes: mode !== 'shaded', lines: true };
+}
+
+/**
+ * 그물 윤곽선·삼각형 변 선 색(0.8.0 선택 포함). 강조면 강조색. 없으면 0.7.2 모드 색: 숨은 선 = 선 색, 음영+윤곽·단색·무늬 없음 = 윤곽선 색,
+ * 와이어프레임·X-ray = 그물 색(X-ray 알파 0.9). fixed면 그 색(X-ray는 알파에 0.9), contrast(대신할 선 색)면 바탕을 보고 고르는 모드
+ * (와이어프레임·X-ray·숨은 선)에서 바탕과 3:1이 안 될 때 contrastLineColor로 바꾼다
+ */
+export function meshEdgeColor(
+  mode: RenderMode,
+  meshColor: Rgba,
+  colors: Pick<RenderColors, 'line' | 'edge' | 'background' | 'highlight'>,
+  hi: boolean,
+  opt: { fixed?: Rgba | null; contrast?: Rgba | null } = {},
+): Rgba {
+  if (hi) return colors.highlight;
+  let c: Rgba =
+    mode === 'hiddenLine' ? colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? colors.edge : [meshColor[0], meshColor[1], meshColor[2], mode === 'xray' ? 0.9 : 1];
+  const f = opt.fixed;
+  if (f) c = mode === 'xray' ? [f[0], f[1], f[2], f[3] * 0.9] : f;
+  if (opt.contrast && (mode === 'hiddenLine' || mode === 'wireframe' || mode === 'xray')) c = contrastLineColor(c, colors.background, opt.contrast);
+  return c;
 }
 
 /**
@@ -178,6 +211,23 @@ export interface RenderState {
   /** 숨은 선 모드에서 면 뒤의 윤곽선을 이 불투명도의 점선으로(0·없으면 안 그림) */
   hiddenEdges?: number;
   /**
+   * 0.8.0: 숨은 점선을 음영 계열 모드(음영·음영+윤곽·단색·무늬 없음)에서도 그린다(SketchUp "뒤 모서리"). 그물 윤곽선은 보이는 윤곽선을 그리는
+   * 모드에서만(음영은 LineSet3d.hiddenEdges 선분 묶음만). 없으면 숨은 선 모드에서만(0.7.2)
+   */
+  hiddenEdgesShaded?: boolean;
+  /** 0.8.0: 숨은 점선 색(없으면 colors.line) */
+  hiddenEdgeColor?: Rgba | null;
+  /**
+   * 0.8.0: 그물 윤곽선(Mesh3d.edges)과 삼각형 변 선 색. 주면 선을 그리는 모든 모드에서 이 색(강조색은 그대로, X-ray는 알파에 0.9를 곱한다).
+   * 없으면 모드 색(와이어프레임·X-ray = 그물 색, 숨은 선 = colors.line, 음영+윤곽·단색·무늬 없음 = colors.edge)
+   */
+  edgeColor?: Rgba | null;
+  /**
+   * 0.8.0: 바탕을 보고 선 색을 고르는 모드(와이어프레임·X-ray·숨은 선)에서 윤곽선·삼각형 변 색이 바탕(colors.background)과 대비 3:1이 안 되면
+   * fallback(테마 선 색 — 그것도 모자라면 검정·흰색)으로 바꾼다. edgeColor보다 뒤에 따진다
+   */
+  edgeContrast?: { fallback: Rgba } | null;
+  /**
    * 화면 공간 외곽선(실루엣): 굵기(장치 화소)·색. 음영 계열 모드와 와이어프레임(0.7.2)에서(drawsProfiles).
    * 굵기 1.5 미만은 끊긴 곳 앞쪽 1화소만(0.7.2 — 0.7.1까지는 2화소로 그렸다), 그 이상은 0.7.1 그대로 양쪽 굵기/2씩
    */
@@ -224,6 +274,9 @@ interface TexRec {
   state: 'queued' | 'decoding' | 'ready' | 'failed';
   bytes: number;
 }
+
+/** 음영 계열 뒤 모서리 점선(0.8.0)을 눈 쪽으로 당기는 깊이 치우침(클립 z에서 w에 곱한다 — 반올림 차이만 덮는 크기) */
+const BACK_EDGE_BIAS = 2e-6;
 
 /** 끄는 동안 이보다 많은 선분 묶음은 gl.LINES(1화소)로 그린다 */
 export const FAST_LINES_WHILE_MOVING = 400_000;
@@ -1401,7 +1454,7 @@ export class Renderer3d {
     list: DrawList,
     lo: number,
     hi: number,
-    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean },
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean; capz?: boolean },
     st: RenderState,
     stats: RenderStats,
   ): void {
@@ -1832,11 +1885,20 @@ export class Renderer3d {
     // 2) 윤곽선·와이어프레임
     if (mode !== 'shaded') {
       const edgeCol = st.colors.edge;
+      // 0.8.0 선 색 선택(없으면 0.7.2 그대로 — meshEdgeColor 시험이 0.7.2 식과 견준다). 대비 계산은 같은 색끼리 한 번만
+      const lineOpt = st.edgeColor || st.edgeContrast ? { fixed: st.edgeColor ?? null, contrast: st.edgeContrast?.fallback ?? null } : null;
+      const lineCache = new Map<string, Rgba>();
       gl.enable(gl.BLEND);
       for (const r of visibleMeshes) {
         const hi = st.highlight.has(r.src.id);
         const c = colOf(r);
-        const col: Rgba = hi ? hiTint : flat ? st.colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
+        let col: Rgba;
+        if (!lineOpt) col = hi ? hiTint : flat ? st.colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
+        else {
+          const key = `${hi ? 1 : 0}${c.join()}`;
+          col = lineCache.get(key) ?? meshEdgeColor(mode, c, st.colors, hi, lineOpt);
+          lineCache.set(key, col);
+        }
         const model = mm(r);
         if (r.edges) {
           const ep = st.parts?.(r.src.id);
@@ -1904,13 +1966,19 @@ export class Renderer3d {
 
     // 2b) 숨은 선 모드: 면 뒤 윤곽선을 흐린 점선으로(깊이 비교를 뒤집어). 숨긴 구간(setHiddenRanges)은 빼고 묶음 불투명도를 곱한다.
     // 모형 모서리 선분 묶음(LineSet3d.hiddenEdges)도 그리기 범위 안쪽을 함께(선분 묶음은 아직 깊이에 없어 면만 가린다)
-    if (flat && st.hiddenEdges && st.hiddenEdges > 0) {
+    // 0.8.0: hiddenEdgesShaded면 음영 계열 모드에서도(그물 윤곽선은 보이는 윤곽선을 그리는 모드에서만 — 음영은 선분 묶음만)
+    const backEdges = drawsBackEdges(mode, !!st.hiddenEdgesShaded);
+    if ((backEdges.meshes || backEdges.lines) && st.hiddenEdges && st.hiddenEdges > 0) {
       gl.enable(gl.BLEND);
       gl.depthFunc(gl.GREATER);
       gl.depthMask(false);
+      const dashCol = st.hiddenEdgeColor ?? st.colors.line;
+      const capz = !flat || !!st.hiddenEdgeColor;
       /** 선분 레코드 하나를 [0, count) 안에서 숨은 점선으로(구간이 있으면 보통·강조 구간 모두, 숨긴 구간은 빼고) */
       const dashHidden = (rec: LineRec, id: string, model: ArrayLike<number> | undefined, count: number, parts: readonly RangePart[] | null | undefined, ver: number, positions: Float32Array, colors: Float32Array | undefined): void => {
-        const o = { color: st.colors.line, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges! * alphaOf(id), clip: clipOf(model), clips: clipsOf(id, model) };
+        // 음영 계열·점선 색을 준 때(0.8.0)는 끝 마개 깊이를 맞춘 변종(CAPZ)에 눈 쪽으로 아주 조금 당겨 그린다: 보이는 윤곽선(얇은 선) 위에 점선이 비치지 않게.
+        // 숨은 선 모드 기본 색은 0.7.2 그대로(선 색과 점선 색이 같아 겹쳐도 보이지 않는다)
+        const o = { color: dashCol, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges! * alphaOf(id), clip: clipOf(model), clips: clipsOf(id, model), ...(capz ? { bias: BACK_EDGE_BIAS, capz: true } : {}) };
         if (!parts) {
           this.drawLines(f, rec, model, { ...o, first: 0, count }, st, stats);
           return;
@@ -1919,13 +1987,13 @@ export class Renderer3d {
         for (const hi of [false, true]) this.drawLineList(f, rec, model, this.lineList(rec, c, parts, hi, positions, colors), 0, count, o, st, stats);
       };
       for (const r of visibleMeshes) {
-        if (!r.edges) continue;
+        if (!r.edges || !backEdges.meshes) continue;
         const ep = st.parts?.(r.src.id);
         dashHidden(r.edges, r.src.id, mm(r), r.edges.n, ep?.edges, ep?.ver ?? 0, r.src.edges!, undefined);
       }
       for (const r of this.lines) {
         const l = r.src;
-        if (l.hiddenEdges !== true || !vis(l.id, l.group)) continue;
+        if (!backEdges.lines || l.hiddenEdges !== true || !vis(l.id, l.group)) continue;
         const range = st.ranges.get(l.id);
         const count = range ? Math.max(0, Math.min(r.n, Math.floor(range.count))) : r.n;
         const p = st.parts?.(l.id);
@@ -2346,7 +2414,7 @@ export class Renderer3d {
     f: ViewFrame,
     r: LineRec,
     matrix: ArrayLike<number> | undefined,
-    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean },
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean; capz?: boolean },
     st: RenderState,
     stats: RenderStats,
   ): void {
@@ -2361,7 +2429,13 @@ export class Renderer3d {
     const clip = o.clip ?? null;
     const fog = !o.noFog && st.fog ? st.fog : null;
     if (wide) {
-      const p = fog ? this.variant('wide', ['FOG', ...(clips ? ['CLIPN'] : [])]) : clips ? this.variant('wide', ['CLIPN']) : this.wideP;
+      const p = o.capz
+        ? this.variant('wide', ['CAPZ', ...(fog ? ['FOG'] : []), ...(clips ? ['CLIPN'] : [])])
+        : fog
+          ? this.variant('wide', ['FOG', ...(clips ? ['CLIPN'] : [])])
+          : clips
+            ? this.variant('wide', ['CLIPN'])
+            : this.wideP;
       gl.useProgram(p.p);
       if (clips) this.setClips(p, clips);
       if (fog) this.setLineFog(p, f, matrix, fog);
