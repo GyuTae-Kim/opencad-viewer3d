@@ -95,6 +95,16 @@ export function meshEdgeColor(
 }
 
 /**
+ * 숨은 점선(뒤 모서리) 한 묶음의 선 그리기 선택(0.9.0): 1화소 점선, 묶음 불투명도를 곱한 alpha.
+ * 늘 두꺼운 선 변종 CAPZ(끝 마개를 늘릴 때 깊이도 선을 따라 늘리고 기울기만큼 눈 쪽으로)에 BACK_EDGE_BIAS만큼 당겨 그린다 —
+ * 보이는 모서리 위에 점선이 겹치지 않게. 0.8.0은 숨은 선 모드 기본 색(점선 색을 주지 않음)에서만 기본 변종이라
+ * 마개 깊이가 어긋나 보이는 모서리 위에도 점선이 조금 겹쳤다(0.7.2부터)
+ */
+export function backEdgeDash(color: Rgba, alpha: number): { color: Rgba; vcol: false; width: 1; dashed: true; alpha: number; bias: number; capz: true } {
+  return { color, vcol: false, width: 1, dashed: true, alpha, bias: BACK_EDGE_BIAS, capz: true };
+}
+
+/**
  * 외곽선 굵기(장치 화소)를 1화소로 그리는지(0.7.2): 1.5 미만이면 끊긴 곳 앞쪽 화소만 칠한다.
  * 그 이상은 0.7.1 그대로 끊긴 곳 양쪽을 굵기/2(최소 1)씩 — 가장 가는 것이 2화소
  */
@@ -1973,12 +1983,10 @@ export class Renderer3d {
       gl.depthFunc(gl.GREATER);
       gl.depthMask(false);
       const dashCol = st.hiddenEdgeColor ?? st.colors.line;
-      const capz = !flat || !!st.hiddenEdgeColor;
       /** 선분 레코드 하나를 [0, count) 안에서 숨은 점선으로(구간이 있으면 보통·강조 구간 모두, 숨긴 구간은 빼고) */
       const dashHidden = (rec: LineRec, id: string, model: ArrayLike<number> | undefined, count: number, parts: readonly RangePart[] | null | undefined, ver: number, positions: Float32Array, colors: Float32Array | undefined): void => {
-        // 음영 계열·점선 색을 준 때(0.8.0)는 끝 마개 깊이를 맞춘 변종(CAPZ)에 눈 쪽으로 아주 조금 당겨 그린다: 보이는 윤곽선(얇은 선) 위에 점선이 비치지 않게.
-        // 숨은 선 모드 기본 색은 0.7.2 그대로(선 색과 점선 색이 같아 겹쳐도 보이지 않는다)
-        const o = { color: dashCol, vcol: false, width: 1, dashed: true, alpha: st.hiddenEdges! * alphaOf(id), clip: clipOf(model), clips: clipsOf(id, model), ...(capz ? { bias: BACK_EDGE_BIAS, capz: true } : {}) };
+        // 끝 마개 깊이를 맞춘 변종(CAPZ)에 눈 쪽으로 아주 조금 당겨 그린다: 보이는 윤곽선(얇은 선) 위에 점선이 비치지 않게(0.9.0부터 숨은 선 모드 기본 색도)
+        const o = { ...backEdgeDash(dashCol, st.hiddenEdges! * alphaOf(id)), clip: clipOf(model), clips: clipsOf(id, model) };
         if (!parts) {
           this.drawLines(f, rec, model, { ...o, first: 0, count }, st, stats);
           return;
