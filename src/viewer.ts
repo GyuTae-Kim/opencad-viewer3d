@@ -333,6 +333,10 @@ export interface ItemLookState {
   color?: Rgba;
   /** 세계에 더 건 행렬(열 우선 4×4) */
   matrix?: Float64Array;
+  /** 0.9.0: 윤곽선 색(setItemEdgeColor) */
+  edgeColor?: Rgba;
+  /** 0.9.0: 외곽선 색(setItemProfileColor) */
+  profileColor?: Rgba;
 }
 
 interface LookState {
@@ -340,6 +344,8 @@ interface LookState {
   pickable?: boolean;
   color?: Rgba;
   matrix?: Float64Array;
+  edgeColor?: Rgba;
+  profileColor?: Rgba;
 }
 
 /** setLighting 선택 */
@@ -2105,6 +2111,32 @@ export class Viewer3d {
     this.setLook(id, l, true);
   }
 
+  /**
+   * 그물 윤곽선 색(0.9.0): 그 그물의 윤곽선(Mesh3d.edges)·삼각형 변(와이어프레임·숨은 선)을 이 색으로 — 재질별·묶음별 모서리 색.
+   * 전역 setRenderOptions({ edgeColor })보다 먼저 쓰고(강조색이 가장 먼저, X-ray는 알파에 0.9), edgeColor: 'contrast'면 이 색에도 바탕 대비를 따진다.
+   * CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림. 숨은 점선(뒤 모서리) 색은 바꾸지 않는다
+   */
+  setItemEdgeColor(id: string, color: Rgba | string | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (color === null) delete l.edgeColor;
+    else l.edgeColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
+    this.setLook(id, l, false);
+  }
+
+  /**
+   * 그물 외곽선 색(0.9.0): 외곽선(setRenderOptions({ profiles }))이 이 그물이 앞에 있는 곳에서 이 색 — 그물이 뒤 그물·바탕과 맞닿은 테두리와
+   * 구멍 테두리. 앞 그물이 뒤 그물 위에 겹친 테두리는 앞 그물의 색이다. 주지 않은 그물은 profiles.color.
+   * 한 그물이라도 색을 주면 외곽선 깊이 그림과 함께 화면 크기 색 그림(RGBA8) 한 장을 더 그린다(모두 되돌리면 놓는다). null이면 되돌림
+   */
+  setItemProfileColor(id: string, color: Rgba | string | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (color === null) delete l.profileColor;
+    else l.profileColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
+    this.setLook(id, l, false);
+  }
+
   /** 묶음 겉모습(바꾼 것만, 없으면 null) */
   itemLook(id: string): ItemLookState | null {
     const l = this.looks.get(id);
@@ -2113,6 +2145,8 @@ export class Viewer3d {
     if (l.alpha !== undefined) out.opacity = l.alpha;
     if (l.color) out.color = l.color;
     if (l.matrix) out.matrix = new Float64Array(l.matrix);
+    if (l.edgeColor) out.edgeColor = l.edgeColor;
+    if (l.profileColor) out.profileColor = l.profileColor;
     return out;
   }
 
@@ -2126,7 +2160,7 @@ export class Viewer3d {
 
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
-    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix) this.looks.delete(id);
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor) this.looks.delete(id);
     else this.looks.set(id, l);
     this.lookChanged(moved);
   }

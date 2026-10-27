@@ -95,6 +95,23 @@ export function meshEdgeColor(
 }
 
 /**
+ * 그물 하나의 윤곽선·삼각형 변 색(0.9.0): 선 색 선택(lineOpt — 전역 edgeColor·대비)도 그물 색(item — setItemEdgeColor)도 없으면
+ * 0.7.2 모드 색 그대로(meshEdgeColor 기본과 같은 값). 그물 색이 있으면 그 그물에서는 전역 edgeColor 자리에 쓰고 대비 선택은 그대로 따진다
+ */
+export function edgeLineColor(
+  mode: RenderMode,
+  meshColor: Rgba,
+  colors: Pick<RenderColors, 'line' | 'edge' | 'background' | 'highlight'>,
+  hi: boolean,
+  lineOpt: { fixed?: Rgba | null; contrast?: Rgba | null } | null,
+  item?: Rgba | null,
+): Rgba {
+  if (!lineOpt && !item)
+    return hi ? colors.highlight : mode === 'hiddenLine' ? colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? colors.edge : [meshColor[0], meshColor[1], meshColor[2], mode === 'xray' ? 0.9 : 1];
+  return meshEdgeColor(mode, meshColor, colors, hi, item ? { fixed: item, contrast: lineOpt?.contrast ?? null } : lineOpt!);
+}
+
+/**
  * 숨은 점선(뒤 모서리) 한 묶음의 선 그리기 선택(0.9.0): 1화소 점선, 묶음 불투명도를 곱한 alpha.
  * 늘 두꺼운 선 변종 CAPZ(끝 마개를 늘릴 때 깊이도 선을 따라 늘리고 기울기만큼 눈 쪽으로)에 BACK_EDGE_BIAS만큼 당겨 그린다 —
  * 보이는 모서리 위에 점선이 겹치지 않게. 0.8.0은 숨은 선 모드 기본 색(점선 색을 주지 않음)에서만 기본 변종이라
@@ -167,6 +184,10 @@ export interface ItemLook {
   color?: Rgba;
   /** 세계에 더 거는 4×4 행렬(열 우선): 세계' = matrix · 세계 */
   matrix?: ArrayLike<number>;
+  /** 0.9.0: 그물 윤곽선(Mesh3d.edges)·삼각형 변 색(강조색이 먼저, 전역 edgeColor보다 먼저 — X-ray는 알파에 0.9) */
+  edgeColor?: Rgba;
+  /** 0.9.0: 외곽선 색(전역 profiles.color 대신, 이 그물이 앞에 있는 외곽선) */
+  profileColor?: Rgba;
 }
 
 /** 여러 단면 그리기 상태(0.7.0 — 평면이 둘 이상이거나 범위를 정한 평면이 있을 때). 있으면 section 대신 쓴다 */
@@ -426,6 +447,8 @@ export class Renderer3d {
   private clipBuf = new Float32Array(MAX_SECTION_PLANES * 4);
   /** 외곽선: 깊이 그림(그물만)과 그 그리기 버퍼, 화면 전체 삼각형 프로그램 */
   private profTex: { tex: WebGLTexture; fb: WebGLFramebuffer; w: number; h: number } | null = null;
+  /** 그물마다 외곽선 색을 쓸 때만(0.9.0): 외곽선 깊이 그림(profTex)과 함께 묶은 색 그림(RGBA8) */
+  private profCol: { tex: WebGLTexture; fb: WebGLFramebuffer } | null = null;
   private profileP: Prog | null = null;
   private skyP: Prog | null = null;
   /** 해 그림자 깊이 그림과 그때의 빛 행렬(판이 같으면 다시 쓴다) */
@@ -534,6 +557,7 @@ export class Renderer3d {
     this.meshTC = null;
     this.variants.clear();
     this.profTex = null;
+    this.profCol = null;
     this.profileP = null;
     this.skyP = null;
     this.shadowMap = null;
@@ -729,7 +753,49 @@ export class Renderer3d {
     return fb;
   }
 
+  /**
+   * 그물마다 외곽선 색(0.9.0): 외곽선 깊이 그림과 같은 크기의 색 그림(RGBA8)을 깊이 그림과 함께 묶은 버퍼. 만들지 못하면 null.
+   * 그물마다 다른 색을 쓸 때만 만든다(화면 크기 RGBA8 한 장 — 휴대폰 3배 화소면 10 MB 남짓)
+   */
+  private profileColorTarget(w: number, h: number): WebGLFramebuffer | null {
+    const gl = this.gl;
+    if (!this.profileTarget(w, h)) return null;
+    if (this.profCol) return this.profCol.fb;
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.profTex!.tex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
+    if (!ok) {
+      gl.deleteFramebuffer(fb);
+      gl.deleteTexture(tex);
+      return null;
+    }
+    this.profCol = { tex, fb };
+    return fb;
+  }
+
+  private dropProfileColor(): void {
+    const c = this.profCol;
+    if (!c) return;
+    this.gl.deleteFramebuffer(c.fb);
+    this.gl.deleteTexture(c.tex);
+    this.profCol = null;
+  }
+
   private dropProfile(): void {
+    this.dropProfileColor();
     const t = this.profTex;
     if (!t) return;
     this.gl.deleteFramebuffer(t.fb);
@@ -1902,11 +1968,13 @@ export class Renderer3d {
       for (const r of visibleMeshes) {
         const hi = st.highlight.has(r.src.id);
         const c = colOf(r);
+        // 0.9.0 그물마다 윤곽선 색(setItemEdgeColor): 그 그물에서는 전역 edgeColor 자리에(대비 선택은 그대로)
+        const ic = lookOf(r.src.id)?.edgeColor;
         let col: Rgba;
-        if (!lineOpt) col = hi ? hiTint : flat ? st.colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
+        if (!lineOpt && !ic) col = hi ? hiTint : flat ? st.colors.line : mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture' ? edgeCol : [c[0], c[1], c[2], mode === 'xray' ? 0.9 : 1];
         else {
-          const key = `${hi ? 1 : 0}${c.join()}`;
-          col = lineCache.get(key) ?? meshEdgeColor(mode, c, st.colors, hi, lineOpt);
+          const key = `${hi ? 1 : 0}${c.join()}|${ic ? ic.join() : ''}`;
+          col = lineCache.get(key) ?? edgeLineColor(mode, c, st.colors, hi, lineOpt, ic);
           lineCache.set(key, col);
         }
         const model = mm(r);
@@ -2016,37 +2084,76 @@ export class Renderer3d {
     // 와이어프레임(0.7.2)도 같은 길: 이 깊이 그림은 자기 버퍼라 기본 깊이(선만 있다)와 상관없다
     if (st.profiles && drawsProfiles(mode) && visibleMeshes.length) {
       const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
-      const fb = this.profileTarget(devW, devH);
+      // 0.9.0 그물마다 외곽선 색(setItemProfileColor)이 있는 불투명 그물이 보일 때만 색 그림을 함께 그린다(없으면 0.8.0 길 그대로)
+      const perItem = visibleMeshes.some((r) => !!lookOf(r.src.id)?.profileColor && !transOf(r));
+      if (!perItem && this.profCol) this.dropProfileColor();
+      const fb = perItem ? this.profileColorTarget(devW, devH) : this.profileTarget(devW, devH);
       if (fb) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
         gl.viewport(0, 0, devW, devH);
         gl.clearDepth(1);
         gl.depthMask(true);
-        gl.clear(gl.DEPTH_BUFFER_BIT);
-        gl.colorMask(false, false, false, false);
         const dc = stats.drawCalls, tr = stats.triangles;
-        meshUse(sceneMeshProg());
-        for (const r of visibleMeshes) {
-          if (transOf(r)) continue;
-          const p = progFor(r);
-          if (p !== cur) meshUse(p);
-          meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
+        const pc = st.profiles.color;
+        if (perItem) {
+          // 깊이와 함께 그물마다 외곽선 색을 쓴다(깊이만 그리는 프로그램 PCOL 변종 — 모형·시점·투영은 그물 그리기와 같은 순서로 합친다)
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+          const dp = this.variant('depth', ['PCOL', ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : [])]);
+          gl.useProgram(dp.p);
+          for (const r of visibleMeshes) {
+            if (transOf(r)) continue;
+            const model = mm(r);
+            const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
+            this.m4a.set(model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj);
+            gl.uniformMatrix4fv(this.loc(dp, 'u_mvp'), false, this.m4a);
+            if (sec) {
+              const k = clipOf(model)!;
+              gl.uniform4f(this.loc(dp, 'u_clip'), k[0], k[1], k[2], k[3]);
+            }
+            if (multi) this.setClips(dp, clipsOf(r.src.id, model)!);
+            const ic = lookOf(r.src.id)?.profileColor ?? pc;
+            gl.uniform4f(this.loc(dp, 'u_pcol'), ic[0], ic[1], ic[2], ic[3]);
+            if (r.src.doubleSided === false) gl.enable(gl.CULL_FACE);
+            else gl.disable(gl.CULL_FACE);
+            const L = meshLists(r);
+            if (!L) this.drawMeshGeometry(r, null);
+            else for (const l of L) this.drawMeshGeometry(r, l);
+          }
+          gl.disable(gl.CULL_FACE);
+          if (st.transparent) gl.clearColor(0, 0, 0, 0);
+          else gl.clearColor(bg[0], bg[1], bg[2], 1);
+        } else {
+          gl.clear(gl.DEPTH_BUFFER_BIT);
+          gl.colorMask(false, false, false, false);
+          meshUse(sceneMeshProg());
+          for (const r of visibleMeshes) {
+            if (transOf(r)) continue;
+            const p = progFor(r);
+            if (p !== cur) meshUse(p);
+            meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
+          }
+          gl.disable(gl.CULL_FACE);
         }
-        gl.disable(gl.CULL_FACE);
         stats.drawCalls = dc;
         stats.triangles = tr;
         gl.colorMask(true, true, true, true);
         gl.bindFramebuffer(gl.FRAMEBUFFER, target);
         gl.viewport(0, 0, devW, devH);
-        // 굵기 1.5 미만(0.7.2): 앞쪽 1화소 변종. 그 밖에는 0.7.1 프로그램 그대로
-        const pp = profileOnePixel(st.profiles.width) ? this.variant('profile', ['ONE']) : (this.profileP ??= this.program(FULL_VS, PROFILE_FS));
+        // 굵기 1.5 미만(0.7.2): 앞쪽 1화소 변종. 그 밖에는 0.7.1 프로그램 그대로(그물마다 색이면 PCOL 변종)
+        const one = profileOnePixel(st.profiles.width);
+        const pp = perItem ? this.variant('profile', one ? ['ONE', 'PCOL'] : ['PCOL']) : one ? this.variant('profile', ['ONE']) : (this.profileP ??= this.program(FULL_VS, PROFILE_FS));
         gl.useProgram(pp.p);
+        if (perItem) {
+          gl.activeTexture(gl.TEXTURE4);
+          gl.bindTexture(gl.TEXTURE_2D, this.profCol!.tex);
+          gl.uniform1i(this.loc(pp, 'u_pcol'), 4);
+        }
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, this.profTex!.tex);
         gl.uniform1i(this.loc(pp, 'u_depth'), 1);
         gl.uniform2f(this.loc(pp, 'u_texel'), 1 / devW, 1 / devH);
         gl.uniform1f(this.loc(pp, 'u_r'), Math.max(1, st.profiles.width / 2));
-        const pc = st.profiles.color;
         gl.uniform4f(this.loc(pp, 'u_color'), pc[0], pc[1], pc[2], pc[3]);
         gl.uniform1f(this.loc(pp, 'u_ortho'), ortho);
         gl.disable(gl.DEPTH_TEST);
@@ -2059,6 +2166,10 @@ export class Renderer3d {
         gl.depthMask(true);
         gl.enable(gl.DEPTH_TEST);
         gl.bindTexture(gl.TEXTURE_2D, null);
+        if (perItem) {
+          gl.activeTexture(gl.TEXTURE4);
+          gl.bindTexture(gl.TEXTURE_2D, null);
+        }
         gl.activeTexture(gl.TEXTURE0);
         lastTex = null;
       }
