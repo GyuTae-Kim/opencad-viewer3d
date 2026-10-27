@@ -8,6 +8,7 @@
  *   &tex=1           무늬 상자·원근 무늬 판을 더한다(바둑판 BMP, 맨 위 왼쪽 칸이 빨강)
  * 0.7.0 단추: 숨은 선·단색·무늬 없음 모드, 외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기
  * 0.8.0 단추: 붙잡기+(가운데 점·앱 중심 점), 음영 뒤 모서리, 대비 선 색, 중력·부딪힘(걷기)
+ * 0.9.0 단추: 추론 붙잡기(붙잡기+에 교차점·수직 발·축 방향까지), 그물 선 색(상자·구의 윤곽선·외곽선 색)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -141,6 +142,18 @@ toggle(
   (v) => viewer.setMeasureSnap(v ? { midpoints: true, edges: true, points: demoSnapPoints() } : null),
   '측정 점을 선분·윤곽선 가운데 점과 앱 점(중심)에도 붙잡기',
 );
+// 0.9.0: 추론 붙잡기(교차점·첫 점에서 내린 수직 발·첫 점의 X·Y·Z 축 방향), 그물마다 윤곽선·외곽선 색
+toggle(
+  '추론 붙잡기',
+  (v) => viewer.setMeasureSnap(v ? { midpoints: true, edges: true, points: demoSnapPoints(), inference: true } : null),
+  '붙잡기+에 더해 두 선분 교차점, 첫 점에서 내린 수직 발, 첫 점의 X·Y·Z 축 방향에도 붙잡기',
+);
+toggle('그물 선 색', (v) => {
+  viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
+  viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
+  viewer.setItemProfileColor('상자', v ? '#e0245e' : null);
+  viewer.setItemProfileColor('구', v ? '#2266dd' : null);
+}, '상자·구의 윤곽선·외곽선을 제 색으로(외곽선을 함께 켜서 본다)');
 toggle('음영 뒤 모서리', (v) => viewer.setRenderOptions({ hiddenEdges: v ? { shaded: true } : null }), '음영 계열 모드에서도 면 뒤 윤곽선을 점선으로');
 toggle('대비 선 색', (v) => viewer.setRenderOptions({ edgeColor: v ? 'contrast' : null, ...(viewer.renderOptions.profiles ? { profiles: { width: viewer.renderOptions.profiles.width, color: v ? 'contrast' : undefined } } : {}) }));
 button('PNG', () => {
