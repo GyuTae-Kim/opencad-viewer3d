@@ -7,14 +7,16 @@
  *   &incremental=1   장면을 여러 프레임에 나눠 올린다(진행은 아래 상태 줄)
  *   &tex=1           무늬 상자·원근 무늬 판을 더한다(바둑판 BMP, 맨 위 왼쪽 칸이 빨강)
  * 0.7.0 단추: 숨은 선·단색·무늬 없음 모드, 외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기
+ * 0.8.0 단추: 붙잡기+(가운데 점·앱 중심 점), 음영 뒤 모서리, 대비 선 색, 중력·부딪힘(걷기)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
+import { itemBounds } from './bounds';
 import { buildBvh } from './bvh';
 import { VIEW_LABELS, type ViewName } from './camera';
 import type { RenderMode } from './renderer';
 import type { SectionAxis } from './section';
 import { syntheticScene } from './synth';
-import type { Scene3d } from './types';
+import type { Scene3d, SnapPoint } from './types';
 import { type SectionCaps, Viewer3d } from './viewer';
 
 const q = new URLSearchParams(location.search);
@@ -132,6 +134,15 @@ toggle('안개', (v) => {
 });
 toggle('걷기', (v) => viewer.setNavigation(v ? 'walk' : 'orbit'), '끌기 = 둘러보기, WASD·화살표·휠 = 걷기, 두 번 누르기 = 서기');
 toggle('윤곽선 고르기', (v) => viewer.setPickEdges(v));
+toggle('중력·부딪힘', (v) => viewer.setNavigation(viewer.navigation, { gravity: v, collide: v }), '걷기에서 바닥 따라가기·벽에서 멈추기(0.8.0)');
+// 0.8.0: 측정 붙잡기 넓히기(가운데 점·앱 점 — 구 중심과 상자 윗면 가운데를 '중심'으로), 음영 뒤 모서리, 대비 선 색
+toggle(
+  '붙잡기+',
+  (v) => viewer.setMeasureSnap(v ? { midpoints: true, edges: true, points: demoSnapPoints() } : null),
+  '측정 점을 선분·윤곽선 가운데 점과 앱 점(중심)에도 붙잡기',
+);
+toggle('음영 뒤 모서리', (v) => viewer.setRenderOptions({ hiddenEdges: v ? { shaded: true } : null }), '음영 계열 모드에서도 면 뒤 윤곽선을 점선으로');
+toggle('대비 선 색', (v) => viewer.setRenderOptions({ edgeColor: v ? 'contrast' : null, ...(viewer.renderOptions.profiles ? { profiles: { width: viewer.renderOptions.profiles.width, color: v ? 'contrast' : undefined } } : {}) }));
 button('PNG', () => {
   void viewer.toBlob('image/png').then((b) => {
     const a = document.createElement('a');
@@ -382,6 +393,18 @@ async function bench(o: { segs?: number; sseg?: number; frames?: number; width?:
   return res;
 }
 
+/** 붙잡기+ 시연 점: 구 중심(구 안이라 가려진다 — 단면·와이어프레임에서 보임)과 상자 윗면 가운데('중심') */
+function demoSnapPoints(): SnapPoint[] {
+  const out: SnapPoint[] = [];
+  for (const m of scene.meshes) {
+    if (m.id !== '구' && m.id !== '상자') continue;
+    const b = itemBounds(m);
+    const c = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, m.id === '상자' ? b.max[2] : (b.min[2] + b.max[2]) / 2];
+    out.push({ point: c, kind: 'center', id: m.id });
+  }
+  return out;
+}
+
 /** 지금 화면(toBlob) → 화소 */
 async function snapshot(): Promise<ImageData> {
   const b = await viewer.toBlob('image/png');
@@ -429,6 +452,7 @@ function load(o: { offset?: number; bake?: boolean; segs?: number; sseg?: number
   offsetVec,
   snapshot,
   diff,
+  demoSnapPoints,
   hideDemo,
   hiDemo,
   picks,
