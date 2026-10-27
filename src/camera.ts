@@ -73,6 +73,13 @@ export const VIEW_LABELS: Record<ViewName, string> = {
   nwIso: '북서 등각',
 };
 
+/**
+ * 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — Viewer3d.handleKey의 규칙이고, 앱이 단추·메뉴 글에 같은 표를 쓰게 내보낸다.
+ * 0.10.0부터 여기(작은 모듈 opencad-viewer3d/camera)에 둔다: 코어 입구(뷰어·그리기)를 나눠 받는 앱도 첫 화면에서 표를 복사하지 않고 쓴다.
+ * 입구(opencad-viewer3d)와 opencad-viewer3d/viewer도 같은 객체를 내보낸다
+ */
+export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
+
 export function defaultCamera(): CameraState {
   const a = dirToAngles(VIEW_DIRS.seIso);
   return { target: [0, 0, 0], distance: 10, yaw: a.yaw, pitch: a.pitch, projection: 'perspective', fovY: DEFAULT_FOV };

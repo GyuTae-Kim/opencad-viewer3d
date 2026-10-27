@@ -22,6 +22,7 @@ import {
   type ViewFrame,
   type ViewName,
   VIEW_DIRS,
+  VIEW_KEYS,
   cameraBasis,
   cameraEye,
   computeFrame,
@@ -504,8 +505,8 @@ export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
 /** 그림 저장 한 변 한도(화소) */
 const SNAPSHOT_MAX_SIDE = 16384;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
-/** 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — 앱이 단추 글에 같은 표를 쓰게 내보낸다 */
-export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
+/** 표준 뷰 키 — 0.10.0부터 작은 모듈 camera.ts에 두고 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
+export { VIEW_KEYS };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
 
 export class Viewer3d {
