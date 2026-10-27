@@ -866,9 +866,19 @@ function lockValues(d: 'base' | 'off'): ValueSet {
           }
         }
       }
-      // 잠근 채 측정 모드를 끄면 풀린다
+      // 커서가 캔버스를 떠난 뒤(앱 단추를 마우스로 누를 때) true는 마지막으로 본 방향 추론을 잠근다
       v.clearMeasure();
       const a = c.at(c.world([120, 0, 40]));
+      const z = c.at(c.world([120, 0, 95]));
+      if (a && z) {
+        c.click(a.x - 1, a.y + 1);
+        c.hover(z.x + 5, z.y - 2);
+        v.renderNow();
+        v.canvas.dispatchEvent(new PointerEvent('pointerleave', { pointerId: 1, pointerType: 'mouse' }));
+        res.push(['leave', v.measureHoverSnap, v.setMeasureInferenceLock(true), v.measureInferenceLock?.axis ?? null]);
+      }
+      // 잠근 채 측정 모드를 끄면 풀린다
+      v.clearMeasure();
       if (a) c.click(a.x - 1, a.y + 1);
       res.push(['off', v.setMeasureInferenceLock('z'), v.measureInferenceLock?.axis ?? null]);
       v.setMeasureMode(false);

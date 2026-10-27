@@ -641,6 +641,11 @@ export class Viewer3d {
   /** 나란함 추론의 기준 선분(0.10.0 — 측정 중 커서가 마지막으로 지나간 선분·윤곽선, 세계 끝점 둘) */
   private parallelRef: [V3, V3] | null = null;
   /**
+   * 첫 점을 찍은 뒤 미리 보기에서 마지막으로 본 방향 추론(0.10.0 — setMeasureInferenceLock(true)가 커서가 캔버스를 떠난 뒤에도,
+   * 예를 들어 마우스로 앱 단추를 누를 때 쓴다). 점을 찍거나 측정을 지우면 잊는다
+   */
+  private lastLockable: InferenceLock | null = null;
+  /**
    * 측정 붙잡기 선택(0.8.0, 없으면 0.7.2 규칙 그대로)과 늘 후보인 앱 점(세계 xyz·종류·묶음 id),
    * 추론 붙잡기(0.9.0)와 앱 점 색인(0.9.0 — 점이 SNAP_INDEX_MIN개 이상일 때 처음 쓸 때 만든다)
    */
@@ -864,6 +869,7 @@ export class Viewer3d {
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
+    this.lastLockable = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
@@ -912,6 +918,7 @@ export class Viewer3d {
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
+    this.lastLockable = null;
     this.marker = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
@@ -971,6 +978,7 @@ export class Viewer3d {
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
+    this.lastLockable = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
@@ -2054,6 +2062,7 @@ export class Viewer3d {
     }
     // 0.10.0: 추론 잠금·나란함 기준 선분은 붙잡기 선택과 함께 새로
     this.inferLock = null;
+    this.lastLockable = null;
     this.parallelRef = null;
     if (this.measuring) this.measureHover = null;
     this.invalidate();
@@ -2116,7 +2125,8 @@ export class Viewer3d {
   }
 
   /**
-   * 측정 추론 잠금(0.10.0 — 터치처럼 Shift가 없을 때 앱 단추로): true = 지금 미리 보기의 방향 추론(축·나란함·수직)을 잠근다,
+   * 측정 추론 잠금(0.10.0 — 터치처럼 Shift가 없을 때 앱 단추로): true = 지금 미리 보기의 방향 추론(축·나란함·수직)을 잠근다
+   * (미리 보기가 방향 추론이 아니거나 커서가 캔버스를 떠났으면 첫 점을 찍은 뒤 마지막으로 본 방향 추론),
    * 'x'·'y'·'z' = 그 축 방향으로 잠근다(첫 점을 찍기 전에 줘도 된다), false·null = 푼다. 잠갔으면 true를 돌려준다.
    * 잠그면 첫 점을 지나는 그 선 위에만 찍고(커서가 꼭짓점 같은 점 붙잡기 위면 그 점을 선에 수직으로 내린 자리), 두 점째를 찍거나
    * 측정을 지우거나(clearMeasure·측정 모드 끄기·장면 바꾸기) 붙잡기 선택을 바꾸면 풀린다. 측정 모드이고 setMeasureSnap이 켜져 있어야 한다.
@@ -2129,7 +2139,13 @@ export class Viewer3d {
     }
     if (!this.snapOpt || !this.measuring) return false;
     const l: InferenceLock | null =
-      lock === true ? (this.measurePts.length === 1 ? lockFromSnap(this.measureHover) : null) : lock === 'x' || lock === 'y' || lock === 'z' ? axisLock(lock) : null;
+      lock === true
+        ? this.measurePts.length === 1
+          ? (lockFromSnap(this.measureHover) ?? this.lastLockable)
+          : null
+        : lock === 'x' || lock === 'y' || lock === 'z'
+          ? axisLock(lock)
+          : null;
     if (!l) return false;
     this.inferLock = { ...l, source: 'api' };
     this.rehover();
@@ -2212,6 +2228,7 @@ export class Viewer3d {
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
+    this.lastLockable = null;
     if (had) for (const cb of this.measureCbs) cb(null);
     this.invalidate();
   }
@@ -3176,8 +3193,9 @@ export class Viewer3d {
       this.measureSnaps.set(p, pointSnapOf(s));
       this.measurePts.push(p);
       this.measureHover = null;
-      // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다
+      // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다. 마지막으로 본 방향 추론은 첫 점이 바뀌면 잊는다
       if (this.measurePts.length === 2) this.inferLock = null;
+      this.lastLockable = null;
       const m = this.measurement();
       if (m) for (const cb of this.measureCbs) cb(m);
       this.invalidate();
@@ -3596,6 +3614,7 @@ export class Viewer3d {
       this.measureHover = this.measureAt(this.hoverAt.x, this.hoverAt.y, this.hoverAt.pointerType);
       this.lastHoverAt = this.hoverAt;
       this.hoverAt = null;
+      if (this.measurePts.length === 1 && !this.measureHover?.locked) this.lastLockable = lockFromSnap(this.measureHover) ?? this.lastLockable;
     }
     if (this.renderer.uploading) this.pumpUpload(this.upload?.budget ?? 8);
     if (this.cutDirty) {
