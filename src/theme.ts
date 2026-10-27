@@ -76,6 +76,23 @@ export const LIGHT_THEME: Viewer3dTheme = {
   section: '#d0246e',
 };
 
+/**
+ * 3D 캔버스 자리 스타일(0.9.0). 0.8.0까지는 여기에 outline:none을 직접 두어 키보드 초점이 보이지 않았다(앱이 !important로 덮어야 했다)
+ */
+export const CANVAS_CSS = 'position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;';
+
+/**
+ * 캔버스 초점 테두리(0.9.0, 뷰어 상자 안 <style>로 넣는다): 마우스·터치로 누를 때는 테두리가 없고, 키보드로 초점이 오면(:focus-visible)
+ * 캔버스 안쪽 2화소 테두리. 색은 CSS 변수 --v3d-focus(없으면 테마 기본 — 어두운 #5aa9ff, 밝은 #1f6fd1, 둘 다 바탕과 3:1 넘음).
+ * :where()로 구체성을 낮춰 앱이 .v3d-gl:focus-visible 같은 보통 규칙으로 바꿀 수 있다(!important 필요 없음)
+ */
+export const CANVAS_FOCUS_CSS =
+  ':where(canvas.v3d-gl){outline:none}' +
+  ':where(canvas.v3d-gl):focus-visible{outline:2px solid var(--v3d-focus,var(--v3d-focus-default,#3d95f0));outline-offset:-2px}';
+
+/** 테마별 초점 테두리 기본색(--v3d-focus-default) */
+export const FOCUS_DEFAULT = { dark: '#5aa9ff', light: '#1f6fd1' } as const;
+
 /** CSS 변수 이름(호스트 요소나 조상에 두면 덮어쓴다) */
 export const THEME_CSS_VARS: Record<keyof Viewer3dTheme, string> = {
   background: '--v3d-bg',

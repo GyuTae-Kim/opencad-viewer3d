@@ -76,7 +76,7 @@ import {
 import { segmentsById } from './segments';
 import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
+import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
@@ -671,7 +671,10 @@ export class Viewer3d {
     canvas.className = 'v3d-gl';
     canvas.tabIndex = 0;
     canvas.setAttribute('aria-label', '3D 보기');
-    canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;';
+    // 0.9.0: 초점 테두리는 :focus-visible 규칙(키보드 초점에서만)으로 — 캔버스에 outline:none을 직접 두지 않는다
+    canvas.style.cssText = CANVAS_CSS;
+    const focusCss = document.createElement('style');
+    focusCss.textContent = CANVAS_FOCUS_CSS;
     const overlay = document.createElement('canvas');
     overlay.className = 'v3d-overlay';
     overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
@@ -680,7 +683,7 @@ export class Viewer3d {
     cube.title = '뷰 큐브: 면·모서리·구석을 누르면 그 방향으로 봅니다';
     cube.style.cssText = `position:absolute;top:8px;right:8px;width:${this.opts.viewCubeSize}px;height:${this.opts.viewCubeSize}px;cursor:pointer;touch-action:none;`;
     if (!this.opts.viewCube) cube.style.display = 'none';
-    wrap.append(canvas, overlay, cube);
+    wrap.append(focusCss, canvas, overlay, cube);
     host.append(wrap);
     this.wrap = wrap;
     this.canvas = canvas;
@@ -2502,6 +2505,7 @@ export class Viewer3d {
       if (v) theme[k] = v;
     }
     this.theme = theme;
+    this.wrap.style.setProperty('--v3d-focus-default', base === LIGHT_THEME ? FOCUS_DEFAULT.light : FOCUS_DEFAULT.dark);
     const c = (s: string): Rgba => this.rgba(s);
     const line: Rgba = base === LIGHT_THEME ? [0.15, 0.2, 0.28, 1] : [0.85, 0.88, 0.92, 1];
     this.colors = {
@@ -3028,7 +3032,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
-    this.canvas.focus({ preventScroll: true });
+    // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.0 — 앞서 키보드를 썼어도 :focus-visible이 아니게)
+    this.canvas.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch {
