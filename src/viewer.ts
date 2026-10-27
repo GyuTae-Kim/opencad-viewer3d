@@ -76,7 +76,7 @@ import {
 import { segmentsById } from './segments';
 import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
+import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
@@ -2988,11 +2988,15 @@ export class Viewer3d {
     this.on<MouseEvent>(cv, 'auxclick', (e) => {
       if (e.button === 1) e.preventDefault();
     });
-    this.on<KeyboardEvent>(cv, 'keydown', (e) => this.onKey(e));
+    this.on<KeyboardEvent>(cv, 'keydown', (e) => {
+      focusKey(cv, e);
+      this.onKey(e);
+    });
     this.on<KeyboardEvent>(cv, 'keyup', (e) => {
       if (this.opts.keyboard && this.handleKeyUp(e)) e.stopPropagation();
     });
     this.on(cv, 'blur', () => {
+      focusLeft(cv);
       this.walkKeys.clear();
       this.listenWalkRelease(false);
     });
@@ -3066,8 +3070,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
-    // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.0 — 앞서 키보드를 썼어도 :focus-visible이 아니게)
-    this.canvas.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
+    // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.1 — 키보드로 이미 초점이 있던 캔버스도 data-v3d-focus="pointer"로 감춘다)
+    pointerFocus(this.canvas);
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch {

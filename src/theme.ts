@@ -82,13 +82,56 @@ export const LIGHT_THEME: Viewer3dTheme = {
 export const CANVAS_CSS = 'position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;';
 
 /**
+ * 누르기(마우스·터치·펜)로 받은 초점 표시(0.9.1): 캔버스에 data-v3d-focus="pointer"를 달고, CANVAS_FOCUS_CSS가 그동안 테두리를 감춘다.
+ * Tab(초점 옮기기)을 누르거나 초점이 캔버스를 떠나면 뗀다
+ */
+export const POINTER_FOCUS_ATTR = 'data-v3d-focus';
+
+/**
  * 캔버스 초점 테두리(0.9.0, 뷰어 상자 안 <style>로 넣는다): 마우스·터치로 누를 때는 테두리가 없고, 키보드로 초점이 오면(:focus-visible)
  * 캔버스 안쪽 2화소 테두리. 색은 CSS 변수 --v3d-focus(없으면 테마 기본 — 어두운 #5aa9ff, 밝은 #1f6fd1, 둘 다 바탕과 3:1 넘음).
- * :where()로 구체성을 낮춰 앱이 .v3d-gl:focus-visible 같은 보통 규칙으로 바꿀 수 있다(!important 필요 없음)
+ * :where()로 구체성을 낮춰 앱이 .v3d-gl:focus-visible 같은 보통 규칙으로 바꿀 수 있다(!important 필요 없음).
+ * 0.9.1: 누르기로 받은 초점(data-v3d-focus="pointer")에서는 테두리를 감춘다. 키보드로 초점을 준 캔버스를 누르면 초점이 바뀌지 않아
+ * 브라우저가 :focus-visible을 그대로 두기 때문이다. 이 규칙만 구체성이 (0,3,1)이라 앱의 .v3d-gl:focus-visible 같은 보통 규칙도 이긴다
  */
 export const CANVAS_FOCUS_CSS =
   ':where(canvas.v3d-gl){outline:none}' +
-  ':where(canvas.v3d-gl):focus-visible{outline:2px solid var(--v3d-focus,var(--v3d-focus-default,#3d95f0));outline-offset:-2px}';
+  ':where(canvas.v3d-gl):focus-visible{outline:2px solid var(--v3d-focus,var(--v3d-focus-default,#3d95f0));outline-offset:-2px}' +
+  `canvas.v3d-gl[${POINTER_FOCUS_ATTR}=pointer]:focus-visible{outline:none}`;
+
+/** 초점 테두리를 다루는 캔버스(시험에서는 가짜 요소) */
+export interface FocusRingTarget {
+  focus(options?: FocusOptions): void;
+  setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
+  readonly ownerDocument: { readonly activeElement: unknown } | null;
+}
+
+/**
+ * 누르기(마우스·터치·펜)로 캔버스에 초점을 줄 때(0.9.1): 초점을 주고 data-v3d-focus="pointer"를 단다.
+ * 0.9.0은 focus({ focusVisible: false })만 했는데, 키보드로 이미 초점이 있던 캔버스는 초점이 바뀌지 않아 그 선택이 듣지 않았다
+ * (Chrome 156: Tab → 누르기에도 :focus-visible 그대로). 초점을 뺐다 다시 주지 않으므로 blur·focus 사건이 나지 않는다
+ */
+export function pointerFocus(el: FocusRingTarget): void {
+  el.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
+  el.setAttribute(POINTER_FOCUS_ATTR, 'pointer');
+}
+
+/**
+ * 캔버스의 키 누르기(0.9.1): Tab·Shift+Tab(초점 옮기기)이면 누르기 표시를 뗀다 — 키보드로 다시 초점이 오면 테두리가 보이게.
+ * 그 밖의 키(F·1~7·걷기 키)는 그대로 둔다(브라우저도 마우스로 준 초점에서는 키를 눌러도 테두리를 보이지 않는다 — 걷기에서 끌어 둘러보며 키를 눌러도 깜박이지 않게)
+ */
+export function focusKey(el: FocusRingTarget, e: { key: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean }): void {
+  if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) el.removeAttribute(POINTER_FOCUS_ATTR);
+}
+
+/**
+ * 캔버스가 흐려질 때(0.9.1): 초점이 문서 안 다른 곳으로 갔으면 누르기 표시를 뗀다. 창만 흐려진 것(다른 앱·탭 — 문서의 초점은 캔버스 그대로)이면 두어,
+ * 돌아왔을 때 테두리가 다시 나오지 않게 한다
+ */
+export function focusLeft(el: FocusRingTarget): void {
+  if (el.ownerDocument?.activeElement !== el) el.removeAttribute(POINTER_FOCUS_ATTR);
+}
 
 /** 테마별 초점 테두리 기본색(--v3d-focus-default) */
 export const FOCUS_DEFAULT = { dark: '#5aa9ff', light: '#1f6fd1' } as const;
