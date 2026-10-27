@@ -9,6 +9,7 @@
  * 0.7.0 단추: 숨은 선·단색·무늬 없음 모드, 외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기
  * 0.8.0 단추: 붙잡기+(가운데 점·앱 중심 점), 음영 뒤 모서리, 대비 선 색, 중력·부딪힘(걷기)
  * 0.9.0 단추: 추론 붙잡기(붙잡기+에 교차점·수직 발·축 방향까지), 그물 선 색(상자·구의 윤곽선·외곽선 색)
+ * 0.10.0 단추: 나란함·잠금(추론 붙잡기에 나란함과 Shift 잠금까지), 잠금(앱 단추 꼴 setMeasureInferenceLock)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -148,6 +149,16 @@ toggle(
   (v) => viewer.setMeasureSnap(v ? { midpoints: true, edges: true, points: demoSnapPoints(), inference: true } : null),
   '붙잡기+에 더해 두 선분 교차점, 첫 점에서 내린 수직 발, 첫 점의 X·Y·Z 축 방향에도 붙잡기',
 );
+// 0.10.0: 나란함·Shift 잠금(추론 다섯 가지 모두), 앱 단추 꼴 잠금(터치에서 Shift 대신)
+toggle(
+  '나란함·잠금',
+  (v) =>
+    viewer.setMeasureSnap(
+      v ? { midpoints: true, edges: true, points: demoSnapPoints(), inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true } } : null,
+    ),
+  '추론 붙잡기에 더해 지나간 선분과 나란한 방향, Shift를 누르고 있는 동안 지금 방향(축·나란함·수직) 잠금',
+);
+button('잠금', () => viewer.setMeasureInferenceLock(!viewer.measureInferenceLock), '지금 미리 보기의 방향을 잠그거나 푼다(터치 단추 꼴 — setMeasureInferenceLock)');
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);

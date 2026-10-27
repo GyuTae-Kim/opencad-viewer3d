@@ -168,9 +168,10 @@ export interface Scene3d {
  * 'midpoint' = 선분·윤곽선 가운데 점(Viewer3d.setMeasureSnap({ midpoints })), 'center' = 원·원호 중심,
  * 'point' = 앱이 준 그 밖의 붙잡기 점. 'center'·'point'와 앱이 준 'endpoint'·'midpoint'는 앱 붙잡기 점(SnapPoint)에서 온다.
  * 0.9.0 추론 붙잡기(setMeasureSnap({ inference })): 'intersection' = 두 선분의 3D 교차점, 'perpendicular' = 첫 점에서 선분으로 내린 수직 발,
- * 'axis' = 첫 점에서 X·Y·Z 축 방향 선 위(어느 축인지는 Viewer3d.measureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB)
+ * 'axis' = 첫 점에서 X·Y·Z 축 방향 선 위(어느 축인지는 Viewer3d.measureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB).
+ * 0.10.0: 'parallel' = 첫 점에서 커서가 앞서 지나간 선분과 나란한 선 위(setMeasureSnap({ inference: { parallel } }) — 방향은 MeasureResult.directionB)
  */
-export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis';
+export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis' | 'parallel';
 
 /**
  * 앱이 주는 측정 붙잡기 점(0.8.0, Viewer3d.setMeasureSnap의 points·pointsFor). 예: STEP 모서리 표가 아는 원·원호 중심, B-rep 모서리의 곡선 가운데 점
@@ -185,6 +186,12 @@ export interface SnapPoint {
    * 묶음 행렬(setItemMatrix — 분해도)을 따라 옮긴다. 없으면 모든 묶음을 자르는 평면으로만 자른다
    */
   id?: string;
+  /**
+   * 차례 값(0.10.0, 선택). 붙잡기 한도(Viewer3d.setMeasureSnapLimit·setMeasureSnap({ limit }))를 두면 차례 < 한도인 점만 붙잡는다.
+   * 예: NC 재생에서 그 원호 중심을 처음 그린 이동 번호 — 그린 이동이 늘 때 한도만 바꾸면 되고 점 목록·색인을 다시 만들지 않는다.
+   * 없으면 한도와 상관없이 늘 후보다
+   */
+  order?: number;
 }
 
 /** 뷰어가 고르기 결과로 돌려주는 것 */

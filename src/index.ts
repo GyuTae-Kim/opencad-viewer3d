@@ -2,7 +2,7 @@
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
 export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, Texture3d } from './types';
-export { SNAPSHOT_MAX_PIXELS, VIEW_KEYS, Viewer3d } from './viewer';
+export { SNAPSHOT_MAX_PIXELS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
   BackgroundOptions,
@@ -13,6 +13,7 @@ export type {
   MarkerOptions,
   MeasureFormat,
   MeasureHoverSnap,
+  MeasureInferenceLock,
   MeasureResult,
   MeasureSnapOptions,
   WalkOptions,
@@ -31,14 +32,14 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
-export type { MeasureInference, SnapAxis } from './inference';
+export type { InferenceLock, InferenceLockKind, MeasureInference, SnapAxis } from './inference';
 export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
 export { type ClosestResult, closestBetween } from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
-export { VIEW_LABELS } from './camera';
+export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export type { RenderMode, TextureStats } from './renderer';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';

@@ -94,9 +94,9 @@ describe('axisSnap', () => {
 });
 
 describe('normalizeInference', () => {
-  it('true면 셋 모두, 아무것도 켜지 않으면 null', () => {
-    expect(normalizeInference(true)).toEqual({ intersections: true, perpendicular: true, axes: true });
-    expect(normalizeInference({ axes: true })).toEqual({ intersections: false, perpendicular: false, axes: true });
+  it('true면 0.9.0의 셋 모두(0.10.0 나란함·잠금은 끔), 아무것도 켜지 않으면 null', () => {
+    expect(normalizeInference(true)).toEqual({ intersections: true, perpendicular: true, axes: true, parallel: false, lock: false });
+    expect(normalizeInference({ axes: true })).toEqual({ intersections: false, perpendicular: false, axes: true, parallel: false, lock: false });
     expect(normalizeInference({})).toBeNull();
     expect(normalizeInference(false)).toBeNull();
     expect(normalizeInference(null)).toBeNull();

@@ -25,6 +25,8 @@ export interface PickDetail {
    * 붙잡지 않았으면 null(vertex가 false일 때와 같다)
    */
   snapKind: SnapKind | null;
+  /** 고른 선분·윤곽선의 세계 끝점 둘(0.10.0 — 나란함 추론의 기준 선분, 단면으로 자르기 전). 그물 면·점이면 없다 */
+  ends?: [V3, V3];
 }
 
 export interface ScenePickItems {
@@ -243,7 +245,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     const pick: Pick3d = { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i };
     if (o.midpoints) return snapSegment(f, pick, raw as [V3, V3], keep, x, y, snapPx);
     const v = snapToNearest(f, raw.filter(keep), x, y, snapPx);
-    return { pick, snap: v ?? ln.point, vertex: !!v, snapKind: v ? 'endpoint' : null };
+    return { pick, snap: v ?? ln.point, vertex: !!v, snapKind: v ? 'endpoint' : null, ends: raw as [V3, V3] };
   }
 
   // 그물 윤곽선(켰을 때): 면보다 먼저. 음영 모드면 그 점에서 다시 광선을 쏴 면에 가린 윤곽선은 뺀다
@@ -272,7 +274,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       const pick: Pick3d = { kind: 'edge', id: ed.m.id, index: ed.i, point: ed.point, raw: ed.i };
       if (o.midpoints) return snapSegment(f, pick, raw as [V3, V3], keep, x, y, snapPx);
       const v = snapToNearest(f, raw.filter(keep), x, y, snapPx);
-      return { pick, snap: v ?? ed.point, vertex: !!v, snapKind: v ? 'endpoint' : null };
+      return { pick, snap: v ?? ed.point, vertex: !!v, snapKind: v ? 'endpoint' : null, ends: raw as [V3, V3] };
     }
   }
 
@@ -365,7 +367,7 @@ function snapSegment(f: ViewFrame, pick: Pick3d, ends: [V3, V3], keep: (p: reado
   const mid: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
   const m = keep(mid) ? snapToNearestKind(f, [{ p: mid, kind: 'midpoint' as SnapKind }], x, y, snapPx) : null;
   const s = m && (!e || m.distPx + MIDPOINT_YIELD_PX < e.distPx) ? m : e;
-  return { pick, snap: s ? s.p : pick.point, vertex: !!s, snapKind: s ? s.kind : null };
+  return { pick, snap: s ? s.p : pick.point, vertex: !!s, snapKind: s ? s.kind : null, ends };
 }
 
 /**
