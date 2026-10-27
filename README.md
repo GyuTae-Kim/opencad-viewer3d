@@ -14,8 +14,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 왼쪽 끌기 궤도 회전(커서 아래 점 둘레), 가운데·오른쪽 끌기 이동, 휠 확대, 터치 회전·이동·핀치(손가락 떨림을 견디는 터치 문턱)
 - 뷰 큐브와 표준 뷰(위·앞·오른쪽·등각 등, 키 1~7), 전체 보기(F), 원근·평행
 - 음영·음영+윤곽·와이어프레임·X-ray·숨은 선·단색·무늬 없음, 화면 공간 외곽선, 굵은 선·점선, 바닥 격자, 좌표축, 밝은·어두운 테마(CSS 변수 `--v3d-*`로 바꿀 수 있음)
-- 해 조명·그림자(PCF)·선형 안개·하늘과 땅 바탕(모두 켤 때만), 1인칭 걷기·둘러보기, 시야각·굴림·렌즈 이동(2점 투시)
-- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정, 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
+- 뒤 모서리 점선(숨은 선, 켜면 음영 계열도), 바탕과 대비되는 외곽선·윤곽선 색(켤 때만)
+- 해 조명·그림자(PCF)·선형 안개·하늘과 땅 바탕(모두 켤 때만), 1인칭 걷기·둘러보기(켜면 바닥 따라가기·부딪힘), 시야각·굴림·렌즈 이동(2점 투시)
+- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심까지 붙잡기), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
 - 단면 보기: 평면 하나 또는 여럿(상자 단면, 평면마다 자를 묶음), 잘린 면 채우기(닫힌 그물·capGroup)·단면 테두리, 고르기·측정도 잘린 쪽을 무시
 - 마주 보는 그물(billboard), 뒷면 색·무늬
 - 무늬(텍스처): 그물마다 무늬 좌표(UV, 원근 무늬는 q까지)와 그림 하나. 되풀이(REPEAT)·밉맵·비등방 거르기, 한 장 크기·전체 GPU 예산 한도
@@ -276,13 +277,92 @@ viewer.setRenderMode(mode);
 viewer.setRenderOptions({ profiles: lineMode ? { width: 1 } : userProfiles }); // userProfiles: 음영 모드에서 앱이 켠 외곽선
 ```
 
+## 0.8.0: 측정 붙잡기·음영 뒤 모서리·선 색·걷기 중력
+
+모두 켜야 동작한다. 켜지 않으면 그림·고르기·측정은 0.7.2와 화소·값까지 같다(개발 페이지 기본·큰 좌표 장면에서 0.7.2 기준
+화면 42가지 — 일곱 모드·밝은 테마·숨은 점선·외곽선 셋·단면·평행 투영·구간 숨김과 강조·측정 그림과 붙잡을 점 표식 셋, 음영 모드에 0.7.2 꼴
+`hiddenEdges: true`를 준 화면 — 와 고르기 7,200번(마우스·터치, 윤곽선 고르기 끔·켬)·측정 누르기 2,640번(마우스·터치·펜, 측정 결과 184개)의 값을 견주었다).
+바뀐 기본 동작은 없다.
+
+### 측정 점 붙잡기 넓히기
+
+- `setMeasureSnap({ midpoints?, edges?, points?, pointsFor? } | null)`·`measureSnap`: 두 점 측정이 꼭짓점·끝점 말고도 붙잡을 점
+  - `midpoints`: 고른 선분 묶음·그물 윤곽선 선분의 가운데 점. 끝점보다 2화소(`MIDPOINT_YIELD_PX`) 넘게 가까울 때만이라 화면에서 몇 화소짜리 꺾은선(곡선)은 끝점이 이긴다
+  - `edges`: 측정 중에만 그물 윤곽선도 고른다(누르기·`onPick`의 `pickEdges`는 그대로). 주지 않으면 `pickEdges`를 따른다
+  - `points`: 늘 후보인 앱 점 `SnapPoint[]` — `{ point, kind?, id? }`(세계 좌표, 종류 기본 `'point'`). 아무것도 고르지 않은 자리(구멍 가운데 빈 곳)에서도 붙잡는다.
+    `id`를 주면 그 묶음이 숨었으면 빼고, 그 묶음의 단면 평면으로 자르고, 묶음 행렬(`setItemMatrix` — 분해도)을 따라 옮긴다
+  - `pointsFor(pick)`: 커서 아래 고른 것(그물·윤곽선·선분·점)마다 앱이 더하는 점. 마우스 이동마다 부르므로 가볍게. `id`가 없으면 고른 묶음으로 자르고 가린다
+- 붙잡기 거리 안(0.6.0 규칙 그대로 — 마우스·펜 10화소, 터치 `max(10, touchPickTolerance)`)에서 화면에 가장 가까운 보이는 점을 붙잡는다.
+  같은 거리면 고르기가 붙잡은 꼭짓점·끝점이 이긴다. 단면에 잘린 점, 음영 계열에서 불투명 면에 가린 점, 숨긴 묶음의 점은 뺀다.
+  앱의 정밀 조준(손가락 위 십자선 — 펜 포인터)도 미리 보기와 누르기가 같은 붙잡기 거리라 미리 본 점이 그대로 찍힌다
+- 마우스를 올리면 표식 모양으로 종류를 보인다: 꼭짓점·끝점 네모(0.7.2와 같음), 가운데 점 세모, 중심 ⊕, 그 밖의 앱 점 마름모, 붙잡지 않음 동그라미
+- `SnapKind` = `'vertex'`(그물 꼭짓점·점 묶음의 점) | `'endpoint'` | `'midpoint'` | `'center'` | `'point'`. 켰을 때만 `MeasureResult.snapA`·`snapB`(붙잡지 않은 점은 `null`)와
+  `measureHoverSnap`(`{ point, snap }` — 상태 줄에 "중심" 같은 글을 보일 때)이 있다. 순수 함수 `chooseMeasureSnap`(`opencad-viewer3d/snap`)
+
+```ts
+// STEP 꼴: 모서리 표가 아는 원·원호 중심과 B-rep 모서리의 곡선 가운데 점
+viewer.setMeasureSnap({
+  midpoints: true,
+  edges: true, // 측정 중에만 윤곽선도 고른다
+  points: circleCenters.map((c) => ({ point: c.world, kind: 'center', id: c.meshId })), // 장면을 열 때 한 번
+  pointsFor: (pick) => {
+    if (pick.kind !== 'edge') return null;
+    const e = edgePickOf(pick.id, pick.index); // 앱의 모서리 표 찾기(edges.ts)
+    if (!e) return null;
+    return [{ point: e.mid, kind: 'midpoint' }, { point: e.ends[0], kind: 'endpoint' }, { point: e.ends[1], kind: 'endpoint' }, ...(e.center ? [{ point: e.center, kind: 'center' as const }] : [])];
+  },
+});
+viewer.onMeasure((m) => m && console.log(m.distance, m.snapA, m.snapB)); // 예: 40, 'midpoint', 'center'
+```
+
+### 음영 방식의 뒤 모서리
+
+- `setRenderOptions({ hiddenEdges: { opacity?, shaded?, color? } })`: `shaded: true`면 음영 계열 모드에서도 면 뒤로 가려진 모서리를 흐린 1화소 점선으로(SketchUp "뒤 모서리").
+  그물 윤곽선은 보이는 윤곽선을 그리는 음영+윤곽·단색·무늬 없음에서만, 음영에서는 `LineSet3d.hiddenEdges` 선분 묶음만 그린다(숨은 선 모드는 0.7.2 그대로 둘 다).
+  `opacity` 기본 0.35, `color`는 점선 색(기본 테마 선 색). 예전처럼 `true`·숫자를 주면 숨은 선 모드에서만이다. 순수 함수 `drawsBackEdges(mode, shaded)`
+- 음영 계열(과 점선 색을 준 숨은 선)의 점선은 두꺼운 선 셰이더 변종 `CAPZ`로 그린다: 끝 마개를 늘릴 때 깊이도 선을 따라 늘리고 선 기울기만큼 눈 쪽으로 당겨,
+  보이는 모서리 위에 점선이 비치지 않는다. 0.7.2 숨은 선 모드는 이 어긋남으로 보이는 모서리 위에도 점선이 일부 겹쳤는데 선과 점선 색이 같아 보이지 않았다(기본은 그대로 둔다)
+- 반투명 그물은 깊이에 없으므로 그 뒤 모서리는 점선이 되지 않는다(비쳐 보인다)
+
+### 선 색: 외곽선·윤곽선이 바탕에 묻히지 않게
+
+- `setRenderOptions({ edgeColor })`: 그물 윤곽선(`Mesh3d.edges`)·삼각형 변 선 색
+  - 색(RGBA 또는 CSS 색): 선을 그리는 모든 모드에서 그 색(강조색은 그대로, X-ray는 알파에 0.9). 모서리를 선분 묶음으로 따로 그리는 앱이 같은 색을 그물 윤곽선에도 줄 때
+  - `'contrast'`: 와이어프레임·X-ray·숨은 선(선 뒤가 바탕인 모드)에서 모드 색(그물 색·테마 선 색)이 바탕과 3:1(WCAG 그래픽)이 안 될 때만 테마 선 색으로, 그것도 모자라면 검정·흰색
+  - `null`: 끄기(0.7.2). 순수 함수 `meshEdgeColor`
+- `profiles.color: 'contrast'`: 외곽선을 바탕(`setBackground` 색 또는 테마 바탕)과 3:1이 되는 색으로(테마 선 색, 모자라면 검정·흰색)
+- 바탕은 `setBackground({ color })`를 따른다(하늘·땅 기울기는 보지 않는다). 대비 계산 `contrastRatio(fg, bg)`·`contrastLineColor(color, bg, fallback)`·`LINE_CONTRAST_MIN`(3)을 입구에서 내보낸다
+
+```ts
+// SketchUp 꼴: 모서리는 선분 묶음(hiddenEdges: true), 카메라를 보는 컴포넌트 모서리만 그물 윤곽선(Mesh3d.edges)
+viewer.setRenderOptions({
+  hiddenEdges: { shaded: style.backEdges, color: edgeColor }, // 음영·음영+윤곽에서도 뒤 모서리 점선
+  edgeColor: edgeColor, // 앱이 선분 묶음에 쓰는 모서리 색(linecontrast로 고른 것)을 그물 윤곽선에도 — 와이어프레임·X-ray에서 재질 색 대신
+  profiles: style.profiles ? { width: style.profileWidth, color: 'contrast' } : null, // 파일 바탕 색과 대비
+});
+```
+
+### 걷기 중력·부딪힘
+
+- `setNavigation('walk', { gravity?, collide?, stepHeight?, radius? })`(`WalkOptions`, 기본 모두 꺼짐 — 끄면 0.7.x 걷기 그대로)
+  - `gravity`: 발 + `stepHeight`에서 아래로 광선을 쏴 맞은 바닥 위 눈높이에 둔다. 계단·경사는 오르고(한 단이 `stepHeight` 이하), 난간 밖으로 나가면 아래 바닥으로 내려가며,
+    아래에 아무것도 없으면 높이를 지킨다. 위아래 입력(Q/E·PageUp/PageDown·두 손가락 위아래)은 무시하고, 켜는 순간 발밑 바닥에 선다
+  - `collide`: 눈 높이와 무릎 높이(발 + `stepHeight`)에서 움직이는 쪽으로 광선을 쏴 벽까지 수직 거리 `radius`에서 멈추고 벽을 따라 미끄러진다
+  - `stepHeight` 기본 눈높이의 0.35(1.6 m면 0.56 m — SketchUp과 비슷), `radius` 기본 눈높이의 0.18
+- 키·휠·두 손가락·조이스틱(`setWalkInput`)·`walkBy`가 모두 같은 길이다. 보이는 그물(반투명 포함, `pickable: false` 제외)과 부딪히고
+  묶음 원점·행렬·숨긴 구간을 따르며 단면에 잘린 쪽은 지나간다. 순수 함수 `castRay`·`walkStep`(`opencad-viewer3d/walk`)
+
+```ts
+viewer.setNavigation('walk', { eyeHeight: 1676, gravity: true, collide: true }); // mm 모형, 눈높이 5′6″
+```
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.7.2"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.8.0"
 }
 ```
 
@@ -307,6 +387,8 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/texture.ts` | 무늬 도구(그림 머리 읽기, 크기 한도·예산 나누기, 뒤집어 풀기) |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
+| `src/snap.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점과 앱 붙잡기 점 가운데) |
+| `src/walk.ts` | 걷기 중력·부딪힘(세계 광선 맞음, 한 걸음) |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
 | `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색·행렬·재생 도우미 |
@@ -319,7 +401,8 @@ npm install
 npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 칸 수&theme=light)
                    #   &offset=1e6(큰 좌표, 묶음 원점) &bake=1(원점 없이 구워 넣기 — 떨림 비교) &section=z:0.5(:flip)
                    #   &incremental=1(나눠 올리기) &tex=1(무늬 상자·원근 무늬 판). 단추: 단면 X·Y·Z, 구간 숨김·구간 강조,
-                   #   0.7.0 모드(숨은 선·단색·무늬 없음)·외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기
+                   #   0.7.0 모드(숨은 선·단색·무늬 없음)·외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기,
+                   #   0.8.0 붙잡기+(가운데 점·중심)·음영 뒤 모서리·대비 선 색·중력·부딪힘
 npm run typecheck
 npm test
 ```
@@ -329,8 +412,12 @@ npm test
 - 단면 평면은 여섯 개까지(셰이더 균일 배열). 여러 평면은 교집합만(합집합 단면 없음)
 - 그림자는 보이는 범위 전체를 감싸는 깊이 그림 한 장(계단식 그림자 아님)이라 아주 넓은 장면에서는 그늘이 거칠다(`shadows.size`로 키운다). 반투명 그물은 그림자를 드리우지 않는다
 - 외곽선은 화면 공간 깊이 차이라 화소보다 얇은 틈·면 안쪽 접힘선은 잡지 않는다. 맨 앞 깊이 그림 하나라 와이어프레임에서도 앞 그물에 가린
-  뒤 그물의 외곽선은 끊기고, 색은 한 가지다(그물마다 그물 색으로 그리지 않는다). 안개는 격자·덧그림에 하지 않는다
-- 걷기는 부딪힘·중력이 없다(서기는 두 번 누른 점 위 눈높이). 마주 보는 그물은 Z축 둘레만(axis 'z')
+  뒤 그물의 외곽선은 끊기고, 색은 한 가지다(바탕과 대비되는 색은 고를 수 있지만 그물마다 다른 색은 없다). 안개는 격자·덧그림에 하지 않는다
+- 선 색 대비(`'contrast'`)는 한 색 바탕만 본다(하늘·땅 기울기 바탕, 선 뒤의 다른 면 색은 보지 않는다)
+- 걷기 부딪힘은 눈·무릎 높이 광선 둘이라 그 사이 높이의 가는 막대·난간 살은 지나가고, 머리 위 천장은 따지지 않는다. 중력은 바로 내려앉는다(떨어지는 시간 없음).
+  마주 보는 그물은 Z축 둘레만(axis 'z')
+- 측정 붙잡기: 앱 점(`points`)은 마우스 이동마다 모두 훑는다(수십만 개면 느려질 수 있다). 교차점·수직 발·축 방향 같은 추론 붙잡기는 없다
+- 음영 뒤 모서리 점선은 반투명 그물 뒤 모서리에는 그리지 않는다. 숨은 선 모드의 기본 점선은 0.7.2 그대로라 보이는 모서리 위에도 조금 겹친다(색이 같아 보이지 않는다)
 - 그림 저장 배율은 한 변 GPU 한도·약 4천만 화소까지(넘으면 줄인다)
 - 잘린 면 채우기는 스텐실 홀짝이라 `closed` 그물이 정말 닫혀 있어야 한다(틈·겹친 입체가 있으면 줄무늬·구멍). 반투명 그물·X-ray·와이어프레임에서는 채우지 않는다
 - 원점(`origin`) 없이 큰 좌표를 그대로 넣은 장면은 예전처럼 떨린다(해석기가 원점을 채워야 한다)

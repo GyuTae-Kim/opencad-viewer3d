@@ -6,12 +6,12 @@
  *   그물은 원점을 합친 모형 행렬로 광선을 로컬로 옮긴다. 어느 쪽이든 double로 계산하므로 큰 좌표에서도 정밀하다.
  * - 단면(clip, 세계 평면)이 있으면 잘린 쪽(평면 값 > 0)은 고르지 않는다: 그물은 광선의 남는 구간만, 선분은 남는 부분만, 점은 남는 것만.
  */
-import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d } from './types';
+import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, SnapKind } from './types';
 import { itemBounds } from './bounds';
 import { type Bvh, type PrimKind, countRayHits, rayBoxEntry, safeInv } from './bvh';
 import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth, worldPerPixel } from './camera';
 import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint } from './math';
-import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, pointCandidates, segmentCandidates, snapToNearest } from './pick';
+import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, pointCandidates, segmentCandidates, snapToNearest, snapToNearestKind } from './pick';
 import { SNAP_PX } from './pointer';
 import { type Plane4, planeShift, planeValue, rayKeptInterval, rayKeptIntervalN } from './section';
 
@@ -20,6 +20,11 @@ export interface PickDetail {
   /** 측정용 붙잡은 점(꼭짓점·끝점 가까우면 그 점) */
   snap: V3;
   vertex: boolean;
+  /**
+   * 붙잡은 종류(0.8.0): 점 묶음의 점·그물 꼭짓점 'vertex', 선분·윤곽선 끝점 'endpoint', 가운데 점 'midpoint'(midpoints를 켰을 때).
+   * 붙잡지 않았으면 null(vertex가 false일 때와 같다)
+   */
+  snapKind: SnapKind | null;
 }
 
 export interface ScenePickItems {
@@ -69,6 +74,8 @@ export interface ScenePickOptions {
    * undefined면 예전처럼 원점만 옮겨 고른다
    */
   itemModel?: (it: LineSet3d | PointSet3d) => ArrayLike<number> | undefined;
+  /** 고른 선분·윤곽선의 가운데 점에도 측정 점을 붙잡는다(0.8.0, 기본 false — 끝점과 같은 거리 snap 안에서 더 가까운 것) */
+  midpoints?: boolean;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
@@ -189,7 +196,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
   const pt = chooseNearest(pts);
   if (pt) {
     const id = pt.p.pointIds?.[pt.i] ?? pt.i;
-    return { pick: { kind: 'point', id: pt.p.id, index: id, point: pt.point, raw: pt.i }, snap: pt.point, vertex: true };
+    return { pick: { kind: 'point', id: pt.p.id, index: id, point: pt.point, raw: pt.i }, snap: pt.point, vertex: true, snapKind: 'vertex' };
   }
 
   // 선분
@@ -228,14 +235,15 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
   if (ln) {
     const P = ln.l.positions, k = ln.i * 6;
     const lmod = o.itemModel?.(ln.l);
-    const ends = (
-      lmod
-        ? [transformPoint(lmod, [P[k]!, P[k + 1]!, P[k + 2]!]), transformPoint(lmod, [P[k + 3]!, P[k + 4]!, P[k + 5]!])]
-        : [addOrigin([P[k]!, P[k + 1]!, P[k + 2]!], ln.l.origin), addOrigin([P[k + 3]!, P[k + 4]!, P[k + 5]!], ln.l.origin)]
-    ).filter(multi ? keptBy(planesOf(ln.l)) : kept);
-    const v = snapToNearest(f, ends, x, y, snapPx);
+    const raw = lmod
+      ? [transformPoint(lmod, [P[k]!, P[k + 1]!, P[k + 2]!]), transformPoint(lmod, [P[k + 3]!, P[k + 4]!, P[k + 5]!])]
+      : [addOrigin([P[k]!, P[k + 1]!, P[k + 2]!], ln.l.origin), addOrigin([P[k + 3]!, P[k + 4]!, P[k + 5]!], ln.l.origin)];
+    const keep = multi ? keptBy(planesOf(ln.l)) : kept;
     const id = ln.l.segmentIds?.[ln.i] ?? ln.i;
-    return { pick: { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i }, snap: v ?? ln.point, vertex: !!v };
+    const pick: Pick3d = { kind: 'line', id: ln.l.id, index: id, point: ln.point, raw: ln.i };
+    if (o.midpoints) return snapSegment(f, pick, raw as [V3, V3], keep, x, y, snapPx);
+    const v = snapToNearest(f, raw.filter(keep), x, y, snapPx);
+    return { pick, snap: v ?? ln.point, vertex: !!v, snapKind: v ? 'endpoint' : null };
   }
 
   // 그물 윤곽선(켰을 때): 면보다 먼저. 음영 모드면 그 점에서 다시 광선을 쏴 면에 가린 윤곽선은 뺀다
@@ -256,21 +264,22 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     if (ed) {
       const P = ed.m.edges!, k = ed.i * 6;
       const model = o.model ? o.model(ed.m) : modelMatrix(ed.m.matrix, ed.m.origin);
-      const ends = [
+      const raw = [
         [P[k]!, P[k + 1]!, P[k + 2]!],
         [P[k + 3]!, P[k + 4]!, P[k + 5]!],
-      ]
-        .map((p) => (model ? transformPoint(model, p) : (p as V3)))
-        .filter(keptBy(planesOf(ed.m)));
-      const v = snapToNearest(f, ends, x, y, snapPx);
-      return { pick: { kind: 'edge', id: ed.m.id, index: ed.i, point: ed.point, raw: ed.i }, snap: v ?? ed.point, vertex: !!v };
+      ].map((p) => (model ? transformPoint(model, p) : (p as V3)));
+      const keep = keptBy(planesOf(ed.m));
+      const pick: Pick3d = { kind: 'edge', id: ed.m.id, index: ed.i, point: ed.point, raw: ed.i };
+      if (o.midpoints) return snapSegment(f, pick, raw as [V3, V3], keep, x, y, snapPx);
+      const v = snapToNearest(f, raw.filter(keep), x, y, snapPx);
+      return { pick, snap: v ?? ed.point, vertex: !!v, snapKind: v ? 'endpoint' : null };
     }
   }
 
   if (cap) {
     let n = cap.n ?? normalize([clip![0], clip![1], clip![2]]);
     if (n[0] * ray.dir[0] + n[1] * ray.dir[1] + n[2] * ray.dir[2] > 0) n = [-n[0], -n[1], -n[2]];
-    return { pick: { kind: 'mesh', id: cap.m.id, index: -1, point: cap.point, raw: -1, normal: n, section: true }, snap: cap.point, vertex: false };
+    return { pick: { kind: 'mesh', id: cap.m.id, index: -1, point: cap.point, raw: -1, normal: n, section: true }, snap: cap.point, vertex: false, snapKind: null };
   }
   if (mesh) {
     const v = snapToNearest(f, mesh.h.corners.filter(multi ? keptBy(planesOf(mesh.m)) : kept), x, y, snapPx);
@@ -278,12 +287,35 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       pick: { kind: 'mesh', id: mesh.m.id, index: mesh.h.tri, point: mesh.h.point, raw: mesh.h.tri, normal: mesh.h.normal },
       snap: v ?? mesh.h.point,
       vertex: !!v,
+      snapKind: v ? 'vertex' : null,
     };
   }
   return null;
 }
 
 type ScenePickRay = { origin: V3; dir: V3 };
+
+/** 가운데 점이 끝점을 이기려면 화면에서 이만큼(화소) 더 가까워야 한다 — 화면에서 몇 화소짜리 선분(곡선을 나눈 꺾은선)은 끝점이 이긴다 */
+export const MIDPOINT_YIELD_PX = 2;
+
+/**
+ * 고른 선분(세계 끝점 둘)에서 측정 점 붙잡기(0.8.0 midpoints): 남는 쪽(keep) 끝점과 가운데 점 가운데 커서에서 snapPx 안의 가까운 것.
+ * 가운데 점은 끝점보다 MIDPOINT_YIELD_PX 넘게 가까울 때만. 아무것도 없으면 고른 점 그대로
+ */
+function snapSegment(f: ViewFrame, pick: Pick3d, ends: [V3, V3], keep: (p: readonly number[]) => boolean, x: number, y: number, snapPx: number): PickDetail {
+  const [a, b] = ends;
+  const e = snapToNearestKind(
+    f,
+    ends.filter(keep).map((p) => ({ p, kind: 'endpoint' as SnapKind })),
+    x,
+    y,
+    snapPx,
+  );
+  const mid: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+  const m = keep(mid) ? snapToNearestKind(f, [{ p: mid, kind: 'midpoint' as SnapKind }], x, y, snapPx) : null;
+  const s = m && (!e || m.distPx + MIDPOINT_YIELD_PX < e.distPx) ? m : e;
+  return { pick, snap: s ? s.p : pick.point, vertex: !!s, snapKind: s ? s.kind : null };
+}
 
 /**
  * 여러 단면 평면(묶음마다 다를 수 있다): 그물마다 남는 광선 구간에서 맞음을 찾고, 채우는 그물(caps)은 들어온 평면 위 점이

@@ -275,7 +275,21 @@ void main() {
   float hw = max(u_width, 1.0) * 0.5;
   vec4 c = mix(c0, c1, a_corner.x);
   float ext = a_corner.x * 2.0 - 1.0;
+#ifdef CAPZ
+  // 끝 마개를 늘릴 때 깊이도 선을 따라 늘린다(0.8.0 — 음영 뒤 모서리 점선이 보이는 얇은 선과 같은 깊이가 되게).
+  // 기본 변종은 마개 쪽 꼭짓점이 끝점 깊이 그대로라 선 위 깊이가 늘린 길이만큼 어긋난다
+  vec2 off = nrm * a_corner.y * hw;
+  if (len > 1e-5) {
+    c += (c1 - c0) * (ext * hw / len);
+    // 기울기 비례 치우침(polygonOffset의 factor처럼): 선을 따라 화소 하나만큼 깊이가 바뀌는 양을 눈 쪽으로 — 얇은 선과 두꺼운 선의
+    // 표본 자리 차이(반 화소 안팎)로 생기는 깊이 차를 덮는다
+    c.z -= abs(c1.z / c1.w - c0.z / c0.w) / len * c.w;
+  } else {
+    off += dir * ext * hw;
+  }
+#else
   vec2 off = nrm * a_corner.y * hw + dir * ext * hw;
+#endif
   c.xy += off / hv * c.w;
   c.z -= u_bias * c.w;
   gl_Position = c;

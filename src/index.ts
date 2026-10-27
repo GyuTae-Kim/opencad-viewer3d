@@ -1,7 +1,7 @@
 /**
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
-export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
+export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, Texture3d } from './types';
 export { SNAPSHOT_MAX_PIXELS, VIEW_KEYS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
@@ -13,6 +13,8 @@ export type {
   MarkerOptions,
   MeasureFormat,
   MeasureResult,
+  MeasureSnapOptions,
+  WalkOptions,
   PickEvent,
   PickOptions,
   ProjectedPoint,
@@ -40,7 +42,7 @@ export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './text
 export type { MarkerKind } from './marker';
 export type { GridZ } from './grid';
 export type { Viewer3dTheme } from './theme';
-export { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS } from './theme';
+export { DARK_THEME, LIGHT_THEME, LINE_CONTRAST_MIN, THEME_CSS_VARS, contrastLineColor, contrastRatio } from './theme';
 export { sceneBounds } from './bounds';
 export {
   DOUBLE_CLICK_PX,

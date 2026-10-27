@@ -12,7 +12,7 @@
  *
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
-import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d } from './types';
+import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
 import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
 import { type IndexRange, mergeRanges, partitionRanges, rangeTester } from './ranges';
 import { type Bvh, type PrimKind, buildBvh } from './bvh';
@@ -44,8 +44,10 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, translation } from './math';
+import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene } from './scenepick';
+import { type SnapCandidate, chooseMeasureSnap } from './snap';
+import { type RayHit, castRay, walkStep } from './walk';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
@@ -72,7 +74,7 @@ import {
 import { segmentsById } from './segments';
 import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, parseColor } from './theme';
+import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
@@ -218,6 +220,54 @@ export interface MeasureResult {
   dx: number;
   dy: number;
   dz: number;
+  /**
+   * 두 점을 붙잡은 종류(0.8.0): 'vertex'·'endpoint'·'midpoint'·'center'·'point', 붙잡지 않은 점(면·선 위 아무 데)은 null.
+   * setMeasureSnap을 켰을 때만 있다(끄면 예전처럼 이 두 필드가 없다)
+   */
+  snapA?: SnapKind | null;
+  snapB?: SnapKind | null;
+}
+
+/** 걷기 선택(Viewer3d.setNavigation('walk', opts)) */
+export interface WalkOptions {
+  /** 눈높이(세계 단위, 기본 단위별 1.6 m) */
+  eyeHeight?: number;
+  /** 빠르기(초당 세계 단위, 기본 보이는 범위 반지름의 0.4) */
+  speed?: number;
+  /** 두 번 누르면 그 자리에 서기(기본 true) */
+  tapToStand?: boolean;
+  /** 0.8.0: 바닥을 따라간다(계단·경사 오르기, 아래 바닥으로 내려가기 — 위아래 입력은 무시). 기본 false */
+  gravity?: boolean;
+  /** 0.8.0: 면을 지나가지 않는다(벽 앞에서 멈추고 벽을 따라 미끄러진다). 기본 false */
+  collide?: boolean;
+  /** 0.8.0: 한 걸음에 오를 수 있는 높이(세계 단위, 기본 눈높이의 0.35 — 1.6 m면 0.56 m) */
+  stepHeight?: number;
+  /** 0.8.0: 몸 반지름(벽 앞에서 멈출 거리, 기본 눈높이의 0.18) */
+  radius?: number;
+}
+
+/**
+ * 측정 점 붙잡기 선택(0.8.0, Viewer3d.setMeasureSnap). 주지 않은 것은 끈다(edges는 pickEdges를 따른다).
+ * 붙잡기 거리는 0.6.0 규칙 그대로(마우스·펜 SNAP_PX 10화소, 터치 max(10, touchPickTolerance)) — 정밀 조준(펜 포인터)도 같다
+ */
+export interface MeasureSnapOptions {
+  /** 고른 선분 묶음·그물 윤곽선 선분의 가운데 점에도 붙잡는다 */
+  midpoints?: boolean;
+  /**
+   * 측정 중에만 그물 윤곽선(Mesh3d.edges)도 고른다(누르기·onPick의 pickEdges는 그대로). 주지 않으면 pickEdges를 따른다.
+   * 윤곽선 끝점·가운데 점·pointsFor는 윤곽선을 골라야 쓰인다
+   */
+  edges?: boolean;
+  /**
+   * 늘 후보인 앱 붙잡기 점(세계 좌표) — 예: 장면의 모든 원·원호 중심. 커서에서 붙잡기 거리 안이고 보이면(단면에 잘리지 않고, 음영 계열 모드에서
+   * 불투명 면에 가리지 않고, id를 주면 그 묶음이 보일 때) 붙잡는다. 아무것도 고르지 않은 자리(구멍 가운데 빈 곳)에서도 된다
+   */
+  points?: readonly SnapPoint[] | null;
+  /**
+   * 커서 아래 고른 것(그물·윤곽선·선분·점)에 따라 앱이 더하는 붙잡기 점 — 예: STEP이 모서리 표로 아는 B-rep 모서리의 곡선 가운데 점·원 중심.
+   * 마우스 이동마다 부르므로 가볍게. id를 주지 않은 점은 고른 묶음 id로 자르고 가린다
+   */
+  pointsFor?: ((pick: Pick3d) => readonly SnapPoint[] | null | undefined) | null;
 }
 
 export interface GroupInfo {
@@ -497,7 +547,11 @@ export class Viewer3d {
 
   private measuring = false;
   private measurePts: V3[] = [];
-  private measureHover: { p: V3; vertex: boolean } | null = null;
+  private measureHover: { p: V3; vertex: boolean; kind: SnapKind | null } | null = null;
+  /** 측정 붙잡기 선택(0.8.0, 없으면 0.7.2 규칙 그대로)과 늘 후보인 앱 점(세계 xyz·종류·묶음 id) */
+  private snapOpt: { midpoints: boolean; edges: boolean | null; pointsFor: MeasureSnapOptions['pointsFor']; src: MeasureSnapOptions; pts: Float64Array; kinds: SnapKind[]; ids: (string | undefined)[] } | null = null;
+  /** 찍은 측정 점의 붙잡은 종류(점 배열 객체 → 종류) */
+  private measureKinds = new WeakMap<V3, SnapKind | null>();
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
   /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
@@ -505,7 +559,7 @@ export class Viewer3d {
   private bbCamKey = '';
   /** 조작 방식(궤도·걷기)과 걷기 상태 */
   private nav: 'orbit' | 'walk' = 'orbit';
-  private walkOpts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {};
+  private walkOpts: WalkOptions = {};
   private walkKeys = new Set<string>();
   /** 걷기 키 떼기 듣기를 푸는 함수(누르고 있는 동안만) */
   private walkRelease: (() => void) | null = null;
@@ -520,7 +574,13 @@ export class Viewer3d {
   /** 그림자 깊이 그림 판(그림자를 바꾸는 상태가 바뀔 때마다 늘린다) */
   private shadowVer = 0;
   /** 보여 주기 선택(외곽선·숨은 점선) */
-  private renderOpts: { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } = { profiles: null, hiddenEdges: 0 };
+  private renderOpts: {
+    profiles: { width: number; color: Rgba | string | null } | null;
+    hiddenEdges: number;
+    hiddenEdgesShaded: boolean;
+    hiddenEdgeColor: Rgba | string | null;
+    edgeColor: Rgba | string | null;
+  } = { profiles: null, hiddenEdges: 0, hiddenEdgesShaded: false, hiddenEdgeColor: null, edgeColor: null };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
   private looks = new Map<string, LookState>();
   /** 묶음 행렬을 건 묶음 수(있으면 보이는 범위를 다시 모은다) */
@@ -898,17 +958,35 @@ export class Viewer3d {
    * 보여 주기 선택(0.7.0): profiles = 화면 공간 외곽선(실루엣, true 또는 { width: CSS 화소(기본 2), color } — 음영 계열 모드와
    * 와이어프레임(0.7.2)에서 그리고 X-ray에서는 그리지 않는다. 굵기가 장치 화소 1.5 미만이면(width 1 · 화소 비율 1) 1화소로(0.7.2)),
    * hiddenEdges = 숨은 선 모드에서 면 뒤 윤곽선을 흐린 점선으로(true = 0.35, 또는 불투명도). 주지 않은 것은 그대로, null이면 끈다.
-   * 점선은 그물 윤곽선(Mesh3d.edges)과 LineSet3d.hiddenEdges가 true인 선분 묶음에 그리고(0.7.1), 숨긴 구간은 빼고 묶음 불투명도를 곱한다
+   * 점선은 그물 윤곽선(Mesh3d.edges)과 LineSet3d.hiddenEdges가 true인 선분 묶음에 그리고(0.7.1), 숨긴 구간은 빼고 묶음 불투명도를 곱한다.
+   * 0.8.0: hiddenEdges에 { opacity, shaded, color }를 주면 shaded: true일 때 음영 계열 모드에서도 뒤 모서리를 점선으로(SketchUp "뒤 모서리" —
+   * 그물 윤곽선은 보이는 윤곽선을 그리는 음영+윤곽·단색·무늬 없음에서만, 음영에서는 LineSet3d.hiddenEdges 선분 묶음만), color = 점선 색(기본 테마 선 색).
+   * profiles.color·edgeColor에 'contrast'를 주면 바탕(setBackground 색 또는 테마 바탕)과 대비 3:1이 되는 색을 고른다.
+   * edgeColor = 그물 윤곽선(Mesh3d.edges)·삼각형 변 선 색: 색을 주면 선을 그리는 모든 모드에서 그 색(강조색은 그대로),
+   * 'contrast'면 와이어프레임·X-ray·숨은 선에서 모드 색(그물 색·테마 선 색)이 바탕과 3:1이 안 될 때만 테마 선 색(그것도 모자라면 검정·흰색)
    */
-  setRenderOptions(o: { profiles?: boolean | { width?: number; color?: Rgba | string } | null; hiddenEdges?: boolean | number | null }): void {
+  setRenderOptions(o: {
+    profiles?: boolean | { width?: number; color?: Rgba | string } | null;
+    hiddenEdges?: boolean | number | { opacity?: number; shaded?: boolean; color?: Rgba | string | null } | null;
+    edgeColor?: Rgba | string | null;
+  }): void {
     if ('profiles' in o) {
       const p = o.profiles;
       this.renderOpts.profiles = !p ? null : { width: Math.max(1, (typeof p === 'object' ? p.width : undefined) ?? 2), color: typeof p === 'object' ? (p.color ?? null) : null };
     }
     if ('hiddenEdges' in o) {
       const h = o.hiddenEdges;
-      this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+      if (h && typeof h === 'object') {
+        this.renderOpts.hiddenEdges = Math.min(1, Math.max(0, h.opacity ?? 0.35));
+        this.renderOpts.hiddenEdgesShaded = !!h.shaded;
+        this.renderOpts.hiddenEdgeColor = h.color ?? null;
+      } else {
+        this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+        this.renderOpts.hiddenEdgesShaded = false;
+        this.renderOpts.hiddenEdgeColor = null;
+      }
     }
+    if ('edgeColor' in o) this.renderOpts.edgeColor = o.edgeColor ?? null;
     this.invalidate();
   }
 
@@ -956,21 +1034,38 @@ export class Viewer3d {
     return this.fogOpt ? { ...this.fogOpt } : null;
   }
 
-  /** 지금 보여 주기 선택 */
-  get renderOptions(): { profiles: { width: number; color: Rgba | string | null } | null; hiddenEdges: number } {
-    const p = this.renderOpts.profiles;
-    return { profiles: p ? { ...p } : null, hiddenEdges: this.renderOpts.hiddenEdges };
+  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도) */
+  get renderOptions(): {
+    profiles: { width: number; color: Rgba | string | null } | null;
+    hiddenEdges: number;
+    hiddenEdgesShaded: boolean;
+    hiddenEdgeColor: Rgba | string | null;
+    edgeColor: Rgba | string | null;
+  } {
+    const r = this.renderOpts;
+    return { profiles: r.profiles ? { ...r.profiles } : null, hiddenEdges: r.hiddenEdges, hiddenEdgesShaded: r.hiddenEdgesShaded, hiddenEdgeColor: r.hiddenEdgeColor, edgeColor: r.edgeColor };
   }
 
   /**
    * 조작 방식(0.7.0): 'orbit'(기본, 대상점 둘레 궤도) 또는 'walk'(1인칭 — 끌기 = 제자리에서 둘러보기, 휠·W/S·↑/↓ = 앞뒤, A/D = 옆, ←/→ = 돌기,
    * Q/E·PageDown/PageUp = 아래·위, Shift = 빠르게, 두 번 누르기 = 그 자리에 서기(눈높이), 터치 두 손가락 = 벌려 앞으로·끌어 옆/위아래).
    * opts: eyeHeight(세계 단위, 기본 단위별 1.6 m), speed(초당 세계 단위, 기본 보이는 범위 반지름의 0.4), tapToStand(기본 true).
-   * 걷기로 바꿀 때 눈은 제자리에 두고 대상점을 눈높이만큼 앞에 둔다. 앱의 가상 조이스틱은 setWalkInput으로
+   * 걷기로 바꿀 때 눈은 제자리에 두고 대상점을 눈높이만큼 앞에 둔다. 앱의 가상 조이스틱은 setWalkInput으로.
+   * 0.8.0(기본 꺼짐): gravity = 바닥을 따라간다(계단·경사를 오르고 난간 밖으로 나가면 아래 바닥으로, 위아래 입력은 무시 — 켜는 순간 발밑 바닥에 선다),
+   * collide = 면을 지나가지 않는다(벽 앞 radius에서 멈추고 벽을 따라 미끄러진다), stepHeight = 오를 수 있는 높이(기본 눈높이의 0.35),
+   * radius = 몸 반지름(기본 눈높이의 0.18). 보이는 그물(반투명 포함, pickable: false 제외)과 부딪히고 단면에 잘린 쪽은 지나간다
    */
-  setNavigation(mode: 'orbit' | 'walk', opts: { eyeHeight?: number; speed?: number; tapToStand?: boolean } = {}): void {
+  setNavigation(mode: 'orbit' | 'walk', opts: WalkOptions = {}): void {
+    const hadGravity = !!this.walkOpts.gravity;
     this.walkOpts = { ...this.walkOpts, ...opts };
-    if (mode === this.nav) return;
+    if (mode === this.nav) {
+      // 걷는 중에 중력을 켜면 발밑 바닥에 선다
+      if (mode === 'walk' && this.walkOpts.gravity && !hadGravity) {
+        this.walkMove(0, 0, 0);
+        this.invalidate();
+      }
+      return;
+    }
     this.finishAnim();
     this.nav = mode;
     this.walkKeys.clear();
@@ -981,8 +1076,47 @@ export class Viewer3d {
       const back = cameraBasis(this.cam).back;
       const d = Math.max(this.eyeHeight(), 1e-6);
       this.cam = { ...this.cam, distance: d, target: [eye[0] - back[0] * d, eye[1] - back[1] * d, eye[2] - back[2] * d] };
+      if (this.walkOpts.gravity) this.walkMove(0, 0, 0);
     }
     this.invalidate();
+  }
+
+  /**
+   * 걷기 한 걸음(수평 앞·오른쪽, 세계 위): 중력·부딪힘을 켰으면 walkStep으로 줄이고 바닥에 맞춘다. 끄면 0.7.x 그대로(walkCamera).
+   * 대상점을 눈과 같이 옮긴다(보는 방향·거리는 그대로)
+   */
+  private walkMove(forward: number, right: number, up: number): void {
+    const w = this.walkOpts;
+    const before = this.cam;
+    const next = walkCamera(before, forward, right, up);
+    if ((!w.gravity && !w.collide) || !this.sceneRef) {
+      this.cam = next;
+      return;
+    }
+    const eh = this.eyeHeight();
+    const box = this.visibleBox();
+    const eye = cameraEye(before);
+    const move: V3 = [next.target[0] - before.target[0], next.target[1] - before.target[1], next.target[2] - before.target[2]];
+    const drop = Math.max(eh, boxIsEmpty(box) ? eh * 10 : eye[2] - box.min[2] + eh);
+    const p = walkStep(
+      eye,
+      move,
+      { eyeHeight: eh, stepHeight: w.stepHeight ?? eh * 0.35, radius: w.radius ?? eh * 0.18, gravity: !!w.gravity, collide: !!w.collide, drop },
+      (o, d, t) => this.castWorld(o, d, t),
+    );
+    const k: V3 = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+    this.cam = { ...before, target: [before.target[0] + k[0], before.target[1] + k[1], before.target[2] + k[2]] };
+  }
+
+  /** 세계 광선이 처음 맞는 보이는 그물 면(걷기 중력·부딪힘) */
+  private castWorld(origin: V3, dir: V3, tMax: number): RayHit | null {
+    return castRay(origin, dir, tMax, this.visibleItems().meshes, {
+      bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
+      model: (m) => this.modelOf(m),
+      bounds: (it) => this.boundsOf(it),
+      hidden: (m) => this.rangeSel.get(m.id)?.test,
+      clips: this.sec ? (m) => this.clipsFor(m.id) : undefined,
+    });
   }
 
   get navigation(): 'orbit' | 'walk' {
@@ -1002,7 +1136,7 @@ export class Viewer3d {
   /** 1인칭 한 걸음(세계 단위): 수평 앞·오른쪽, 세계 위 */
   walkBy(forward: number, right: number, up = 0): void {
     this.finishAnim();
-    this.cam = walkCamera(this.cam, forward, right, up);
+    this.walkMove(forward, right, up);
     this.invalidate();
   }
 
@@ -1054,7 +1188,7 @@ export class Viewer3d {
     this.walkT = now;
     const v = this.walkSpeed() * (this.walkFast ? 3 : 1) * dt;
     this.anim = null;
-    if (fw || rt || up) this.cam = walkCamera(this.cam, fw * v, rt * v, up * v);
+    if (fw || rt || up) this.walkMove(fw * v, rt * v, up * v);
     if (tn || lk) this.cam = lookCamera(this.cam, tn * dt * (Math.PI / 2), lk * dt * (Math.PI / 2));
     this.invalidate();
   }
@@ -1751,6 +1885,47 @@ export class Viewer3d {
     return this.opts.pickEdges;
   }
 
+  /**
+   * 측정 점 붙잡기 넓히기(0.8.0, 기본 꺼짐 — 끄면 0.7.2처럼 꼭짓점·끝점에만): midpoints = 선분·윤곽선 가운데 점, edges = 측정 중에만 윤곽선 고르기,
+   * points = 늘 후보인 앱 점(원 중심 등), pointsFor = 고른 것에 따라 앱이 더하는 점. 붙잡기 거리 안에서 화면에 가장 가까운 것을 붙잡고(같으면 꼭짓점·끝점),
+   * 마우스를 올리면 표식 모양으로 종류를 보인다(끝점·꼭짓점 네모, 가운데 점 세모, 중심 ⊕, 그 밖의 앱 점 마름모). 측정 결과에 snapA·snapB가 실린다.
+   * null(또는 빈 선택)이면 끈다. 장면을 바꿔도 남는다(점 목록은 앱이 장면에 맞춰 다시 준다)
+   */
+  setMeasureSnap(o: MeasureSnapOptions | null): void {
+    const pts = o?.points ?? [];
+    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor)) this.snapOpt = null;
+    else {
+      const xyz = new Float64Array(pts.length * 3);
+      const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
+      let n = 0;
+      for (const sp of pts) {
+        const q = sp.point;
+        if (!q || !Number.isFinite(q[0]) || !Number.isFinite(q[1]) || !Number.isFinite(q[2])) continue;
+        xyz[n * 3] = q[0]!;
+        xyz[n * 3 + 1] = q[1]!;
+        xyz[n * 3 + 2] = q[2]!;
+        kinds.push(sp.kind ?? 'point');
+        ids.push(sp.id);
+        n++;
+      }
+      this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src: { ...o }, pts: xyz.subarray(0, n * 3), kinds, ids };
+      if (o.edges) this.scheduleBvh();
+    }
+    if (this.measuring) this.measureHover = null;
+    this.invalidate();
+  }
+
+  /** 지금 측정 붙잡기 선택(꺼져 있으면 null) */
+  get measureSnap(): MeasureSnapOptions | null {
+    return this.snapOpt ? { ...this.snapOpt.src } : null;
+  }
+
+  /** 측정 중 커서 아래 붙잡을 점과 그 종류(0.8.0 — 앱이 상태 줄에 "끝점·가운데 점·중심"을 보일 때). 측정 중이 아니거나 없으면 null */
+  get measureHoverSnap(): { point: V3; snap: SnapKind | null } | null {
+    const h = this.measuring ? this.measureHover : null;
+    return h ? { point: [...h.p] as V3, snap: h.kind } : null;
+  }
+
   /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
   setMeasureMode(on: boolean): void {
     this.measuring = on;
@@ -1781,7 +1956,12 @@ export class Viewer3d {
     const [a, b] = this.measurePts;
     if (!a || !b) return null;
     const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-    return { a, b, distance: Math.hypot(dx, dy, dz), dx, dy, dz };
+    const r: MeasureResult = { a, b, distance: Math.hypot(dx, dy, dz), dx, dy, dz };
+    if (this.snapOpt) {
+      r.snapA = this.measureKinds.get(a) ?? null;
+      r.snapB = this.measureKinds.get(b) ?? null;
+    }
+    return r;
   }
 
   // ───────────────────────── 화면 위치·측정 덧그림 ─────────────────────────
@@ -2491,11 +2671,12 @@ export class Viewer3d {
   }
 
   /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도 */
-  private pickDetail(x: number, y: number, build = true, pointerType?: string, edges = this.opts.pickEdges): PickDetail | null {
+  private pickDetail(x: number, y: number, build = true, pointerType?: string, edges = this.opts.pickEdges, midpoints = false): PickDetail | null {
     if (!this.sceneRef) return null;
     const t = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance);
     return pickScene(this.frame(), x, y, this.visibleItems(), {
       ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
+      ...(midpoints ? { midpoints: true } : {}),
       tol: t.tol,
       snap: t.snap,
       occlude: this.shadedMode,
@@ -2507,6 +2688,55 @@ export class Viewer3d {
       ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
+  }
+
+  /**
+   * 측정 점 고르기: 화면 점에서 찍을 점과 붙잡은 종류. 붙잡기 선택(setMeasureSnap)이 없으면 0.7.2 그대로(고르기의 꼭짓점·끝점 붙잡기 — d를 주면 그것을 쓴다).
+   * 있으면 고르기(윤곽선·가운데 점 선택 반영)의 붙잡은 점, pointsFor 점, 늘 후보인 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것
+   */
+  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null): { p: V3; vertex: boolean; kind: SnapKind | null } | null {
+    const so = this.snapOpt;
+    if (!so) {
+      const d = d0 !== undefined ? d0 : this.pickDetail(x, y, true, pointerType);
+      return d ? { p: d.snap, vertex: d.vertex, kind: d.snapKind } : null;
+    }
+    if (!this.sceneRef) return null;
+    const d = this.pickDetail(x, y, true, pointerType, so.edges ?? this.opts.pickEdges, so.midpoints);
+    const snapPx = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance).snap;
+    const f = this.frame();
+    return chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, this.snapCandidates(d?.pick ?? null), (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+  }
+
+  /** 앱 붙잡기 후보: pointsFor(고른 것) 점(id가 없으면 고른 묶음), 늘 후보인 점. id가 있으면 묶음 행렬(분해도)을 따라 옮긴다 */
+  private *snapCandidates(pick: Pick3d | null): Generator<SnapCandidate> {
+    const so = this.snapOpt;
+    if (!so) return;
+    const at = (x: number, y: number, z: number, kind: SnapKind, id: string | undefined): SnapCandidate => {
+      const m = id !== undefined ? this.looks.get(id)?.matrix : undefined;
+      return { p: m ? transformPoint(m, [x, y, z]) : [x, y, z], kind, id };
+    };
+    if (pick && so.pointsFor) {
+      const extra = so.pointsFor(pick);
+      if (extra)
+        for (const sp of extra) {
+          const q = sp.point;
+          if (q && Number.isFinite(q[0]) && Number.isFinite(q[1]) && Number.isFinite(q[2])) yield at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', sp.id ?? pick.id);
+        }
+    }
+    const P = so.pts;
+    for (let i = 0, n = P.length / 3; i < n; i++) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+  }
+
+  /** 앱 붙잡기 점이 보이는지: 묶음(id)이 보이고, 단면에 잘리지 않고(id면 그 묶음 평면, 아니면 모든 묶음을 자르는 평면), 음영 계열에서 가리지 않음 */
+  private snapVisible(f: ViewFrame, p: V3, sx: number, sy: number, id: string | undefined): boolean {
+    if (id !== undefined) {
+      const it = this.items.get(id);
+      if (it && (!this.visible(it.item.id, it.item.group) || this.looks.get(id)?.pickable === false)) return false;
+      if (it) {
+        for (const c of this.clipsFor(id)) if (planeValue(c, p[0], p[1], p[2]) > 1e-9 * (Math.abs(c[3]) + 1)) return false;
+      } else if (this.pointCut(p)) return false;
+    } else if (this.pointCut(p)) return false;
+    return !this.occludedAt(f, p, sx, sy, true);
   }
 
   /** 단면에서 잘린 면을 채워 그리는 그물인지(렌더러의 채우기 조건과 같다). capGroup이 있는 그물은 묶음으로 채운다 */
@@ -2566,12 +2796,16 @@ export class Viewer3d {
       return;
     }
     if (this.measuring) {
-      if (!d) return;
+      const s = this.measureAt(x, y, type, this.snapOpt ? undefined : d);
+      if (!s) return;
       if (this.measurePts.length >= 2) {
         this.measurePts = [];
         for (const cb of this.measureCbs) cb(null);
       }
-      this.measurePts.push(d.snap);
+      // 같은 점 객체가 두 번 찍혀도 종류를 따로 지키도록 복사해 넣는다(붙잡기 선택이 있을 때만 — 없으면 0.7.2 그대로)
+      const p: V3 = this.snapOpt ? [s.p[0], s.p[1], s.p[2]] : s.p;
+      this.measureKinds.set(p, s.kind);
+      this.measurePts.push(p);
       this.measureHover = null;
       const m = this.measurement();
       if (m) for (const cb of this.measureCbs) cb(m);
@@ -2758,7 +2992,7 @@ export class Viewer3d {
       if (this.nav === 'walk') {
         // 걷기: 벌리면 앞으로, 두 손가락을 끌면 옆·위아래로(장면을 잡아 끄는 쪽)
         const k = this.walkSpeed() * 0.01;
-        this.cam = walkCamera(this.cam, (dist - t.dist) * k, -(cx - t.cx) * k, (cy - t.cy) * k);
+        this.walkMove((dist - t.dist) * k, -(cx - t.cx) * k, (cy - t.cy) * k);
         this.touch = { dist, cx, cy };
         this.invalidate();
         return;
@@ -2841,7 +3075,7 @@ export class Viewer3d {
     const delta = Math.max(-400, Math.min(400, e.deltaY * k));
     if (this.nav === 'walk') {
       // 걷기: 휠은 앞뒤로 걷는다
-      this.cam = walkCamera(this.cam, -delta * this.walkSpeed() * 0.002, 0, 0);
+      this.walkMove(-delta * this.walkSpeed() * 0.002, 0, 0);
       this.invalidate();
       return;
     }
@@ -2975,8 +3209,7 @@ export class Viewer3d {
     const f = this.frame();
     // 측정 중 커서 아래 붙잡을 점
     if (this.measuring && this.hoverAt && !this.drag) {
-      const d = this.pickDetail(this.hoverAt.x, this.hoverAt.y, true, this.hoverAt.pointerType);
-      this.measureHover = d ? { p: d.snap, vertex: d.vertex } : null;
+      this.measureHover = this.measureAt(this.hoverAt.x, this.hoverAt.y, this.hoverAt.pointerType);
       this.hoverAt = null;
     }
     if (this.renderer.uploading) this.pumpUpload(this.upload?.budget ?? 8);
@@ -3054,10 +3287,29 @@ export class Viewer3d {
       profiles: this.renderOpts.profiles
         ? {
             width: this.renderOpts.profiles.width * dpr,
-            color: this.renderOpts.profiles.color === null ? this.colors.line : typeof this.renderOpts.profiles.color === 'string' ? this.rgba(this.renderOpts.profiles.color) : this.renderOpts.profiles.color,
+            color: this.optColor(this.renderOpts.profiles.color, colors.background),
           }
         : null,
+      ...this.lineColorState(colors.background),
     };
+  }
+
+  /** 선택 색(없으면 테마 선 색, 'contrast'면 바탕과 3:1이 되는 테마 선 색·검정·흰색) */
+  private optColor(c: Rgba | string | null, bg: Rgba): Rgba {
+    if (c === null) return this.colors.line;
+    if (c === 'contrast') return contrastLineColor(this.colors.line, bg, this.colors.line);
+    return typeof c === 'string' ? this.rgba(c) : c;
+  }
+
+  /** 0.8.0 선 색 선택을 그리기 상태로(쓰지 않으면 필드를 넣지 않는다 — 0.7.2와 같은 상태) */
+  private lineColorState(bg: Rgba): Pick<RenderState, 'hiddenEdgesShaded' | 'hiddenEdgeColor' | 'edgeColor' | 'edgeContrast'> {
+    const r = this.renderOpts;
+    const o: Pick<RenderState, 'hiddenEdgesShaded' | 'hiddenEdgeColor' | 'edgeColor' | 'edgeContrast'> = {};
+    if (r.hiddenEdgesShaded) o.hiddenEdgesShaded = true;
+    if (r.hiddenEdgeColor !== null) o.hiddenEdgeColor = this.optColor(r.hiddenEdgeColor, bg);
+    if (r.edgeColor === 'contrast') o.edgeContrast = { fallback: this.colors.line };
+    else if (r.edgeColor !== null) o.edgeColor = this.optColor(r.edgeColor, bg);
+    return o;
   }
 
   private drawCube(): void {
@@ -3280,6 +3532,47 @@ export class Viewer3d {
       ctx.fill();
       ctx.stroke();
     };
+    /** 0.8.0 붙잡기 표식: 가운데 점 = 세모, 중심 = 동그라미 테 + 십자(⊕), 그 밖의 앱 점 = 마름모 */
+    const snapMarkAt = (p: V3 | null, kind: 'midpoint' | 'center' | 'point'): void => {
+      if (!p) return;
+      const [x, y] = p;
+      ctx.fillStyle = th.measure;
+      ctx.strokeStyle = th.textBg;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (kind === 'midpoint') {
+        ctx.moveTo(x, y - 6);
+        ctx.lineTo(x + 5.5, y + 4);
+        ctx.lineTo(x - 5.5, y + 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else if (kind === 'point') {
+        ctx.moveTo(x, y - 6);
+        ctx.lineTo(x + 6, y);
+        ctx.lineTo(x, y + 6);
+        ctx.lineTo(x - 6, y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        // 바탕 테(대비) 위에 측정 색 테와 십자
+        for (const [color, w] of [
+          [th.textBg, 4],
+          [th.measure, 2],
+        ] as const) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          ctx.arc(x, y, 6, 0, Math.PI * 2);
+          ctx.moveTo(x - 9, y);
+          ctx.lineTo(x + 9, y);
+          ctx.moveTo(x, y - 9);
+          ctx.lineTo(x, y + 9);
+          ctx.stroke();
+        }
+      }
+    };
     const label = (at: V3 | null, lines: string[]): void => {
       if (!at || !lines.length) return;
       ctx.font = `12px ${FONT}`;
@@ -3324,7 +3617,12 @@ export class Viewer3d {
       );
     }
     for (const p of pts) dotAt(P(p), false);
-    if (hover) dotAt(P(hover.p), hover.vertex);
+    if (hover) {
+      const k = hover.kind;
+      // 0.7.2의 두 모양(꼭짓점·끝점 네모, 붙잡지 않음 동그라미) 그대로, 0.8.0 붙잡기 종류만 새 모양
+      if (k === 'midpoint' || k === 'center' || k === 'point') snapMarkAt(P(hover.p), k);
+      else dotAt(P(hover.p), hover.vertex);
+    }
     ctx.restore();
   }
 }
