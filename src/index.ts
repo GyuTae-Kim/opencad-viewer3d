@@ -27,6 +27,7 @@ export type {
   SectionPlane,
   SectionState,
   SegmentHighlightOptions,
+  SetMeshOptions,
   SnapshotOptions,
   Viewer3dOptions,
   Viewer3dStats,

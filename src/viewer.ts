@@ -13,7 +13,7 @@
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
-import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
 import { type IndexRange, mergeRanges, partitionRanges, rangeTester } from './ranges';
 import { type Bvh, type PrimKind, buildBvh } from './bvh';
 import {
@@ -468,6 +468,25 @@ export interface AnnotationOptions {
 
 export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats };
 
+/** Viewer3d.setMesh 선택(0.11.0) */
+export interface SetMeshOptions {
+  /**
+   * 바뀐 정점 구간(정점 번호 { start, count }, 하나 또는 목록). 주면 정점 속성 배열(positions·normals·colors·uvs·backUvs)은 이 구간 밖이 앞 그물과 같다고 보고
+   * 이 구간만 GPU에 올린다 — 앞 그물과 같은 배열 객체를 제자리에서 고쳤을 때(이때는 꼭 준다)와, 같은 크기 새 배열이 앞 버퍼를 물려받을 때.
+   * 주지 않으면 앞 그물과 같은 배열 객체는 바뀌지 않았다고 보고 다시 올리지 않으며, 새 배열은 통째로 올린다
+   */
+  vertices?: IndexRange | readonly IndexRange[] | null;
+  /**
+   * 새로 올릴 배열이 8 MB(CHUNK_MIN_BYTES)를 넘으면 프레임마다 budgetMs(기본 8 ms)씩 4 MB 조각으로 새 버퍼에 채우고, 다 채울 때까지 앞 그물을 그린다.
+   * 주지 않으면 한 번에 올린다
+   */
+  incremental?: boolean | { budgetMs?: number };
+}
+
+/** 두 상자의 여섯 값이 모두 같은지 */
+const sameBox = (a: Box3, b: Box3): boolean =>
+  a.min[0] === b.min[0] && a.min[1] === b.min[1] && a.min[2] === b.min[2] && a.max[0] === b.max[0] && a.max[1] === b.max[1] && a.max[2] === b.max[2];
+
 type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } | { kind: 'point'; item: PointSet3d };
 /**
  * 측정 점 고르기 결과(미리 보기·누르기): 찍을 점·붙잡았는지·종류, 0.9.0 축 붙잡기의 축,
@@ -608,6 +627,12 @@ export class Viewer3d {
   private bvhs = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Bvh>>();
   private bvhGen = 0;
   private bvhTimer = 0;
+  /** 쉬는 틈에 만들 BVH 일(작은 것부터) */
+  private bvhTasks: { n: number; run: () => void }[] = [];
+  /** 그물마다 단면 교선(로컬 좌표) — 평면·숨긴 구간이 같으면 다시 쓴다(0.11.0: 그물 하나를 바꿔도 다른 그물은 다시 자르지 않는다) */
+  private cutCache = new WeakMap<Mesh3d, { plane: Plane4; test: ((i: number) => boolean) | null | undefined; segs: Float32Array }[]>();
+  /** 그물 바꾸기 나눠 올리기의 프레임 몫(ms, setMesh의 incremental.budgetMs) */
+  private meshBudget = 8;
 
   private cssW = 1;
   private cssH = 1;
@@ -843,6 +868,7 @@ export class Viewer3d {
    * incremental을 주면 GPU 올리기를 여러 프레임에 나눈다(한 프레임 budgetMs, 기본 8 ms — 묶음 하나는 통째로).
    * 올라간 묶음부터 그리고, onProgress(올린 묶음 수, 전체)를 프레임마다 부른다(끝나면 done = total).
    * 범위·고르기·측정은 처음부터 장면 전체로 한다. 주지 않으면 예전처럼 한 번에 올린다.
+   * 그물 하나만 바뀌면 장면 전체 대신 setMesh·removeMesh(0.11.0)를 쓴다.
    */
   setScene(
     scene: Scene3d,
@@ -851,12 +877,9 @@ export class Viewer3d {
     if (this.disposed) return;
     const hadSection = !!this.sec;
     this.sceneRef = scene;
-    this.items.clear();
+    this.rebuildItems();
     this.bbList = scene.meshes.filter((m) => hasBillboard(m));
     this.bbCamKey = '';
-    for (const m of scene.meshes) this.items.set(m.id, { kind: 'mesh', item: m });
-    for (const l of scene.lines) this.items.set(l.id, { kind: 'line', item: l });
-    for (const p of scene.points ?? []) this.items.set(p.id, { kind: 'point', item: p });
     this.hiddenGroups.clear();
     this.hiddenItems.clear();
     this.hi.clear();
@@ -873,6 +896,7 @@ export class Viewer3d {
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
+    this.cutCache = new WeakMap();
     this.visLists = null;
     this.cutDirty = true;
     if (!opts.keepView) {
@@ -923,6 +947,7 @@ export class Viewer3d {
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
+    this.cutCache = new WeakMap();
     this.visLists = null;
     this.sec = null;
     this.secMore = [];
@@ -931,12 +956,146 @@ export class Viewer3d {
     this.usesOrigin = false;
     this.wheelAnchor = null;
     this.bvhGen++;
+    this.bvhTasks = [];
     clearTimeout(this.bvhTimer);
     if (this.gpu) this.renderer.clear();
     this.allBox = emptyBox();
     this.visBox = null;
     this.rebuildGrid();
     if (hadSection) this.emitSection();
+    this.invalidate();
+  }
+
+  /**
+   * 그물 하나 넣기·바꾸기(0.11.0): mesh.id와 같은 그물이 있으면 그 자리에서 바꾸고, 없으면 장면 그물 목록 끝에 더한다.
+   * 장면 전체를 다시 올리지 않는다 — 이 그물의 GPU 버퍼만 올리고(앞 그물만 쓰던 버퍼와 바이트 크기가 같으면 그 버퍼에 bufferSubData, 다르면 새 버퍼),
+   * 고르기 BVH·범위·단면 테두리도 이 그물 것만 다시 한다(그림자 깊이 그림은 다음 그리기에서 다시 그린다).
+   * 다른 묶음의 버퍼, 카메라, 강조(highlight), 측정 점, 숨김(항목·묶음), 묶음 겉모습(이 그물 id에 둔 색·불투명도·행렬·선 색도), 단면은 그대로다.
+   * 이 그물 id의 구간 숨김·강조는 새 삼각형 수로 자른다. 장면 범위는 Scene3d.bounds를 준 장면이면 그 값 그대로, 아니면 다시 센다(배열마다 캐시).
+   * viewer.scene은 그물을 바꾼 새 장면 객체가 된다(앱이 준 장면 객체는 고치지 않는다).
+   *
+   * 앞 그물과 같은 배열 객체는 바뀌지 않았다고 본다(GPU·범위·BVH를 다시 만들지 않는다). 정점 속성 배열(위치·법선·색·무늬 좌표)을 제자리에서
+   * 고쳤으면 opts.vertices로 바뀐 정점 구간을 알린다 — 그 구간만 올린다. 새 배열을 주면서 vertices를 주면 그 구간 밖은 앞 그물과 같다고 보고
+   * 물려받은 버퍼에 그 구간만 올린다. 색인(indices)·윤곽선(edges)을 바꿨으면 새 배열로 준다.
+   * opts.incremental이면 새로 올릴 배열이 8 MB(CHUNK_MIN_BYTES)를 넘을 때 프레임마다 4 MB씩 새 버퍼에 채우고, 다 채울 때까지 앞 그물을 그린다
+   * (고르기·측정·범위는 처음부터 새 그물로 한다).
+   * 돌려주는 값: 넣었거나 바꿨으면 true. 장면이 없거나(setScene 먼저) 같은 id가 선분·점 묶음이면 false
+   */
+  setMesh(mesh: Mesh3d, opts: SetMeshOptions = {}): boolean {
+    const s = this.sceneRef;
+    if (this.disposed || !s || !mesh || typeof mesh.id !== 'string' || !mesh.positions) return false;
+    const old = this.items.get(mesh.id);
+    if (old && old.kind !== 'mesh') return false;
+    const prev = old?.item as Mesh3d | undefined;
+    const v = opts.vertices;
+    const ranges = v ? mergeRanges(Array.isArray(v) ? (v as readonly IndexRange[]) : [v as IndexRange], Math.floor(mesh.positions.length / 3)) : null;
+    // 제자리에서 고친 배열의 캐시(범위·BVH, 그 배열을 함께 쓰는 묶음의 범위·단면 교선)
+    if (prev && ranges?.length) {
+      for (const a of [prev.positions, prev.normals, prev.colors, prev.uvs, prev.backUvs]) {
+        if (!a || !this.sameArrayIn(mesh, a)) continue;
+        if (a === mesh.positions) {
+          forgetBounds(a);
+          this.bvhs.delete(a);
+          for (const it of this.items.values())
+            if (it.item.positions === a) {
+              this.boxes.delete(it.item);
+              if (it.kind === 'mesh') this.cutCache.delete(it.item);
+            }
+        }
+      }
+    }
+    if (prev) {
+      this.boxes.delete(prev);
+      this.models.delete(prev);
+      this.cutCache.delete(prev);
+    }
+    this.boxes.delete(mesh);
+    this.models.delete(mesh);
+    this.cutCache.delete(mesh);
+    const meshes = s.meshes.slice();
+    let k = prev ? meshes.indexOf(prev) : -1;
+    if (prev && k < 0) k = meshes.findIndex((m) => m.id === mesh.id);
+    if (k >= 0) meshes[k] = mesh;
+    else meshes.push(mesh);
+    const scene: Scene3d = { ...s, meshes };
+    this.sceneRef = scene;
+    if (prev) this.items.set(mesh.id, { kind: 'mesh', item: mesh });
+    else this.rebuildItems();
+    const r = this.rangeSel.get(mesh.id);
+    if (r) {
+      const it = this.items.get(mesh.id)!;
+      const ne = mesh.edges ? Math.floor(mesh.edges.length / 6) : 0;
+      r.hidden = mergeRanges(r.hidden, primCount(it));
+      r.hi = mergeRanges(r.hi, primCount(it));
+      r.eHidden = mergeRanges(r.eHidden, ne);
+      r.eHi = mergeRanges(r.eHi, ne);
+      this.rangesChanged(it);
+    }
+    const inc = opts.incremental;
+    if (inc) this.meshBudget = Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8);
+    if (this.gpu) this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc });
+    this.sceneEdited();
+    this.queueBvh(mesh);
+    return true;
+  }
+
+  /**
+   * 그물 하나 빼기(0.11.0). 그 그물만 쓰던 GPU 버퍼를 지우고 범위·고르기·단면 테두리에서 뺀다. 다른 묶음·카메라·측정 점은 그대로다.
+   * 그 id에 둔 겉모습(setItem…)·구간 숨김·강조는 지우고, id로 정한 보이기(setItemVisible)·강조(highlight)는 남긴다(같은 id로 다시 넣으면 따른다).
+   * 돌려주는 값: 뺐으면 true(그런 그물이 없으면 false)
+   */
+  removeMesh(id: string): boolean {
+    const s = this.sceneRef;
+    const it = this.items.get(id);
+    if (this.disposed || !s || !it || it.kind !== 'mesh') return false;
+    const m = it.item;
+    this.sceneRef = { ...s, meshes: s.meshes.filter((x) => x !== m) };
+    this.items.delete(id);
+    this.rangeSel.delete(id);
+    if (this.looks.delete(id)) {
+      let n = 0;
+      for (const l of this.looks.values()) if (l.matrix) n++;
+      this.lookMoves = n;
+    }
+    if (this.gpu) this.renderer.removeMesh(id, this.sceneRef);
+    this.sceneEdited();
+    return true;
+  }
+
+  /** mesh가 쓰는 정점 속성 배열 가운데 a와 같은 객체가 있는지 */
+  private sameArrayIn(mesh: Mesh3d, a: Float32Array): boolean {
+    return a === mesh.positions || a === mesh.normals || a === mesh.colors || a === mesh.uvs || a === mesh.backUvs;
+  }
+
+  /** 장면 묶음 표(id → 묶음)를 장면 차례(그물 → 선분 → 점)로 다시 만든다 */
+  private rebuildItems(): void {
+    this.items.clear();
+    const s = this.sceneRef;
+    if (!s) return;
+    for (const m of s.meshes) this.items.set(m.id, { kind: 'mesh', item: m });
+    for (const l of s.lines) this.items.set(l.id, { kind: 'line', item: l });
+    for (const p of s.points ?? []) this.items.set(p.id, { kind: 'point', item: p });
+  }
+
+  /** 그물 하나를 넣거나 바꾸거나 뺀 뒤: 장면에서 다시 셀 것(범위·마주 보기·원점 쓰기)과 화면 상태(그림자·단면 테두리·측정 미리 보기) */
+  private sceneEdited(): void {
+    const s = this.sceneRef!;
+    this.bbList = s.meshes.filter((m) => hasBillboard(m));
+    this.bbCamKey = '';
+    const hadOrigin = this.usesOrigin;
+    this.usesOrigin = s.meshes.some((m) => hasOrigin(m.origin)) || s.lines.some((l) => hasOrigin(l.origin)) || (s.points ?? []).some((p) => hasOrigin(p.origin));
+    this.visLists = null;
+    this.visBox = null;
+    this.cutDirty = true;
+    this.shadowVer++;
+    const box = s.bounds && !boxIsEmpty(s.bounds) ? s.bounds : sceneBounds(s);
+    const moved = !sameBox(box, this.allBox);
+    this.allBox = box;
+    if (moved || hadOrigin !== this.usesOrigin) this.rebuildGrid();
+    if (this.snapOpt) this.snapOpt.pfMemo = null;
+    // 측정 미리 보기는 그 커서 자리에서 바뀐 그물로 다시 구한다(찍은 점은 그대로)
+    this.rehover();
+    if (moved && this.sec) this.emitSection();
     this.invalidate();
   }
 
@@ -982,6 +1141,8 @@ export class Viewer3d {
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
+    this.cutCache = new WeakMap();
+    this.bvhTasks = [];
     this.visLists = null;
     this.anim = null;
     this.drag = null;
@@ -1850,21 +2011,25 @@ export class Viewer3d {
     r.box = null;
   }
 
-  /** 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만) */
+  /**
+   * 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만). onProgress는 장면 나눠 올리기만 알린다
+   * (0.11.0 그물 바꾸기 나눠 올리기는 알리지 않는다)
+   */
   private pumpUpload(budgetMs: number): void {
+    const scene = !!this.renderer.uploadProgress;
     const done = this.renderer.uploadSome(budgetMs);
     this.shadowVer++;
-    const p = this.renderer.uploadProgress;
-    const s = this.sceneRef;
-    const total = s ? s.meshes.length + s.lines.length + (s.points?.length ?? 0) : 0;
-    const cb = this.upload?.cb;
-    if (done) {
-      if (this.upload) this.upload.cb = null;
-      cb?.(total, total);
-    } else {
-      cb?.(p!.done, p!.total);
-      this.invalidate();
+    if (scene) {
+      const p = this.renderer.uploadProgress;
+      const s = this.sceneRef;
+      const total = s ? s.meshes.length + s.lines.length + (s.points?.length ?? 0) : 0;
+      const cb = this.upload?.cb;
+      if (!p) {
+        if (this.upload) this.upload.cb = null;
+        cb?.(total, total);
+      } else cb?.(p.done, p.total);
     }
+    if (!done) this.invalidate();
   }
 
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
@@ -1885,24 +2050,25 @@ export class Viewer3d {
       const m = it.item;
       if (!this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
       const model = this.modelOf(m);
-      const segs = sectionSegments(m.positions, m.indices, planeToLocal(plane, model), this.bvhFor('triangle', m.positions, m.indices, false), this.rangeSel.get(m.id)?.test);
+      const segs = this.meshCut(m, planeToLocal(plane, model));
       if (!segs.length) continue;
-      // 로컬 → 세계(double) → 장면 가운데 기준
+      // 로컬 → 세계(double) → 장면 가운데 기준(교선은 그물마다 캐시하므로 새 배열에)
       const M = model;
+      const out = new Float32Array(segs.length);
       for (let i = 0; i < segs.length; i += 3) {
         const x = segs[i]!, y = segs[i + 1]!, z = segs[i + 2]!;
         if (M) {
-          segs[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]! - origin[0];
-          segs[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]! - origin[1];
-          segs[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]! - origin[2];
+          out[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]! - origin[0];
+          out[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]! - origin[1];
+          out[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]! - origin[2];
         } else {
-          segs[i] = x - origin[0];
-          segs[i + 1] = y - origin[1];
-          segs[i + 2] = z - origin[2];
+          out[i] = x - origin[0];
+          out[i + 1] = y - origin[1];
+          out[i + 2] = z - origin[2];
         }
       }
-      parts.push(segs);
-      total += segs.length;
+      parts.push(out);
+      total += out.length;
     }
     let all: Float32Array | null = null;
     if (total) {
@@ -1916,6 +2082,22 @@ export class Viewer3d {
       }
     }
     if (this.gpu) this.renderer.setSectionLines(all, origin);
+  }
+
+  /**
+   * 그물과 로컬 평면의 교선(로컬 좌표, 고치지 않고 읽기만 한다). 같은 그물 객체·평면·숨긴 구간 판정이면 앞 결과를 다시 쓴다(0.11.0 — 그물 하나를
+   * 바꾸거나 넣어도 다른 그물은 다시 자르지 않는다). 그물마다 평면 MAX_SECTION_PLANES개까지 기억한다
+   */
+  private meshCut(m: Mesh3d, plane: Plane4): Float32Array {
+    const test = this.rangeSel.get(m.id)?.test;
+    let list = this.cutCache.get(m);
+    const hit = list?.find((e) => e.test === test && e.plane[0] === plane[0] && e.plane[1] === plane[1] && e.plane[2] === plane[2] && e.plane[3] === plane[3]);
+    if (hit) return hit.segs;
+    const segs = sectionSegments(m.positions, m.indices, plane, this.bvhFor('triangle', m.positions, m.indices, false), test);
+    if (!list) this.cutCache.set(m, (list = []));
+    list.push({ plane: [plane[0], plane[1], plane[2], plane[3]], test, segs });
+    if (list.length > MAX_SECTION_PLANES) list.shift();
+    return segs;
   }
 
   /** 여러 단면의 테두리: 평면마다 그 평면이 자르는 보이는 그물과의 교선을 모으고, 그 그물을 자르는 다른 평면들로 다시 자른다 */
@@ -1937,7 +2119,7 @@ export class Viewer3d {
         const idx = this.secOf(m.id);
         if (!idx.includes(k) || !this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
         const model = this.modelOf(m);
-        const segs = sectionSegments(m.positions, m.indices, planeToLocal(plane, model), this.bvhFor('triangle', m.positions, m.indices, false), this.rangeSel.get(m.id)?.test);
+        const segs = this.meshCut(m, planeToLocal(plane, model));
         if (!segs.length) continue;
         // 로컬 → 세계(double)
         const w: number[] = new Array(segs.length);
@@ -2826,15 +3008,43 @@ export class Viewer3d {
 
   /** 장면을 올린 뒤 쉬는 틈에 BVH를 미리 만든다(작은 것부터, 한 틈에 약 10 ms씩) */
   private scheduleBvh(): void {
-    clearTimeout(this.bvhTimer);
-    const gen = ++this.bvhGen;
+    ++this.bvhGen;
+    this.bvhTasks = [];
     const s = this.sceneRef;
-    if (!s) return;
-    const tasks: { n: number; run: () => void }[] = [];
-    for (const m of s.meshes) tasks.push({ n: m.indices?.length ?? m.positions.length, run: () => this.bvhFor('triangle', m.positions, m.indices, true) });
-    if (this.opts.pickEdges) for (const m of s.meshes) if (m.edges && m.edges.length >= 6) tasks.push({ n: m.edges.length, run: () => this.bvhFor('segment', m.edges!, undefined, true) });
-    for (const l of s.lines) tasks.push({ n: l.positions.length, run: () => this.bvhFor('segment', l.positions, undefined, true) });
-    for (const p of s.points ?? []) tasks.push({ n: p.positions.length, run: () => this.bvhFor('point', p.positions, undefined, true) });
+    if (!s) {
+      clearTimeout(this.bvhTimer);
+      return;
+    }
+    for (const m of s.meshes) this.bvhTasks.push(this.meshBvhTask(m));
+    if (this.opts.pickEdges) for (const m of s.meshes) if (m.edges && m.edges.length >= 6) this.bvhTasks.push(this.edgeBvhTask(m));
+    for (const l of s.lines) this.bvhTasks.push({ n: l.positions.length, run: () => this.bvhFor('segment', l.positions, undefined, true) });
+    for (const p of s.points ?? []) this.bvhTasks.push({ n: p.positions.length, run: () => this.bvhFor('point', p.positions, undefined, true) });
+    this.runBvhTasks();
+  }
+
+  /**
+   * 바꾼 그물 하나의 BVH를 쉬는 틈에 만들도록 줄에 더한다(0.11.0 setMesh). 기다림(200 ms)을 처음부터 다시 세므로
+   * 그물을 잇달아 바꾸는 동안에는 만들지 않고(고르기는 필요할 때 그 자리에서 만든다) 바꾸기가 멈추면 만든다
+   */
+  private queueBvh(m: Mesh3d): void {
+    this.bvhTasks.push(this.meshBvhTask(m));
+    if (this.opts.pickEdges && m.edges && m.edges.length >= 6) this.bvhTasks.push(this.edgeBvhTask(m));
+    this.runBvhTasks();
+  }
+
+  /** 그물 BVH 일(그 사이 그물이 바뀌었거나 빠졌으면 건너뛴다) */
+  private meshBvhTask(m: Mesh3d): { n: number; run: () => void } {
+    return { n: m.indices?.length ?? m.positions.length, run: () => void (this.items.get(m.id)?.item === m && this.bvhFor('triangle', m.positions, m.indices, true)) };
+  }
+
+  private edgeBvhTask(m: Mesh3d): { n: number; run: () => void } {
+    return { n: m.edges!.length, run: () => void (this.items.get(m.id)?.item === m && this.bvhFor('segment', m.edges!, undefined, true)) };
+  }
+
+  private runBvhTasks(): void {
+    clearTimeout(this.bvhTimer);
+    const gen = this.bvhGen;
+    const tasks = this.bvhTasks;
     tasks.sort((a, b) => a.n - b.n);
     const step = (): void => {
       if (gen !== this.bvhGen || this.disposed) return;
@@ -3616,7 +3826,7 @@ export class Viewer3d {
       this.hoverAt = null;
       if (this.measurePts.length === 1 && !this.measureHover?.locked) this.lastLockable = lockFromSnap(this.measureHover) ?? this.lastLockable;
     }
-    if (this.renderer.uploading) this.pumpUpload(this.upload?.budget ?? 8);
+    if (this.renderer.uploading) this.pumpUpload(this.renderer.uploadProgress ? (this.upload?.budget ?? 8) : this.meshBudget);
     if (this.cutDirty) {
       if (this.sec) this.updateCut();
       else {

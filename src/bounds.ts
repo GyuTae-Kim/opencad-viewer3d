@@ -94,6 +94,11 @@ export function positionsBox(p: Float32Array): Box3 {
   return b;
 }
 
+/** 배열을 제자리에서 고친 뒤(0.11.0 Viewer3d.setMesh의 vertices): 그 배열의 캐시한 범위를 버린다(다음에 다시 훑는다) */
+export function forgetBounds(p: Float32Array): void {
+  cache.delete(p);
+}
+
 /** 상자를 o만큼 옮긴 새 상자(o가 없으면 복사) */
 export function offsetBox(b: Box3, o: readonly number[] | undefined | null): Box3 {
   if (!o) return copyBox(b);
