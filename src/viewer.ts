@@ -45,8 +45,10 @@ import {
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
-import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene } from './scenepick';
+import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
 import { type SnapCandidate, chooseMeasureSnap } from './snap';
+import { type MeasureInference, type SnapAxis, axisSnap, inferenceCandidates, normalizeInference } from './inference';
+import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
@@ -74,7 +76,7 @@ import {
 import { segmentsById } from './segments';
 import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { DARK_THEME, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
+import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
@@ -268,6 +270,21 @@ export interface MeasureSnapOptions {
    * 마우스 이동마다 부르므로 가볍게. id를 주지 않은 점은 고른 묶음 id로 자르고 가린다
    */
   pointsFor?: ((pick: Pick3d) => readonly SnapPoint[] | null | undefined) | null;
+  /**
+   * 추론 붙잡기(0.9.0, 기본 꺼짐): intersections = 커서 둘레 두 선분(선분 묶음·윤곽선)의 3D 교차점, perpendicular = 첫 측정 점에서
+   * 커서 둘레 선분으로 내린 수직 발, axes = 첫 측정 점에서 X·Y·Z 축 방향(점 붙잡기가 없을 때만 — 축 색 안내선). true면 셋 모두.
+   * 그물 윤곽선은 측정 중 윤곽선을 고를 때만(edges 또는 pickEdges) 쓴다
+   */
+  inference?: MeasureInference | boolean | null;
+}
+
+/** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
+export interface MeasureHoverSnap {
+  point: V3;
+  /** 붙잡은 종류(붙잡지 않았으면 null) */
+  snap: SnapKind | null;
+  /** 축 붙잡기(snap === 'axis')면 그 축 */
+  axis?: SnapAxis;
 }
 
 export interface GroupInfo {
@@ -316,6 +333,10 @@ export interface ItemLookState {
   color?: Rgba;
   /** 세계에 더 건 행렬(열 우선 4×4) */
   matrix?: Float64Array;
+  /** 0.9.0: 윤곽선 색(setItemEdgeColor) */
+  edgeColor?: Rgba;
+  /** 0.9.0: 외곽선 색(setItemProfileColor) */
+  profileColor?: Rgba;
 }
 
 interface LookState {
@@ -323,6 +344,8 @@ interface LookState {
   pickable?: boolean;
   color?: Rgba;
   matrix?: Float64Array;
+  edgeColor?: Rgba;
+  profileColor?: Rgba;
 }
 
 /** setLighting 선택 */
@@ -547,9 +570,22 @@ export class Viewer3d {
 
   private measuring = false;
   private measurePts: V3[] = [];
-  private measureHover: { p: V3; vertex: boolean; kind: SnapKind | null } | null = null;
-  /** 측정 붙잡기 선택(0.8.0, 없으면 0.7.2 규칙 그대로)과 늘 후보인 앱 점(세계 xyz·종류·묶음 id) */
-  private snapOpt: { midpoints: boolean; edges: boolean | null; pointsFor: MeasureSnapOptions['pointsFor']; src: MeasureSnapOptions; pts: Float64Array; kinds: SnapKind[]; ids: (string | undefined)[] } | null = null;
+  private measureHover: { p: V3; vertex: boolean; kind: SnapKind | null; axis?: SnapAxis } | null = null;
+  /**
+   * 측정 붙잡기 선택(0.8.0, 없으면 0.7.2 규칙 그대로)과 늘 후보인 앱 점(세계 xyz·종류·묶음 id),
+   * 추론 붙잡기(0.9.0)와 앱 점 색인(0.9.0 — 점이 SNAP_INDEX_MIN개 이상일 때 처음 쓸 때 만든다)
+   */
+  private snapOpt: {
+    midpoints: boolean;
+    edges: boolean | null;
+    pointsFor: MeasureSnapOptions['pointsFor'];
+    src: MeasureSnapOptions;
+    pts: Float64Array;
+    kinds: SnapKind[];
+    ids: (string | undefined)[];
+    inference: Required<MeasureInference> | null;
+    index: SnapPointIndex | null;
+  } | null = null;
   /** 찍은 측정 점의 붙잡은 종류(점 배열 객체 → 종류) */
   private measureKinds = new WeakMap<V3, SnapKind | null>();
   /** 측정 글 꼴(없으면 기본) */
@@ -641,7 +677,10 @@ export class Viewer3d {
     canvas.className = 'v3d-gl';
     canvas.tabIndex = 0;
     canvas.setAttribute('aria-label', '3D 보기');
-    canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;';
+    // 0.9.0: 초점 테두리는 :focus-visible 규칙(키보드 초점에서만)으로 — 캔버스에 outline:none을 직접 두지 않는다
+    canvas.style.cssText = CANVAS_CSS;
+    const focusCss = document.createElement('style');
+    focusCss.textContent = CANVAS_FOCUS_CSS;
     const overlay = document.createElement('canvas');
     overlay.className = 'v3d-overlay';
     overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
@@ -650,7 +689,7 @@ export class Viewer3d {
     cube.title = '뷰 큐브: 면·모서리·구석을 누르면 그 방향으로 봅니다';
     cube.style.cssText = `position:absolute;top:8px;right:8px;width:${this.opts.viewCubeSize}px;height:${this.opts.viewCubeSize}px;cursor:pointer;touch-action:none;`;
     if (!this.opts.viewCube) cube.style.display = 'none';
-    wrap.append(canvas, overlay, cube);
+    wrap.append(focusCss, canvas, overlay, cube);
     host.append(wrap);
     this.wrap = wrap;
     this.canvas = canvas;
@@ -1893,7 +1932,8 @@ export class Viewer3d {
    */
   setMeasureSnap(o: MeasureSnapOptions | null): void {
     const pts = o?.points ?? [];
-    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor)) this.snapOpt = null;
+    const inference = normalizeInference(o?.inference);
+    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference)) this.snapOpt = null;
     else {
       const xyz = new Float64Array(pts.length * 3);
       const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
@@ -1908,22 +1948,41 @@ export class Viewer3d {
         ids.push(sp.id);
         n++;
       }
-      this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src: { ...o }, pts: xyz.subarray(0, n * 3), kinds, ids };
+      const src: MeasureSnapOptions = { ...o };
+      if (inference) src.inference = { ...inference };
+      else delete src.inference;
+      const so = (this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src, pts: xyz.subarray(0, n * 3), kinds, ids, inference, index: null as SnapPointIndex | null });
+      // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
+      if (n >= SNAP_INDEX_MIN) {
+        so.index = new SnapPointIndex(so.pts, ids);
+        setTimeout(() => {
+          if (this.snapOpt === so && !this.disposed) so.index?.build();
+        }, 0);
+      }
       if (o.edges) this.scheduleBvh();
     }
     if (this.measuring) this.measureHover = null;
     this.invalidate();
   }
 
-  /** 지금 측정 붙잡기 선택(꺼져 있으면 null) */
+  /** 지금 측정 붙잡기 선택(꺼져 있으면 null). inference는 0.9.0부터 세 값으로 편 꼴 */
   get measureSnap(): MeasureSnapOptions | null {
-    return this.snapOpt ? { ...this.snapOpt.src } : null;
+    if (!this.snapOpt) return null;
+    const r = { ...this.snapOpt.src };
+    if (r.inference) r.inference = { ...(r.inference as Required<MeasureInference>) };
+    return r;
   }
 
-  /** 측정 중 커서 아래 붙잡을 점과 그 종류(0.8.0 — 앱이 상태 줄에 "끝점·가운데 점·중심"을 보일 때). 측정 중이 아니거나 없으면 null */
-  get measureHoverSnap(): { point: V3; snap: SnapKind | null } | null {
+  /**
+   * 측정 중 커서 아래 붙잡을 점과 그 종류(0.8.0 — 앱이 상태 줄에 "끝점·가운데 점·중심"을 보일 때), 축 붙잡기면 그 축(0.9.0).
+   * 측정 중이 아니거나 없으면 null
+   */
+  get measureHoverSnap(): MeasureHoverSnap | null {
     const h = this.measuring ? this.measureHover : null;
-    return h ? { point: [...h.p] as V3, snap: h.kind } : null;
+    if (!h) return null;
+    const r: MeasureHoverSnap = { point: [...h.p] as V3, snap: h.kind };
+    if (h.axis) r.axis = h.axis;
+    return r;
   }
 
   /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
@@ -2052,6 +2111,32 @@ export class Viewer3d {
     this.setLook(id, l, true);
   }
 
+  /**
+   * 그물 윤곽선 색(0.9.0): 그 그물의 윤곽선(Mesh3d.edges)·삼각형 변(와이어프레임·숨은 선)을 이 색으로 — 재질별·묶음별 모서리 색.
+   * 전역 setRenderOptions({ edgeColor })보다 먼저 쓰고(강조색이 가장 먼저, X-ray는 알파에 0.9), edgeColor: 'contrast'면 이 색에도 바탕 대비를 따진다.
+   * CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림. 숨은 점선(뒤 모서리) 색은 바꾸지 않는다
+   */
+  setItemEdgeColor(id: string, color: Rgba | string | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (color === null) delete l.edgeColor;
+    else l.edgeColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
+    this.setLook(id, l, false);
+  }
+
+  /**
+   * 그물 외곽선 색(0.9.0): 외곽선(setRenderOptions({ profiles }))이 이 그물이 앞에 있는 곳에서 이 색 — 그물이 뒤 그물·바탕과 맞닿은 테두리와
+   * 구멍 테두리. 앞 그물이 뒤 그물 위에 겹친 테두리는 앞 그물의 색이다. 주지 않은 그물은 profiles.color.
+   * 한 그물이라도 색을 주면 외곽선 깊이 그림과 함께 화면 크기 색 그림(RGBA8) 한 장을 더 그린다(모두 되돌리면 놓는다). null이면 되돌림
+   */
+  setItemProfileColor(id: string, color: Rgba | string | null): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if (color === null) delete l.profileColor;
+    else l.profileColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
+    this.setLook(id, l, false);
+  }
+
   /** 묶음 겉모습(바꾼 것만, 없으면 null) */
   itemLook(id: string): ItemLookState | null {
     const l = this.looks.get(id);
@@ -2060,6 +2145,8 @@ export class Viewer3d {
     if (l.alpha !== undefined) out.opacity = l.alpha;
     if (l.color) out.color = l.color;
     if (l.matrix) out.matrix = new Float64Array(l.matrix);
+    if (l.edgeColor) out.edgeColor = l.edgeColor;
+    if (l.profileColor) out.profileColor = l.profileColor;
     return out;
   }
 
@@ -2073,7 +2160,7 @@ export class Viewer3d {
 
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
-    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix) this.looks.delete(id);
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor) this.looks.delete(id);
     else this.looks.set(id, l);
     this.lookChanged(moved);
   }
@@ -2452,6 +2539,7 @@ export class Viewer3d {
       if (v) theme[k] = v;
     }
     this.theme = theme;
+    this.wrap.style.setProperty('--v3d-focus-default', base === LIGHT_THEME ? FOCUS_DEFAULT.light : FOCUS_DEFAULT.dark);
     const c = (s: string): Rgba => this.rgba(s);
     const line: Rgba = base === LIGHT_THEME ? [0.15, 0.2, 0.28, 1] : [0.85, 0.88, 0.92, 1];
     this.colors = {
@@ -2694,7 +2782,7 @@ export class Viewer3d {
    * 측정 점 고르기: 화면 점에서 찍을 점과 붙잡은 종류. 붙잡기 선택(setMeasureSnap)이 없으면 0.7.2 그대로(고르기의 꼭짓점·끝점 붙잡기 — d를 주면 그것을 쓴다).
    * 있으면 고르기(윤곽선·가운데 점 선택 반영)의 붙잡은 점, pointsFor 점, 늘 후보인 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것
    */
-  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null): { p: V3; vertex: boolean; kind: SnapKind | null } | null {
+  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null): { p: V3; vertex: boolean; kind: SnapKind | null; axis?: SnapAxis } | null {
     const so = this.snapOpt;
     if (!so) {
       const d = d0 !== undefined ? d0 : this.pickDetail(x, y, true, pointerType);
@@ -2704,11 +2792,49 @@ export class Viewer3d {
     const d = this.pickDetail(x, y, true, pointerType, so.edges ?? this.opts.pickEdges, so.midpoints);
     const snapPx = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance).snap;
     const f = this.frame();
-    return chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, this.snapCandidates(d?.pick ?? null), (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+    const inf = so.inference;
+    const first = this.measurePts.length === 1 ? this.measurePts[0]! : null;
+    const cands: Iterable<SnapCandidate> = inf ? this.withInference(f, x, y, snapPx, so.edges ?? this.opts.pickEdges, inf, first, this.snapCandidates(f, x, y, snapPx, d?.pick ?? null)) : this.snapCandidates(f, x, y, snapPx, d?.pick ?? null);
+    const r = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+    // 축(0.9.0): 점 붙잡기가 하나도 없을 때만 첫 점의 축 방향 선에
+    if (inf?.axes && first && (!r || !r.kind)) {
+      const a = axisSnap(f, first, x, y, snapPx);
+      if (a) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis };
+    }
+    return r;
   }
 
-  /** 앱 붙잡기 후보: pointsFor(고른 것) 점(id가 없으면 고른 묶음), 늘 후보인 점. id가 있으면 묶음 행렬(분해도)을 따라 옮긴다 */
-  private *snapCandidates(pick: Pick3d | null): Generator<SnapCandidate> {
+  /** 앱 붙잡기 후보 뒤에 추론 후보(0.9.0 — 커서 둘레 선분의 교차점·첫 점에서 내린 수직 발)를 잇는다 */
+  private *withInference(
+    f: ViewFrame,
+    x: number,
+    y: number,
+    snapPx: number,
+    edges: boolean,
+    inf: Required<MeasureInference>,
+    first: V3 | null,
+    app: Iterable<SnapCandidate>,
+  ): Generator<SnapCandidate> {
+    yield* app;
+    if (!inf.intersections && !(inf.perpendicular && first)) return;
+    const segs = segmentsNear(f, x, y, this.visibleItems(), {
+      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
+      bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
+      limit: (id) => this.ranges.get(id)?.count,
+      bounds: (it) => this.boundsOf(it),
+      model: (m) => this.modelOf(m),
+      ...this.clipOpts(),
+      hidden: (it) => this.rangeSel.get(it.id)?.test,
+    }, snapPx);
+    const near = segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth) }));
+    for (const c of inferenceCandidates(near, first, inf)) yield c;
+  }
+
+  /**
+   * 앱 붙잡기 후보: pointsFor(고른 것) 점(id가 없으면 고른 묶음), 늘 후보인 점. id가 있으면 묶음 행렬(분해도)을 따라 옮긴다.
+   * 늘 후보인 점이 SNAP_INDEX_MIN개 이상이면(0.9.0) 색인에서 커서 둘레(붙잡기 거리 안일 수 있는 것)만 번호 차례로 — 결과는 모두 훑을 때와 같다
+   */
+  private *snapCandidates(f: ViewFrame, x: number, y: number, snapPx: number, pick: Pick3d | null): Generator<SnapCandidate> {
     const so = this.snapOpt;
     if (!so) return;
     const at = (x: number, y: number, z: number, kind: SnapKind, id: string | undefined): SnapCandidate => {
@@ -2724,7 +2850,15 @@ export class Viewer3d {
         }
     }
     const P = so.pts;
-    for (let i = 0, n = P.length / 3; i < n; i++) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+    const n = P.length / 3;
+    if (n < SNAP_INDEX_MIN) {
+      for (let i = 0; i < n; i++) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+      return;
+    }
+    so.index ??= new SnapPointIndex(P, so.ids);
+    const moved: string[] = [];
+    for (const [id, l] of this.looks) if (l.matrix) moved.push(id);
+    for (const i of so.index.near(f, x, y, snapPx, (id) => this.looks.get(id)?.matrix, moved)) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
   }
 
   /** 앱 붙잡기 점이 보이는지: 묶음(id)이 보이고, 단면에 잘리지 않고(id면 그 묶음 평면, 아니면 모든 묶음을 자르는 평면), 음영 계열에서 가리지 않음 */
@@ -2932,7 +3066,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
-    this.canvas.focus({ preventScroll: true });
+    // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.0 — 앞서 키보드를 썼어도 :focus-visible이 아니게)
+    this.canvas.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch {
@@ -3532,15 +3667,40 @@ export class Viewer3d {
       ctx.fill();
       ctx.stroke();
     };
-    /** 0.8.0 붙잡기 표식: 가운데 점 = 세모, 중심 = 동그라미 테 + 십자(⊕), 그 밖의 앱 점 = 마름모 */
-    const snapMarkAt = (p: V3 | null, kind: 'midpoint' | 'center' | 'point'): void => {
+    /**
+     * 0.8.0 붙잡기 표식: 가운데 점 = 세모, 중심 = 동그라미 테 + 십자(⊕), 그 밖의 앱 점 = 마름모.
+     * 0.9.0 추론: 교차점 = 엇갈린 십자(×), 수직 발 = ⊥(두 선이 만나는 곳이 점)
+     */
+    const snapMarkAt = (p: V3 | null, kind: 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular'): void => {
       if (!p) return;
       const [x, y] = p;
       ctx.fillStyle = th.measure;
       ctx.strokeStyle = th.textBg;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      if (kind === 'midpoint') {
+      if (kind === 'intersection' || kind === 'perpendicular') {
+        // 바탕 테(대비) 위에 측정 색 선
+        for (const [color, w] of [
+          [th.textBg, 4.5],
+          [th.measure, 2],
+        ] as const) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          if (kind === 'intersection') {
+            ctx.moveTo(x - 6, y - 6);
+            ctx.lineTo(x + 6, y + 6);
+            ctx.moveTo(x + 6, y - 6);
+            ctx.lineTo(x - 6, y + 6);
+          } else {
+            ctx.moveTo(x - 7, y);
+            ctx.lineTo(x + 7, y);
+            ctx.moveTo(x, y);
+            ctx.lineTo(x, y - 10);
+          }
+          ctx.stroke();
+        }
+      } else if (kind === 'midpoint') {
         ctx.moveTo(x, y - 6);
         ctx.lineTo(x + 5.5, y + 4);
         ctx.lineTo(x - 5.5, y + 4);
@@ -3604,7 +3764,9 @@ export class Viewer3d {
         line(P(k1), P(k2), th.axisY, 1.5, [5, 4]);
         line(P(k2), sb, th.axisZ, 1.5, [5, 4]);
       }
-      line(sa, sb, th.measure, 2, pts.length === 2 ? [] : [6, 4]);
+      // 0.9.0 축 붙잡기 미리 보기: 첫 점에서 그 축 색 안내선
+      const ax = pts.length === 1 && hover?.kind === 'axis' ? hover.axis : undefined;
+      line(sa, sb, ax ? (ax === 'x' ? th.axisX : ax === 'y' ? th.axisY : th.axisZ) : th.measure, 2, pts.length === 2 ? [] : [6, 4]);
       const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
       const mid = sa && sb ? ([(sa[0] + sb[0]) / 2, (sa[1] + sb[1]) / 2, 0] as V3) : sb ?? sa;
       const u = unit ? ` ${unit}` : '';
@@ -3620,8 +3782,20 @@ export class Viewer3d {
     if (hover) {
       const k = hover.kind;
       // 0.7.2의 두 모양(꼭짓점·끝점 네모, 붙잡지 않음 동그라미) 그대로, 0.8.0 붙잡기 종류만 새 모양
-      if (k === 'midpoint' || k === 'center' || k === 'point') snapMarkAt(P(hover.p), k);
-      else dotAt(P(hover.p), hover.vertex);
+      if (k === 'midpoint' || k === 'center' || k === 'point' || k === 'intersection' || k === 'perpendicular') snapMarkAt(P(hover.p), k);
+      else if (k === 'axis' && hover.axis) {
+        // 축 위 점: 축 색 동그라미
+        const sp = P(hover.p);
+        if (sp) {
+          ctx.fillStyle = hover.axis === 'x' ? th.axisX : hover.axis === 'y' ? th.axisY : th.axisZ;
+          ctx.strokeStyle = th.textBg;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sp[0], sp[1], 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      } else dotAt(P(hover.p), hover.vertex);
     }
     ctx.restore();
   }

@@ -12,6 +12,7 @@
  *   조각에서 평면마다 버리고, 굵은 선은 정점 셰이더에서 평면마다 차례로 자르고, 점은 잘린 쪽 점을 화면 밖으로 보낸다.
  * - FLAT(그물 변종, 숨은 선 모드): 조명 없이 색 그대로(바탕색으로 채워 뒤의 선을 가린다).
  * - 윤곽(PROFILE): 그물만 그린 깊이 그림에서 화면 화소 반지름 둘레의 깊이 2차 차분이 크면(실루엣) 그 색을 칠한다.
+ *   PCOL(0.9.0, 그물마다 외곽선 색): 깊이 그림과 함께 그물마다 외곽선 색을 쓴 색 그림(DEPTH_FS PCOL)에서 끊긴 곳의 가장 가까운 화소 색을 칠한다.
  *   원근 깊이 버퍼 값은 1/z에 대해 1차라 평면은 2차 차분이 0이다. 허용치는 (1 − 깊이)에 비례(가까운 곳·먼 곳 같은 상대 기준).
  *   끊긴 곳 양쪽 화소를 모두 칠해 가장 가는 것이 2화소다. ONE(0.7.2, 굵기 1화소)이면 앞쪽 화소(그물 쪽·이웃 평균보다 가까운 쪽)만 칠한다.
  * - 해(SUN, 0.7.0): 고정 보조광 대신 세계 방향 해 하나(시점 공간으로 옮긴 u_sunDir)·주변광. SHADOW면 해 쪽 평행 투영 깊이 그림을
@@ -484,6 +485,9 @@ uniform vec4 u_color;
 uniform float u_ortho;
 out vec4 o_color;
 float D(vec2 o) { return texture(u_depth, v_uv + o * u_texel).r; }
+#ifdef PCOL
+uniform highp sampler2D u_pcol;
+#endif
 void main() {
   float c = D(vec2(0.0));
 #ifdef ONE
@@ -492,10 +496,17 @@ void main() {
 #endif
   float thr = u_ortho > 0.5 ? 0.002 : 0.04 * max(1.0 - c, 1e-7);
   float e = 0.0;
+#ifdef PCOL
+  vec2 at = vec2(0.0);
+#endif
   vec2 dirs[4] = vec2[4](vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.7071, 0.7071), vec2(0.7071, -0.7071));
   for (int i = 0; i < 4; i++) {
     vec2 o = dirs[i] * u_r;
     float a = D(o), b = D(-o);
+#ifdef PCOL
+    // 끊긴 곳의 세 화소(c, a, b) 가운데 가장 가까운 화소 = 앞 그물의 외곽선 색(0.9.0 그물마다 다른 색)
+    at = c <= a && c <= b ? vec2(0.0) : a <= b ? o : -o;
+#endif
     // 바탕(1)과 그물 경계는 늘 윤곽
     if ((c < 1.0) != (a < 1.0) || (c < 1.0) != (b < 1.0)) { e = 1.0; break; }
     if (c >= 1.0) continue;
@@ -507,7 +518,11 @@ void main() {
 #endif
   }
   if (e < 0.5) discard;
+#ifdef PCOL
+  o_color = texture(u_pcol, v_uv + at * u_texel);
+#else
   o_color = u_color;
+#endif
 }`;
 
 /**
@@ -561,6 +576,9 @@ precision highp float;
 #ifdef CLIP
 in float v_clip;
 #endif
+#ifdef PCOL
+uniform vec4 u_pcol;
+#endif
 #ifdef CLIPN
 in vec3 v_lpos;
 uniform vec4 u_clips[6];
@@ -577,5 +595,9 @@ void main() {
     if (dot(u_clips[i], vec4(v_lpos, 1.0)) > 0.0) discard;
   }
 #endif
+#ifdef PCOL
+  o_color = u_pcol;
+#else
   o_color = vec4(1.0);
+#endif
 }`;

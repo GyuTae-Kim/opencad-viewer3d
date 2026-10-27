@@ -13,7 +13,11 @@ import { Viewer3d } from '../../src/viewer';
 
 /** 판마다 있을 수도 없을 수도 있는 메서드를 부르려고 느슨하게 본 뷰어 */
 type V = Viewer3d & Record<string, any>;
-type Data = 'base' | 'off' | 'tex';
+/**
+ * cross = base에 상자 윗면 위로 엇갈린 선분 둘을 더한 자료(0.9.0 교차점 붙잡기),
+ * big = 나선 선분 40만 개(위치 9.6 MB·색 12.8 MB — 조각 일곱) 장면을 나눠 올리기로 올린 자료(0.9.0 큰 배열 조각 올리기 — 다 올린 그림이 같아야 한다)
+ */
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big';
 
 interface Ctx {
   v: V;
@@ -59,8 +63,16 @@ const scenes = new Map<Data, ReturnType<typeof syntheticScene>>();
 function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   let s = scenes.get(d);
   if (!s) {
-    const base = { segments: 20_000, sphereSeg: 48 };
+    const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : base);
+    if (d === 'cross')
+      s = {
+        ...s,
+        lines: [
+          ...s.lines,
+          { id: '엇갈림', positions: new Float32Array([10, 10, 40.5, 110, 70, 40.5, 10, 70, 40.5, 110, 10, 40.5]), color: [0.95, 0.95, 0.4, 1], hiddenEdges: true },
+        ],
+      };
     scenes.set(d, s);
   }
   return s;
@@ -77,6 +89,14 @@ const fn =
 const v080: Need = (v) => {
   const r = typeof v.setRenderOptions === 'function' ? v.renderOptions : null;
   return r && 'edgeColor' in r && 'hiddenEdgesShaded' in r ? null : '이 판에 없는 선택: 0.8.0 보여 주기(edgeColor·hiddenEdges.shaded)';
+};
+/** 0.9.0 추론 붙잡기가 있는 판인지 — 추론만 켠 붙잡기 선택이 남는다(0.8.0은 아무것도 켜지 않은 선택이라 끈다) */
+const v090infer: Need = (v) => {
+  if (typeof v.setMeasureSnap !== 'function') return '이 판에 없는 API: setMeasureSnap';
+  v.setMeasureSnap({ inference: { axes: true } });
+  const ok = !!v.measureSnap?.inference && typeof v.measureSnap.inference === 'object';
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.9.0 추론 붙잡기(setMeasureSnap({ inference }))';
 };
 const all =
   (...ns: Need[]): Need =>
@@ -180,6 +200,86 @@ function newShots(d: 'base' | 'off'): Shot[] {
       if (p) c.hover(p.x + 4, p.y - 3);
     }, all(v080, fn('setMeasureSnap', 'project'))),
   ];
+}
+
+/** 0.9.0 추론 붙잡기 표식(교차점 ×·수직 발 ⊥·축 안내선). 공구 경로(나선)는 숨긴다 — 선분 고르기가 먼저라 상자 위를 덮는다 */
+function inferShots(d: 'base' | 'off'): Shot[] {
+  const s = (name: string, setup: Shot['setup'], data: Data = d): Shot => ({
+    name: `${d}-${name}`,
+    data,
+    needs: all(v090infer, fn('project', 'setGroupVisible')),
+    setup: (c) => {
+      c.v.setGroupVisible('공구 경로', false);
+      return setup(c);
+    },
+  });
+  const out: Shot[] = [
+    // 구멍 점(50, 70, 40)에서 상자 앞 윗모서리로 내린 수직 발(50, 0, 40)
+    s('infer-perp', (c) => {
+      c.v.setMeasureMode(true);
+      c.v.setMeasureSnap({ edges: true, inference: { perpendicular: true } });
+      const a = c.at(c.world([50, 70, 40]));
+      const p = c.at(c.world([50, 0, 40]));
+      if (a) c.click(a.x + 1, a.y);
+      if (p) c.hover(p.x + 4, p.y + 1);
+    }),
+    // 상자 앞 오른쪽 위 구석에서 Z축 방향(상자 위 빈 곳)
+    s('infer-axis', (c) => {
+      c.v.setMeasureMode(true);
+      c.v.setMeasureSnap({ inference: { axes: true } });
+      const a = c.at(c.world([120, 0, 40]));
+      const p = c.at(c.world([120, 0, 95]));
+      if (a) c.click(a.x - 1, a.y + 1);
+      if (p) c.hover(p.x + 5, p.y - 2);
+    }),
+  ];
+  if (d === 'base')
+    out.push(
+      // 상자 윗면 위로 엇갈린 두 선분의 교차점(60, 40, 40.5)
+      s(
+        'infer-cross',
+        (c) => {
+          c.v.setMeasureMode(true);
+          c.v.setMeasureSnap({ inference: { intersections: true } });
+          const p = c.at([60, 40, 40.5]);
+          if (p) c.hover(p.x + 4, p.y - 3);
+        },
+        'cross',
+      ),
+    );
+  return out;
+}
+
+/** 0.9.0 그물마다 윤곽선·외곽선 색 */
+function itemLineShots(d: 'base' | 'off'): Shot[] {
+  const s = (name: string, setup: Shot['setup']): Shot => ({ name: `${d}-${name}`, data: d, setup, needs: fn('setItemEdgeColor', 'setItemProfileColor') });
+  const out: Shot[] = [
+    // 외곽선(굵기 3): 상자·구는 제 색, 나머지는 전역 색 — 구가 판 위에 겹친 테두리는 구 색
+    s('item-profile', ({ v }) => {
+      v.setRenderOptions({ profiles: { width: 3, color: '#101418' } });
+      v.setItemProfileColor('상자', '#e0245e');
+      v.setItemProfileColor('구', [0.15, 0.45, 0.95, 1]);
+    }),
+  ];
+  if (d === 'base')
+    out.push(
+      // 와이어프레임 1화소 외곽선 + 그물마다 윤곽선 색(상자 = 윤곽선, 구 = 삼각형 변)
+      s('item-lines-wire', ({ v }) => {
+        v.setRenderMode('wireframe');
+        v.setRenderOptions({ profiles: { width: 1 } });
+        v.setItemEdgeColor('상자', '#e0245e');
+        v.setItemEdgeColor('구', '#22aa66');
+        v.setItemProfileColor('작은 상자 2', '#ffcc00');
+      }),
+      // 음영+윤곽: 상자 윤곽선만 제 색, 반투명 판의 외곽선 색은 쓰지 않는다(반투명은 외곽선 없음)
+      s('item-edge-shadedEdges', ({ v }) => {
+        v.setRenderMode('shadedEdges');
+        v.setRenderOptions({ profiles: { width: 2 } });
+        v.setItemEdgeColor('상자', '#e0245e');
+        v.setItemProfileColor('판', '#00ff00');
+      }),
+    );
+  return out;
 }
 
 /** 걷기(0.7.0)와 중력·부딪힘(0.8.0) */
@@ -291,6 +391,8 @@ const extraShots: Shot[] = [
       ]),
   },
   { name: 'base-cube-iso', data: 'base', capture: 'cube', setup: () => undefined },
+  // 나눠 올리기로 올린 큰 장면(그림을 찍을 때 남은 올리기를 마친다): 0.9.0은 큰 배열을 조각으로 채운다 — 다 올린 그림은 0.8.0과 같아야 한다
+  { name: 'big-incremental', data: 'big', setup: () => undefined },
   {
     name: 'base-cube-light-front',
     data: 'base',
@@ -302,7 +404,18 @@ const extraShots: Shot[] = [
   },
 ];
 
-const SHOTS: Shot[] = [...classicShots('base'), ...classicShots('off'), ...newShots('base'), ...newShots('off'), ...walkShots, ...extraShots];
+const SHOTS: Shot[] = [
+  ...classicShots('base'),
+  ...classicShots('off'),
+  ...newShots('base'),
+  ...newShots('off'),
+  ...walkShots,
+  ...extraShots,
+  ...inferShots('base'),
+  ...inferShots('off'),
+  ...itemLineShots('base'),
+  ...itemLineShots('off'),
+];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
 function valueSets(d: 'base' | 'off'): ValueSet[] {
@@ -342,6 +455,27 @@ function valueSets(d: 'base' | 'off'): ValueSet[] {
       },
     },
     {
+      // 0.9.0 앱 점 색인: 앱 점 수천 개(묶음 행렬로 옮긴 묶음 포함)를 붙잡는 측정 — 0.8.0(모두 훑기)과 값이 같아야 한다
+      name: `${d}-measure-snap-many`,
+      data: d,
+      needs: all(v080, fn('setMeasureSnap', 'setItemMatrix')),
+      run: (c) => {
+        c.v.setItemMatrix('작은 상자 1', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 30, 1]);
+        c.v.setMeasureSnap({ points: manySnapPoints(c) });
+        return measureClicks(c, ['mouse', 'touch']);
+      },
+    },
+    {
+      // 0.9.0 추론 붙잡기를 모두 켠 측정(교차점·수직 발·축)
+      name: `${d}-measure-infer`,
+      data: d,
+      needs: v090infer,
+      run: (c) => {
+        c.v.setMeasureSnap({ edges: true, inference: true });
+        return measureClicks(c, ['mouse', 'touch']);
+      },
+    },
+    {
       // 상자 구석·구 중심의 화면 위치와 가림(음영)
       name: `${d}-project`,
       data: d,
@@ -374,6 +508,23 @@ function valueSets(d: 'base' | 'off'): ValueSet[] {
   ];
 }
 
+/**
+ * 앱 붙잡기 점 수천 개: 상자 윗면 격자(묶음 '상자'), 구 겉면(묶음 없음), 작은 상자 1 둘레(묶음 행렬을 거는 묶음 — 따로 찾는 길).
+ * 종류는 차례로 돌린다
+ */
+function manySnapPoints(c: Ctx): { point: number[]; kind: 'center' | 'point' | 'midpoint'; id?: string }[] {
+  const kinds = ['center', 'point', 'midpoint'] as const;
+  const out: { point: number[]; kind: 'center' | 'point' | 'midpoint'; id?: string }[] = [];
+  for (let j = 0; j <= 40; j++) for (let i = 0; i <= 60; i++) out.push({ point: c.world([i * 2, j * 2, 40]), kind: kinds[out.length % 3]!, id: '상자' });
+  for (let j = 1; j < 24; j++)
+    for (let i = 0; i < 48; i++) {
+      const ph = (j / 24) * Math.PI, th = (i / 48) * Math.PI * 2;
+      out.push({ point: c.world([190 + 35 * Math.sin(ph) * Math.cos(th), 40 + 35 * Math.sin(ph) * Math.sin(th), 35 + 35 * Math.cos(ph)]), kind: kinds[out.length % 3]! });
+    }
+  for (let k = 0; k < 120; k++) out.push({ point: c.world([150 - 6 + (k % 12), -30 - 6 + Math.floor(k / 12) * 1.2, 12]), kind: kinds[out.length % 3]!, id: '작은 상자 1' });
+  return out;
+}
+
 function measureClicks(c: Ctx, types: string[]): unknown[] {
   const { v, w, h } = c;
   const res: unknown[] = [];
@@ -392,6 +543,17 @@ function measureClicks(c: Ctx, types: string[]): unknown[] {
   off();
   return res;
 }
+
+const crossValues: ValueSet = {
+  // 0.9.0 교차점 붙잡기: 엇갈린 선분이 있는 자료에서 추론을 켠 측정
+  name: 'cross-measure-infer',
+  data: 'cross',
+  needs: v090infer,
+  run: (c) => {
+    c.v.setMeasureSnap({ edges: true, inference: true });
+    return measureClicks(c, ['mouse']);
+  },
+};
 
 const walkValues: ValueSet = {
   // 중력·부딪힘 걷기: 걸음마다 대상점(눈 앞)·거리
@@ -423,7 +585,7 @@ const walkValues: ValueSet = {
   },
 };
 
-const VALUES: ValueSet[] = [...valueSets('base'), ...valueSets('off'), walkValues];
+const VALUES: ValueSet[] = [...valueSets('base'), ...valueSets('off'), walkValues, crossValues];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
 function rangesDemo({ v }: Ctx): void {
@@ -454,7 +616,7 @@ let loaded: Data | null = null;
 function viewerOf(d: Data): V {
   viewer ??= new Viewer3d(host, { theme: 'dark', animate: false, keyboard: false, renderMode: 'shaded' }) as V;
   if (loaded !== d) {
-    viewer.setScene(sceneOf(d));
+    viewer.setScene(sceneOf(d), d === 'big' ? { incremental: true } : {});
     loaded = d;
   }
   return viewer;
@@ -486,6 +648,7 @@ function reset(v: V, d: Data): void {
   call('setMarker', null);
   for (const l of sceneOf(d).lines) call('setLineDrawRange', l.id, null);
   call('setGridVisible', true);
+  if (typeof v.groups === 'function') for (const g of v.groups()) if (!g.visible) call('setGroupVisible', g.name, true);
   v.setView('seIso', false);
   v.fit(false);
 }

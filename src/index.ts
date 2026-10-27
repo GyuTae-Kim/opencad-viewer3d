@@ -12,6 +12,7 @@ export type {
   LightingOptions,
   MarkerOptions,
   MeasureFormat,
+  MeasureHoverSnap,
   MeasureResult,
   MeasureSnapOptions,
   WalkOptions,
@@ -30,6 +31,7 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
+export type { MeasureInference, SnapAxis } from './inference';
 export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';

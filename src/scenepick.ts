@@ -10,7 +10,7 @@ import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, SnapKind } from './ty
 import { itemBounds } from './bounds';
 import { type Bvh, type PrimKind, countRayHits, rayBoxEntry, safeInv } from './bvh';
 import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth, worldPerPixel } from './camera';
-import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint } from './math';
+import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint, translation } from './math';
 import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, pointCandidates, segmentCandidates, snapToNearest, snapToNearestKind } from './pick';
 import { SNAP_PX } from './pointer';
 import { type Plane4, planeShift, planeValue, rayKeptInterval, rayKeptIntervalN } from './section';
@@ -294,6 +294,57 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
 }
 
 type ScenePickRay = { origin: V3; dir: V3 };
+
+/**
+ * 커서 tolPx 안의 선분(0.9.0 추론 붙잡기 — 교차점·수직 발): 보이는 선분 묶음(그리기 범위 앞쪽, 숨긴 구간 빼고)과 o.edges면 그물 윤곽선.
+ * 세계 끝점(자르기 전 — 교차·수직 발은 선 위 어디든 된다)과 그 묶음의 남는 쪽 판정을 돌려준다. 화면 거리 차례로 max개까지.
+ * 가림은 따지지 않는다(후보 점마다 따로 묻는다)
+ */
+export function segmentsNear(
+  f: ViewFrame,
+  x: number,
+  y: number,
+  items: ScenePickItems,
+  o: Pick<ScenePickOptions, 'bvh' | 'limit' | 'bounds' | 'model' | 'clip' | 'clips' | 'hidden' | 'edges' | 'edgeHidden' | 'itemModel'>,
+  tolPx: number,
+  max = 24,
+): { a: V3; b: V3; id: string; keep: ((p: readonly number[]) => boolean) | undefined; distPx: number; depth: number }[] {
+  const bounds = o.bounds ?? itemBounds;
+  const clip = o.clip ?? null;
+  const NONE: readonly Readonly<Plane4>[] = [];
+  const planesOf = (it: Mesh3d | LineSet3d): readonly Readonly<Plane4>[] => (o.clips ? (o.clips(it) ?? NONE) : clip ? [clip] : NONE);
+  const keepOf = (pl: readonly Readonly<Plane4>[]) =>
+    pl.length ? (p: readonly number[]): boolean => pl.every((c) => planeValue(c, p[0]!, p[1]!, p[2]!) <= 1e-9 * (Math.abs(c[3]) + 1)) : undefined;
+  const out: { a: V3; b: V3; id: string; keep: ((p: readonly number[]) => boolean) | undefined; distPx: number; depth: number }[] = [];
+  const add = (id: string, P: Float32Array, model: ArrayLike<number> | undefined, pl: readonly Readonly<Plane4>[], hs: { index: number; distPx: number; depth: number }[]): void => {
+    if (!hs.length) return;
+    const keep = keepOf(pl);
+    for (const h of hs) {
+      const k = h.index * 6;
+      const a: V3 = [P[k]!, P[k + 1]!, P[k + 2]!], b: V3 = [P[k + 3]!, P[k + 4]!, P[k + 5]!];
+      out.push({ a: model ? transformPoint(model, a) : a, b: model ? transformPoint(model, b) : b, id, keep, distPx: h.distPx, depth: h.depth });
+    }
+  };
+  for (const l of items.lines) {
+    if (!nearBox(f, bounds(l), x, y, tolPx + (l.width ?? 1) / 2)) continue;
+    const model = o.itemModel?.(l) ?? (l.origin && (l.origin[0] || l.origin[1] || l.origin[2]) ? translation(l.origin) : undefined);
+    const pl = planesOf(l);
+    const lim = o.limit?.(l.id) ?? Infinity;
+    const hid = o.hidden?.(l);
+    add(l.id, l.positions, model, pl, segmentCandidates(f, l.positions, o.bvh('segment', l.positions, undefined), model, x, y, tolPx + (l.width ?? 1) / 2, { clips: pl.length ? pl : null, skip: (i) => i >= lim || !!hid?.(i) }));
+  }
+  if (o.edges)
+    for (const m of items.meshes) {
+      const E = m.edges;
+      if (!E || E.length < 6 || !nearBox(f, bounds(m), x, y, tolPx)) continue;
+      const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
+      const pl = planesOf(m);
+      add(m.id, E, model, pl, segmentCandidates(f, E, o.bvh('segment', E, undefined), model, x, y, tolPx, { clips: pl.length ? pl : null, skip: o.edgeHidden?.(m) }));
+    }
+  out.sort((p, q) => p.distPx - q.distPx);
+  if (out.length > max) out.length = max;
+  return out;
+}
 
 /** 가운데 점이 끝점을 이기려면 화면에서 이만큼(화소) 더 가까워야 한다 — 화면에서 몇 화소짜리 선분(곡선을 나눈 꺾은선)은 끝점이 이긴다 */
 export const MIDPOINT_YIELD_PX = 2;
