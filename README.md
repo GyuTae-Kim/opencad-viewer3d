@@ -22,6 +22,7 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 무늬(텍스처): 그물마다 무늬 좌표(UV, 원근 무늬는 q까지)와 그림 하나. 되풀이(REPEAT)·밉맵·비등방 거르기, 한 장 크기·전체 GPU 예산 한도
 - 큰 좌표(예: 1e6 mm대): 묶음 원점(`origin`)을 double 행렬로 합쳐 그려 떨리지 않음
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
+- 장면 전체를 다시 주지 않고 그물 하나만 넣기·바꾸기·빼기(`setMesh`·`removeMesh` — 그 그물의 GPU 버퍼·BVH만 다시, 바뀐 정점 구간만 올리기도)
 
 ## 장면 계약
 
@@ -71,6 +72,7 @@ viewer.fit();
 - `gridVisible`, `viewCubeVisible`, `axesVisible`: 격자·뷰 큐브·좌표축 켜짐 상태
 - `viewCubeSize` 옵션·`setViewCubeSize(px)`: 뷰 큐브 크기(기본 112, 64~160) — 좁은 화면에서 줄여 쓴다
 - `setDrawLimitBySegmentId`, `setMarker`: NC 재생
+- `setMesh(mesh, { vertices?, incremental? })`, `removeMesh(id)`: 장면 전체를 다시 주지 않고 그물 하나만 넣기·바꾸기·빼기(0.11.0 — 아래 절)
 - `setHighlightSegments(positions, { origin })`: 강조 선분도 원점 기준 좌표로 줄 수 있다(큰 좌표). `highlightSegmentIds`는 묶음 원점을 알아서 반영한다
 
 터치 조작(0.6.0). 마우스·펜은 0.5.0과 똑같고 `pointerType === 'touch'`만 바뀐다:
@@ -563,13 +565,88 @@ viewer.onMeasure(() => lockButton.setAttribute('aria-pressed', String(!!viewer.m
   측정 띠에 `snapB === 'parallel'`(나란함)·`lockedB`를 보인다. 새 글은 앱 사전(en·ja·zh-CN·de)에 넣는다
 - 테마 색을 직접 주는 앱은 `inference`(또는 CSS `--v3d-inference`)를 바탕과 3:1 넘게 고른다(기본은 어두운 테마 `#f062f0` 5.5:1, 밝은 테마 `#b31ab3` 5.2:1)
 
+## 0.11.0: 장면 그물 하나 넣기·바꾸기·빼기
+
+새 API를 쓰지 않으면 그림·고르기·측정은 0.10.0과 화소·값까지 같다(CI의 `npm run pixels -- --base origin/main`: 장면 90개·값 28묶음 모두 같음).
+그 안의 `edit-*` 장면 6개는 base(0.10.0)에서 같은 마지막 장면을 `setScene`으로 다시 준 것이라, `setMesh`로 바꾼 그림이 장면 전체를 다시 올린 그림과 화소까지 같다는 확인이기도 하다. 바뀐 기본 동작은 없다.
+0.10.0까지는 그물 하나가 바뀌어도(소재 깎기 시뮬레이션의 높이 그물 등) 장면 전체를 `setScene`으로 다시 주어야 해서, 선분 수십만 개 공구 경로까지
+GPU에 다시 올리고 모든 고르기 BVH를 다시 만들었다.
+
+### 그물 하나 넣기·바꾸기·빼기
+
+- `setMesh(mesh, opts?)`(`SetMeshOptions`): `mesh.id`와 같은 그물이 있으면 그 자리에서 바꾸고, 없으면 장면 그물 목록 끝에 더한다(`true`).
+  장면이 없거나(`setScene` 먼저) 같은 id가 선분·점 묶음이면 `false`
+  - GPU: 이 그물의 배열만 올린다. 앞 그물만 쓰던 배열과 바이트 크기가 같은 새 배열은 그 버퍼에 `bufferSubData`로 채우고(버퍼를 새로 만들지 않는다),
+    크기가 다르면 새 버퍼를 만들고 앞 버퍼를 지운다. 여러 그물이 함께 쓰는 배열(같은 크기 조각의 색인 등)은 그 배열을 쓰는 마지막 그물이 빠질 때까지 남긴다.
+    다른 묶음의 버퍼에는 아무 호출도 없다
+  - 앞 그물과 같은 배열 객체는 바뀌지 않았다고 본다(다시 올리지 않고 범위·BVH도 다시 만들지 않는다). 제자리에서 고쳤으면 `vertices`를 준다(아래)
+  - 이 그물에 걸린 것만 다시 한다: 고르기 BVH(쉬는 틈에 — 바꾸기가 200 ms 멈추면 만들고, 그 사이 고르기는 그 자리에서 만든다), 그물 범위와 장면 범위
+    (`Scene3d.bounds`를 준 장면은 `setScene`처럼 그 값 그대로), 단면 테두리(다른 그물의 교선은 그물마다 기억한 것을 다시 쓴다), 그림자 깊이 그림(다음 그리기에서 한 번).
+    색인 배열이 같으면 와이어프레임 삼각형 변 색인도 넘겨 쓴다
+  - 그대로 두는 것: 카메라, 강조(`highlight`), 숨김(항목·묶음), 묶음 겉모습(이 id에 둔 색·불투명도·행렬·선 색도), 찍은 측정 점, 단면, 붙잡기 선택.
+    이 id의 구간 숨김·강조는 새 삼각형 수로 자른다. 측정 미리 보기는 그 커서 자리에서 새 그물로 다시 구한다
+  - `viewer.scene`은 그물을 바꾼 새 장면 객체가 된다(앱이 준 장면 객체는 고치지 않는다). 그물 차례도 `setScene`과 같다(새 id는 그물 목록 끝)
+- `removeMesh(id)`: 그물 하나 빼기(뺐으면 `true`). 그 그물만 쓰던 버퍼를 지운다. 그 id에 둔 겉모습·구간 숨김·강조는 지우고,
+  id로만 정하는 `setItemVisible`·`highlight`는 남긴다(같은 id로 다시 넣으면 따른다)
+- 선분·점 묶음은 하나씩 바꾸지 않는다(바뀌면 장면을 다시 준다). 보이기만 바꿀 때는 `setItemVisible`·`setGroupVisible`
+- 시험: 가짜 DOM·가짜 WebGL2(`tests/fakegl.ts` — 버퍼 내용과 그리기 호출마다 버퍼 해시·균일 변수를 기록)로, `setMesh`·`removeMesh`로 바꾼 뷰어와 처음부터
+  바뀐 장면을 `setScene`한 뷰어의 그리기·고르기·측정 붙잡기(바꾼 그물의 꼭짓점)·미리 보기·장면 범위·보이기가 같고, 다른 묶음 버퍼에는 호출이 없음을 확인한다
+  (새 배열·크기가 다른 배열·제자리 고치기·넣기·빼기·공유 색인·와이어프레임·나눠 올리기 도중)
+
+### 바뀐 정점 구간만 올리기
+
+- `setMesh(mesh, { vertices: { start, count } | [...] })`(정점 번호): 정점 속성 배열(위치·법선·색·무늬 좌표)은 그 구간 밖이 앞 그물과 같다는 약속으로, 그 구간만 올린다
+  - 배열을 제자리에서 고쳤으면 꼭 준다(그 배열의 범위 캐시와 BVH를 버린다). 같은 배열을 함께 쓰는 다른 그물도 범위를 새로 센다
+  - 같은 크기 새 배열에 주면 물려받은 버퍼에 그 구간만 올린다(워커가 새 배열을 보내며 바뀐 줄을 알려 줄 때)
+  - 행 우선 높이 격자(가로 마디 nx개)에서 마디 줄 j0..j1을 고쳤으면 `{ start: j0 * nx, count: (j1 - j0 + 1) * nx }`. 법선을 이웃 마디 차분으로 세면 위아래 한 줄씩 넓힌다
+- 색인(`indices`)·윤곽선(`edges`)은 구간으로 올리지 않는다. 바꿨으면 새 배열로 주고, 그 배열은 통째로 올라간다
+- 싸게 하지 못한 것: 고르기 BVH는 그물 전체를 다시 만든다. 상자만 고치기(refit)는 같은 거리 맞음을 고르는 차례가 새로 만든 BVH와 달라
+  `setScene`과 고르기 값이 어긋날 수 있어서 하지 않았다. 대신 만들기를 바꾸기가 멈출 때까지 미룬다(그 사이 고르면 그 자리에서 만든다).
+  장면 범위를 맞추려고 위치 배열은 통째로 한 번 훑는다(1024² 마디 몇 ms)
+
+### 큰 그물과 나눠 올리기
+
+- `setMesh(mesh, { incremental: true | { budgetMs } })`: 새로 올릴 배열이 8 MB(`CHUNK_MIN_BYTES`)를 넘으면 0.9.0 조각 올리기(`ChunkedUpload`)로 새 버퍼에
+  프레임마다 4 MB씩 채우고, 다 채울 때까지 앞 그물을 그린다(빈 화면이 없다 — 그동안 GPU에 그 그물이 두 벌). 고르기·측정·범위는 처음부터 새 그물로 한다.
+  8 MB 이하이거나 `incremental`을 주지 않으면 한 번에 올린다. `toBlob`·`renderImage`는 남은 조각을 채운 뒤 그린다. `onProgress`는 장면 나눠 올리기만 알린다
+- `setScene(…, { incremental })`로 장면을 나눠 올리는 동안 부르면: 이미 올린 그물은 바로 바꾸거나 빼고, 아직 차례가 오지 않은 그물은 새 그물이 그 차례에 올라간다
+- `vertices` 구간 올리기는 작아서 늘 바로 한다
+
+### 비용
+
+비용은 이 판에서 아직 재지 않았다. `npm run bench:edit -- --reps 5`로 선분 30만 + 격자 1024²에서 `setScene` 장면 전체 · `setMesh` 그물 전체 · `vertices` 구간을
+SwiftShader와 기계 GPU로 잴 수 있다. 이 판을 낼 때 로컬 확인 도구를 쓸 수 없어서, 표는 다음 판에 싣는다.
+
+### 앱이 할 일
+
+- NC(소재 깎기 시뮬레이션): 지금은 조각 그물이 바뀔 때마다 `composeSimScene`으로 장면 전체를 만들어 `setScene`(카메라 지킴)하고, 그 값이 비싸서 "걸린 시간 × 4"마다로
+  묶고 측정·정밀 조준 중에는 미룬다. 0.11.0에서는 시뮬레이션을 켤 때 한 번만 `setScene(composeSimScene(…))`로 조각·옆면·바닥 그물이 든 장면을 주고
+  (공구 경로 선분은 늘 장면에 두고 "공구 경로도 보이기"는 `setGroupVisible`로), 워커가 조각을 보낼 때마다 그 조각만 `viewer.setMesh(mesh)`(같은 id
+  `sim-tile-x-y`, 워커가 넘긴 새 배열, 같은 크기 조각은 `indexCache`의 같은 색인 — 색인 버퍼는 다시 올리지 않는다)로 바꾼다. 옆면·바닥도 `setMesh`.
+  공구 경로 버퍼·BVH를 건드리지 않고 측정 점·미리 보기도 지키므로 `holdScene` 미루기와 `minGap` 묶기는 뺄 수 있다(한 프레임에 조각 몇 개씩만 바꾸고 싶으면 남겨도 된다).
+  시뮬레이션을 끄면 조각을 `removeMesh`하고 공작물 상자를 `setMesh`로 되돌리거나 문서 장면을 `setScene(…, { keepView: true })`로 다시 준다.
+  `composeSimScene`이 `bounds`를 주므로 장면 범위(격자·단면 눈금)는 그 값 그대로다
+- 조각으로 나누지 않은 큰 높이 그물 하나를 쓰는 앱은 배열을 제자리에서 고치고 바뀐 마디 줄을 `vertices`로 준다(새 배열을 통째로 줄 때는 `incremental`)
+
+```ts
+// NC: 시뮬레이션을 켤 때 한 번
+viewer.setScene(composeSimScene(doc.scene, [...tiles, walls, bottom], true, stockBox), { keepView: true });
+// 워커가 바뀐 조각을 보낼 때마다(장면 전체를 다시 올리지 않는다)
+for (const t of msg.tiles) viewer.setMesh(this.mesh(`sim-tile-${t.tx}-${t.ty}`, t, this.indices(t.cols, t.rows, t.flat)));
+if (msg.walls) viewer.setMesh(this.mesh('sim-walls', msg.walls, msg.walls.indices));
+// 공구 경로 보이기
+viewer.setGroupVisible(pathGroup, prefs.paths);
+// 큰 높이 그물 하나를 제자리에서 고칠 때: 줄 j0..j1(법선 때문에 위아래 한 줄씩 넓혀)
+viewer.setMesh(grid, { vertices: { start: Math.max(0, j0 - 1) * nx, count: (Math.min(ny - 1, j1 + 1) - Math.max(0, j0 - 1) + 1) * nx } });
+```
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.10.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.11.0"
 }
 ```
 
@@ -600,7 +677,9 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
 | `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색(캔버스 초점 테두리 포함)·행렬·재생 도우미 |
 | `src/synth.ts`, `src/dev.ts`, `dev/viewer3d.html` | 합성 장면(무늬 상자·원근 무늬 판 포함)과 개발 확인 페이지 |
-| `scripts/pixels/` | 화소·값 회귀 비교(`npm run pixels`): 비교 페이지·장면 목록, git 판 소스 묶기, 헤드리스 Chrome, PNG·차이 |
+| `scripts/pixels/` | 화소·값 회귀 비교(`npm run pixels`): 비교 페이지·장면 목록, git 판 소스 묶기, 헤드리스 Chrome, PNG·차이, 높이 격자 그물(`grid.ts`) |
+| `scripts/bench/` | 그물 바꾸기 비용 재기(`npm run bench:edit`): `setScene` 장면 전체·`setMesh` 그물 전체·`vertices` 구간, SwiftShader와 기계 GPU |
+| `tests/fakegl.ts`, `tests/fakedom.ts` | 시험용 가짜 WebGL2(버퍼 내용·그리기 기록)·가짜 DOM — 브라우저 없이 뷰어를 돌려 값을 견준다 |
 
 ## 개발
 
@@ -616,6 +695,7 @@ npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 
 npm run typecheck
 npm test
 npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
+npm run bench:edit -- --reps 5         # 그물 바꾸기 비용(0.11.0 비용 표): 선분 30만 + 격자 1024², SwiftShader와 기계 GPU(--backend swiftshader|gpu|both)
 ```
 
 ### 화소·값 회귀 비교
@@ -623,12 +703,15 @@ npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
 `npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
 Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
 
-- 합성 장면 84가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+- 합성 장면 90가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
   그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식도 찍습니다.
+  0.11.0의 그물 바꾸기 여섯 가지(`edit-*`)는 head가 `setMesh`·`removeMesh`로 바꾸고, 그 API가 없는 판(base)은 같은 마지막 장면을 `setScene`(카메라 지킴)으로
+  다시 준다 — base·head 비교가 곧 "그물 하나 바꾸기 = 장면 전체 다시 올리기"의 확인이다.
 - 값도 비교합니다. 고르기 7,200번, 측정 누르기 2만 4천여 번(앱 점 수천 개 붙잡기·추론 붙잡기, 0.9.1의 축 붙잡기 축, 0.10.0의 차례 한도·추론 잠금·나란함·
-  같은 자리 미리 보기 뒤 누르기의 `pointsFor` 포함)의 결과와 화면 위치, 걷기 경로입니다.
+  같은 자리 미리 보기 뒤 누르기의 `pointsFor` 포함)의 결과와 화면 위치, 걷기 경로입니다. 0.11.0 `edit-values`는 바꾼 장면의 고르기·측정·미리 보기·범위,
+  `edit-same-pixels`는 같은 판 안에서 `setMesh`로 바꾼 그림과 처음부터 `setScene`한 그림의 다른 화소 수(0이어야 한다)입니다.
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
@@ -661,6 +744,8 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 잘린 면 채우기는 스텐실 홀짝이라 `closed` 그물이 정말 닫혀 있어야 한다(틈·겹친 입체가 있으면 줄무늬·구멍). 반투명 그물·X-ray·와이어프레임에서는 채우지 않는다
 - 원점(`origin`) 없이 큰 좌표를 그대로 넣은 장면은 예전처럼 떨린다(해석기가 원점을 채워야 한다)
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
+- 하나씩 바꾸기는 그물만이다(선분·점 묶음은 장면을 다시 준다). 바꾼 그물의 고르기 BVH는 통째로 다시 만들고(상자만 고치기 없음), 범위는 위치 배열을 통째로 한 번 훑는다.
+  `setMesh`의 나눠 올리기는 다 채울 때까지 GPU에 그 그물이 두 벌이고, 정점 구간은 위치·법선·색·무늬 좌표만(색인·윤곽선은 통째로)
 - 구간 숨김은 그물 윤곽선(`edges`)을 삼각형과 짝지어 주지 않는다 — 윤곽선도 숨기려면 `{ prims, edges }`로 윤곽선 번호를 함께 준다
 - 무늬는 그물마다 앞·뒷면 하나씩(여러 겹 무늬, 법선·거칠기 같은 PBR 그림 없음). 색 공간은 정점 색과 같이 sRGB 값 그대로 조명한다
 - 투명 화소를 쓰는 무늬(`alpha`)는 그물 단위로 앞뒤를 정렬해 그린다(그물 안 삼각형끼리는 정렬하지 않는다)

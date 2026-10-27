@@ -8,16 +8,19 @@
  * SwiftShader에서 몇 배 느려진다. 찍는 차례는 두 판이 같으므로 되돌리기에서 빠진 상태가 있어도 비교는 공정하다.
  * 주소 인자: ?w=폭&h=높이(CSS 화소, 장치 화소 비율 1).
  */
-import { syntheticScene } from '../../src/synth';
+import { boxMesh, syntheticScene } from '../../src/synth';
+import type { Mesh3d, Scene3d } from '../../src/types';
 import { Viewer3d } from '../../src/viewer';
+import { type GridSpec, cutBy, fillGrid, gridMesh, gridX, gridY } from './grid';
 
 /** 판마다 있을 수도 없을 수도 있는 메서드를 부르려고 느슨하게 본 뷰어 */
 type V = Viewer3d & Record<string, any>;
 /**
  * cross = base에 상자 윗면 위로 엇갈린 선분 둘을 더한 자료(0.9.0 교차점 붙잡기),
- * big = 나선 선분 40만 개(위치 9.6 MB·색 12.8 MB — 조각 일곱) 장면을 나눠 올리기로 올린 자료(0.9.0 큰 배열 조각 올리기 — 다 올린 그림이 같아야 한다)
+ * big = 나선 선분 40만 개(위치 9.6 MB·색 12.8 MB — 조각 일곱) 장면을 나눠 올리기로 올린 자료(0.9.0 큰 배열 조각 올리기 — 다 올린 그림이 같아야 한다),
+ * edit·edit-big = base에 상자 윗면 위 높이 격자 그물(96² 마디, 큰 쪽은 520²)을 더한 자료(0.11.0 그물 바꾸기 — 장면마다 새로 만든다. 격자 배열을 제자리에서 고치므로)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big';
 
 interface Ctx {
   v: V;
@@ -63,6 +66,7 @@ host.style.height = `${H}px`;
 const OFFSET: [number, number, number] = [1e6, -5e5, 1e4];
 const scenes = new Map<Data, ReturnType<typeof syntheticScene>>();
 function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
+  if (d === 'edit' || d === 'edit-big') return editScene(d === 'edit-big' ? EDIT_BIG : EDIT_GRID, flatTop);
   let s = scenes.get(d);
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
@@ -524,6 +528,214 @@ function lockShots(d: 'base' | 'off'): Shot[] {
   return out;
 }
 
+// ───────────── 0.11.0 그물 하나 바꾸기(setMesh·removeMesh) ─────────────
+/**
+ * 상자 윗면(z 40) 위에 띄운 높이 격자(소재 윗면 z 52, 깎으면 내려간다). 원점은 격자 가운데 윗면.
+ * head는 setMesh·removeMesh로 바꾸고, 그 API가 없는 판(base)은 같은 마지막 장면을 setScene(keepView)으로 다시 준다
+ * (0.11.0 전에 앱이 하던 길) — 그래서 base·head 비교가 곧 "setMesh = 장면 전체 다시 올리기"의 확인이다
+ */
+const TOP = 52;
+const EDIT_GRID: GridSpec = { n: 96, size: 70, x0: 25, y0: 5, origin: [60, 40, TOP] };
+const EDIT_BIG: GridSpec = { ...EDIT_GRID, n: 520 };
+const flatTop = (): number => TOP;
+const EDIT_PATH: [number, number][] = [
+  [35, 15],
+  [85, 65],
+  [85, 20],
+  [40, 60],
+];
+const cutTop = cutBy(flatTop, EDIT_PATH, 6, TOP - 5, 3);
+const gridOpts = { top: TOP, depth: 6, group: '소재' };
+
+function editScene(g: GridSpec, z: (x: number, y: number) => number): Scene3d {
+  const s = sceneOf('base');
+  return { ...s, meshes: [...s.meshes, gridMesh('소재', g, z, gridOpts)] };
+}
+
+/** 장면 그물 목록에서 id를 바꾼(없으면 끝에 더한, null이면 뺀) 새 장면 */
+function withMesh(s: Scene3d, id: string, m: Mesh3d | null): Scene3d {
+  const i = s.meshes.findIndex((x) => x.id === id);
+  const meshes = s.meshes.slice();
+  if (!m) meshes.splice(i, 1);
+  else if (i >= 0) meshes[i] = m;
+  else meshes.push(m);
+  return { ...s, meshes };
+}
+
+interface Edit {
+  name: string;
+  data: 'edit' | 'edit-big';
+  /** 바꾸기 전에 거는 보기 상태(base는 setScene 뒤에 다시 건다) */
+  state?: (v: V) => void;
+  /** head: setMesh·removeMesh로 바꾼다 */
+  head: (v: V) => void;
+  /** base: 바꾼 뒤의 장면(지금 장면에서) */
+  final: (s: Scene3d) => Scene3d;
+}
+
+const grid2: GridSpec = { n: 48, size: 40, x0: 10, y0: -48, origin: [30, -28, 4] };
+const cut2 = cutBy(() => 4, [
+  [14, -44],
+  [46, -12],
+], 4, 1, 1.5);
+const grid2Opts = { top: 4, depth: 3, group: '소재' };
+const sphereBox = (): Mesh3d => ({ ...boxMesh('구', [160, 10, 0], [220, 70, 50], [0.85, 0.45, 0.35, 1], '구') });
+const EDITS: Edit[] = [
+  {
+    // 격자를 깎은 격자로(같은 크기 새 배열 — 앞 버퍼를 물려받는다, 색인은 같은 배열)
+    name: 'replace',
+    data: 'edit',
+    head: (v) => {
+      const g = v.scene!.meshes.find((m: Mesh3d) => m.id === '소재')!;
+      v.setMesh(gridMesh('소재', EDIT_GRID, cutTop, { ...gridOpts, indices: g.indices }));
+    },
+    final: (s) => withMesh(s, '소재', gridMesh('소재', EDIT_GRID, cutTop, gridOpts)),
+  },
+  {
+    // 보기 상태(숨김·강조·겉모습·단면·그림자·외곽선)를 건 채 바꾸기
+    name: 'replace-state',
+    data: 'edit',
+    state: (v) => {
+      v.setRenderMode('shadedEdges');
+      v.setGroupVisible('공구 경로', false);
+      v.setItemVisible('구멍', false);
+      v.highlight(['상자']);
+      v.setItemColor('판', '#3366aa');
+      v.setItemEdgeColor('상자', '#00ff00');
+      v.setItemProfileColor('소재', '#e0245e');
+      v.setSection({ normal: [0, 1, 0], offset: 46 });
+      v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true });
+      v.setRenderOptions({ profiles: { width: 2 } });
+    },
+    head: (v) => v.setMesh(gridMesh('소재', EDIT_GRID, cutTop, gridOpts)),
+    final: (s) => withMesh(s, '소재', gridMesh('소재', EDIT_GRID, cutTop, gridOpts)),
+  },
+  {
+    // 제자리에서 고친 마디 줄(30~70)만 vertices로 올리기
+    name: 'range',
+    data: 'edit',
+    head: (v) => {
+      const g = v.scene!.meshes.find((m: Mesh3d) => m.id === '소재')!;
+      v.setMesh(g, { vertices: fillGrid(g, EDIT_GRID, cutTop, 30, 70, TOP, 6) });
+    },
+    final: (s) => {
+      const g = gridMesh('소재', EDIT_GRID, flatTop, gridOpts);
+      fillGrid(g, EDIT_GRID, cutTop, 30, 70, TOP, 6);
+      return withMesh(s, '소재', g);
+    },
+  },
+  {
+    // 넣기(새 격자 조각)·빼기(작은 상자 2)·모양이 다른 그물로 바꾸기(구 → 상자), 숨은 선 모드
+    name: 'insert-remove',
+    data: 'edit',
+    state: (v) => v.setRenderMode('hiddenLine'),
+    head: (v) => {
+      v.setMesh(gridMesh('조각 2', grid2, cut2, grid2Opts));
+      v.removeMesh('작은 상자 2');
+      v.setMesh(sphereBox());
+    },
+    final: (s) => withMesh(withMesh(withMesh(s, '조각 2', gridMesh('조각 2', grid2, cut2, grid2Opts)), '작은 상자 2', null), '구', sphereBox()),
+  },
+  {
+    // 와이어프레임(법선 없는 격자 — 삼각형 변) + 1화소 외곽선
+    name: 'wire',
+    data: 'edit',
+    state: (v) => {
+      v.setRenderMode('wireframe');
+      v.setRenderOptions({ profiles: { width: 1 } });
+    },
+    head: (v) => v.setMesh(gridMesh('소재', EDIT_GRID, cutTop, { ...gridOpts })),
+    final: (s) => withMesh(s, '소재', gridMesh('소재', EDIT_GRID, cutTop, gridOpts)),
+  },
+  {
+    // 큰 격자(520² 마디, 새 배열 10.8 MB)를 나눠 올리기로 바꾸기 — 그림을 찍을 때 남은 조각을 채운다
+    name: 'incremental',
+    data: 'edit-big',
+    head: (v) => v.setMesh(gridMesh('소재', EDIT_BIG, cutTop, gridOpts), { incremental: true }),
+    final: (s) => withMesh(s, '소재', gridMesh('소재', EDIT_BIG, cutTop, gridOpts)),
+  },
+];
+
+/** 바꾸기 한 가지를 지금 뷰어에 건다(head = setMesh 길, base = 같은 마지막 장면을 setScene). 뷰어 장면이 바뀌므로 다음 장면은 다시 올린다 */
+function applyEdit(c: Ctx, e: Edit, path: 'auto' | 'setScene' = 'auto'): void {
+  const { v } = c;
+  e.state?.(v);
+  if (path === 'auto' && typeof v.setMesh === 'function') e.head(v);
+  else {
+    v.setScene(e.final(v.scene!), { keepView: true });
+    e.state?.(v);
+  }
+  loaded = null;
+}
+
+const editShots: Shot[] = EDITS.map((e) => ({ name: `${e.data}-${e.name}`, data: e.data, setup: (c) => applyEdit(c, e) }));
+
+/** 같은 판 안에서: setMesh로 바꾼 그림 = 처음부터 바뀐 장면을 setScene한 그림(다른 화소 수 — base는 둘 다 setScene이라 0) */
+const editSame: ValueSet = {
+  name: 'edit-same-pixels',
+  data: 'edit',
+  run: () => {
+    const out: unknown[] = [];
+    for (const e of EDITS) {
+      const ca = makeCtx(e.data);
+      applyEdit(ca, e);
+      const a = ca.v.renderImage({}).data;
+      const cb = makeCtx(e.data);
+      applyEdit(cb, e, 'setScene');
+      const b = cb.v.renderImage({}).data;
+      let diff = 0;
+      for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) diff++;
+      out.push([e.name, a.length, diff]);
+    }
+    return out;
+  },
+};
+
+/** 바꾼 장면의 값: 고르기(격자 위 화면 점)·측정(상자 구석 → 깎인 격자 마디)·미리 보기·범위·보이기·그리기 수 */
+const editValues: ValueSet = {
+  name: 'edit-values',
+  data: 'edit',
+  run: (c) => {
+    const { v, w, h } = c;
+    applyEdit(c, EDITS[3]!);
+    applyEdit(c, EDITS[0]!);
+    v.setGroupVisible('공구 경로', false);
+    const out: unknown[] = [];
+    for (const pointerType of ['mouse', 'touch'])
+      for (let j = 0; j < 12; j++)
+        for (let i = 0; i < 16; i++) {
+          const p = v.pick(((i + 0.5) * w) / 16, ((j + 0.5) * h) / 12, { pointerType });
+          out.push(p ? [p.kind, p.id, p.index, r10s(p.point)] : null);
+        }
+    const res: unknown[] = [];
+    const off = v.onMeasure((m: any) => m && res.push([r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null]));
+    v.setMeasureMode(true);
+    for (const [i, j] of [
+      [14, 14],
+      [48, 48],
+      [80, 30],
+      [60, 60],
+    ] as const) {
+      const x = gridX(EDIT_GRID, i), y = gridY(EDIT_GRID, j);
+      const a = c.at([120, 0, 40]);
+      const p = c.at([x, y, cutTop(x, y)]);
+      if (!a || !p) continue;
+      c.click(a.x - 1, a.y + 1);
+      c.hover(p.x, p.y);
+      v.renderNow();
+      const hs = v.measureHoverSnap;
+      res.push(hs ? [r10s(hs.point), hs.snap] : null);
+      c.click(p.x, p.y);
+    }
+    off();
+    v.renderNow();
+    out.push(res, v.sectionRange('x'), v.sectionRange('z'), v.groups(), ['소재', '조각 2', '구', '작은 상자 2'].map((id) => v.isVisible(id)));
+    const st = v.stats;
+    out.push([st.drawCalls, st.triangles, st.segments, st.points]);
+    return out;
+  },
+};
+
 const SHOTS: Shot[] = [
   ...classicShots('base'),
   ...classicShots('off'),
@@ -539,6 +751,7 @@ const SHOTS: Shot[] = [
   ...limitShots('off'),
   ...lockShots('base'),
   ...lockShots('off'),
+  ...editShots,
 ];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
@@ -1092,6 +1305,8 @@ const VALUES: ValueSet[] = [
   pointsForValues('base'),
   pointsForValues('off'),
   pointsForCallValues,
+  editValues,
+  editSame,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -1153,7 +1368,7 @@ function reset(v: V, d: Data): void {
   call('clearItemLooks');
   call('setAnnotations', null);
   call('setMarker', null);
-  for (const l of sceneOf(d).lines) call('setLineDrawRange', l.id, null);
+  for (const l of sceneOf(d === 'edit' || d === 'edit-big' ? 'base' : d).lines) call('setLineDrawRange', l.id, null);
   call('setGridVisible', true);
   if (typeof v.groups === 'function') for (const g of v.groups()) if (!g.visible) call('setGroupVisible', g.name, true);
   v.setView('seIso', false);

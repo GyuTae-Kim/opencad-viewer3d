@@ -392,7 +392,8 @@ interface MeshRec {
   /** 세계 좌표 범위의 가운데(반투명 정렬용) */
   center: V3;
   edges: LineRec | null;
-  wire: { vao: WebGLVertexArrayObject; count: number } | null;
+  /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
+  wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
   parts?: PartCache;
 }
 
@@ -465,7 +466,12 @@ export class Renderer3d {
   private stencilOk = false;
   private arrayBufs = new Map<ArrayBufferView, WebGLBuffer>();
   private elemBufs = new Map<ArrayBufferView, WebGLBuffer>();
-  private vaos: WebGLVertexArrayObject[] = [];
+  /**
+   * 장면 묶음(그물·선분·점 기록)이 쓰는 배열마다 그 배열을 쓰는 기록 수(0.11.0). 그물 하나를 바꾸거나 뺄 때
+   * 아무도 쓰지 않게 된 배열의 GPU 버퍼만 지운다(조각 그물이 함께 쓰는 색인 같은 공유 배열은 남긴다). 표시 그물·따로 두는 선분은 세지 않는다
+   */
+  private refs = new Map<ArrayBufferView, number>();
+  private vaos = new Set<WebGLVertexArrayObject>();
   meshes: MeshRec[] = [];
   lines: (LineRec & { src: LineSet3d })[] = [];
   points: PointRec[] = [];
@@ -487,6 +493,11 @@ export class Renderer3d {
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
   /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
   private pending: { scene: Scene3d; mi: number; li: number; pi: number; chunk?: ChunkedUpload<WebGLBuffer> | null } | null = null;
+  /**
+   * 나눠 올리는 중인 그물 바꾸기(0.11.0 setMesh(…, { incremental })): id → 새 그물과 조각 올리기.
+   * 다 채울 때까지 앞 그물 기록을 그대로 그리고, 다 채우면 기록을 바꾼다
+   */
+  private jobs = new Map<string, { mesh: Mesh3d; chunk: ChunkedUpload<WebGLBuffer> }>();
   /** 장면의 무늬 그림(id → 원본) */
   private texSrc = new Map<string, Texture3d>();
   /** 그물이 쓰는 무늬(풀기·올리기 상태) */
@@ -543,7 +554,9 @@ export class Renderer3d {
   forget(): void {
     this.arrayBufs.clear();
     this.elemBufs.clear();
-    this.vaos = [];
+    this.refs.clear();
+    this.jobs.clear();
+    this.vaos.clear();
     this.meshes = [];
     this.lines = [];
     this.points = [];
@@ -876,7 +889,7 @@ export class Renderer3d {
 
   private vao(): WebGLVertexArrayObject {
     const v = this.gl.createVertexArray()!;
-    this.vaos.push(v);
+    this.vaos.add(v);
     this.gl.bindVertexArray(v);
     return v;
   }
@@ -892,15 +905,15 @@ export class Renderer3d {
       this.pending = { scene, mi: 0, li: 0, pi: 0 };
       return;
     }
-    for (const m of scene.meshes) this.meshes.push(this.meshRec(m));
+    for (const m of scene.meshes) this.meshes.push(this.sceneMeshRec(m));
     for (const l of scene.lines) this.lines.push(this.sceneLineRec(l));
-    for (const p of scene.points ?? []) this.points.push(this.pointRec(p));
+    for (const p of scene.points ?? []) this.points.push(this.scenePointRec(p));
     this.gl.bindVertexArray(null);
   }
 
-  /** 나눠 올리는 중인지 */
+  /** 나눠 올리는 중인지(장면 나눠 올리기 또는 0.11.0 그물 바꾸기 나눠 올리기) */
   get uploading(): boolean {
-    return !!this.pending;
+    return !!this.pending || this.jobs.size > 0;
   }
 
   /** 나눠 올리기 진행: 올린 묶음 수 / 전체 묶음 수(올리는 중이 아니면 null) */
@@ -918,35 +931,51 @@ export class Renderer3d {
    */
   uploadSome(budgetMs: number): boolean {
     const p = this.pending;
-    if (!p) return true;
-    const s = p.scene;
-    const pts = s.points ?? [];
+    if (!p && !this.jobs.size) return true;
     const t0 = performance.now();
     let first = true;
     this.gl.bindVertexArray(null);
-    while (first || performance.now() - t0 < budgetMs) {
+    while (this.pending && (first || performance.now() - t0 < budgetMs)) {
       first = false;
-      const kind = p.mi < s.meshes.length ? 'mesh' : p.li < s.lines.length ? 'line' : p.pi < pts.length ? 'point' : null;
-      if (!kind) break;
-      const item = kind === 'mesh' ? s.meshes[p.mi]! : kind === 'line' ? s.lines[p.li]! : pts[p.pi]!;
-      // 큰 묶음: 버퍼를 잡고 조각 하나씩 채운다(다 채울 때까지 그 묶음 기록은 만들지 않는다)
-      if (p.chunk === undefined) {
-        const arrays = newArrays(this.uploadArrays(kind, item), (d) => (d instanceof Uint32Array ? this.elemBufs.has(d) : this.arrayBufs.has(d as Float32Array)));
-        const bytes = arrays.reduce((n, a) => n + a.data.byteLength, 0);
-        p.chunk = bytes > CHUNK_MIN_BYTES ? new ChunkedUpload(arrays, this.bufferSink(), (d, t, b) => (t === 'element' ? this.elemBufs.set(d as Uint32Array, b) : this.arrayBufs.set(d as Float32Array, b)), CHUNK_BYTES) : null;
+      const s = p!.scene;
+      const pts = s.points ?? [];
+      const kind = p!.mi < s.meshes.length ? 'mesh' : p!.li < s.lines.length ? 'line' : p!.pi < pts.length ? 'point' : null;
+      if (!kind) {
+        this.pending = null;
+        break;
       }
+      const item = kind === 'mesh' ? s.meshes[p!.mi]! : kind === 'line' ? s.lines[p!.li]! : pts[p!.pi]!;
+      // 큰 묶음: 버퍼를 잡고 조각 하나씩 채운다(다 채울 때까지 그 묶음 기록은 만들지 않는다)
+      if (p!.chunk === undefined) p!.chunk = this.chunkFor(this.uploadArrays(kind, item));
       // 버퍼 잡기(크기만큼 0 채우기)는 이번 걸음 몫을 이미 썼으면 다음 프레임 처음으로 미룬다
-      if (p.chunk && p.chunk.nextIsAlloc && performance.now() - t0 > budgetMs / 2 && budgetMs !== Infinity) break;
-      if (p.chunk && !p.chunk.step()) continue;
-      p.chunk = undefined;
-      if (kind === 'mesh') this.meshes.push(this.meshRec(s.meshes[p.mi++]!));
-      else if (kind === 'line') this.lines.push(this.sceneLineRec(s.lines[p.li++]!));
-      else this.points.push(this.pointRec(pts[p.pi++]!));
+      if (p!.chunk && p!.chunk.nextIsAlloc && performance.now() - t0 > budgetMs / 2 && budgetMs !== Infinity) break;
+      if (p!.chunk && !p!.chunk.step()) continue;
+      p!.chunk = undefined;
+      if (kind === 'mesh') this.meshes.push(this.sceneMeshRec(s.meshes[p!.mi++]!));
+      else if (kind === 'line') this.lines.push(this.sceneLineRec(s.lines[p!.li++]!));
+      else this.points.push(this.scenePointRec(pts[p!.pi++]!));
       this.gl.bindVertexArray(null);
+      if (p!.mi >= s.meshes.length && p!.li >= s.lines.length && p!.pi >= pts.length) this.pending = null;
+    }
+    // 0.11.0 그물 바꾸기 나눠 올리기: 장면 나눠 올리기를 마친 뒤 같은 몫 안에서 차례로(다 채운 그물부터 기록을 바꾼다)
+    while (!this.pending && this.jobs.size && (first || performance.now() - t0 < budgetMs)) {
+      const [id, j] = this.jobs.entries().next().value!;
+      if (!first && j.chunk.nextIsAlloc && performance.now() - t0 > budgetMs / 2 && budgetMs !== Infinity) break;
+      first = false;
+      if (!j.chunk.step()) continue;
+      this.jobs.delete(id);
+      this.gl.bindVertexArray(null);
+      this.installMesh(j.mesh, this.meshes.findIndex((r) => r.src.id === id));
     }
     this.gl.bindVertexArray(null);
-    if (p.mi >= s.meshes.length && p.li >= s.lines.length && p.pi >= pts.length) this.pending = null;
-    return !this.pending;
+    return !this.pending && !this.jobs.size;
+  }
+
+  /** 새로 올릴 배열이 CHUNK_MIN_BYTES를 넘으면 조각 올리기(버퍼는 잡는 대로 배열 표에 넣는다), 아니면 null */
+  private chunkFor(list: readonly ({ data: UploadArray; target: BufferTarget } | null)[]): ChunkedUpload<WebGLBuffer> | null {
+    const arrays = newArrays(list, (d) => (d instanceof Uint32Array ? this.elemBufs.has(d) : this.arrayBufs.has(d as Float32Array)));
+    const bytes = arrays.reduce((n, a) => n + a.data.byteLength, 0);
+    return bytes > CHUNK_MIN_BYTES ? new ChunkedUpload(arrays, this.bufferSink(), (d, t, b) => (t === 'element' ? this.elemBufs.set(d as Uint32Array, b) : this.arrayBufs.set(d as Float32Array, b)), CHUNK_BYTES) : null;
   }
 
   /**
@@ -995,7 +1024,273 @@ export class Renderer3d {
   private sceneLineRec(l: LineSet3d): LineRec & { src: LineSet3d } {
     const r = this.lineRec(l.id, l.group, l.positions, l.colors);
     if (hasOrigin(l.origin)) r.model = translation(l.origin);
+    this.retain('line', l);
     return { ...r, src: l };
+  }
+
+  /** 장면 그물 기록(쓰는 배열을 센다) */
+  private sceneMeshRec(m: Mesh3d): MeshRec {
+    const r = this.meshRec(m);
+    this.retain('mesh', m);
+    return r;
+  }
+
+  /** 장면 점 묶음 기록(쓰는 배열을 센다) */
+  private scenePointRec(p: PointSet3d): PointRec {
+    const r = this.pointRec(p);
+    this.retain('point', p);
+    return r;
+  }
+
+  /** 묶음 하나가 쓰는 배열(같은 배열은 한 번)마다 쓰는 기록 수를 하나 늘린다 */
+  private retain(kind: 'mesh' | 'line' | 'point', item: Mesh3d | LineSet3d | PointSet3d): void {
+    const seen = new Set<UploadArray>();
+    for (const a of this.uploadArrays(kind, item)) {
+      if (!a || seen.has(a.data)) continue;
+      seen.add(a.data);
+      this.refs.set(a.data, (this.refs.get(a.data) ?? 0) + 1);
+    }
+  }
+
+  /** retain의 반대: 아무도 쓰지 않게 된 배열은 GPU 버퍼를 지운다 */
+  private release(kind: 'mesh' | 'line' | 'point', item: Mesh3d | LineSet3d | PointSet3d): void {
+    const seen = new Set<UploadArray>();
+    for (const a of this.uploadArrays(kind, item)) {
+      if (!a || seen.has(a.data)) continue;
+      seen.add(a.data);
+      const n = (this.refs.get(a.data) ?? 0) - 1;
+      if (n > 0) this.refs.set(a.data, n);
+      else {
+        this.refs.delete(a.data);
+        this.freeBuffer(a.data, a.target);
+      }
+    }
+  }
+
+  /** 배열의 GPU 버퍼를 지운다(있으면) */
+  private freeBuffer(data: UploadArray, target: BufferTarget): void {
+    const map = target === 'element' ? this.elemBufs : this.arrayBufs;
+    const b = map.get(data);
+    if (!b) return;
+    this.gl.deleteBuffer(b);
+    map.delete(data);
+  }
+
+  /** 끊긴 조각 올리기가 잡은 버퍼 가운데 아무 기록도 쓰지 않는 것을 지운다 */
+  private dropChunk(list: readonly ({ data: UploadArray; target: BufferTarget } | null)[]): void {
+    for (const a of list) if (a && !this.refs.has(a.data)) this.freeBuffer(a.data, a.target);
+  }
+
+  /**
+   * 그물 하나 넣기·바꾸기(0.11.0 — Viewer3d.setMesh). scene은 바꾼 뒤의 장면(무늬 맞추기, 나눠 올리는 중인 장면 갈아 끼우기).
+   * 다른 묶음의 GPU 버퍼·기록은 건드리지 않는다. 같은 id가 있으면 그 자리에서 바꾸고, 없으면 끝에 더한다.
+   * - 앞 그물과 같은 배열 객체는 바뀌지 않았다고 보고 다시 올리지 않는다. vertices를 주면 정점 속성 배열(위치·법선·색·무늬 좌표)의
+   *   그 정점 구간만 바뀌었다고 보고 그 구간만 bufferSubData로 올린다(같은 배열 객체든, 앞 버퍼를 물려받는 새 배열이든)
+   * - 새 배열은 앞 그물의 같은 자리 배열을 이 그물만 쓰고 바이트 크기가 같으면 그 GPU 버퍼에 bufferSubData로 채우고(vertices가 있으면 그 구간만),
+   *   아니면 새 버퍼로 올린다. 아무도 쓰지 않게 된 앞 배열의 버퍼는 지운다
+   * - incremental: 새로 올릴 배열이 CHUNK_MIN_BYTES를 넘으면 새 버퍼에 프레임마다 조각으로 채우고(uploadSome), 다 채울 때까지 앞 그물을 그린다
+   */
+  setMesh(m: Mesh3d, scene: Scene3d, o: { vertices?: readonly IndexRange[] | null; incremental?: boolean } = {}): void {
+    this.syncTextures(scene);
+    this.gl.bindVertexArray(null);
+    const ranges = o.vertices?.length ? o.vertices : null;
+    const p = this.pending;
+    if (p) {
+      // 나눠 올리는 장면에서 아직 올리지 않은 그물이면 장면만 갈아 끼운다(차례가 오면 새 그물을 올린다)
+      const k = p.scene.meshes.findIndex((x) => x.id === m.id);
+      const prev = k >= 0 ? p.scene.meshes[k]! : null;
+      if (k === p.mi && p.chunk !== undefined) {
+        if (p.chunk) this.dropChunk(this.uploadArrays('mesh', prev!));
+        p.chunk = undefined;
+      }
+      p.scene = scene;
+      if (k < 0 || k >= p.mi) {
+        // 다른 묶음과 함께 쓰는 배열을 제자리에서 고쳤으면 이미 올린 그 버퍼는 고친다
+        if (prev && ranges) {
+          this.patchSame(prev, m, ranges);
+          this.refreshSharing(prev, m);
+        }
+        return;
+      }
+    }
+    this.dropJob(m.id);
+    const i = this.meshes.findIndex((r) => r.src.id === m.id);
+    const old = i >= 0 ? this.meshes[i]! : null;
+    if (old && ranges) this.patchSame(old.src, m, ranges);
+    if (old && o.incremental) {
+      const chunk = this.chunkFor(this.uploadArrays('mesh', m));
+      if (chunk) {
+        this.jobs.set(m.id, { mesh: m, chunk });
+        if (ranges) this.refreshSharing(old.src, m);
+        return;
+      }
+    }
+    if (old) this.recycle(old.src, m, ranges);
+    this.installMesh(m, i);
+    if (old && ranges) this.refreshSharing(old.src, m);
+  }
+
+  /**
+   * 제자리에서 고친 위치·색 배열을 함께 쓰는 다른 그물 기록(드물다 — 같은 배열을 여러 그물이 쓸 때)은 범위·반투명 판정을 새로 하려고
+   * 기록을 다시 만든다(배열은 이미 올라가 있어 다시 올리지 않는다)
+   */
+  private refreshSharing(prev: Mesh3d, next: Mesh3d): void {
+    const changed = new Set<Float32Array>();
+    if (prev.positions === next.positions) changed.add(next.positions);
+    if (prev.colors && prev.colors === next.colors) changed.add(next.colors);
+    if (!changed.size) return;
+    for (let k = 0; k < this.meshes.length; k++) {
+      const r = this.meshes[k]!;
+      if (r.src.id !== next.id && (changed.has(r.src.positions) || (!!r.src.colors && changed.has(r.src.colors)))) this.installMesh(r.src, k);
+    }
+  }
+
+  /** 그물 하나 빼기(0.11.0 — Viewer3d.removeMesh). scene은 뺀 뒤의 장면. 아무도 쓰지 않게 된 배열의 버퍼를 지운다 */
+  removeMesh(id: string, scene: Scene3d): void {
+    this.syncTextures(scene);
+    const p = this.pending;
+    if (p) {
+      const k = p.scene.meshes.findIndex((x) => x.id === id);
+      if (k >= 0 && k === p.mi && p.chunk !== undefined) {
+        if (p.chunk) this.dropChunk(this.uploadArrays('mesh', p.scene.meshes[k]!));
+        p.chunk = undefined;
+      }
+      if (k >= 0 && k < p.mi) p.mi--;
+      p.scene = scene;
+    }
+    this.dropJob(id);
+    const i = this.meshes.findIndex((r) => r.src.id === id);
+    if (i < 0) return;
+    const r = this.meshes[i]!;
+    this.meshes.splice(i, 1);
+    this.dropMeshRec(r, false);
+    this.release('mesh', r.src);
+  }
+
+  /** 나눠 올리던 그물 바꾸기를 그만둔다(잡은 버퍼 가운데 쓰지 않는 것은 지운다) */
+  private dropJob(id: string): void {
+    const j = this.jobs.get(id);
+    if (!j) return;
+    this.jobs.delete(id);
+    this.dropChunk(this.uploadArrays('mesh', j.mesh));
+  }
+
+  /**
+   * 기록을 새 그물로(i = 앞 기록 자리, 없으면 −1 — 끝에 더한다). 배열은 arrayBuf·elemBuf가 이미 올린 것을 다시 쓰고 없는 것만 올린다.
+   * 색인이 같으면 삼각형 변 그리기(wire)를 넘겨 쓴다(큰 그물의 와이어프레임 색인을 다시 만들지 않게)
+   */
+  private installMesh(m: Mesh3d, i: number): void {
+    const old = i >= 0 ? this.meshes[i]! : null;
+    const rec = this.sceneMeshRec(m);
+    if (old) {
+      const w = old.wire;
+      if (w && old.src.indices === m.indices && old.count === rec.count && old.indexed === rec.indexed) {
+        const gl = this.gl;
+        gl.bindVertexArray(w.vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(m.positions));
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+        rec.wire = w;
+      }
+      this.dropMeshRec(old, rec.wire === w && !!w);
+      this.release('mesh', old.src);
+      this.meshes[i] = rec;
+    } else this.meshes.push(rec);
+    this.gl.bindVertexArray(null);
+  }
+
+  /** 그물 기록의 VAO·구간 캐시·윤곽선 기록(keepWire가 아니면 삼각형 변 색인도)을 지운다. 배열 버퍼는 release가 지운다 */
+  private dropMeshRec(r: MeshRec, keepWire: boolean): void {
+    const gl = this.gl;
+    this.dropParts(r);
+    gl.deleteVertexArray(r.vao);
+    this.vaos.delete(r.vao);
+    if (r.edges) {
+      this.dropParts(r.edges);
+      for (const v of [r.edges.wide, r.edges.thin]) {
+        gl.deleteVertexArray(v);
+        this.vaos.delete(v);
+      }
+    }
+    if (r.wire && !keepWire) {
+      gl.deleteVertexArray(r.wire.vao);
+      this.vaos.delete(r.wire.vao);
+      this.freeBuffer(r.wire.idx, 'element');
+    }
+  }
+
+  /**
+   * 그물의 정점 속성 배열(올리는 것만): 배열·정점당 값 수. uploadArrays와 같은 조건이다
+   */
+  private vertexArrays(m: Mesh3d): ({ data: Float32Array; stride: number } | null)[] {
+    const nv = Math.floor(m.positions.length / 3);
+    const uv = m.texture ? uvComponents(m) : 0;
+    const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
+    const buv = buvs ? uvComponents(m, buvs) : 0;
+    return [
+      { data: m.positions, stride: 3 },
+      m.normals && m.normals.length >= nv * 3 ? { data: m.normals, stride: 3 } : null,
+      m.colors && m.colors.length >= nv * 4 ? { data: m.colors, stride: 4 } : null,
+      uv ? { data: m.uvs!, stride: uv } : null,
+      buv ? { data: buvs!, stride: buv } : null,
+    ];
+  }
+
+  /** 정점 구간들만 버퍼에 채운다(구간은 정점 번호, stride = 정점당 값 수) */
+  private writeRanges(buf: WebGLBuffer, data: Float32Array, stride: number, ranges: readonly IndexRange[]): void {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    const nv = Math.floor(data.length / stride);
+    for (const r of ranges) {
+      const s = Math.max(0, Math.floor(r.start)), e = Math.min(nv, s + Math.floor(r.count));
+      if (e > s) gl.bufferSubData(gl.ARRAY_BUFFER, s * stride * 4, data, s * stride, (e - s) * stride);
+    }
+  }
+
+  /** 앞 그물과 같은 정점 속성 배열 객체(제자리에서 고친 것)의 정점 구간을 이미 올린 버퍼에 채운다 */
+  private patchSame(prev: Mesh3d, next: Mesh3d, ranges: readonly IndexRange[]): void {
+    const a = this.vertexArrays(prev), b = this.vertexArrays(next);
+    const done = new Set<Float32Array>();
+    for (let s = 0; s < b.length; s++) {
+      const x = b[s];
+      if (!x || done.has(x.data) || a[s]?.data !== x.data || a[s]!.stride !== x.stride) continue;
+      const buf = this.arrayBufs.get(x.data);
+      if (!buf) continue;
+      done.add(x.data);
+      this.writeRanges(buf, x.data, x.stride, ranges);
+    }
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, null);
+  }
+
+  /**
+   * 앞 그물만 쓰던 배열의 GPU 버퍼를 같은 자리의 새 배열이 물려받는다(바이트 크기가 같고 새 배열은 아직 올리지 않았을 때):
+   * 버퍼를 새로 만들지 않고 bufferSubData로 채운다 — 정점 속성 배열에 ranges가 있으면 그 정점 구간만
+   */
+  private recycle(prev: Mesh3d, next: Mesh3d, ranges: readonly IndexRange[] | null): void {
+    const gl = this.gl;
+    const before = this.uploadArrays('mesh', prev), after = this.uploadArrays('mesh', next);
+    const vb = this.vertexArrays(next);
+    const keep = new Set<UploadArray>();
+    for (const x of after) if (x) keep.add(x.data);
+    gl.bindVertexArray(null);
+    for (let s = 0; s < after.length; s++) {
+      const a = before[s], b = after[s];
+      if (!a || !b || a.data === b.data || a.target !== b.target || keep.has(a.data)) continue;
+      if (a.data.byteLength !== b.data.byteLength || this.refs.get(a.data) !== 1) continue;
+      const map = a.target === 'element' ? this.elemBufs : this.arrayBufs;
+      const buf = map.get(a.data);
+      if (!buf || map.has(b.data)) continue;
+      map.delete(a.data);
+      map.set(b.data, buf);
+      // 앞 배열은 이제 아무 버퍼도 없다(release가 기록 수만 줄인다)
+      const v = s < vb.length ? vb[s] : null;
+      if (ranges && v && v.data === b.data && a.data.length === b.data.length) this.writeRanges(buf, v.data, v.stride, ranges);
+      else {
+        const T = a.target === 'element' ? gl.ELEMENT_ARRAY_BUFFER : gl.ARRAY_BUFFER;
+        gl.bindBuffer(T, buf);
+        gl.bufferSubData(T, 0, b.data);
+      }
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
   /** 지금 묶인 VAO에 그물 정점 속성(위치·법선·색·무늬 좌표)을 건다 */
@@ -1162,7 +1457,7 @@ export class Renderer3d {
     if (!r) return;
     this.gl.deleteBuffer(r.buf);
     this.gl.deleteVertexArray(r.vao);
-    this.vaos = this.vaos.filter((v) => v !== r.vao);
+    this.vaos.delete(r.vao);
   }
 
   /**
@@ -1261,8 +1556,11 @@ export class Renderer3d {
       if (m.src.normals) markerBufs.add(this.arrayBufs.get(m.src.normals)!);
       markerBufs.add(this.arrayBufs.get(m.src.positions)!);
     }
-    for (const v of this.vaos) if (!keep.has(v)) gl.deleteVertexArray(v);
-    this.vaos = this.vaos.filter((v) => keep.has(v));
+    for (const v of this.vaos)
+      if (!keep.has(v)) {
+        gl.deleteVertexArray(v);
+        this.vaos.delete(v);
+      }
     for (const [k, b] of this.arrayBufs)
       if (!markerBufs.has(b)) {
         gl.deleteBuffer(b);
@@ -1270,6 +1568,8 @@ export class Renderer3d {
       }
     for (const b of this.elemBufs.values()) gl.deleteBuffer(b);
     this.elemBufs.clear();
+    this.refs.clear();
+    this.jobs.clear();
     this.meshes = [];
     this.lines = [];
     this.points = [];
@@ -1284,7 +1584,7 @@ export class Renderer3d {
     const gl = this.gl;
     for (const v of this.vaos) gl.deleteVertexArray(v);
     for (const b of this.arrayBufs.values()) gl.deleteBuffer(b);
-    this.vaos = [];
+    this.vaos.clear();
     this.arrayBufs.clear();
     this.markers.clear();
     gl.deleteBuffer(this.quadWide);
@@ -1305,7 +1605,7 @@ export class Renderer3d {
   }
 
   /** 삼각형 선 그리기(윤곽선 없는 그물의 와이어프레임) */
-  private wireOf(r: MeshRec): { vao: WebGLVertexArrayObject; count: number } {
+  private wireOf(r: MeshRec): { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } {
     if (r.wire) return r.wire;
     const gl = this.gl;
     const m = r.src;
@@ -1330,7 +1630,7 @@ export class Renderer3d {
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.elemBuf(idx));
     gl.bindVertexArray(null);
-    r.wire = { vao, count: idx.length };
+    r.wire = { vao, count: idx.length, idx };
     return r.wire;
   }
 
