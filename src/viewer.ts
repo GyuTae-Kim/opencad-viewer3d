@@ -46,7 +46,7 @@ import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
-import { type SnapCandidate, chooseMeasureSnap } from './snap';
+import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult } from './snap';
 import { type MeasureInference, type SnapAxis, axisSnap, inferenceCandidates, normalizeInference } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
@@ -76,7 +76,7 @@ import {
 import { segmentsById } from './segments';
 import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, parseColor } from './theme';
+import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
@@ -223,11 +223,17 @@ export interface MeasureResult {
   dy: number;
   dz: number;
   /**
-   * 두 점을 붙잡은 종류(0.8.0): 'vertex'·'endpoint'·'midpoint'·'center'·'point', 붙잡지 않은 점(면·선 위 아무 데)은 null.
-   * setMeasureSnap을 켰을 때만 있다(끄면 예전처럼 이 두 필드가 없다)
+   * 두 점을 붙잡은 종류(0.8.0): 'vertex'·'endpoint'·'midpoint'·'center'·'point'(0.9.0부터 추론 'intersection'·'perpendicular'·'axis'),
+   * 붙잡지 않은 점(면·선 위 아무 데)은 null. setMeasureSnap을 켰을 때만 있다(끄면 예전처럼 이 두 필드가 없다)
    */
   snapA?: SnapKind | null;
   snapB?: SnapKind | null;
+  /**
+   * 축 붙잡기의 축(0.9.1): snapA·snapB가 'axis'(첫 점에서 X·Y·Z 축 방향 — setMeasureSnap({ inference: { axes } }))일 때만 'x'·'y'·'z'.
+   * 다른 종류나 추론을 끄면 없다. 축 붙잡기는 첫 점을 찍은 뒤에만 되므로 지금은 axisB만 실린다
+   */
+  axisA?: SnapAxis;
+  axisB?: SnapAxis;
 }
 
 /** 걷기 선택(Viewer3d.setNavigation('walk', opts)) */
@@ -586,8 +592,8 @@ export class Viewer3d {
     inference: Required<MeasureInference> | null;
     index: SnapPointIndex | null;
   } | null = null;
-  /** 찍은 측정 점의 붙잡은 종류(점 배열 객체 → 종류) */
-  private measureKinds = new WeakMap<V3, SnapKind | null>();
+  /** 찍은 측정 점의 붙잡은 종류와 축 붙잡기의 축(점 배열 객체 → 붙잡기) */
+  private measureSnaps = new WeakMap<V3, MeasurePointSnap>();
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
   /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
@@ -2014,13 +2020,7 @@ export class Viewer3d {
   measurement(): MeasureResult | null {
     const [a, b] = this.measurePts;
     if (!a || !b) return null;
-    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-    const r: MeasureResult = { a, b, distance: Math.hypot(dx, dy, dz), dx, dy, dz };
-    if (this.snapOpt) {
-      r.snapA = this.measureKinds.get(a) ?? null;
-      r.snapB = this.measureKinds.get(b) ?? null;
-    }
-    return r;
+    return measureResult(a, b, this.snapOpt ? [this.measureSnaps.get(a), this.measureSnaps.get(b)] : null);
   }
 
   // ───────────────────────── 화면 위치·측정 덧그림 ─────────────────────────
@@ -2938,7 +2938,7 @@ export class Viewer3d {
       }
       // 같은 점 객체가 두 번 찍혀도 종류를 따로 지키도록 복사해 넣는다(붙잡기 선택이 있을 때만 — 없으면 0.7.2 그대로)
       const p: V3 = this.snapOpt ? [s.p[0], s.p[1], s.p[2]] : s.p;
-      this.measureKinds.set(p, s.kind);
+      this.measureSnaps.set(p, s.axis ? { kind: s.kind, axis: s.axis } : { kind: s.kind });
       this.measurePts.push(p);
       this.measureHover = null;
       const m = this.measurement();
@@ -2988,11 +2988,15 @@ export class Viewer3d {
     this.on<MouseEvent>(cv, 'auxclick', (e) => {
       if (e.button === 1) e.preventDefault();
     });
-    this.on<KeyboardEvent>(cv, 'keydown', (e) => this.onKey(e));
+    this.on<KeyboardEvent>(cv, 'keydown', (e) => {
+      focusKey(cv, e);
+      this.onKey(e);
+    });
     this.on<KeyboardEvent>(cv, 'keyup', (e) => {
       if (this.opts.keyboard && this.handleKeyUp(e)) e.stopPropagation();
     });
     this.on(cv, 'blur', () => {
+      focusLeft(cv);
       this.walkKeys.clear();
       this.listenWalkRelease(false);
     });
@@ -3066,8 +3070,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
-    // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.0 — 앞서 키보드를 썼어도 :focus-visible이 아니게)
-    this.canvas.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
+    // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.1 — 키보드로 이미 초점이 있던 캔버스도 data-v3d-focus="pointer"로 감춘다)
+    pointerFocus(this.canvas);
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch {
@@ -3771,10 +3775,12 @@ export class Viewer3d {
       const mid = sa && sb ? ([(sa[0] + sb[0]) / 2, (sa[1] + sb[1]) / 2, 0] as V3) : sb ?? sa;
       const u = unit ? ` ${unit}` : '';
       const fm = this.measureFmt;
+      // 글 꼴에는 onMeasure와 같은 결과를 준다(0.9.1 — 붙잡기를 켰으면 snapA·snapB·axisB도. 미리 보기의 B는 커서 아래 붙잡을 점)
+      const snapB = pts[1] ? this.measureSnaps.get(pts[1]) : hover ? { kind: hover.kind, ...(hover.axis ? { axis: hover.axis } : {}) } : undefined;
       label(
         mid,
         fm
-          ? fm({ a: [...a] as V3, b: [...b] as V3, distance: Math.hypot(dx, dy, dz), dx, dy, dz, units: this.sceneRef?.units ?? 'unknown' })
+          ? fm({ ...measureResult([...a] as V3, [...b] as V3, this.snapOpt ? [this.measureSnaps.get(a), snapB] : null), units: this.sceneRef?.units ?? 'unknown' })
           : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
       );
     }

@@ -7,7 +7,9 @@
  */
 import type { SnapKind } from './types';
 import { type ViewFrame, projectToScreen } from './camera';
+import type { SnapAxis } from './inference';
 import type { V3 } from './math';
+import type { MeasureResult } from './viewer';
 
 /** 측정 점 고르기 결과: 찍을 점, 붙잡았는지, 붙잡은 종류(붙잡지 않았으면 null) */
 export interface MeasureSnapPick {
@@ -53,4 +55,27 @@ export function chooseMeasureSnap(
   }
   if (best) return { p: best.p, vertex: true, kind: best.kind };
   return base ? { p: base.p, vertex: false, kind: null } : null;
+}
+
+/** 찍은 측정 점의 붙잡기: 종류(붙잡지 않았으면 null)와 축 붙잡기('axis')면 그 축 */
+export interface MeasurePointSnap {
+  kind: SnapKind | null;
+  axis?: SnapAxis;
+}
+
+/**
+ * 두 점 측정 결과(Viewer3d.measurement·onMeasure). snaps를 주면(붙잡기 선택을 켰을 때 — 찍은 점마다, 모르는 점은 undefined) snapA·snapB를 싣고,
+ * 0.9.1부터 축 붙잡기('axis')인 점은 그 축을 axisA·axisB로 싣는다(다른 종류면 그 필드가 없다). snaps가 없으면 0.7.2 꼴(a·b·거리·dx dy dz)
+ */
+export function measureResult(a: V3, b: V3, snaps?: readonly [MeasurePointSnap | undefined, MeasurePointSnap | undefined] | null): MeasureResult {
+  const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+  const r: MeasureResult = { a, b, distance: Math.hypot(dx, dy, dz), dx, dy, dz };
+  if (snaps) {
+    const [sa, sb] = snaps;
+    r.snapA = sa?.kind ?? null;
+    r.snapB = sb?.kind ?? null;
+    if (sa?.kind === 'axis' && sa.axis) r.axisA = sa.axis;
+    if (sb?.kind === 'axis' && sb.axis) r.axisB = sb.axis;
+  }
+  return r;
 }

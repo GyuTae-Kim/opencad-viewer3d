@@ -365,7 +365,7 @@ viewer.setNavigation('walk', { eyeHeight: 1676, gravity: true, collide: true });
 - 숨은 선 모드의 숨은 점선(뒤 모서리)을 기본 색에서도 끝 마개 깊이를 맞춘 변종(`CAPZ`)으로 눈 쪽으로 아주 조금 당겨 그린다. 0.7.2부터 마개를 늘린 만큼
   보이는 모서리 위에도 점선 끝이 조금 겹쳤다(선과 점선 색이 같아 눈에는 거의 보이지 않았다). 화소 비교에서 `base-hidden-dash`·`off-hidden-dash` 두 화면만
   화소 100개씩(최대 차 65) 바뀐다 — 작은 상자·판 모서리의 꼭짓점 둘레. 점선 색을 준 숨은 선과 음영 뒤 모서리는 0.8.0부터 이 변종이었다. 순수 함수 `backEdgeDash`
-- 캔버스에 키보드 초점이 오면(`:focus-visible`) 캔버스 안쪽에 2화소 테두리를 그린다. 마우스·터치로 누를 때는 테두리가 없다(앞서 키보드를 썼어도 — 누를 때 `focus({ focusVisible: false })`, Chrome에서 확인).
+- 캔버스에 키보드 초점이 오면(`:focus-visible`) 캔버스 안쪽에 2화소 테두리를 그린다. 마우스·터치로 누를 때는 테두리가 없다(누를 때 `focus({ focusVisible: false })`. 다만 키보드로 먼저 초점을 준 캔버스를 누르면 테두리가 남았다 — 0.9.1에서 고쳤다).
   0.8.0까지는 캔버스에 `outline:none`을 직접 두어 키보드 초점이 보이지 않았다. 색은 CSS 변수 `--v3d-focus`(없으면 어두운 테마 `#5aa9ff`, 밝은 테마 `#1f6fd1` —
   둘 다 테마 바탕과 3:1 넘음). 규칙은 `:where()`로 구체성을 낮춰 두었으므로 앱은 `.v3d-gl:focus-visible { outline: … }` 같은 보통 규칙으로 바꾼다(`!important`가 필요 없다)
 - 나눠 올리기(`setScene(scene, { incremental })`)에서 새로 올릴 배열이 8 MB(`CHUNK_MIN_BYTES`)를 넘는 묶음은 GPU 버퍼를 배열마다 잡고 4 MB(`CHUNK_BYTES`)씩
@@ -433,13 +433,58 @@ viewer.setRenderOptions({ profiles: style.profiles ? { width: style.profileWidth
 - 헤드리스 Chrome(SwiftShader — CPU로 흉내 내는 GPU라 실제 기기와 시간은 다르다)에서 선분 300만 개 한 묶음(위치 72 MB·색 96 MB), 프레임 몫 8 ms:
   0.8.0은 그 묶음을 한 프레임에 25~56 ms, 0.9.0은 4프레임에 나눠 프레임마다 10~15 ms
 
+## 0.9.1: 누른 뒤 초점 테두리·측정 결과의 축
+
+0.9.0을 앱에 붙이며 찾은 것을 고친 작은 판이다. 그림·고르기·측정 값은 0.9.0과 같다(`npm run pixels -- --base v0.9.0`: 화면 76가지, 값 14묶음 모두 같음.
+새 값 묶음 `base-measure-axis`·`off-measure-axis` 둘은 0.9.0에 없는 값이라 건너뜀). 측정 결과와 측정 글 꼴이 받는 값에는 아래 필드가 더해진다(앱이 쓰지 않으면 달라지는 것이 없다).
+초점 테두리는 캔버스의 CSS 테두리라 이 비교(WebGL 그림)에 들지 않아 헤드리스 Chrome에서 따로 확인했다. 바뀐 기본 동작은 하나다(키보드로 초점을 준 캔버스를 누르면 테두리가 사라진다).
+
+### 키보드로 초점을 준 뒤 누르면 테두리 감추기
+
+- 0.9.0은 누를 때 `focus({ focusVisible: false })`만 불렀다. 키보드(Tab)로 이미 초점이 있던 캔버스는 초점이 바뀌지 않아 이 선택이 듣지 않고,
+  브라우저가 `:focus-visible`을 그대로 두어 마우스·터치로 누른 뒤에도 테두리가 보였다(Chrome 156에서 확인)
+- 0.9.1은 누르면(마우스·터치·펜) 캔버스에 `data-v3d-focus="pointer"`를 달고 그동안 테두리를 감춘다. 초점을 뺐다 다시 주지 않으므로 `blur`·`focus` 사건이 나지 않는다
+  (화면 읽기 프로그램이 캔버스를 다시 읽지 않고, 누르고 있던 걷기 키도 풀리지 않는다). 속성과 CSS만 쓰므로 `:focus-visible`을 아는 브라우저면 같게 동작한다
+- Tab·Shift+Tab을 누르거나 초점이 문서 안 다른 곳으로 가면 속성을 뗀다. 그래서 Tab으로 나갔다가 키보드로 돌아오면 다시 보인다.
+  다른 앱이나 탭에 갔다 오면(창만 흐려지고 문서의 초점은 캔버스 그대로) 감춘 채다
+- 캔버스에서 다른 키(F·1~7·걷기 키)를 눌러도 다시 보이지 않는다. 브라우저도 마우스로 준 초점에서는 키를 눌러도 테두리를 보이지 않는다(Chrome 156에서 확인).
+  걷기에서 끌어 둘러보며 W·A·S·D를 눌러도 테두리가 깜박이지 않는다
+- 감추는 규칙 `canvas.v3d-gl[data-v3d-focus=pointer]:focus-visible { outline: none }`은 구체성이 (0,3,1)이라 앱의 `.v3d-gl:focus-visible`이나
+  전역 `:focus-visible` 같은 보통 규칙도 이긴다(보이는 규칙은 0.9.0처럼 `:where()`로 낮다). 누른 뒤에도 앱 테두리를 보이려면 이 속성을 넣은 더 구체적인 규칙을 쓰고,
+  `outline` 대신 `box-shadow` 같은 것으로 테두리를 그리는 앱은 그 규칙에 `:not([data-v3d-focus=pointer])`를 붙인다
+- 헤드리스 Chrome 156에서 실제 입력(CDP)으로 Tab → 누르기 → F·1 → Tab → Shift+Tab → 누르기 → 터치 → 다른 단추 누르기 → Shift+Tab 차례를
+  앱 규칙 없음, `.v3d-gl:focus-visible`, 전역 `:focus-visible` 세 경우에 보았다. 0.9.0은 누른 뒤에도 테두리가 남고, 0.9.1은 누르면 없고 키보드로 돌아오면 있다.
+  Safari·Firefox는 이 기계에서 돌려 보지 못했다
+- 도우미 `pointerFocus`·`focusKey`·`focusLeft`·`POINTER_FOCUS_ATTR`(`opencad-viewer3d/theme`)
+
+### 측정 결과의 축 붙잡기 축
+
+- `MeasureResult.axisA`·`axisB`(`SnapAxis` — `'x'`·`'y'`·`'z'`): 축 붙잡기(`snapA`·`snapB`가 `'axis'`)로 찍은 점의 축. `measureHoverSnap.axis`와 같은 값이다.
+  축 붙잡기는 첫 점을 찍은 뒤에만 되므로 지금은 `axisB`만 실린다(`axisA`는 `snapA`와 짝을 맞춘 자리). 다른 종류이거나 추론(`inference.axes`)을 끄면 이 필드가 없고 결과는 0.9.0과 같다.
+  앱이 dx·dy·dz 가운데 가장 큰 것으로 축을 짐작하지 않아도 된다
+- 측정 글 꼴(`formatMeasure`·`setMeasureFormat`)도 `onMeasure`와 같은 결과를 받는다. 0.9.0은 타입(`MeasureResult & { units }`)과 달리 내장 측정 글에
+  `a`·`b`·거리·dx dy dz만 넘겨, 붙잡기를 켜도 `snapA`·`snapB`가 늘 없었다. 0.9.1은 붙잡기를 켰으면 `snapA`·`snapB`·`axisB`도 넘긴다(첫 점만 찍은 미리 보기에서 B는 커서 아래 붙잡을 점).
+  글 꼴을 주지 않은 기본 글은 그대로다
+- 순수 함수 `measureResult(a, b, snaps)`(`opencad-viewer3d/snap`)
+
+```ts
+// 측정 띠: 축 붙잡기면 "Z축"(0.9.0은 dx·dy·dz로 짐작했다). KIND는 위 0.9.0 예의 종류 이름표
+viewer.onMeasure((m) => {
+  if (!m) return;
+  const name = (k: SnapKind | null | undefined, axis?: SnapAxis) => (k === 'axis' && axis ? `${axis.toUpperCase()}축` : k ? KIND[k] : '면 위 점');
+  band.textContent = `${fmt(m.distance)} · ${name(m.snapA, m.axisA)} → ${name(m.snapB, m.axisB)}`;
+});
+// 3D 위 측정 글에도 같은 값이 온다
+viewer.setMeasureFormat((m) => [`${fmt(m.distance)}${m.axisB ? ` (${m.axisB.toUpperCase()}축)` : ''}`]);
+```
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.9.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.9.1"
 }
 ```
 
@@ -464,11 +509,11 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/texture.ts` | 무늬 도구(그림 머리 읽기, 크기 한도·예산 나누기, 뒤집어 풀기) |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
-| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데), 추론 붙잡기(교차점·수직 발·축), 앱 점 색인 |
+| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 추론 붙잡기(교차점·수직 발·축), 앱 점 색인 |
 | `src/walk.ts` | 걷기 중력·부딪힘(세계 광선 맞음, 한 걸음) |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
-| `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색·행렬·재생 도우미 |
+| `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색(캔버스 초점 테두리 포함)·행렬·재생 도우미 |
 | `src/synth.ts`, `src/dev.ts`, `dev/viewer3d.html` | 합성 장면(무늬 상자·원근 무늬 판 포함)과 개발 확인 페이지 |
 | `scripts/pixels/` | 화소·값 회귀 비교(`npm run pixels`): 비교 페이지·장면 목록, git 판 소스 묶기, 헤드리스 Chrome, PNG·차이 |
 
@@ -496,7 +541,7 @@ Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), Web
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
   그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면도 찍습니다.
-- 값도 비교합니다. 고르기 7,200번, 측정 누르기 8,300여 번(앱 점 수천 개 붙잡기·추론 붙잡기 포함)의 결과와 화면 위치, 걷기 경로입니다.
+- 값도 비교합니다. 고르기 7,200번, 측정 누르기 8,400여 번(앱 점 수천 개 붙잡기·추론 붙잡기, 0.9.1의 축 붙잡기 축 포함)의 결과와 화면 위치, 걷기 경로입니다.
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
