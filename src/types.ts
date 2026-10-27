@@ -163,6 +163,28 @@ export interface Scene3d {
   meta?: Record<string, unknown>;
 }
 
+/**
+ * 측정 점을 붙잡은 종류(0.8.0): 'vertex' = 그물 꼭짓점·점 묶음의 점, 'endpoint' = 선분·윤곽선 끝점,
+ * 'midpoint' = 선분·윤곽선 가운데 점(Viewer3d.setMeasureSnap({ midpoints })), 'center' = 원·원호 중심,
+ * 'point' = 앱이 준 그 밖의 붙잡기 점. 'center'·'point'와 앱이 준 'endpoint'·'midpoint'는 앱 붙잡기 점(SnapPoint)에서 온다
+ */
+export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point';
+
+/**
+ * 앱이 주는 측정 붙잡기 점(0.8.0, Viewer3d.setMeasureSnap의 points·pointsFor). 예: STEP 모서리 표가 아는 원·원호 중심, B-rep 모서리의 곡선 가운데 점
+ */
+export interface SnapPoint {
+  /** 세계 좌표(묶음 origin·matrix를 거친 값) */
+  point: readonly number[];
+  /** 붙잡은 종류(기본 'point') — 마우스를 올렸을 때 표식 모양과 측정 결과(MeasureResult.snapA·snapB)에 쓴다 */
+  kind?: SnapKind;
+  /**
+   * 이 점이 속한 묶음 id(선택). 주면 그 묶음이 숨었으면 빼고, 그 묶음을 자르는 단면 평면으로 자르며,
+   * 묶음 행렬(setItemMatrix — 분해도)을 따라 옮긴다. 없으면 모든 묶음을 자르는 평면으로만 자른다
+   */
+  id?: string;
+}
+
 /** 뷰어가 고르기 결과로 돌려주는 것 */
 export interface Pick3d {
   /** 'edge'는 그물 윤곽선(Mesh3d.edges) — 윤곽선 고르기를 켰을 때만(0.7.0, Viewer3dOptions.pickEdges·pick(x, y, { edges })) */

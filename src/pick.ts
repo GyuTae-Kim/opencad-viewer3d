@@ -297,6 +297,21 @@ export function snapToNearest(f: ViewFrame, candidates: readonly V3[], cx: numbe
   return best;
 }
 
+/**
+ * 종류가 붙은 후보 점 가운데 커서에서 tolPx 안의 가장 가까운 것(0.8.0 — 끝점·가운데 점 붙잡기).
+ * 화면 거리가 같으면 앞의 후보(끝점을 가운데 점보다 앞에 둔다)를 지킨다
+ */
+export function snapToNearestKind<K>(f: ViewFrame, candidates: readonly { p: V3; kind: K }[], cx: number, cy: number, tolPx: number): { p: V3; kind: K; distPx: number } | null {
+  let best: { p: V3; kind: K; distPx: number } | null = null;
+  for (const c of candidates) {
+    const s = projectToScreen(f, c.p);
+    if (!s) continue;
+    const d = Math.hypot(s[0] - cx, s[1] - cy);
+    if (d <= tolPx && (!best || d < best.distPx)) best = { p: c.p, kind: c.kind, distPx: d };
+  }
+  return best;
+}
+
 /** 3×3(4×4의 왼쪽 위) 행렬 노름의 위 한계 √(‖A‖₁·‖A‖∞) — 로컬 질의 반지름을 보수적으로 늘릴 때 */
 export function normBound3(m: ArrayLike<number>): number {
   let c = 0, r = 0;
