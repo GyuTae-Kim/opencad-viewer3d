@@ -21,6 +21,7 @@ import { boxCenter, boxIsEmpty, boxSphere, meshBounds, transformBox, unionBox } 
 import { DEPTH_FS, DEPTH_VS, FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, SKY_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { contrastLineColor } from './theme';
+import { type BufferSink, type BufferTarget, CHUNK_BYTES, CHUNK_MIN_BYTES, ChunkedUpload, type UploadArray, newArrays } from './upload';
 import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
 
@@ -485,7 +486,7 @@ export class Renderer3d {
   private d4b = new Float64Array(16);
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
   /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
-  private pending: { scene: Scene3d; mi: number; li: number; pi: number } | null = null;
+  private pending: { scene: Scene3d; mi: number; li: number; pi: number; chunk?: ChunkedUpload<WebGLBuffer> | null } | null = null;
   /** 장면의 무늬 그림(id → 원본) */
   private texSrc = new Map<string, Texture3d>();
   /** 그물이 쓰는 무늬(풀기·올리기 상태) */
@@ -911,8 +912,9 @@ export class Renderer3d {
   }
 
   /**
-   * 나눠 올리기를 budgetMs 동안 이어 간다(적어도 묶음 하나). 그물 → 선분 → 점 차례. 다 올렸으면 true.
-   * 묶음 하나는 통째로 올린다(아주 큰 배열 하나는 한 번에 걸린다).
+   * 나눠 올리기를 budgetMs 동안 이어 간다(적어도 한 걸음). 그물 → 선분 → 점 차례. 다 올렸으면 true.
+   * 0.9.0: 묶음 하나가 새로 올릴 배열이 CHUNK_MIN_BYTES를 넘으면 버퍼를 CHUNK_BYTES 조각으로 여러 걸음(프레임)에 나눠 채우고,
+   * 다 채운 뒤 그 묶음을 그리기 목록에 넣는다(0.8.0은 묶음을 통째로 올려 아주 큰 배열 하나가 한 프레임에 걸렸다)
    */
   uploadSome(budgetMs: number): boolean {
     const p = this.pending;
@@ -921,16 +923,73 @@ export class Renderer3d {
     const pts = s.points ?? [];
     const t0 = performance.now();
     let first = true;
+    this.gl.bindVertexArray(null);
     while (first || performance.now() - t0 < budgetMs) {
       first = false;
-      if (p.mi < s.meshes.length) this.meshes.push(this.meshRec(s.meshes[p.mi++]!));
-      else if (p.li < s.lines.length) this.lines.push(this.sceneLineRec(s.lines[p.li++]!));
-      else if (p.pi < pts.length) this.points.push(this.pointRec(pts[p.pi++]!));
-      else break;
+      const kind = p.mi < s.meshes.length ? 'mesh' : p.li < s.lines.length ? 'line' : p.pi < pts.length ? 'point' : null;
+      if (!kind) break;
+      const item = kind === 'mesh' ? s.meshes[p.mi]! : kind === 'line' ? s.lines[p.li]! : pts[p.pi]!;
+      // 큰 묶음: 버퍼를 잡고 조각 하나씩 채운다(다 채울 때까지 그 묶음 기록은 만들지 않는다)
+      if (p.chunk === undefined) {
+        const arrays = newArrays(this.uploadArrays(kind, item), (d) => (d instanceof Uint32Array ? this.elemBufs.has(d) : this.arrayBufs.has(d as Float32Array)));
+        const bytes = arrays.reduce((n, a) => n + a.data.byteLength, 0);
+        p.chunk = bytes > CHUNK_MIN_BYTES ? new ChunkedUpload(arrays, this.bufferSink(), (d, t, b) => (t === 'element' ? this.elemBufs.set(d as Uint32Array, b) : this.arrayBufs.set(d as Float32Array, b)), CHUNK_BYTES) : null;
+      }
+      // 버퍼 잡기(크기만큼 0 채우기)는 이번 걸음 몫을 이미 썼으면 다음 프레임 처음으로 미룬다
+      if (p.chunk && p.chunk.nextIsAlloc && performance.now() - t0 > budgetMs / 2 && budgetMs !== Infinity) break;
+      if (p.chunk && !p.chunk.step()) continue;
+      p.chunk = undefined;
+      if (kind === 'mesh') this.meshes.push(this.meshRec(s.meshes[p.mi++]!));
+      else if (kind === 'line') this.lines.push(this.sceneLineRec(s.lines[p.li++]!));
+      else this.points.push(this.pointRec(pts[p.pi++]!));
+      this.gl.bindVertexArray(null);
     }
     this.gl.bindVertexArray(null);
     if (p.mi >= s.meshes.length && p.li >= s.lines.length && p.pi >= pts.length) this.pending = null;
     return !this.pending;
+  }
+
+  /**
+   * 묶음 하나가 GPU에 올리는 배열(meshRec·lineRec·pointRec가 arrayBuf·elemBuf로 올리는 것과 같은 조건 — 나눠 올리기에서 미리 채운다)
+   */
+  private uploadArrays(kind: 'mesh' | 'line' | 'point', item: Mesh3d | LineSet3d | PointSet3d): ({ data: UploadArray; target: BufferTarget } | null)[] {
+    const A = (data: Float32Array | undefined | false | null): { data: UploadArray; target: BufferTarget } | null => (data ? { data, target: 'array' } : null);
+    if (kind === 'point') return [A(item.positions)];
+    if (kind === 'line') {
+      const l = item as LineSet3d;
+      const n = Math.floor(l.positions.length / 6);
+      return [A(l.positions), A(l.colors && l.colors.length >= n * 8 && l.colors)];
+    }
+    const m = item as Mesh3d;
+    const nv = Math.floor(m.positions.length / 3);
+    const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
+    return [
+      A(m.positions),
+      A(!!m.normals && m.normals.length >= nv * 3 && m.normals),
+      A(!!m.colors && m.colors.length >= nv * 4 && m.colors),
+      A(!!uvComponents(m) && !!m.texture && m.uvs),
+      A(!!buvs && !!uvComponents(m, buvs) && buvs),
+      m.indices ? { data: m.indices, target: 'element' } : null,
+      A(hasMeshEdges(m) && m.edges),
+    ];
+  }
+
+  /** WebGL2 버퍼 만들기·채우기(나눠 올리기). 그물 VAO를 건드리지 않게 묶인 VAO는 비운 채로 부른다 */
+  private bufferSink(): BufferSink<WebGLBuffer> {
+    const gl = this.gl;
+    const T = (t: BufferTarget): number => (t === 'element' ? gl.ELEMENT_ARRAY_BUFFER : gl.ARRAY_BUFFER);
+    return {
+      alloc: (t, bytes) => {
+        const b = gl.createBuffer()!;
+        gl.bindBuffer(T(t), b);
+        gl.bufferData(T(t), bytes, gl.STATIC_DRAW);
+        return b;
+      },
+      write: (b, t, off, src, srcOffset, length) => {
+        gl.bindBuffer(T(t), b);
+        gl.bufferSubData(T(t), off, src, srcOffset, length);
+      },
+    };
   }
 
   private sceneLineRec(l: LineSet3d): LineRec & { src: LineSet3d } {
