@@ -500,10 +500,12 @@ function lockShots(d: 'base' | 'off'): Shot[] {
   ];
   if (d === 'base')
     out.push(
-      // 상자 앞 오른쪽 위 구석(120, 0, 40)에서, 엇갈린 선분 하나를 지나간 뒤 그와 나란한 자리(상자 앞 허공)
+      // 상자 앞 오른쪽 위 구석(120, 0, 40)에서, 엇갈린 선분 하나를 지나간 뒤 그와 나란한 자리(상자 앞 허공). 밝은 테마의 추론 색도 한 장
+      ...[false, true].map((light) =>
       s(
-        'infer-parallel',
+        light ? 'infer-parallel-light' : 'infer-parallel',
         (c) => {
+          if (light) c.v.setTheme('light');
           c.v.setMeasureMode(true);
           c.v.setMeasureSnap({ inference: { axes: true, parallel: true } });
           const a = c.at([120, 0, 40]);
@@ -516,6 +518,7 @@ function lockShots(d: 'base' | 'off'): Shot[] {
           if (p) c.hover(p.x + 3, p.y + 2);
         },
         'cross',
+      ),
       ),
     );
   return out;
