@@ -16,7 +16,7 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 음영·음영+윤곽·와이어프레임·X-ray·숨은 선·단색·무늬 없음, 화면 공간 외곽선, 굵은 선·점선, 바닥 격자, 좌표축, 밝은·어두운 테마(CSS 변수 `--v3d-*`로 바꿀 수 있음), 키보드 초점 테두리
 - 뒤 모서리 점선(숨은 선, 켜면 음영 계열도), 바탕과 대비되는 외곽선·윤곽선 색(켤 때만), 그물마다 다른 윤곽선·외곽선 색
 - 해 조명·그림자(PCF)·선형 안개·하늘과 땅 바탕(모두 켤 때만), 1인칭 걷기·둘러보기(켜면 바닥 따라가기·부딪힘), 시야각·굴림·렌즈 이동(2점 투시)
-- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심, 두 선분 교차점·수직 발·축 방향까지 붙잡기 — 앱 점 수십만 개도 색인으로), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
+- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심, 두 선분 교차점·수직 발·축 방향·지나간 모서리와 나란한 방향까지 붙잡기와 Shift·앱 단추로 방향 잠그기 — 앱 점 수십만 개도 색인으로, 재생에 맞춰 차례 한도로 거르기), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
 - 단면 보기: 평면 하나 또는 여럿(상자 단면, 평면마다 자를 묶음), 잘린 면 채우기(닫힌 그물·capGroup)·단면 테두리, 고르기·측정도 잘린 쪽을 무시
 - 마주 보는 그물(billboard), 뒷면 색·무늬
 - 무늬(텍스처): 그물마다 무늬 좌표(UV, 원근 무늬는 q까지)와 그림 하나. 되풀이(REPEAT)·밉맵·비등방 거르기, 한 장 크기·전체 GPU 예산 한도
@@ -62,7 +62,7 @@ viewer.fit();
 
 앱이 자주 쓰는 것:
 
-- `handleKey(e)`: 캔버스에 초점이 없을 때 창 키를 넘기면 F·1~7·Esc를 뷰어 규칙대로 처리하고 처리했으면 `true`. 표준 뷰 키 표는 `VIEW_KEYS`
+- `handleKey(e)`: 캔버스에 초점이 없을 때 창 키를 넘기면 F·1~7·Esc를 뷰어 규칙대로 처리하고 처리했으면 `true`. 표준 뷰 키 표는 `VIEW_KEYS`(0.10.0부터 작은 모듈 `opencad-viewer3d/camera`에서도)
 - `fitItems(ids)`: 고른 항목(그물·선·점 id)만 맞춰 보기
 - `highlight(ids)`, `setItemVisible`, `setGroupVisible`, `groups()`: 항목 단위 강조와 보이기
 - `highlightSegmentIds(ids)`, `setHighlightSegments(positions)`: 선분 단위 강조(예: NC 한 줄). 보이는 부분은 깊이를 따져 굵게, 가려진 부분은 흐리게(`hidden`) 그린다. `highlightSegmentIds`는 `segmentIds`로 찾고 찾은 선분 수를 돌려준다
@@ -478,13 +478,98 @@ viewer.onMeasure((m) => {
 viewer.setMeasureFormat((m) => [`${fmt(m.distance)}${m.axisB ? ` (${m.axisB.toUpperCase()}축)` : ''}`]);
 ```
 
+## 0.10.0: 붙잡기 점 차례 한도·추론 잠금과 나란함·작은 모듈의 뷰 키 표
+
+새 선택을 켜지 않으면 그림·고르기·측정은 0.9.1과 화소·값까지 같다(`npm run pixels -- --base v0.9.1`: 0.9.1의 화면 76가지·값 16묶음 모두 같음.
+새로 더한 값 가운데 0.9.1 API만 쓰는 셋도 같다 — 새 선택 없이 Shift를 누른 채 미리 보고 찍은 `base-measure-shift-off`, 고른 점에 따라 달라지는
+`pointsFor`로 미리 보고 같은 자리를 누른 `base·off-measure-points-for`. 새 화면 7가지·값 7묶음은 0.9.1에 없는 API라 건너뜀).
+바뀐 기본 동작은 없다. 측정 결과와 미리 보기에는 아래 필드가 더해지고(앱이 쓰지 않으면 달라지는 것이 없다), `measureSnap.inference`는 다섯 값으로 편 꼴이 된다.
+
+### 앱 붙잡기 점 차례 한도
+
+- `SnapPoint.order`(차례 값)와 `setMeasureSnapLimit(n)`·`setMeasureSnap({ limit })`·`measureSnapLimit`: 차례가 n보다 작은 앱 점만 붙잡는다.
+  차례가 없는 점은 늘 후보이고, `pointsFor`가 준 점에도 같은 규칙을 쓴다. `null`(또는 `Infinity`)이면 한도가 없다
+- 점 목록과 색인(BVH)은 모든 점으로 한 번 만들고 꺼낼 때만 거른다. 한도가 바뀌면 마지막 커서 자리에서 미리 보기를 다시 구한다
+  (0.9.1 꼴로 `setMeasureSnap`을 다시 주면 미리 보기가 사라졌다)
+- `setMeasureSnap`은 한도도 새로 정한다(`limit`을 주지 않으면 한도 없음). 붙잡기가 꺼져 있으면 `setMeasureSnapLimit`은 아무것도 하지 않는다
+- 비용(이 기계 Node, 원호 중심 10만 개, 차례 = 이동 번호): 한도마다 목록을 잘라 색인을 다시 만들면(0.9.1 꼴) 한 번에 8~22 ms.
+  한도로 거르는 질의는 마우스 이동 한 번에 0.05~0.1 ms로 한도가 없을 때와 차이를 잴 수 없을 만큼 작다(거른 점은 꺼내지도 정렬하지도 않는다)
+- 시험: 한도로 거른 후보는 한도 없는 후보를 거른 것과 같고, 고른 점은 한도 안 점만 다시 준 목록과 같다(원근·평행·묶음 행렬).
+  화소·값 비교 `base·off-measure-limit`은 앱 점 3,725개에 한도 다섯 가지로 잰 측정이 한도 안 점만 다시 준 목록과 같은지도 함께 남긴다
+
+```ts
+// NC 재생: 원호 중심마다 그 중심을 처음 그린 이동 번호를 차례로 두고, 문서를 열 때 한 번만 준다
+viewer.setMeasureSnap({ points: centers.points.map((p, i) => ({ ...p, order: centers.moves[i] })), pointsFor, inference: true });
+// 재생 위치가 바뀔 때마다(lastMove까지 그렸을 때) — 목록·색인은 그대로
+viewer.setMeasureSnapLimit(playing ? lastMove + 1 : null);
+```
+
+### 작은 모듈의 표준 뷰 키 표
+
+- `VIEW_KEYS`를 `opencad-viewer3d/camera`에서도 내보낸다(입구·`opencad-viewer3d/viewer`와 같은 객체). camera 모듈은 뷰어·그리기·셰이더를 가져오지 않으므로
+  코어 입구를 나눠 받는 앱도 첫 화면 메뉴 글에 표를 복사하지 않고 쓴다. package.json `exports`의 `"./*"`가 이미 이 하위 경로를 내주므로 바꾸지 않았다
+
+```ts
+import { VIEW_KEYS, VIEW_LABELS } from 'opencad-viewer3d/camera';
+```
+
+### 추론 잠금(Shift·앱 단추)과 나란함
+
+- `setMeasureSnap({ inference: { …, parallel?, lock? } })`(`MeasureInference`, 둘 다 기본 꺼짐). `inference: true`는 0.9.0의 셋 그대로다(켜 둔 앱의 동작이 바뀌지 않게 따로 켠다)
+  - `parallel`: 측정 중 커서가 지나간 선분(선분 묶음, 측정 중 윤곽선을 고르면 그물 윤곽선도)을 기준으로, 첫 점에서 그와 나란한 선 위의 점.
+    점 붙잡기가 하나도 없을 때만 쓰고, 축 붙잡기와 화면 거리로 견줘 가까운 것을 고른다(같으면 축). 기준 선분이 축과 나란하면 축에 맡긴다.
+    자홍 안내선(테마 `inference`, CSS 변수 `--v3d-inference`)과 기준 선분 점선을 그리고, 표식은 자홍 동그라미와 ∥이다. `SnapKind`에 `'parallel'`을 더했다
+  - `lock`: Shift를 누르는 순간 지금 미리 보기의 방향 추론(축, 나란함, 수직 — 첫 점에서 수직 발 쪽)을 잠그고, 떼면 푼다(SketchUp의 추론 잠금).
+    잠그면 첫 점을 지나는 그 선 위에만 찍는다. 커서가 꼭짓점·끝점·중심 같은 점 붙잡기 위면 그 점을 선에 수직으로 내린 자리를 찍고
+    (예: Z를 잠그고 다른 모서리 끝을 가리키면 그 높이), 아니면 커서 광선에 가장 가까운 선 위 점이다(붙잡기 거리 제한 없음).
+    안내선은 굵은 실선, 표식에는 고리를 두르고, 옮겨 온 점에서 가는 점선을 긋는다
+  - Shift는 포인터 이동의 `shiftKey`와 캔버스·`handleKey`·`handleKeyUp`의 Shift로 보고, 누르는 동안 창 keyup·blur도 들어 떼기를 놓치지 않는다.
+    `handleKey`는 Shift를 받아도 `false`를 돌려준다(기본 동작을 막지 않는다)
+- `setMeasureInferenceLock(true | 'x' | 'y' | 'z' | false)`·`measureInferenceLock`: Shift가 없는 터치 기기에서 앱 단추로 잠근다(위 `lock` 선택과 상관없이 된다).
+  `true`는 지금 미리 보기의 방향 추론(커서가 캔버스를 떠났으면 첫 점을 찍은 뒤 마지막으로 본 것), 축 이름은 그 축(첫 점을 찍기 전에 줘도 된다), `false`는 풀기다.
+  두 점째를 찍거나 측정을 지우거나(Esc·측정 모드 끄기·장면 바꾸기) 붙잡기 선택을 바꾸면 풀린다. `measureInferenceLock`은 `{ kind, direction, axis?, edge?, source }`
+- 결과: `MeasureResult.directionA`·`directionB`(방향 추론의 단위 방향 — 축은 +X·+Y·+Z, 나란함은 기준 선분 방향, 수직은 첫 점에서 발 쪽)와 `lockedA`·`lockedB`.
+  `measureHoverSnap`에는 `direction`·`locked`·`edge`(나란함의 기준 선분, 수직 발의 선분)·`from`·`fromSnap`(잠근 선으로 옮겨 온 점과 그 종류)이 실린다
+- 순수 함수 `parallelSnap`·`lockedSnap`·`lockFromSnap`·`axisLock`·`rayLinePoint`(`opencad-viewer3d/inference`). 0.9.0 `axisSnap`은 같은 식(`rayLinePoint`)을 함께 쓰고 값은 그대로다(시험으로 견줌)
+- 화소·값 비교: 나란함·Shift 잠금(보통·큰 좌표)·앱 단추로 잠근 수직(보통·큰 좌표) 화면, 잠금·나란함·추론 다섯 가지 값
+
+```ts
+viewer.setMeasureSnap({ points, pointsFor, inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true } });
+// 상태 줄: KIND는 0.9.0 예의 종류 이름표에 parallel: '나란함'을 더한 것
+const h = viewer.measureHoverSnap;
+const name = !h?.snap ? '' : h.snap === 'axis' ? `${h.axis!.toUpperCase()}축 방향` : KIND[h.snap];
+status.textContent = name && (h!.locked ? `${name} (잠금)` : h!.direction ? `${name} — Shift로 잠그기` : name);
+// 터치: 정밀 조준 중 다른 손가락으로 누르는 잠금 단추, 첫 점 뒤 축 단추
+lockButton.onclick = () => lockButton.setAttribute('aria-pressed', String(viewer.setMeasureInferenceLock(!viewer.measureInferenceLock)));
+zButton.onclick = () => viewer.setMeasureInferenceLock('z');
+viewer.onMeasure(() => lockButton.setAttribute('aria-pressed', String(!!viewer.measureInferenceLock))); // 두 점째에서 풀린다
+```
+
+### 같은 고르기에서 pointsFor 다시 쓰기
+
+- 바로 앞 호출과 같은 고르기(종류·묶음 id·번호·고른 점·법선·잘린 면이 같다 — `samePick`)면 `pointsFor`를 다시 부르지 않고 앞 결과를 쓴다.
+  같은 자리에서 미리 본 뒤 누를 때와, 붙잡기 한도나 잠금이 바뀌어 미리 보기를 다시 구할 때다. 커서가 움직이면 고른 점이 달라지므로,
+  앱 점이 고른 점에 따라 정해져도(가장 가까운 요소 찾기) 값이 같다. 기억은 `setMeasureSnap`마다 새로 한다.
+  결과는 고른 것으로만 정해져야 한다(앱 자료가 바뀌면 `setMeasureSnap`을 다시 준다 — 0.8.0부터의 약속)
+- 화소·값 비교 자료에서 미리 보기 180자리와 같은 자리 누르기: 0.9.1은 52번, 0.10.0은 26번 불렀다(사이마다 한도를 바꿔도 26번).
+  커서가 움직일 때마다 부르는 것은 그대로다
+
+### 앱이 할 일
+
+- NC: 원호 중심(`arcCenters`)에 `order`(그 중심을 처음 그린 이동 번호)를 두고, 재생 위치가 바뀔 때 `setMeasureSnap({ points: slice })` 대신
+  `setMeasureSnapLimit(lastMove + 1)`(재생 중이 아니면 `null`)을 부른다. `src/app/keys.ts`의 `VIEW_KEYS` 복사본은 `opencad-viewer3d/camera`에서 가져오고, 견주던 시험은 뺀다
+- STEP·SKP·NC: 잠금과 나란함을 쓰려면 `inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true }`로 켠다.
+  터치 화면에는 잠금 단추(또는 X·Y·Z 단추)를 달고, 상태 줄에 `measureHoverSnap.locked`·`direction`으로 "잠금"·"Shift로 잠그기"를,
+  측정 띠에 `snapB === 'parallel'`(나란함)·`lockedB`를 보인다. 새 글은 앱 사전(en·ja·zh-CN·de)에 넣는다
+- 테마 색을 직접 주는 앱은 `inference`(또는 CSS `--v3d-inference`)를 바탕과 3:1 넘게 고른다(기본은 어두운 테마 `#f062f0` 5.5:1, 밝은 테마 `#b31ab3` 5.2:1)
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.9.1"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.10.0"
 }
 ```
 
@@ -509,7 +594,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/texture.ts` | 무늬 도구(그림 머리 읽기, 크기 한도·예산 나누기, 뒤집어 풀기) |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
-| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 추론 붙잡기(교차점·수직 발·축), 앱 점 색인 |
+| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 추론 붙잡기(교차점·수직 발·축·나란함)와 방향 잠금, 앱 점 색인(차례 한도) |
 | `src/walk.ts` | 걷기 중력·부딪힘(세계 광선 맞음, 한 걸음) |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
@@ -526,7 +611,8 @@ npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 
                    #   &incremental=1(나눠 올리기) &tex=1(무늬 상자·원근 무늬 판). 단추: 단면 X·Y·Z, 구간 숨김·구간 강조,
                    #   0.7.0 모드(숨은 선·단색·무늬 없음)·외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기,
                    #   0.8.0 붙잡기+(가운데 점·중심)·음영 뒤 모서리·대비 선 색·중력·부딪힘,
-                   #   0.9.0 추론 붙잡기(교차점·수직 발·축)·그물 선 색
+                   #   0.9.0 추론 붙잡기(교차점·수직 발·축)·그물 선 색,
+                   #   0.10.0 나란함·잠금(Shift)·잠금 단추(setMeasureInferenceLock)
 npm run typecheck
 npm test
 npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
@@ -537,11 +623,12 @@ npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
 `npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
 Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
 
-- 합성 장면 76가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+- 합성 장면 83가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
-  그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면도 찍습니다.
-- 값도 비교합니다. 고르기 7,200번, 측정 누르기 8,400여 번(앱 점 수천 개 붙잡기·추론 붙잡기, 0.9.1의 축 붙잡기 축 포함)의 결과와 화면 위치, 걷기 경로입니다.
+  그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식도 찍습니다.
+- 값도 비교합니다. 고르기 7,200번, 측정 누르기 2만 4천여 번(앱 점 수천 개 붙잡기·추론 붙잡기, 0.9.1의 축 붙잡기 축, 0.10.0의 차례 한도·추론 잠금·나란함·
+  같은 자리 미리 보기 뒤 누르기의 `pointsFor` 포함)의 결과와 화면 위치, 걷기 경로입니다.
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
@@ -565,8 +652,10 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 선 색 대비(`'contrast'`)는 한 색 바탕만 본다(하늘·땅 기울기 바탕, 선 뒤의 다른 면 색은 보지 않는다)
 - 걷기 부딪힘은 눈·무릎 높이 광선 둘이라 그 사이 높이의 가는 막대·난간 살은 지나가고, 머리 위 천장은 따지지 않는다. 중력은 바로 내려앉는다(떨어지는 시간 없음).
   마주 보는 그물은 Z축 둘레만(axis 'z')
-- 추론 붙잡기는 선분끼리의 3D 교차, 선분 위 수직 발, 첫 점의 세계 X·Y·Z 축 방향뿐이다(선과 면의 교차, 면 위 수직 발, 나란한 방향, 다른 점에서 끌어온 축 안내,
-  축 고정(Shift)은 없다). 커서 둘레 선분은 화면에서 가까운 24개까지만 짝짓는다. `pointsFor`는 여전히 마우스 이동마다 부른다
+- 추론 붙잡기는 선분끼리의 3D 교차, 선분 위 수직 발, 첫 점을 지나는 세계 X·Y·Z 축 방향과 지나간 선분과 나란한 방향뿐이다(선과 면의 교차, 면 위 수직 발,
+  모서리에 수직인 방향, 다른 점에서 끌어온 축 안내, 면 잠금은 없다). 나란함의 기준은 마지막으로 지나간 선분 하나다. 잠금은 첫 점을 지나는 선 하나이고
+  키보드 화살표로 축을 고르는 잠금(SketchUp의 →·←·↑)은 없다(앱이 `setMeasureInferenceLock('x')` 등으로 단다). 커서 둘레 선분은 화면에서 가까운 24개까지만 짝짓는다.
+  `pointsFor`는 같은 고르기에서는 다시 쓰지만 커서가 움직여 고른 점이 바뀌면 부른다
 - 음영 뒤 모서리 점선은 반투명 그물 뒤 모서리에는 그리지 않는다
 - 그림 저장 배율은 한 변 GPU 한도·약 4천만 화소까지(넘으면 줄인다)
 - 잘린 면 채우기는 스텐실 홀짝이라 `closed` 그물이 정말 닫혀 있어야 한다(틈·겹친 입체가 있으면 줄무늬·구멍). 반투명 그물·X-ray·와이어프레임에서는 채우지 않는다
