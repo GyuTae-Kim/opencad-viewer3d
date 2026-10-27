@@ -166,9 +166,11 @@ export interface Scene3d {
 /**
  * 측정 점을 붙잡은 종류(0.8.0): 'vertex' = 그물 꼭짓점·점 묶음의 점, 'endpoint' = 선분·윤곽선 끝점,
  * 'midpoint' = 선분·윤곽선 가운데 점(Viewer3d.setMeasureSnap({ midpoints })), 'center' = 원·원호 중심,
- * 'point' = 앱이 준 그 밖의 붙잡기 점. 'center'·'point'와 앱이 준 'endpoint'·'midpoint'는 앱 붙잡기 점(SnapPoint)에서 온다
+ * 'point' = 앱이 준 그 밖의 붙잡기 점. 'center'·'point'와 앱이 준 'endpoint'·'midpoint'는 앱 붙잡기 점(SnapPoint)에서 온다.
+ * 0.9.0 추론 붙잡기(setMeasureSnap({ inference })): 'intersection' = 두 선분의 3D 교차점, 'perpendicular' = 첫 점에서 선분으로 내린 수직 발,
+ * 'axis' = 첫 점에서 X·Y·Z 축 방향 선 위(어느 축인지는 Viewer3d.measureHoverSnap.axis)
  */
-export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point';
+export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis';
 
 /**
  * 앱이 주는 측정 붙잡기 점(0.8.0, Viewer3d.setMeasureSnap의 points·pointsFor). 예: STEP 모서리 표가 아는 원·원호 중심, B-rep 모서리의 곡선 가운데 점
