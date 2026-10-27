@@ -393,6 +393,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
 | `src/grid.ts`, `src/marker.ts`, `src/theme.ts`, `src/math.ts`, `src/playback.ts` | 격자·표식·색·행렬·재생 도우미 |
 | `src/synth.ts`, `src/dev.ts`, `dev/viewer3d.html` | 합성 장면(무늬 상자·원근 무늬 판 포함)과 개발 확인 페이지 |
+| `scripts/pixels/` | 화소·값 회귀 비교(`npm run pixels`): 비교 페이지·장면 목록, git 판 소스 묶기, 헤드리스 Chrome, PNG·차이 |
 
 ## 개발
 
@@ -405,7 +406,31 @@ npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 
                    #   0.8.0 붙잡기+(가운데 점·중심)·음영 뒤 모서리·대비 선 색·중력·부딪힘
 npm run typecheck
 npm test
+npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
 ```
+
+### 화소·값 회귀 비교
+
+`npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
+Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
+
+- 합성 장면 66가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+  구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
+  걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브도 찍습니다.
+- 값도 비교합니다. 고르기 7,200번, 측정 누르기 4,400여 번의 결과와 화면 위치, 걷기 경로입니다.
+- 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
+- base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
+  도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
+- 결과는 `--out`(기본 `.runtime/pixels/<base>-<head>-<시각>/`)에 `summary.json`(`done: true`, 장면마다 같은지와 다른 화소 수)과
+  `summary.md`로 남깁니다. 다른 장면은 `diff/`에 base 그림, head 그림, 차이 그림(다른 화소는 빨강)을 PNG로 둡니다.
+- base 소스는 작업 트리나 소스 사본을 만들지 않고 git 개체(`git cat-file`)에서 바로 묶습니다. 비교 페이지(`scripts/pixels/page.ts`)와
+  장면 목록은 두 판 모두 작업 트리 것을 쓰고 `src/`만 바뀝니다. 장면을 더하려면 이 파일에 넣습니다.
+- 선택: `--head <판>`(작업 트리 대신 커밋끼리), `--runs 1`(두 번 찍기 생략), `--only <정규식>`, `--size 폭x높이`, `--keep-shots`(같은 장면 그림·값도 남기기), `--port`.
+
+PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어갈 base 커밋과 병합 결과를 이 명령으로 비교합니다.
+저장해 둔 기준 그림은 쓰지 않습니다(러너마다 GPU 흉내가 달라서). 다르면 작업 요약에 표를 붙이고 artifact `pixels`에 차이 PNG를 올린 뒤 실패합니다.
+**그림이 바뀌는 것이 의도한 변화면 PR에 `pixels-changed` 라벨을 붙입니다.** 그러면 차이를 알리기만 하고 통과합니다(라벨을 붙이거나 떼면 다시 판정합니다).
+라벨을 붙이기 전에 차이 PNG를 보고 바뀐 장면이 PR이 바꾸려던 것뿐인지 확인합니다.
 
 ## 남은 일
 
