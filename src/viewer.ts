@@ -47,7 +47,7 @@ import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
-import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, snapLimit, withinSnapLimit } from './snap';
+import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, samePick, snapLimit, withinSnapLimit } from './snap';
 import {
   type InferenceLock,
   type MeasureInference,
@@ -295,7 +295,9 @@ export interface MeasureSnapOptions {
   points?: readonly SnapPoint[] | null;
   /**
    * 커서 아래 고른 것(그물·윤곽선·선분·점)에 따라 앱이 더하는 붙잡기 점 — 예: STEP이 모서리 표로 아는 B-rep 모서리의 곡선 가운데 점·원 중심.
-   * 마우스 이동마다 부르므로 가볍게. id를 주지 않은 점은 고른 묶음 id로 자르고 가린다
+   * 마우스 이동마다 부르므로 가볍게. id를 주지 않은 점은 고른 묶음 id로 자르고 가린다.
+   * 0.10.0: 바로 앞과 같은 고르기(종류·묶음·번호·고른 점·법선이 같다 — 같은 자리에서 미리 본 뒤 누르기, 붙잡기 한도·잠금이 바뀌어 다시 구하기)면
+   * 다시 부르지 않고 앞 결과를 쓴다. 결과는 고른 것으로만 정해져야 한다(앱 자료가 바뀌면 setMeasureSnap을 다시 준다 — 0.8.0부터의 약속)
    */
   pointsFor?: ((pick: Pick3d) => readonly SnapPoint[] | null | undefined) | null;
   /**
@@ -655,6 +657,8 @@ export class Viewer3d {
     /** 0.10.0 차례 값(점마다, 차례가 없는 점은 −Infinity — 한 점도 차례가 없으면 null)과 붙잡기 한도(없으면 null) */
     orders: Float64Array | null;
     limit: number | null;
+    /** 0.10.0: 바로 앞 pointsFor 호출의 고르기(복사본)와 결과 — 같은 고르기면 다시 부르지 않는다 */
+    pfMemo: { pick: Pick3d; res: readonly SnapPoint[] | null | undefined } | null;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
@@ -2038,7 +2042,7 @@ export class Viewer3d {
       if (limit === null) delete src.limit;
       else src.limit = limit;
       const orders = ord ? ord.subarray(0, n) : null;
-      const so = (this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src, pts: xyz.subarray(0, n * 3), kinds, ids, inference, index: null as SnapPointIndex | null, orders, limit });
+      const so = (this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src, pts: xyz.subarray(0, n * 3), kinds, ids, inference, index: null as SnapPointIndex | null, orders, limit, pfMemo: null });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
         so.index = new SnapPointIndex(so.pts, ids, orders);
@@ -3064,7 +3068,14 @@ export class Viewer3d {
     };
     const lim = so.limit;
     if (pick && so.pointsFor) {
-      const extra = so.pointsFor(pick);
+      // 0.10.0: 바로 앞과 같은 고르기(같은 자리 — 미리 본 뒤 누르기, 붙잡기 한도·잠금이 바뀌어 다시 구하기)면 앞 결과를 다시 쓴다
+      const memo = so.pfMemo;
+      let extra: readonly SnapPoint[] | null | undefined;
+      if (memo && samePick(memo.pick, pick)) extra = memo.res;
+      else {
+        extra = so.pointsFor(pick);
+        so.pfMemo = { pick: { ...pick, point: [...pick.point] as V3, ...(pick.normal ? { normal: [...pick.normal] as V3 } : {}) }, res: extra };
+      }
       if (extra)
         for (const sp of extra) {
           const q = sp.point;

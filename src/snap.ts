@@ -5,7 +5,7 @@
  * 화면에 가장 가까운 보이는 것을 고른다. 거리가 같으면 앞의 것(고르기가 붙잡은 점 → 앱 점 차례)을 지킨다.
  * 보이는지(단면·가림) 따지기는 비싸므로 지금 고른 것보다 가까운 후보에만 묻는다.
  */
-import type { SnapKind } from './types';
+import type { Pick3d, SnapKind } from './types';
 import { type ViewFrame, projectToScreen } from './camera';
 import type { SnapAxis } from './inference';
 import type { V3 } from './math';
@@ -70,6 +70,19 @@ export function snapLimit(n: unknown): number | null {
 /** 차례 값 order인 점이 한도 limit 안인지(차례가 없거나 한도가 없으면 늘 안) */
 export function withinSnapLimit(order: number | undefined, limit: number | null): boolean {
   return limit === null || typeof order !== 'number' || Number.isNaN(order) || order < limit;
+}
+
+/**
+ * 같은 고르기인지(0.10.0 — pointsFor 결과를 다시 쓸 때): 종류·묶음 id·번호(index·raw)·고른 점·법선·잘린 면이 모두 같으면 true.
+ * 커서가 움직이면 고른 점이 달라지므로, 앱 점이 고른 점에 따라 달라도(가장 가까운 요소 찾기 등) 다시 쓴 결과가 부른 결과와 같다
+ */
+export function samePick(a: Pick3d, b: Pick3d): boolean {
+  if (a.kind !== b.kind || a.id !== b.id || a.index !== b.index || a.raw !== b.raw || !!a.section !== !!b.section) return false;
+  const p = a.point, q = b.point;
+  if (p[0] !== q[0] || p[1] !== q[1] || p[2] !== q[2]) return false;
+  const n = a.normal, m = b.normal;
+  if (!n || !m) return !n && !m;
+  return n[0] === m[0] && n[1] === m[1] && n[2] === m[2];
 }
 
 /**

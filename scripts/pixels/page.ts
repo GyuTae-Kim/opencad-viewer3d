@@ -976,6 +976,83 @@ const shiftOffValues: ValueSet = {
   },
 };
 
+/**
+ * 앱이 고른 것마다 더하는 점(pointsFor)을 고른 점에 따라 정하는 꼴(NC 보정 경로·판재 요소처럼 가장 가까운 요소를 찾는 앱): 고른 점을 4 단위 격자로
+ * 내린 점과 고른 묶음 번호로 정한 점. calls에 부른 횟수를 센다
+ */
+function pickPoints(c: Ctx, calls: { n: number }) {
+  return (pick: any) => {
+    calls.n++;
+    const p = pick.point as number[];
+    const g = p.map((x) => Math.round(x / 4) * 4);
+    return [
+      { point: g, kind: 'point' as const },
+      { point: c.world([pick.raw % 2 ? 60 : 120, 40, 40]), kind: 'center' as const },
+    ];
+  };
+}
+
+/** 미리 본 자리에서 누르기(같은 자리 — 0.10.0은 pointsFor를 다시 부르지 않는다): 격자 자리마다 미리 보기·그리기·누르기 */
+function hoverClicks(c: Ctx, step: () => void = () => undefined): unknown[] {
+  const { v, w, h } = c;
+  const res: unknown[] = [];
+  const off = v.onMeasure((m: any) => res.push(m ? [r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null] : null));
+  for (const mode of ['shaded', 'wireframe']) {
+    v.setRenderMode(mode as never);
+    v.setMeasureMode(true);
+    for (let j = 0; j < 9; j++)
+      for (let i = 0; i < 10; i++) {
+        const x = ((i + 0.5) * w) / 10, y = ((j + 0.5) * h) / 9;
+        c.hover(x, y);
+        v.renderNow();
+        const hv = v.measureHoverSnap;
+        res.push(hv ? [r10s(hv.point), hv.snap] : null);
+        step();
+        c.click(x, y);
+      }
+    v.setMeasureMode(false);
+  }
+  off();
+  return res;
+}
+
+/**
+ * pointsFor 값(0.9.1과 견준다): 고른 점에 따라 달라지는 앱 점으로 미리 보고 같은 자리를 누른 결과. 0.10.0은 누를 때 미리 보기의 결과를 다시 쓰므로
+ * 같은 값이 나와야 한다
+ */
+function pointsForValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-points-for`,
+    data: d,
+    needs: all(v080, fn('setMeasureSnap')),
+    run: (c) => {
+      c.v.setMeasureSnap({ midpoints: true, pointsFor: pickPoints(c, { n: 0 }) });
+      return hoverClicks(c);
+    },
+  };
+}
+
+/** 0.10.0 pointsFor 부른 횟수: 미리 보기·누르기와, 그 사이 붙잡기 한도를 바꿔 같은 자리에서 다시 구할 때(새 장면) */
+const pointsForCallValues: ValueSet = {
+  name: 'base-measure-points-for-calls',
+  data: 'base',
+  needs: fn('setMeasureSnapLimit'),
+  run: (c) => {
+    // 0.9.1은 미리 보기와 누르기에서 한 번씩(이 자료에서 52번), 한도를 바꿔 다시 구하면 한 번 더 불렀다. 0.10.0은 미리 보기에서만(26번)
+    const calls = { n: 0 };
+    c.v.setMeasureSnap({ midpoints: true, pointsFor: pickPoints(c, calls), points: [{ point: [60, 40, 40], kind: 'center', order: 1 }] });
+    hoverClicks(c);
+    const n1 = calls.n;
+    calls.n = 0;
+    let k = 0;
+    const withLimit = hoverClicks(c, () => {
+      c.v.setMeasureSnapLimit(k++ % 2 ? 2 : 1);
+      c.v.renderNow();
+    });
+    return [n1, calls.n, withLimit];
+  },
+};
+
 /** 0.10.0 추론 다섯 가지를 모두 켠 격자 누르기(엇갈린 선분 자료 — 나란함 기준 선분이 계속 바뀐다) */
 const crossAllValues: ValueSet = {
   name: 'cross-measure-infer-all',
@@ -999,6 +1076,9 @@ const VALUES: ValueSet[] = [
   parallelValues,
   shiftOffValues,
   crossAllValues,
+  pointsForValues('base'),
+  pointsForValues('off'),
+  pointsForCallValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

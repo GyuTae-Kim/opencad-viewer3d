@@ -1,6 +1,6 @@
 /**
  * 0.10.0 측정 추론 보완(순수 함수): 나란함(parallelSnap), 잠금(lockedSnap·lockFromSnap·axisLock), 축 붙잡기 식을 함께 쓰도록 나눈 뒤에도
- * 0.9.1 axisSnap과 값이 같은지, 측정 결과의 방향·잠금 필드
+ * 0.9.1 axisSnap과 값이 같은지, 측정 결과의 방향·잠금 필드, pointsFor 다시 쓰기의 같은 고르기 판정(samePick)
  */
 import { describe, expect, it } from 'vitest';
 import { type CameraState, type ViewFrame, computeFrame, defaultCamera, dirToAngles, projectToScreen, screenRay } from '../src/camera';
@@ -18,7 +18,8 @@ import {
   unitDir,
 } from '../src/inference';
 import type { V3 } from '../src/math';
-import { chooseMeasureSnap, measureResult } from '../src/snap';
+import { chooseMeasureSnap, measureResult, samePick } from '../src/snap';
+import type { Pick3d } from '../src/types';
 
 const iso = dirToAngles([1, -1, 0.8]);
 const frames: [string, ViewFrame, V3][] = [];
@@ -237,6 +238,21 @@ describe('측정 결과·고르기 결과의 0.10.0 필드', () => {
     const seg = { a: [0, -10, 0] as V3, b: [0, 10, 0] as V3, id: 's', wpp: 0.01 };
     const c = inferenceCandidates([seg], [7, 3, 0], { intersections: true, perpendicular: true });
     expect(c).toEqual([{ p: [0, 3, 0], kind: 'perpendicular', id: 's', edge: [seg.a, seg.b] }]);
+  });
+
+  it('samePick: 종류·묶음·번호·고른 점·법선·잘린 면이 모두 같을 때만 같은 고르기(pointsFor 다시 쓰기)', () => {
+    const base: Pick3d = { kind: 'line', id: 'nc-cut-1', index: 42, raw: 7, point: [1, 2, 3] };
+    expect(samePick(base, { ...base, point: [1, 2, 3] })).toBe(true);
+    expect(samePick(base, { ...base, point: [1, 2, 3 + 1e-12] })).toBe(false);
+    expect(samePick(base, { ...base, kind: 'edge' })).toBe(false);
+    expect(samePick(base, { ...base, id: 'nc-cut-2' })).toBe(false);
+    expect(samePick(base, { ...base, index: 43 })).toBe(false);
+    expect(samePick(base, { ...base, raw: 8 })).toBe(false);
+    const mesh: Pick3d = { kind: 'mesh', id: '상자', index: 3, raw: 3, point: [0, 0, 40], normal: [0, 0, 1] };
+    expect(samePick(mesh, { ...mesh, normal: [0, 0, 1] })).toBe(true);
+    expect(samePick(mesh, { ...mesh, normal: [0, 1, 0] })).toBe(false);
+    expect(samePick(mesh, { ...mesh, normal: undefined })).toBe(false);
+    expect(samePick(mesh, { ...mesh, section: true })).toBe(false);
   });
 
   it('나란함·잠금만 켠 선택도 켜진 것이다(true는 0.9.0의 셋만)', () => {
