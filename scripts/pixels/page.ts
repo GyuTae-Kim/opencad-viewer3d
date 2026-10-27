@@ -586,7 +586,7 @@ const EDITS: Edit[] = [
     name: 'replace',
     data: 'edit',
     head: (v) => {
-      const g = v.scene.meshes.find((m: Mesh3d) => m.id === '소재');
+      const g = v.scene!.meshes.find((m: Mesh3d) => m.id === '소재')!;
       v.setMesh(gridMesh('소재', EDIT_GRID, cutTop, { ...gridOpts, indices: g.indices }));
     },
     final: (s) => withMesh(s, '소재', gridMesh('소재', EDIT_GRID, cutTop, gridOpts)),
@@ -615,7 +615,7 @@ const EDITS: Edit[] = [
     name: 'range',
     data: 'edit',
     head: (v) => {
-      const g = v.scene.meshes.find((m: Mesh3d) => m.id === '소재');
+      const g = v.scene!.meshes.find((m: Mesh3d) => m.id === '소재')!;
       v.setMesh(g, { vertices: fillGrid(g, EDIT_GRID, cutTop, 30, 70, TOP, 6) });
     },
     final: (s) => {
@@ -662,7 +662,7 @@ function applyEdit(c: Ctx, e: Edit, path: 'auto' | 'setScene' = 'auto'): void {
   e.state?.(v);
   if (path === 'auto' && typeof v.setMesh === 'function') e.head(v);
   else {
-    v.setScene(e.final(v.scene), { keepView: true });
+    v.setScene(e.final(v.scene!), { keepView: true });
     e.state?.(v);
   }
   loaded = null;
