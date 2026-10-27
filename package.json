@@ -17,7 +17,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "pixels": "node scripts/pixels/run.mjs"
+    "pixels": "node scripts/pixels/run.mjs",
+    "bench:edit": "node scripts/bench/edit.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -32,9 +32,10 @@ export function findChrome(env = process.env, platform = process.platform) {
 
 /**
  * Chrome 인자. 리눅스 CI에서는 샌드박스·/dev/shm 제약을 끈다.
- * @param {{ profile: string; width: number; height: number; platform?: string }} o
+ * gpu(비용 재기 scripts/bench만): SwiftShader 대신 기계의 GPU 백엔드(macOS는 ANGLE Metal)를 쓴다 — 화소 비교는 늘 SwiftShader
+ * @param {{ profile: string; width: number; height: number; platform?: string; gpu?: boolean }} o
  */
-export function chromeArgs({ profile, width, height, platform = process.platform }) {
+export function chromeArgs({ profile, width, height, platform = process.platform, gpu = false }) {
   const args = [
     '--headless=new',
     `--user-data-dir=${profile}`,
@@ -46,8 +47,7 @@ export function chromeArgs({ profile, width, height, platform = process.platform
     '--disable-component-update',
     '--disable-sync',
     '--mute-audio',
-    '--use-angle=swiftshader',
-    '--enable-unsafe-swiftshader',
+    ...(gpu ? ['--enable-gpu', '--ignore-gpu-blocklist', ...(platform === 'darwin' ? ['--use-angle=metal'] : [])] : ['--use-angle=swiftshader', '--enable-unsafe-swiftshader']),
     '--force-device-scale-factor=1',
     `--window-size=${width},${height}`,
     '--hide-scrollbars',
@@ -63,13 +63,13 @@ export function chromeArgs({ profile, width, height, platform = process.platform
  */
 
 /**
- * @param {{ width: number; height: number; chrome?: string; log?: (s: string) => void }} o
+ * @param {{ width: number; height: number; chrome?: string; log?: (s: string) => void; gpu?: boolean }} o
  * @returns {Promise<Browser>}
  */
-export async function launchChrome({ width, height, chrome, log = () => {} }) {
+export async function launchChrome({ width, height, chrome, log = () => {}, gpu = false }) {
   const exe = chrome ?? findChrome();
   const profile = mkdtempSync(join(tmpdir(), 'pixels-chrome-'));
-  const proc = spawn(exe, chromeArgs({ profile, width, height }), { stdio: ['ignore', 'ignore', 'pipe'] });
+  const proc = spawn(exe, chromeArgs({ profile, width, height, gpu }), { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   proc.stderr?.on('data', (d) => {
     if (stderr.length < 8192) stderr += String(d);

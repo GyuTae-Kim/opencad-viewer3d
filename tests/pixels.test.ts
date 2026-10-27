@@ -271,6 +271,10 @@ describe('Chrome', () => {
     expect(mac).toContain('--window-size=960,600');
     expect(mac).not.toContain('--no-sandbox');
     expect(chromeArgs({ profile: '/tmp/p', width: 960, height: 600, platform: 'linux' })).toContain('--no-sandbox');
+    // 0.11.0 비용 재기(scripts/bench)만: 기계 GPU — 화소 비교 기본값은 그대로 SwiftShader
+    const gpu = chromeArgs({ profile: '/tmp/p', width: 960, height: 600, platform: 'darwin', gpu: true });
+    expect(gpu).toContain('--use-angle=metal');
+    expect(gpu.some((a) => a.includes('swiftshader'))).toBe(false);
   });
 
   it('CHROME_PATH가 먼저', () => {
