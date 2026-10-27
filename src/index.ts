@@ -14,6 +14,7 @@ export type {
   MeasureFormat,
   MeasureResult,
   MeasureSnapOptions,
+  WalkOptions,
   PickEvent,
   PickOptions,
   ProjectedPoint,
