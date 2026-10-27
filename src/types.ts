@@ -185,6 +185,12 @@ export interface SnapPoint {
    * 묶음 행렬(setItemMatrix — 분해도)을 따라 옮긴다. 없으면 모든 묶음을 자르는 평면으로만 자른다
    */
   id?: string;
+  /**
+   * 차례 값(0.10.0, 선택). 붙잡기 한도(Viewer3d.setMeasureSnapLimit·setMeasureSnap({ limit }))를 두면 차례 < 한도인 점만 붙잡는다.
+   * 예: NC 재생에서 그 원호 중심을 처음 그린 이동 번호 — 그린 이동이 늘 때 한도만 바꾸면 되고 점 목록·색인을 다시 만들지 않는다.
+   * 없으면 한도와 상관없이 늘 후보다
+   */
+  order?: number;
 }
 
 /** 뷰어가 고르기 결과로 돌려주는 것 */

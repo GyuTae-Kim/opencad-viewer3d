@@ -57,6 +57,19 @@ export function chooseMeasureSnap(
   return base ? { p: base.p, vertex: false, kind: null } : null;
 }
 
+/**
+ * 붙잡기 한도 값 고르기(0.10.0, setMeasureSnapLimit·setMeasureSnap({ limit })): 수(NaN 아님, +Infinity 아님)면 그대로, 아니면 null(한도 없음).
+ * −Infinity는 차례 값이 있는 점을 모두 뺀다
+ */
+export function snapLimit(n: unknown): number | null {
+  return typeof n === 'number' && !Number.isNaN(n) && n !== Infinity ? n : null;
+}
+
+/** 차례 값 order인 점이 한도 limit 안인지(차례가 없거나 한도가 없으면 늘 안) */
+export function withinSnapLimit(order: number | undefined, limit: number | null): boolean {
+  return limit === null || typeof order !== 'number' || Number.isNaN(order) || order < limit;
+}
+
 /** 찍은 측정 점의 붙잡기: 종류(붙잡지 않았으면 null)와 축 붙잡기('axis')면 그 축 */
 export interface MeasurePointSnap {
   kind: SnapKind | null;

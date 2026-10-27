@@ -431,6 +431,28 @@ const extraShots: Shot[] = [
   },
 ];
 
+/** 0.10.0 붙잡기 한도(setMeasureSnapLimit): 한도 밖이던 상자 윗면 중심이 한도를 늘리면 그 커서 자리에서 다시 붙잡힌다 */
+function limitShots(d: 'base' | 'off'): Shot[] {
+  return [
+    {
+      name: `${d}-measure-limit-hover`,
+      data: d,
+      needs: fn('setMeasureSnapLimit', 'project', 'setGroupVisible'),
+      setup: (c) => {
+        const { v } = c;
+        // 공구 경로(나선)는 숨긴다 — 선분 끝점이 상자 위를 덮는다(inferShots와 같다)
+        v.setGroupVisible('공구 경로', false);
+        v.setMeasureMode(true);
+        v.setMeasureSnap({ points: [{ point: c.world([60, 40, 40]), kind: 'center', id: '상자', order: 5 }], limit: 5 });
+        const p = c.at(c.world([60, 40, 40]));
+        if (p) c.hover(p.x + 3, p.y - 2);
+        v.renderNow();
+        v.setMeasureSnapLimit(6);
+      },
+    },
+  ];
+}
+
 const SHOTS: Shot[] = [
   ...classicShots('base'),
   ...classicShots('off'),
@@ -442,6 +464,8 @@ const SHOTS: Shot[] = [
   ...inferShots('off'),
   ...itemLineShots('base'),
   ...itemLineShots('off'),
+  ...limitShots('base'),
+  ...limitShots('off'),
 ];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
@@ -646,7 +670,55 @@ const walkValues: ValueSet = {
   },
 };
 
-const VALUES: ValueSet[] = [...valueSets('base'), ...valueSets('off'), walkValues, crossValues];
+/**
+ * 0.10.0 붙잡기 한도: 앱 점 수천 개에 차례 값을 두고 한도를 바꾸며 잰 측정이, 한도 안 점만 다시 준 목록(0.9.1 앱의 slice)과 같은지.
+ * 값은 한도마다 [한도로 잰 결과, 다시 준 목록과 같은지]. 묶음 행렬로 옮긴 묶음도 든다
+ */
+function limitValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-limit`,
+    data: d,
+    needs: fn('setMeasureSnapLimit', 'setItemMatrix'),
+    run: (c) => {
+      c.v.setItemMatrix('작은 상자 1', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 30, 1]);
+      // 차례: 번호의 두 배(뒤쪽 300개는 거꾸로), 열한 번째마다 차례 없음(늘 후보)
+      const pts: (ReturnType<typeof manySnapPoints>[number] & { order?: number })[] = manySnapPoints(c).map((p, i, a) =>
+        i % 11 === 10 ? p : { ...p, order: i < a.length - 300 ? i * 2 : (a.length - i) * 2 },
+      );
+      // 누를 자리: 격자(measureClicks)와 앱 점 열세 개마다 하나의 화면 자리 바로 옆(묶음 행렬로 옮긴 점은 옮긴 자리)
+      const spots: { x: number; y: number }[] = [];
+      for (let i = 0; i < pts.length; i += 13) {
+        const p = pts[i]!;
+        const s = c.at(p.id === '작은 상자 1' ? [p.point[0]!, p.point[1]!, p.point[2]! + 30] : p.point);
+        if (s) spots.push({ x: s.x + 1.5, y: s.y - 1 });
+      }
+      const run = (): unknown[] => {
+        const res: unknown[] = [];
+        const off = c.v.onMeasure((m: any) => res.push(m ? [r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null] : null));
+        // 앞 차례의 measureClicks가 남긴 모드·윤곽선 고르기를 처음으로
+        c.v.setRenderMode('shaded');
+        c.v.setPickEdges(false);
+        c.v.setMeasureMode(true);
+        for (const s of spots) c.click(s.x, s.y);
+        c.v.setMeasureMode(false);
+        off();
+        return [...res, ...measureClicks(c, ['mouse'])];
+      };
+      const out: unknown[] = [];
+      for (const lim of [0, 1500, 4000, 7000, null]) {
+        c.v.setMeasureSnap({ points: pts });
+        c.v.setMeasureSnapLimit(lim);
+        const a = run();
+        c.v.setMeasureSnap({ points: pts.filter((p) => lim === null || p.order === undefined || p.order < lim) });
+        const b = run();
+        out.push([lim, a, JSON.stringify(a) === JSON.stringify(b)]);
+      }
+      return out;
+    },
+  };
+}
+
+const VALUES: ValueSet[] = [...valueSets('base'), ...valueSets('off'), walkValues, crossValues, limitValues('base'), limitValues('off')];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
 function rangesDemo({ v }: Ctx): void {

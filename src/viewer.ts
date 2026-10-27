@@ -46,7 +46,7 @@ import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
-import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult } from './snap';
+import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, snapLimit, withinSnapLimit } from './snap';
 import { type MeasureInference, type SnapAxis, axisSnap, inferenceCandidates, normalizeInference } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
@@ -282,6 +282,11 @@ export interface MeasureSnapOptions {
    * 그물 윤곽선은 측정 중 윤곽선을 고를 때만(edges 또는 pickEdges) 쓴다
    */
   inference?: MeasureInference | boolean | null;
+  /**
+   * 붙잡기 한도(0.10.0, 기본 없음): 차례 값(SnapPoint.order)이 이보다 작은 앱 점만 붙잡는다(points·pointsFor 모두, 차례가 없는 점은 늘).
+   * 처음 값이고, 바꿀 때는 setMeasureSnapLimit(n)(점 목록·색인을 다시 만들지 않는다)
+   */
+  limit?: number | null;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
@@ -591,7 +596,12 @@ export class Viewer3d {
     ids: (string | undefined)[];
     inference: Required<MeasureInference> | null;
     index: SnapPointIndex | null;
+    /** 0.10.0 차례 값(점마다, 차례가 없는 점은 −Infinity — 한 점도 차례가 없으면 null)과 붙잡기 한도(없으면 null) */
+    orders: Float64Array | null;
+    limit: number | null;
   } | null = null;
+  /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
+  private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
   /** 찍은 측정 점의 붙잡은 종류와 축 붙잡기의 축(점 배열 객체 → 붙잡기) */
   private measureSnaps = new WeakMap<V3, MeasurePointSnap>();
   /** 측정 글 꼴(없으면 기본) */
@@ -1943,6 +1953,8 @@ export class Viewer3d {
     else {
       const xyz = new Float64Array(pts.length * 3);
       const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
+      // 차례 값(0.10.0): 한 점이라도 있으면 점마다 둔다(없는 점은 −Infinity — 어떤 한도에도 든다)
+      let ord: Float64Array | null = null;
       let n = 0;
       for (const sp of pts) {
         const q = sp.point;
@@ -1952,15 +1964,24 @@ export class Viewer3d {
         xyz[n * 3 + 2] = q[2]!;
         kinds.push(sp.kind ?? 'point');
         ids.push(sp.id);
+        const k = sp.order;
+        if (typeof k === 'number' && !Number.isNaN(k)) {
+          ord ??= new Float64Array(pts.length).fill(-Infinity);
+          ord[n] = k;
+        }
         n++;
       }
       const src: MeasureSnapOptions = { ...o };
       if (inference) src.inference = { ...inference };
       else delete src.inference;
-      const so = (this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src, pts: xyz.subarray(0, n * 3), kinds, ids, inference, index: null as SnapPointIndex | null });
+      const limit = snapLimit(o.limit);
+      if (limit === null) delete src.limit;
+      else src.limit = limit;
+      const orders = ord ? ord.subarray(0, n) : null;
+      const so = (this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src, pts: xyz.subarray(0, n * 3), kinds, ids, inference, index: null as SnapPointIndex | null, orders, limit });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
-        so.index = new SnapPointIndex(so.pts, ids);
+        so.index = new SnapPointIndex(so.pts, ids, orders);
         setTimeout(() => {
           if (this.snapOpt === so && !this.disposed) so.index?.build();
         }, 0);
@@ -1969,6 +1990,35 @@ export class Viewer3d {
     }
     if (this.measuring) this.measureHover = null;
     this.invalidate();
+  }
+
+  /**
+   * 붙잡기 한도(0.10.0): 차례 값(SnapPoint.order)이 n보다 작은 앱 점만 붙잡는다(차례가 없는 점은 늘). null(또는 Infinity)이면 한도 없음.
+   * 점 목록·색인(BVH)은 그대로 두고 꺼낼 때만 거른다 — NC 재생처럼 그린 이동이 늘 때마다 setMeasureSnap({ points })를 다시 주지 않아도 된다.
+   * 측정 미리 보기는 마지막 커서 자리에서 다시 구한다. 붙잡기가 꺼져 있으면(setMeasureSnap(null)) 아무것도 하지 않는다 — setMeasureSnap은 한도도 새로 정한다
+   */
+  setMeasureSnapLimit(n: number | null): void {
+    const so = this.snapOpt;
+    if (!so) return;
+    const limit = snapLimit(n);
+    if (limit === so.limit) return;
+    so.limit = limit;
+    if (limit === null) delete so.src.limit;
+    else so.src.limit = limit;
+    this.rehover();
+  }
+
+  /** 지금 붙잡기 한도(없거나 붙잡기가 꺼져 있으면 null) */
+  get measureSnapLimit(): number | null {
+    return this.snapOpt?.limit ?? null;
+  }
+
+  /** 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때) */
+  private rehover(): void {
+    if (this.measuring && this.measureHover && this.lastHoverAt && !this.drag) {
+      this.hoverAt = this.lastHoverAt;
+      this.invalidate();
+    }
   }
 
   /** 지금 측정 붙잡기 선택(꺼져 있으면 null). inference는 0.9.0부터 세 값으로 편 꼴 */
@@ -2841,24 +2891,27 @@ export class Viewer3d {
       const m = id !== undefined ? this.looks.get(id)?.matrix : undefined;
       return { p: m ? transformPoint(m, [x, y, z]) : [x, y, z], kind, id };
     };
+    const lim = so.limit;
     if (pick && so.pointsFor) {
       const extra = so.pointsFor(pick);
       if (extra)
         for (const sp of extra) {
           const q = sp.point;
-          if (q && Number.isFinite(q[0]) && Number.isFinite(q[1]) && Number.isFinite(q[2])) yield at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', sp.id ?? pick.id);
+          if (q && Number.isFinite(q[0]) && Number.isFinite(q[1]) && Number.isFinite(q[2]) && withinSnapLimit(sp.order, lim)) yield at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', sp.id ?? pick.id);
         }
     }
     const P = so.pts;
     const n = P.length / 3;
+    // 차례 한도(0.10.0): 한도와 차례 값이 모두 있을 때만 거른다
+    const ord = lim !== null ? so.orders : null;
     if (n < SNAP_INDEX_MIN) {
-      for (let i = 0; i < n; i++) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+      for (let i = 0; i < n; i++) if (!ord || ord[i]! < lim!) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
       return;
     }
-    so.index ??= new SnapPointIndex(P, so.ids);
+    so.index ??= new SnapPointIndex(P, so.ids, so.orders);
     const moved: string[] = [];
     for (const [id, l] of this.looks) if (l.matrix) moved.push(id);
-    for (const i of so.index.near(f, x, y, snapPx, (id) => this.looks.get(id)?.matrix, moved)) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+    for (const i of so.index.near(f, x, y, snapPx, (id) => this.looks.get(id)?.matrix, moved, ord ? lim : null)) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
   }
 
   /** 앱 붙잡기 점이 보이는지: 묶음(id)이 보이고, 단면에 잘리지 않고(id면 그 묶음 평면, 아니면 모든 묶음을 자르는 평면), 음영 계열에서 가리지 않음 */
@@ -3349,6 +3402,7 @@ export class Viewer3d {
     // 측정 중 커서 아래 붙잡을 점
     if (this.measuring && this.hoverAt && !this.drag) {
       this.measureHover = this.measureAt(this.hoverAt.x, this.hoverAt.y, this.hoverAt.pointerType);
+      this.lastHoverAt = this.hoverAt;
       this.hoverAt = null;
     }
     if (this.renderer.uploading) this.pumpUpload(this.upload?.budget ?? 8);

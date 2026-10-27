@@ -8,6 +8,8 @@
  * - 큰 좌표: 나무는 점들의 가운데를 뺀 float32 좌표로 만들고, 그 반올림만큼 원뿔을 넓힌다(정확한 판정은 double 세계 좌표로 따로 한다)
  * - 묶음 행렬(setItemMatrix — 분해도): 행렬이 걸린 묶음(id)의 점은 그 묶음만의 나무(점이 적으면 모두 훑기)에서
  *   광선을 행렬의 역으로 옮겨 찾는다(반지름은 역행렬 노름 한계만큼 넉넉히)
+ * - 차례 한도(0.10.0 — SnapPoint.order, Viewer3d.setMeasureSnapLimit): 점마다 차례 값을 두면 near(…, limit)가 차례 < limit인 점만 돌려준다.
+ *   나무는 모든 점으로 한 번 만들고 꺼낼 때만 거르므로, 재생처럼 한도가 자주 바뀌어도 점 목록·나무를 다시 만들지 않는다
  */
 import { type Bvh, buildBvh, queryCone } from './bvh';
 import { type ViewFrame, screenRay } from './camera';
@@ -101,20 +103,23 @@ function queryTree(t: Tree, f: ViewFrame, x: number, y: number, tolPx: number, i
   });
 }
 
-/** 앱 붙잡기 점(세계 xyz, 묶음 id) 색인 */
+/** 앱 붙잡기 점(세계 xyz, 묶음 id, 차례) 색인 */
 export class SnapPointIndex {
   readonly count: number;
   private readonly xyz: Float64Array;
   private readonly ids: readonly (string | undefined)[];
+  /** 점마다 차례 값(0.10.0, 없으면 null — 차례가 없는 점은 −Infinity라 어떤 한도에도 든다) */
+  private readonly order: Float64Array | null;
   private all: Tree | null = null;
   /** 묶음 id → 그 묶음 점 번호(오름차순) */
   private readonly byId = new Map<string, Uint32Array>();
   /** 행렬이 걸린 묶음의 나무(점이 많을 때만, 처음 쓸 때 만든다) */
   private readonly sub = new Map<string, Tree>();
 
-  constructor(xyz: Float64Array, ids: readonly (string | undefined)[]) {
+  constructor(xyz: Float64Array, ids: readonly (string | undefined)[], order: Float64Array | null = null) {
     this.xyz = xyz;
     this.ids = ids;
+    this.order = order;
     this.count = Math.floor(xyz.length / 3);
     const lists = new Map<string, number[]>();
     for (let i = 0; i < this.count; i++) {
@@ -134,31 +139,34 @@ export class SnapPointIndex {
 
   /**
    * 커서(x, y)에서 화면 tolPx 안일 수 있는 점 번호(오름차순, 겹침 없음 — 정확한 거리는 부르는 쪽이 잰다).
-   * matrixOf(id) = 그 묶음에 걸린 행렬(세계' = M · 세계, 없으면 undefined). moved = 행렬이 걸린 묶음 id들
+   * matrixOf(id) = 그 묶음에 걸린 행렬(세계' = M · 세계, 없으면 undefined). moved = 행렬이 걸린 묶음 id들.
+   * limit(0.10.0)을 주면 차례 값이 limit보다 작은 점만(차례가 없는 점은 늘 든다). null·undefined면 거르지 않는다
    */
-  near(f: ViewFrame, x: number, y: number, tolPx: number, matrixOf: (id: string) => ArrayLike<number> | undefined, moved: Iterable<string>): number[] {
+  near(f: ViewFrame, x: number, y: number, tolPx: number, matrixOf: (id: string) => ArrayLike<number> | undefined, moved: Iterable<string>, limit?: number | null): number[] {
     const out: number[] = [];
     const movedPts: string[] = [];
     for (const id of moved) if (this.byId.has(id) && matrixOf(id)) movedPts.push(id);
     const movedSet = movedPts.length ? new Set(movedPts) : null;
     const ids = this.ids;
+    const ord = limit !== null && limit !== undefined ? this.order : null;
+    const lim = limit ?? Infinity;
+    // 꺼낼 때 거르기: 행렬이 걸린 묶음의 점(따로 찾는다)과 한도를 넘은 차례
+    const late = ord ? (i: number): boolean => ord[i]! >= lim : null;
+    const skip =
+      movedSet && late ? (i: number) => late(i) || (ids[i] !== undefined && movedSet.has(ids[i]!)) : movedSet ? (i: number) => ids[i] !== undefined && movedSet.has(ids[i]!) : late;
     this.build();
-    queryTree(this.all!, f, x, y, tolPx, null, out, movedSet ? (i) => ids[i] !== undefined && movedSet.has(ids[i]!) : null);
+    queryTree(this.all!, f, x, y, tolPx, null, out, skip);
     for (const id of movedPts) {
       const idx = this.byId.get(id)!;
       const M = matrixOf(id)!;
-      if (idx.length < SUB_INDEX_MIN) {
-        for (const i of idx) out.push(i);
-        continue;
-      }
-      const inv = mat4Invert(M);
+      const inv = idx.length < SUB_INDEX_MIN ? null : mat4Invert(M);
       if (!inv) {
-        for (const i of idx) out.push(i);
+        for (const i of idx) if (!late || !late(i)) out.push(i);
         continue;
       }
       let t = this.sub.get(id);
       if (!t) this.sub.set(id, (t = makeTree(this.xyz, idx)));
-      queryTree(t, f, x, y, tolPx, inv, out, null);
+      queryTree(t, f, x, y, tolPx, inv, out, late);
     }
     out.sort((a, b) => a - b);
     return out;
