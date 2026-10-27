@@ -16,7 +16,8 @@
     "dev": "vite --open /dev/viewer3d.html",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "pixels": "node scripts/pixels/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
