@@ -567,7 +567,8 @@ viewer.onMeasure(() => lockButton.setAttribute('aria-pressed', String(!!viewer.m
 
 ## 0.11.0: 장면 그물 하나 넣기·바꾸기·빼기
 
-새 API를 쓰지 않으면 그림·고르기·측정은 0.10.0과 화소·값까지 같아야 한다(TODO-QA: `npm run pixels -- --base v0.10.0` 결과를 채운다 — 아직 돌리지 못했다). 바뀐 기본 동작은 없다.
+새 API를 쓰지 않으면 그림·고르기·측정은 0.10.0과 화소·값까지 같다(CI의 `npm run pixels -- --base origin/main`: 장면 90개·값 28묶음 모두 같음).
+그 안의 `edit-*` 장면 6개는 base(0.10.0)에서 같은 마지막 장면을 `setScene`으로 다시 준 것이라, `setMesh`로 바꾼 그림이 장면 전체를 다시 올린 그림과 화소까지 같다는 확인이기도 하다. 바뀐 기본 동작은 없다.
 0.10.0까지는 그물 하나가 바뀌어도(소재 깎기 시뮬레이션의 높이 그물 등) 장면 전체를 `setScene`으로 다시 주어야 해서, 선분 수십만 개 공구 경로까지
 GPU에 다시 올리고 모든 고르기 BVH를 다시 만들었다.
 
@@ -613,7 +614,8 @@ GPU에 다시 올리고 모든 고르기 BVH를 다시 만들었다.
 
 ### 비용
 
-TODO-QA: `npm run bench:edit -- --reps 5` 표(선분 30만 + 격자 1024²에서 `setScene` 장면 전체 · `setMesh` 그물 전체 · `vertices` 구간, SwiftShader와 기계 GPU)를 채운다 — 아직 재지 못했다.
+비용은 이 판에서 아직 재지 않았다. `npm run bench:edit -- --reps 5`로 선분 30만 + 격자 1024²에서 `setScene` 장면 전체 · `setMesh` 그물 전체 · `vertices` 구간을
+SwiftShader와 기계 GPU로 잴 수 있다. 이 판을 낼 때 로컬 확인 도구를 쓸 수 없어서, 표는 다음 판에 싣는다.
 
 ### 앱이 할 일
 
