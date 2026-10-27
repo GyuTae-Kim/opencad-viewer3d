@@ -1,5 +1,8 @@
-/** 0.9.1: 누르기로 받은 초점의 테두리 감추기(키보드로 먼저 초점을 준 캔버스) */
+/** 0.9.1: 누르기로 받은 초점의 테두리 감추기(키보드로 먼저 초점을 준 캔버스), 측정 결과의 축 붙잡기 축(axisA·axisB) */
 import { describe, expect, it } from 'vitest';
+import { type CameraState, computeFrame, defaultCamera, dirToAngles, projectToScreen } from '../src/camera';
+import { axisSnap } from '../src/inference';
+import { measureResult } from '../src/snap';
 import { CANVAS_FOCUS_CSS, type FocusRingTarget, POINTER_FOCUS_ATTR, focusKey, focusLeft, pointerFocus } from '../src/theme';
 
 /** 가짜 캔버스: 초점 호출·속성만 기록한다 */
@@ -90,5 +93,56 @@ describe('초점 테두리: 누르기로 받은 초점', () => {
     c.doc.activeElement = { id: 'body' }; // 문서 안에서 옮김: blur 때 activeElement는 body(Chrome 156에서 확인)
     focusLeft(c);
     expect(c.attrs.has(POINTER_FOCUS_ATTR)).toBe(false);
+  });
+});
+
+describe('측정 결과(measureResult)', () => {
+  const A: [number, number, number] = [10, 20, 30];
+  const B: [number, number, number] = [10, 20, 75];
+
+  it('붙잡기 선택이 없으면 0.7.2 꼴 그대로(snap·axis 필드 없음)', () => {
+    const r = measureResult(A, B);
+    expect(Object.keys(r).sort()).toEqual(['a', 'b', 'distance', 'dx', 'dy', 'dz']);
+    expect(r.distance).toBe(45);
+    expect([r.dx, r.dy, r.dz]).toEqual([0, 0, 45]);
+    expect(measureResult(A, B, null)).toEqual(r);
+  });
+
+  it('붙잡기를 켜도 축 붙잡기가 아니면 0.9.0과 같다(axisA·axisB 없음 — 축을 넘겨도 종류가 axis가 아니면 싣지 않는다)', () => {
+    const r = measureResult(A, B, [{ kind: 'vertex' }, { kind: 'perpendicular' }]);
+    expect(Object.keys(r).sort()).toEqual(['a', 'b', 'distance', 'dx', 'dy', 'dz', 'snapA', 'snapB']);
+    expect([r.snapA, r.snapB]).toEqual(['vertex', 'perpendicular']);
+    const odd = measureResult(A, B, [{ kind: null, axis: 'x' }, undefined]);
+    expect([odd.snapA, odd.snapB]).toEqual([null, null]);
+    expect('axisA' in odd || 'axisB' in odd).toBe(false);
+  });
+
+  it("축 붙잡기('axis')인 점은 그 축을 axisA·axisB로 싣는다", () => {
+    const r = measureResult(A, B, [{ kind: 'endpoint' }, { kind: 'axis', axis: 'z' }]);
+    expect(r.snapB).toBe('axis');
+    expect(r.axisB).toBe('z');
+    expect('axisA' in r).toBe(false);
+    expect(measureResult(B, A, [{ kind: 'axis', axis: 'y' }, { kind: 'axis', axis: 'x' }])).toMatchObject({ axisA: 'y', axisB: 'x' });
+  });
+
+  it('축 붙잡기로 찍은 점(axisSnap)의 축이 결과에 그대로 실리고, 결과는 그 축 방향으로만 떨어져 있다', () => {
+    const iso = dirToAngles([1, -1, 0.8]);
+    const cam: CameraState = { ...defaultCamera(), yaw: iso.yaw, pitch: iso.pitch, target: [0, 0, 0], distance: 200, projection: 'perspective' };
+    const f = computeFrame(cam, 600, 400, { center: [0, 0, 0], radius: 60 });
+    const first: [number, number, number] = [5, -4, 3];
+    for (const [axis, dir] of [
+      ['x', [1, 0, 0]],
+      ['y', [0, 1, 0]],
+      ['z', [0, 0, 1]],
+    ] as const) {
+      const s = projectToScreen(f, [first[0] + dir[0] * 30, first[1] + dir[1] * 30, first[2] + dir[2] * 30])!;
+      const hit = axisSnap(f, first, s[0] + 2, s[1] - 1, 10)!;
+      expect(hit.axis).toBe(axis);
+      const r = measureResult(first, hit.p, [{ kind: 'vertex' }, { kind: 'axis', axis: hit.axis }]);
+      expect(r.axisB).toBe(axis);
+      const d = { x: r.dx, y: r.dy, z: r.dz };
+      for (const k of ['x', 'y', 'z'] as const) if (k !== axis) expect(Math.abs(d[k])).toBeLessThan(1e-9);
+      expect(Math.abs(d[axis])).toBeGreaterThan(20);
+    }
   });
 });

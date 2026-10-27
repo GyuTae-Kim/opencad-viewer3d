@@ -49,7 +49,8 @@ interface ValueSet {
   run(c: Ctx): unknown[] | Promise<unknown[]>;
 }
 
-type Need = (v: V) => string | null;
+/** 판 기능 확인(없으면 건너뛸 까닭). c로 그 자료에서 짧게 눌러 볼 수도 있다(되돌리기는 확인이 스스로) */
+type Need = (v: V, c: Ctx) => string | null;
 
 const q = new URLSearchParams(location.search);
 const W = Math.max(64, Number(q.get('w')) || 960);
@@ -98,11 +99,37 @@ const v090infer: Need = (v) => {
   v.setMeasureSnap(null);
   return ok ? null : '이 판에 없는 선택: 0.9.0 추론 붙잡기(setMeasureSnap({ inference }))';
 };
+/** 0.9.1 측정 결과의 축(MeasureResult.axisB)이 있는 판인지 — 상자 구석에서 Z축 방향으로 두 점을 찍어 본다(infer-axis와 같은 자리) */
+const v091axis: Need = (v, c) => {
+  const why = all(v090infer, fn('setGroupVisible'))(v, c);
+  if (why) return why;
+  // 공구 경로(나선)는 숨긴다 — 선분 고르기가 먼저라 상자 위를 덮어 끝점에 붙잡힌다(inferShots와 같다)
+  v.setGroupVisible('공구 경로', false);
+  let got: any = null;
+  const off = v.onMeasure((m: any) => {
+    if (m) got = m;
+  });
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ inference: { axes: true } });
+  const a = c.at(c.world([120, 0, 40]));
+  const p = c.at(c.world([120, 0, 95]));
+  if (a && p) {
+    c.click(a.x - 1, a.y + 1);
+    c.click(p.x + 5, p.y - 2);
+  }
+  off();
+  v.setMeasureMode(false);
+  v.setMeasureSnap(null);
+  v.setGroupVisible('공구 경로', true);
+  // 0.9.0부터 축 붙잡기는 되므로 여기서 축이 아니면 장면·자리가 바뀐 것이다(조용히 건너뛰지 않게 오류로)
+  if (got?.snapB !== 'axis') throw new Error('축 확인 측정이 축 붙잡기가 아닙니다(장면을 바꿨으면 v091axis의 자리를 고칩니다)');
+  return got.axisB ? null : '이 판에 없는 값: 0.9.1 MeasureResult.axisB(축 붙잡기의 축)';
+};
 const all =
   (...ns: Need[]): Need =>
-  (v) => {
+  (v, c) => {
     for (const n of ns) {
-      const r = n(v);
+      const r = n(v, c);
       if (r) return r;
     }
     return null;
@@ -476,6 +503,40 @@ function valueSets(d: 'base' | 'off'): ValueSet[] {
       },
     },
     {
+      // 0.9.1 축 붙잡기 측정: 상자 구석 셋에서 X·Y·Z 축 방향(앞·뒤로)을 찍은 결과의 붙잡기 종류와 축(axisB). 공구 경로는 숨긴다
+      name: `${d}-measure-axis`,
+      data: d,
+      needs: v091axis,
+      run: (c) => {
+        const { v } = c;
+        const res: unknown[] = [];
+        const off = v.onMeasure((m: any) => m && res.push([r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null, m.axisA ?? null, m.axisB ?? null]));
+        v.setGroupVisible('공구 경로', false);
+        v.setMeasureMode(true);
+        v.setMeasureSnap({ inference: { axes: true } });
+        const dirs = [
+          [1, 0, 0],
+          [0, 1, 0],
+          [0, 0, 1],
+        ];
+        for (const corner of [
+          [120, 0, 40],
+          [0, 0, 40],
+          [120, 80, 40],
+        ])
+          for (const e of dirs)
+            for (const t of [-30, 25, 55]) {
+              const a = c.at(c.world(corner));
+              const p = c.at(c.world(corner.map((x, i) => x + e[i]! * t)));
+              if (!a || !p) continue;
+              c.click(a.x - 1, a.y + 1);
+              c.click(p.x + 3, p.y - 2);
+            }
+        off();
+        return res;
+      },
+    },
+    {
       // 상자 구석·구 중심의 화면 위치와 가림(음영)
       name: `${d}-project`,
       data: d,
@@ -717,7 +778,7 @@ type Result<T> = { ok: true; value: T } | { skip: string } | { error: string };
 async function withViewer<T>(item: { data: Data; needs?: Need }, fn: (c: Ctx) => Promise<T>): Promise<Result<T>> {
   try {
     const c = makeCtx(item.data);
-    const why = item.needs?.(c.v);
+    const why = item.needs?.(c.v, c);
     if (why) return { skip: why };
     return { ok: true, value: await fn(c) };
   } catch (e) {

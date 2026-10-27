@@ -328,7 +328,9 @@ const hiBtn = button('구간 강조', () => {
   hiBtn.setAttribute('aria-pressed', String(hiOn));
 });
 viewer.onMeasure((m) => {
-  info = m ? `측정: ${m.distance.toFixed(3)} mm (ΔX ${m.dx.toFixed(3)} ΔY ${m.dy.toFixed(3)} ΔZ ${m.dz.toFixed(3)})` : '';
+  // 붙잡기를 켰으면 두 점의 종류(축 붙잡기는 0.9.1부터 그 축)
+  const snap = m && (m.snapA !== undefined || m.snapB !== undefined) ? ` · ${m.snapA ?? '자유'} → ${m.snapB === 'axis' && m.axisB ? `${m.axisB.toUpperCase()}축` : (m.snapB ?? '자유')}` : '';
+  info = m ? `측정: ${m.distance.toFixed(3)} mm (ΔX ${m.dx.toFixed(3)} ΔY ${m.dy.toFixed(3)} ΔZ ${m.dz.toFixed(3)})${snap}` : '';
   showStatus();
 });
 

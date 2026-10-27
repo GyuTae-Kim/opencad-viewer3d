@@ -9,7 +9,7 @@
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
 
-/** 축 이름(축 붙잡기 — MeasureHoverSnap.axis) */
+/** 축 이름(축 붙잡기 — MeasureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB) */
 export type SnapAxis = 'x' | 'y' | 'z';
 
 /** 측정 추론 붙잡기 선택(Viewer3d.setMeasureSnap({ inference })) */
