@@ -528,6 +528,80 @@ function lockShots(d: 'base' | 'off'): Shot[] {
   return out;
 }
 
+// ───────────── 0.12.0 선분 방향 잠금·앱 방향 잠금 ─────────────
+/** 0.12.0 측정 잠금 보완(measureHoverLock·measurePoints·measureLabelRect getter)이 있는 판인지 */
+const v0120lock: Need = (v, c) => {
+  const why = v0100lock(v, c);
+  if (why) return why;
+  const miss = ['measureHoverLock', 'measurePoints', 'measureLabelRect'].filter((n) => !(n in v));
+  return miss.length ? `이 판에 없는 API: ${miss.join(', ')}` : null;
+};
+
+/**
+ * 0.12.0 잠금 표식: 상자 구석에서 세 모서리가 만나는 다른 구석(점 붙잡기)을 가리킨 뒤 Shift — 첫 점을 지나는 모서리 축(Y)으로 잠근 굵은 선.
+ * base 자료만: 엇갈린 대각 선분 끝에서 다른 끝을 가리킨 뒤 Shift(그 선분과 나란히 — 자홍 잠금선·기준 선분 점선),
+ * 앱이 정한 방향(setMeasureInferenceLock({ edge })). 공구 경로는 숨긴다
+ */
+function edgeLockShots(d: 'base' | 'off'): Shot[] {
+  const s = (name: string, setup: Shot['setup'], data: Data = d): Shot => ({
+    name: `${d}-${name}`,
+    data,
+    needs: v0120lock,
+    setup: (c) => {
+      c.v.setGroupVisible('공구 경로', false);
+      return setup(c);
+    },
+  });
+  const out: Shot[] = [
+    s('infer-lock-edge-axis', (c) => {
+      c.v.setMeasureMode(true);
+      c.v.setMeasureSnap({ edges: true, inference: { axes: true, lock: true } });
+      const a = c.at(c.world([120, 0, 40]));
+      const p = c.at(c.world([120, 80, 40]));
+      const q = c.at(c.world([135, 115, 70]));
+      if (a) c.click(a.x, a.y);
+      if (p) c.hover(p.x, p.y);
+      c.v.renderNow();
+      if (q) c.hover(q.x, q.y, 'mouse', true);
+    }),
+  ];
+  if (d === 'base')
+    out.push(
+      s(
+        'infer-lock-edge',
+        (c) => {
+          // 구멍 점(z 40)이 대각 선분 끝(z 40.5) 바로 아래에 있어 점이 먼저 붙잡힌다 — 숨긴다
+          c.v.setGroupVisible('구멍', false);
+          c.v.setMeasureMode(true);
+          c.v.setMeasureSnap({ midpoints: true, inference: { intersections: true, axes: true, lock: true } });
+          const a = c.at([10, 10, 40.5]);
+          const p = c.at([110, 70, 40.5]);
+          const q = c.at([150, 75, 40.5]);
+          if (a) c.click(a.x, a.y);
+          if (p) c.hover(p.x, p.y);
+          c.v.renderNow();
+          if (q) c.hover(q.x, q.y, 'mouse', true);
+        },
+        'cross',
+      ),
+      s('infer-lock-direction', (c) => {
+        c.v.setMeasureMode(true);
+        c.v.setMeasureSnap({ inference: { axes: true } });
+        c.v.setMeasureInferenceLock({
+          edge: [
+            [0, 0, 40],
+            [120, 80, 40],
+          ],
+        });
+        const a = c.at([120, 0, 40]);
+        const q = c.at([175, 30, 40]);
+        if (a) c.click(a.x, a.y);
+        if (q) c.hover(q.x, q.y);
+      }),
+    );
+  return out;
+}
+
 // ───────────── 0.11.0 그물 하나 바꾸기(setMesh·removeMesh) ─────────────
 /**
  * 상자 윗면(z 40) 위에 띄운 높이 격자(소재 윗면 z 52, 깎으면 내려간다). 원점은 격자 가운데 윗면.
@@ -752,6 +826,8 @@ const SHOTS: Shot[] = [
   ...lockShots('base'),
   ...lockShots('off'),
   ...editShots,
+  ...edgeLockShots('base'),
+  ...edgeLockShots('off'),
 ];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
@@ -1290,6 +1366,170 @@ const crossAllValues: ValueSet = {
   },
 };
 
+/** 잠금 상태 한 줄(없으면 null) */
+const lockState = (l: any): unknown[] | null => (l ? [l.kind, l.axis ?? null, r10s(l.direction), l.edge ? l.edge.map(r10s) : null, l.source ?? null] : null);
+
+/**
+ * 0.12.0 선분 방향 잠금 값: 첫 점(모서리 끝)마다 다른 점(끝점·가운데 점·교차점·선 위)을 가리켜 미리 보기·잠글 방향(measureHoverLock)을 남기고,
+ * Shift를 누른 채 같은 자리 → 잠금 상태, 선 밖으로 옮겨 찍은 결과. 첫 점 자리·첫 점을 지나지 않는 모서리의 끝은 잠그지 않아야 한다.
+ * 마지막에 커서가 캔버스를 떠난 뒤 setMeasureInferenceLock(true)(마지막으로 본 방향)
+ */
+function edgeLockRun(c: Ctx, firsts: number[][], targets: number[][], snap: Record<string, unknown>): unknown[] {
+  const { v } = c;
+  const res: unknown[] = [];
+  const off = v.onMeasure((m: any) => m && res.push(lockRow(m)));
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap(snap);
+  for (const first of firsts) {
+    const a = c.at(c.world(first));
+    if (!a) continue;
+    for (const t of targets) {
+      const q = c.at(c.world(t));
+      if (!q) continue;
+      v.clearMeasure();
+      c.click(a.x, a.y);
+      c.hover(q.x, q.y);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      const p0 = v.measurePoints[0];
+      res.push(['hover', first, t, p0 ? [r10s(p0.point), p0.snap] : null, h ? [r10s(h.point), h.snap, h.axis ?? null] : null, lockState(v.measureHoverLock)]);
+      c.hover(q.x, q.y, 'mouse', true);
+      v.renderNow();
+      res.push(['shift', lockState(v.measureInferenceLock)]);
+      c.hover(q.x + 23, q.y - 31, 'mouse', true);
+      v.renderNow();
+      const g = v.measureHoverSnap;
+      res.push(['moved', g ? [r10s(g.point), g.snap, g.locked ?? null, r10s(g.from)] : null]);
+      c.click(q.x + 23, q.y - 31, 'mouse', true);
+      c.hover(q.x + 23, q.y - 31);
+    }
+  }
+  // 첫 점 → 둘째 대상(점 붙잡기)을 본 뒤 캔버스를 떠나 앱 단추로
+  const a = c.at(c.world(firsts[0]!)), q = c.at(c.world(targets[1]!));
+  if (a && q) {
+    v.clearMeasure();
+    c.click(a.x, a.y);
+    c.hover(q.x, q.y);
+    v.renderNow();
+    v.canvas.dispatchEvent(new PointerEvent('pointerleave', { pointerId: 1, pointerType: 'mouse' }));
+    v.renderNow();
+    res.push(['leave', v.measureHoverSnap, lockState(v.measureHoverLock), v.setMeasureInferenceLock(true), lockState(v.measureInferenceLock)]);
+  }
+  v.setMeasureMode(false);
+  off();
+  return res;
+}
+
+/** 0.12.0 선분 방향 잠금: 상자 윗면 네 구석에서 다른 구석·모서리 가운데 점·아래 구석(그물 윤곽선 — 모두 축 방향) */
+function edgeLockValues(d: 'base' | 'off'): ValueSet {
+  const top = [
+    [0, 0, 40],
+    [120, 0, 40],
+    [120, 80, 40],
+    [0, 80, 40],
+  ];
+  return {
+    name: `${d}-measure-edge-lock`,
+    data: d,
+    needs: v0120lock,
+    run: (c) =>
+      edgeLockRun(c, top, [...top, [60, 0, 40], [120, 40, 40], [60, 80, 40], [0, 40, 40], [120, 0, 0], [0, 0, 0], [120, 0, 17]], {
+        midpoints: true,
+        edges: true,
+        inference: { intersections: true, perpendicular: true, axes: true, lock: true },
+      }),
+  };
+}
+
+/** 0.12.0 선분 방향 잠금(대각): 엇갈린 선분 네 끝에서 맞은편 끝·가운데(가운데 점 = 교차점)·선 위·다른 선분 끝 */
+const crossEdgeLockValues: ValueSet = {
+  name: 'cross-measure-edge-lock',
+  data: 'cross',
+  needs: v0120lock,
+  run: (c) => {
+    const ends = [
+      [10, 10, 40.5],
+      [110, 70, 40.5],
+      [10, 70, 40.5],
+      [110, 10, 40.5],
+    ];
+    const out: unknown[] = [];
+    for (const snap of [
+      { midpoints: true, inference: { intersections: true, axes: true, lock: true } },
+      { inference: { intersections: true, lock: true } },
+      { inference: { axes: true, parallel: true, lock: true } },
+    ])
+      out.push(edgeLockRun(c, ends, [...ends, [60, 40, 40.5], [35, 25, 40.5], [85, 25, 40.5]], snap));
+    return out;
+  },
+};
+
+/**
+ * 0.12.0 앱이 정한 방향 잠금(setMeasureInferenceLock({ direction, edge?, kind? })): 돌려준 값·잠금 상태, 상자 구석에서 여러 자리를 찍은 결과와 찍은 점(measurePoints),
+ * 거리 글상자 자리(measureLabelRect). 잘못된 값은 false
+ */
+function directionLockValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-direction-lock`,
+    data: d,
+    needs: v0120lock,
+    run: (c) => {
+      const { v } = c;
+      const res: unknown[] = [];
+      const off = v.onMeasure((m: any) => m && res.push(lockRow(m)));
+      v.setGroupVisible('공구 경로', false);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ inference: { axes: true, lock: true } });
+      // 판마다 API가 다를 수 있어 느슨하게(잘못된 값도 넣어 본다)
+      const inputs: any[] = [
+        { direction: [1, 1, 0] },
+        { direction: [0, 0, -2] },
+        { direction: [3, -4, 5], kind: 'perpendicular' },
+        { edge: [c.world([0, 0, 40]), c.world([120, 80, 40])] },
+        { direction: [1, 0, 0], kind: 'parallel', edge: [c.world([0, 80, 40]), c.world([120, 80, 40])] },
+        { direction: [3, 4, 0], kind: 'axis' },
+        { direction: [0, 0, 0] },
+        { edge: [c.world([5, 5, 5]), c.world([5, 5, 5])] },
+      ];
+      const targets = [
+        [156, -36, 12],
+        [190, 40, 70],
+        [-15, 100, 60],
+      ];
+      for (const corner of [
+        [120, 0, 40],
+        [0, 80, 40],
+      ]) {
+        const a = c.at(c.world(corner));
+        if (!a) continue;
+        inputs.forEach((input, i) => {
+          for (const t of targets) {
+            const q = c.at(c.world(t));
+            if (!q) continue;
+            v.clearMeasure();
+            res.push(['set', i, v.setMeasureInferenceLock(input), lockState(v.measureInferenceLock)]);
+            c.click(a.x, a.y);
+            c.hover(q.x + 1.5, q.y - 1);
+            v.renderNow();
+            const h = v.measureHoverSnap;
+            const r = v.measureLabelRect;
+            res.push(['hover', h ? [r10s(h.point), h.snap, h.locked ?? null, r10s(h.from)] : null, r ? [r.x, r.y, r.width, r.height].map(r10) : null]);
+            c.click(q.x + 1.5, q.y - 1);
+            res.push(['points', v.measurePoints.map((p: any) => [r10s(p.point), p.snap, p.axis ?? null, r10s(p.direction), p.locked ?? null]), v.measureInferenceLock]);
+          }
+        });
+      }
+      v.setMeasureMode(false);
+      v.renderNow();
+      res.push(['off', v.measurePoints, v.measureLabelRect]);
+      off();
+      return res;
+    },
+  };
+}
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -1307,6 +1547,11 @@ const VALUES: ValueSet[] = [
   pointsForCallValues,
   editValues,
   editSame,
+  edgeLockValues('base'),
+  edgeLockValues('off'),
+  crossEdgeLockValues,
+  directionLockValues('base'),
+  directionLockValues('off'),
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
