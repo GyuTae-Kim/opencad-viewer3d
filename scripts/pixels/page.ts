@@ -42,8 +42,8 @@ interface Shot {
   /** 이 장면에 필요한 판 기능(없으면 건너뛸 까닭을 돌려준다) */
   needs?: Need;
   setup(c: Ctx): void | Promise<void>;
-  /** 'cube' = 뷰 큐브 캔버스만 */
-  capture?: 'image' | 'cube';
+  /** 'cube' = 뷰 큐브 캔버스만, 'overlay' = 화면 덧그림 캔버스만(0.13.0 — 측정 글상자를 비켜 그리는 것은 화면 덧그림뿐이다) */
+  capture?: 'image' | 'cube' | 'overlay';
 }
 
 interface ValueSet {
@@ -602,6 +602,136 @@ function edgeLockShots(d: 'base' | 'off'): Shot[] {
   return out;
 }
 
+// ───────────── 0.13.0 측정 거리 글상자 비켜 그리기 ─────────────
+/** 0.13.0 거리 글상자 비켜 그리기(setMeasureLabelAvoid)가 있는 판인지 */
+const v0130label: Need = (v, c) => v0120lock(v, c) ?? fn('setMeasureLabelAvoid')(v, c);
+
+/** 손가락 위 정밀 조준 십자선의 반지름(커서 둘레)과 그 아래 손가락 자리(십자선 가운데에서 64화소 아래, 44화소 네모) */
+const AIM_R = 24;
+const finger = (x: number, y: number): { x: number; y: number; width: number; height: number } => ({ x: x - 22, y: y + 64 - 22, width: 44, height: 44 });
+/** 상자 윗면 앞 구석에서 윗면 모서리를 따라 가까운 점 — 기본 글상자가 커서에 걸린다 */
+const LABEL_TARGET = [120, 22, 40];
+
+/** 공구 경로를 숨기고 상자 윗면 앞 구석(120, 0, 40)에 첫 점을 찍은 뒤 target을 가리킨다(pointerType). 가리킨 화면 자리 */
+function labelPreview(c: Ctx, target: readonly number[], pointerType = 'mouse'): { x: number; y: number } | null {
+  c.v.setGroupVisible('공구 경로', false);
+  c.v.setMeasureMode(true);
+  const a = c.at(c.world([120, 0, 40]));
+  const q = c.at(c.world(target));
+  if (!a || !q) return null;
+  c.click(a.x, a.y);
+  c.hover(q.x, q.y, pointerType);
+  return q;
+}
+
+/**
+ * 화면 덧그림 캔버스만 찍는다(비켜 그리기는 화면 덧그림뿐 — 그림 저장은 기본 자리). 기본 자리(옛 API만 — base와 견준다),
+ * 그 자리를 앱 사각형으로 막은 것, 정밀 조준처럼 펜으로 가리키고 십자선(커서 둘레)과 손가락을 피한 것
+ */
+const labelShots: Shot[] = [
+  { name: 'base-measure-label-screen', data: 'base', needs: fn('setGroupVisible', 'project'), capture: 'overlay', setup: (c) => void labelPreview(c, LABEL_TARGET) },
+  {
+    name: 'base-measure-label-avoid-rect',
+    data: 'base',
+    needs: v0130label,
+    capture: 'overlay',
+    setup: (c) => {
+      if (!labelPreview(c, LABEL_TARGET)) return;
+      c.v.renderNow();
+      const r = c.v.measureLabelRect;
+      c.v.setMeasureLabelAvoid(r ? [r] : null);
+    },
+  },
+  // 첫 점 가까이(6 mm — 화면 몇 화소)를 가리키면 귀·선분 위 자리가 모두 십자선에 걸려 십자선 바로 위로
+  ...[
+    ['aim', LABEL_TARGET],
+    ['aim-short', [120, 6, 40]],
+  ].map(
+    ([name, target]): Shot => ({
+      name: `base-measure-label-avoid-${name}`,
+      data: 'base',
+      needs: v0130label,
+      capture: 'overlay',
+      setup: (c) => {
+        const q = c.at(c.world(target as number[]));
+        if (q) c.v.setMeasureLabelAvoid({ pointerRadius: AIM_R, rects: [finger(q.x, q.y)] });
+        labelPreview(c, target as number[], 'pen');
+      },
+    }),
+  ),
+];
+
+/**
+ * 0.13.0 비켜 그리기 값: 상자 윗면 앞 구석에서 가까운 점들을 가리킨 기본 자리, 그 자리를 앱 사각형으로 막은 자리, 십자선·손가락을 피한 자리와
+ * 확인(막은 자리와 겹치지 않거나 모두 겹쳐 기본 자리인지, 그림 저장(renderImage)이 피할 영역을 쓰지 않는지 — 다른 화소 수 0,
+ * 화면 덧그림은 글상자가 옮겨졌을 때만 바뀌는지)
+ */
+const labelAvoidValues: ValueSet = {
+  name: 'base-measure-label-avoid',
+  data: 'base',
+  needs: v0130label,
+  run: (c) => {
+    const { v } = c;
+    const overlay = c.host.querySelector<HTMLCanvasElement>('canvas.v3d-overlay')!;
+    const screen = (): Uint8ClampedArray => overlay.getContext('2d')!.getImageData(0, 0, overlay.width, overlay.height).data;
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++;
+      return n;
+    };
+    type Rect = { x: number; y: number; width: number; height: number };
+    const rect = (r: Rect | null): number[] | null => (r ? [r.x, r.y, r.width, r.height].map(r10) : null);
+    const same = (a: Rect | null, b: Rect | null): boolean => JSON.stringify(a) === JSON.stringify(b);
+    const overlap = (a: Rect, b: Rect): boolean => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+    const out: unknown[] = [];
+    const a = c.at(c.world([120, 0, 40]))!;
+    for (const t of [LABEL_TARGET, [120, 6, 40], [120, 40, 40], [100, 0, 40], [120, 0, 25], [90, 30, 40], [0, 0, 40]])
+      for (const pt of ['mouse', 'pen']) {
+        v.setMeasureLabelAvoid(null);
+        v.clearMeasure();
+        const q = labelPreview(c, t, pt);
+        v.renderNow();
+        const r0: Rect | null = v.measureLabelRect;
+        if (!q || !r0) {
+          out.push([t, pt, null]);
+          continue;
+        }
+        const img0 = v.renderImage({}).data, scr0 = screen();
+        v.setMeasureLabelAvoid([r0]);
+        v.renderNow();
+        const r1: Rect = v.measureLabelRect!;
+        const aim = { pointerRadius: AIM_R, rects: [finger(q.x, q.y)] };
+        v.setMeasureLabelAvoid(aim);
+        v.renderNow();
+        const r2: Rect = v.measureLabelRect!;
+        const img2 = v.renderImage({}).data, scr2 = screen();
+        // 십자선(커서 둘레 원)·손가락과 겹치는지
+        const dx = q.x - Math.min(Math.max(q.x, r2.x), r2.x + r2.width), dy = q.y - Math.min(Math.max(q.y, r2.y), r2.y + r2.height);
+        const hit2 = dx * dx + dy * dy < AIM_R * AIM_R || overlap(r2, aim.rects[0]!);
+        // 옮긴 글상자가 첫 점 표식(반지름 6)을 가리는지
+        const ax = a.x - Math.min(Math.max(a.x, r2.x), r2.x + r2.width), ay = a.y - Math.min(Math.max(a.y, r2.y), r2.y + r2.height);
+        out.push([
+          t,
+          pt,
+          rect(r0),
+          rect(r1),
+          !overlap(r1, r0) || same(r1, r0),
+          rect(r2),
+          hit2 === same(r2, r0) || !hit2,
+          !same(r2, r0) && ax * ax + ay * ay < 36,
+          v.measureLabelAvoid,
+          diff(img0, img2),
+          diff(scr0, scr2) > 0 === !same(r0, r2),
+        ]);
+      }
+    v.setMeasureLabelAvoid(null);
+    v.setMeasureMode(false);
+    v.renderNow();
+    out.push(['off', v.measureLabelRect, v.measureLabelAvoid]);
+    return out;
+  },
+};
+
 // ───────────── 0.11.0 그물 하나 바꾸기(setMesh·removeMesh) ─────────────
 /**
  * 상자 윗면(z 40) 위에 띄운 높이 격자(소재 윗면 z 52, 깎으면 내려간다). 원점은 격자 가운데 윗면.
@@ -828,6 +958,7 @@ const SHOTS: Shot[] = [
   ...editShots,
   ...edgeLockShots('base'),
   ...edgeLockShots('off'),
+  ...labelShots,
 ];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
@@ -1552,6 +1683,7 @@ const VALUES: ValueSet[] = [
   crossEdgeLockValues,
   directionLockValues('base'),
   directionLockValues('off'),
+  labelAvoidValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -1597,6 +1729,8 @@ function reset(v: V, d: Data): void {
   call('setNavigation', 'orbit', { gravity: false, collide: false, eyeHeight: undefined });
   call('setMeasureMode', false);
   call('setMeasureSnap', null);
+  // 0.13.0: 측정을 지워도 남으므로 장면마다 끈다(뷰어 하나를 모든 장면이 함께 쓴다)
+  call('setMeasureLabelAvoid', null);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
   call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null });
@@ -1702,10 +1836,10 @@ async function shot(name: string): Promise<Result<{ w: number; h: number; rgba: 
     // 화면 그리기 한 번: 측정 미리 보기(마우스 아래 붙잡을 점)·뷰 큐브는 그릴 때 정한다(사용자가 보는 그대로)
     c.v.renderNow();
     let img: ImageData;
-    if (s.capture === 'cube') {
-      const cube = c.host.querySelector<HTMLCanvasElement>('canvas.v3d-cube');
-      if (!cube) throw new Error('뷰 큐브 캔버스가 없습니다');
-      img = cube.getContext('2d')!.getImageData(0, 0, cube.width, cube.height);
+    if (s.capture === 'cube' || s.capture === 'overlay') {
+      const el = c.host.querySelector<HTMLCanvasElement>(`canvas.v3d-${s.capture}`);
+      if (!el) throw new Error(`${s.capture === 'cube' ? '뷰 큐브' : '화면 덧그림'} 캔버스가 없습니다`);
+      img = el.getContext('2d')!.getImageData(0, 0, el.width, el.height);
     } else img = c.v.renderImage({});
     return { w: img.width, h: img.height, rgba: await b64(img.data) };
   });
