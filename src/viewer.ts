@@ -48,6 +48,7 @@ import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
 import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, samePick, snapLimit, withinSnapLimit } from './snap';
+import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
 import {
   type InferenceLock,
   type InferenceLockInput,
@@ -353,11 +354,16 @@ export interface MeasurePoint {
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
-export interface MeasureLabelRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+export type { MeasureLabelRect };
+
+/**
+ * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리)
+ */
+export interface MeasureLabelAvoid {
+  /** 피할 화면 영역(캔버스 왼쪽 위 기준 CSS 화소 — 앱이 그린 십자선·손가락·툴팁 자리). 수가 아니거나 너비·높이가 0 이하인 것은 버린다 */
+  rects?: readonly MeasureLabelRect[];
+  /** 측정 커서(코어가 미리 보기를 구한 포인터 자리) 둘레에서 피할 반지름(CSS 화소). 미리 보기가 있을 때만 본다. 0·없으면 커서를 보지 않는다 */
+  pointerRadius?: number;
 }
 
 export interface GroupInfo {
@@ -734,6 +740,8 @@ export class Viewer3d {
   private measureFmt: MeasureFormat | null = null;
   /** 마지막으로 화면에 그린 측정 거리 글상자(0.12.0 — CSS 화소, 그리지 않았으면 null) */
   private measureLabel: MeasureLabelRect | null = null;
+  /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
+  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number } | null = null;
   /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
   private bbList: Mesh3d[] = [];
   private bbCamKey = '';
@@ -2490,11 +2498,70 @@ export class Viewer3d {
   /**
    * 측정 거리 글상자의 화면 자리(0.12.0 — 캔버스 왼쪽 위 기준 CSS 화소, 복사본): 첫 점과 미리 보기(또는 두 점째) 사이 거리 글을 마지막으로 그린 자리.
    * 앱이 커서 옆에 제 툴팁을 띄울 때 이 상자와 겹치지 않게 옮긴다. 그리지 않았으면(측정 중이 아님, 첫 점이나 미리 보기가 없음) null.
-   * 그리기는 requestAnimationFrame에서 하므로 상태를 바꾼 직후 읽으려면 renderNow() 뒤에 읽는다. 그림 저장(toBlob·renderImage)의 덧그림은 바꾸지 않는다
+   * 그리기는 requestAnimationFrame에서 하므로 상태를 바꾼 직후 읽으려면 renderNow() 뒤에 읽는다. 그림 저장(toBlob·renderImage)의 덧그림은 바꾸지 않는다.
+   * 0.13.0: setMeasureLabelAvoid로 비켜 그렸으면 옮긴 자리
    */
   get measureLabelRect(): MeasureLabelRect | null {
     const r = this.measureLabel;
     return r ? { ...r } : null;
+  }
+
+  /**
+   * 측정 거리 글상자가 비켜 그릴 자리(0.13.0): 앱이 캔버스 위에 그린 것(손가락 위 십자선·커서 옆 툴팁)의 화면 사각형과 커서 둘레 반지름.
+   * 사각형 목록만 줘도 된다. 기본 자리(두 점 화면 가운데의 오른쪽 위)가 이것과 겹치면 왼쪽 위 → 오른쪽 아래 → 왼쪽 아래, 그다음 두 점을 잇는
+   * 선분을 따라 첫 점 쪽 1/4·둘째 점 쪽 1/4·첫 점·둘째 점 자리에서 같은 네 귀, 그다음 피할 영역마다 바로 위·아래(선분이 짧아 커서가 기준점 바로 옆일 때)를
+   * 차례로 보고 겹치지 않는 첫 자리에 그린다(모두 겹치면 기본 자리 — 순수 함수 placeMeasureLabel).
+   * 옮길 때는 두 측정 점 표식도 가리지 않는 자리를 먼저 찾는다(그런 자리가 없으면 앱 영역만 비켜 간 자리).
+   * 화면 덧그림에만 쓰고 그림 저장(toBlob·renderImage)은 기본 자리에 그린다. 사각형은 캔버스 왼쪽 위 기준 CSS 화소이고, 앱의 십자선·툴팁이
+   * 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). null·빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지워도 남는다
+   */
+  setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
+    const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
+    const rects: MeasureLabelRect[] = [];
+    for (const r of Array.isArray(o?.rects) ? o!.rects : []) {
+      const a = avoidRect(r);
+      if (a) rects.push(a);
+    }
+    const pr = o?.pointerRadius;
+    const pointerRadius = typeof pr === 'number' && Number.isFinite(pr) && pr > 0 ? pr : 0;
+    const next = rects.length || pointerRadius ? { rects, pointerRadius } : null;
+    const prev = this.labelAvoid;
+    const same =
+      prev === next ||
+      (!!prev &&
+        !!next &&
+        prev.pointerRadius === next.pointerRadius &&
+        prev.rects.length === next.rects.length &&
+        prev.rects.every((r, i) => {
+          const s = next.rects[i]!;
+          return r.x === s.x && r.y === s.y && r.width === s.width && r.height === s.height;
+        }));
+    this.labelAvoid = next;
+    if (!same && this.measuring && this.measurePts.length) this.invalidate();
+  }
+
+  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null) */
+  get measureLabelAvoid(): MeasureLabelAvoid | null {
+    const a = this.labelAvoid;
+    if (!a) return null;
+    const r: MeasureLabelAvoid = { rects: a.rects.map((x) => ({ ...x })) };
+    if (a.pointerRadius) r.pointerRadius = a.pointerRadius;
+    return r;
+  }
+
+  /**
+   * 화면 덧그림의 글상자가 지금 피할 영역(커서 둘레는 미리 보기가 있을 때만). 옮길 때는 두 측정 점 표식(seg)도 될 수 있으면 가리지 않는다.
+   * 꺼져 있으면 null
+   */
+  private labelAvoidAreas(seg: [V3, V3] | null): LabelAvoidAreas | null {
+    const a = this.labelAvoid;
+    if (!a) return null;
+    const at = a.pointerRadius && this.measuring && this.measureHover ? this.lastHoverAt : null;
+    return {
+      rects: a.rects,
+      circles: at ? [{ x: at.x, y: at.y, r: a.pointerRadius }] : [],
+      soft: seg ? seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R })) : [],
+    };
   }
 
   clearMeasure(): void {
@@ -2797,7 +2864,9 @@ export class Viewer3d {
     c.height = this.canvas.height;
     const ctx = c.getContext('2d')!;
     ctx.drawImage(this.canvas, 0, 0);
-    ctx.drawImage(this.overlay, 0, 0);
+    // 화면 덧그림을 그대로 쓴다. 다만 거리 글상자를 비켜 그렸으면(0.13.0 — 앱 십자선·툴팁은 그림에 없다) 덧그림만 기본 자리로 다시 그린다
+    if (this.labelAvoid && this.measuring && this.measurePts.length) this.drawOverlayOn(ctx, this.frame(), this.dpr);
+    else ctx.drawImage(this.overlay, 0, 0);
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
   }
 
@@ -4329,14 +4398,14 @@ export class Viewer3d {
         }
       }
     };
-    const label = (at: V3 | null, lines: string[]): void => {
+    /** seg = 두 점의 화면 자리(0.13.0 — 피할 영역과 겹치면 이 선분을 따라 옮겨 본다) */
+    const label = (at: V3 | null, lines: string[], seg: [V3, V3] | null): void => {
       if (!at || !lines.length) return;
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((s) => ctx.measureText(s).width)) + 14;
       const h = lines.length * 16 + 8;
-      let x = at[0] + 10, y = at[1] - h - 8;
-      x = Math.min(Math.max(4, x), this.cssW - w - 4);
-      y = Math.min(Math.max(4, y), this.cssH - h - 4);
+      // 기본 자리는 두 점 화면 가운데의 오른쪽 위(캔버스 안으로 당김). 화면 덧그림이고 앱이 피할 자리를 줬으면 비켜 그린다(0.13.0)
+      const { x, y } = placeMeasureLabel(at, { width: w, height: h }, { width: this.cssW, height: this.cssH }, screen ? this.labelAvoidAreas(seg) : null, seg);
       if (screen) this.measureLabel = { x, y, width: w, height: h };
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = th.measure;
@@ -4387,6 +4456,7 @@ export class Viewer3d {
         fm
           ? fm({ ...measureResult([...a] as V3, [...b] as V3, this.snapOpt ? [this.measureSnaps.get(a), snapB] : null), units: this.sceneRef?.units ?? 'unknown' })
           : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
+        sa && sb ? [sa, sb] : null,
       );
     }
     for (const p of pts) dotAt(P(p), false);

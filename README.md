@@ -69,7 +69,8 @@ viewer.fit();
 - `highlightSegmentIds(ids)`, `setHighlightSegments(positions)`: 선분 단위 강조(예: NC 한 줄). 보이는 부분은 깊이를 따져 굵게, 가려진 부분은 흐리게(`hidden`) 그린다. `highlightSegmentIds`는 `segmentIds`로 찾고 찾은 선분 수를 돌려준다
 - `onPick((pick, e) => …)`: 두 번째 인자 `e`는 누를 때의 `altKey`·`ctrlKey`·`shiftKey`·`metaKey`, `clicks`(1 또는 2 — 바로 앞 누르기와 0.45초·6화소(터치는 24화소) 안이면 2), `button`, `pointerType`. 한 인자 콜백도 그대로 된다
 - `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`, `measurePoints`(찍은 점의 좌표·붙잡은 종류 — 0.12.0)
-- `measureHoverSnap`(커서 아래 붙잡을 점), `measureHoverLock`(Shift·잠금 단추가 지금 잠글 방향 — 0.12.0), `setMeasureInferenceLock(true | 'x' | { direction, edge? } | false)`(앱 단추로 잠그기), `measureLabelRect`(코어 거리 글상자 자리 — 앱 툴팁이 피한다, 0.12.0)
+- `measureHoverSnap`(커서 아래 붙잡을 점), `measureHoverLock`(Shift·잠금 단추가 지금 잠글 방향 — 0.12.0), `setMeasureInferenceLock(true | 'x' | { direction, edge? } | false)`(앱 단추로 잠그기), `measureLabelRect`(코어 거리 글상자 자리 — 앱 툴팁이 피한다, 0.12.0),
+  `setMeasureLabelAvoid({ rects?, pointerRadius? } | rects | null)`(코어 거리 글상자가 앱 십자선·툴팁과 커서 둘레를 비켜 그리기 — 0.13.0)
 - `gridVisible`, `viewCubeVisible`, `axesVisible`: 격자·뷰 큐브·좌표축 켜짐 상태
 - `viewCubeSize` 옵션·`setViewCubeSize(px)`: 뷰 큐브 크기(기본 112, 64~160) — 좁은 화면에서 줄여 쓴다
 - `setDrawLimitBySegmentId`, `setMarker`: NC 재생
@@ -689,7 +690,7 @@ viewer.setMesh(grid, { vertices: { start: Math.max(0, j0 - 1) * nx, count: (Math
 - 글상자는 두 점의 화면 가운데에서 오른쪽으로 10화소, 위로 8화소 띄워 그리고 캔버스 밖으로 나가면 안으로 당긴다. 커서가 첫 점 가까이 있으면
   커서 옆에 그린 앱 툴팁과 겹칠 수 있다. 앱은 툴팁 자리를 정할 때 이 상자와 겹치면 반대쪽으로 옮긴다
 - 그리기는 requestAnimationFrame에서 하므로 미리 보기가 바뀐 다음 프레임(또는 `renderNow()` 뒤)에 읽는다. 그림 저장(`toBlob`·`renderImage`)의 덧그림은 이 값을 바꾸지 않는다.
-  코어 글상자를 앱 툴팁에 맞춰 옮기는 선택은 두지 않았다(코어는 앱 툴팁의 크기를 모른다)
+  코어 글상자를 앱 툴팁에 맞춰 옮기는 선택은 두지 않았다(코어는 앱 툴팁의 크기를 모른다 — 0.13.0에서 앱이 자리를 알려 주는 `setMeasureLabelAvoid`를 더했다)
 
 ```ts
 // 상태 줄: 잠글 수 있으면 안내(0.10.0 예의 h.direction 대신)
@@ -715,13 +716,64 @@ if (r && tipX < r.x + r.width && r.x < tipX + tipW && tipY < r.y + r.height && r
 - SKP: 줄자·각도기는 코어 측정을 쓰지 않고 앱 추정(`src/app/snap.ts`의 `edgeLineLock`)으로 이미 고쳤으므로 바꿀 것이 없다.
   같은 판정을 코어 순수 함수 `edgeLineLock(첫 점, 점, [모서리, 다른 선분], 허용치)`로 바꿔 쓸 수는 있다(허용치를 세계 길이로 준다 — 앱은 지금 상대 1e-6)
 
+## 0.13.0: 측정 거리 글상자가 앱 십자선·툴팁과 커서를 비켜 그리기
+
+`setMeasureLabelAvoid`를 부르지 않으면 그림·고르기·측정은 0.12.0과 화소·값까지 같다(`npm run pixels -- --base v0.12.0`: 0.12.0으로도 찍을 수 있는 장면 95개·값 33묶음 모두 같음.
+그 가운데 화면 덧그림의 기본 자리 장면 하나는 이번에 더했다. 새 장면 3개·값 1묶음은 0.12.0에 없는 API라 건너뛰고, head에서 두 번 찍어 같은 것을 확인했다).
+바뀐 기본 동작은 없다.
+
+0.12.0까지 코어 거리 글상자는 늘 두 점 화면 가운데의 오른쪽 위에 그렸다. 휴대폰의 정밀 조준 십자선(앱이 손가락 위에 띄워 그린다)은
+커서 자리라 옮길 수 없는데, 첫 점 가까이를 가리키면 이 십자선이 글상자 왼쪽을 가렸다. 0.12.0의 `measureLabelRect`로는 앱이 제 툴팁만 옮길 수 있었다.
+코어는 앱 십자선·툴팁의 크기를 모르므로, 앱이 그 자리를 알려 주면 코어 글상자가 비켜 그리게 했다.
+
+### 피할 자리 알려 주기
+
+- `setMeasureLabelAvoid(avoid: MeasureLabelAvoid | MeasureLabelRect[] | null)`. `MeasureLabelAvoid`는 `{ rects?, pointerRadius? }`이다
+  - `rects`: 피할 화면 사각형(캔버스 왼쪽 위 기준 CSS 화소 `{ x, y, width, height }` — 앱이 그린 십자선·손가락·툴팁 자리). 사각형 목록만 줘도 된다.
+    수가 아니거나 너비·높이가 0 이하인 것은 버린다
+  - `pointerRadius`: 측정 커서 둘레에서 피할 반지름(CSS 화소). 커서는 코어가 미리 보기를 구한 포인터 자리다(앱이 십자선 자리로 포인터 사건을 보내면 십자선 가운데).
+    미리 보기가 있을 때만 본다
+  - 앱 십자선·툴팁이 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). `null`이나 빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지우거나 측정 모드를 꺼도 남는다
+  - `measureLabelAvoid`(getter): 고른 값의 복사본, 꺼져 있으면 `null`
+- 자리는 이 차례로 보고, 겹치지 않는 첫 자리에 그린다(순수 함수 `placeMeasureLabel` — `opencad-viewer3d/measurelabel`)
+  1. 기본 자리(두 점 화면 가운데에서 오른쪽 10·위 8, 캔버스 안으로 당김)가 피할 자리와 겹치지 않으면 옮기지 않는다
+  2. 같은 기준점의 왼쪽 위 → 오른쪽 아래 → 왼쪽 아래
+  3. 두 점을 잇는 화면 선분을 따라 첫 점 쪽 1/4 → 둘째 점 쪽 1/4 → 첫 점 → 둘째 점 자리에서 같은 네 귀(오른쪽 위부터)
+  4. 피할 자리마다 바로 위·아래(기본 자리에서 세로로 가까운 것부터, 가로는 기본 자리 → 왼쪽 위). 선분이 짧아 커서가 기준점 바로 옆이면 앞의 자리가 모두 걸린다
+  5. 모두 겹치면 기본 자리
+  - 옮길 때는 두 측정 점 표식(반지름 6화소)도 가리지 않는 자리를 먼저 고르고, 그런 자리가 없으면 피할 자리만 비켜 간 첫 자리에 둔다.
+    옮길지 말지는 앱이 준 자리와 커서로만 정한다(기본 자리가 점 표식에 걸쳐도 0.12.0처럼 그대로 둔다)
+- `measureLabelRect`는 실제로 그린(옮긴) 자리를 돌려준다
+- 화면 덧그림에만 쓴다. 그림 저장(`toBlob`·`renderImage`)은 앱 십자선·툴팁이 없는 그림이라 기본 자리에 그린다.
+  선택 없이 부른 `toBlob()`은 화면 덧그림을 그대로 붙이는데, 글상자를 옮겨 그렸을 때만 덧그림을 기본 자리로 다시 그린다
+
+```ts
+// STEP 정밀 조준: 십자선(48화소)을 손가락 위 64화소에 띄우고 코어에는 십자선 가운데로 펜 포인터를 보낸다.
+// 십자선은 커서 둘레(반지름 24)로, 손가락은 사각형으로(ax·ay = 십자선 가운데의 캔버스 기준 자리 — 옮길 때마다 다시)
+viewer.setMeasureLabelAvoid({ pointerRadius: 24, rects: [{ x: ax - 22, y: ay + 64 - 22, width: 44, height: 44 }] });
+viewer.setMeasureLabelAvoid(null); // 조준을 마치면
+// NC 툴팁: 툴팁이 먼저 서려는 자리(붙잡을 점 오른쪽 아래)를 넘긴다. 코어 글상자가 먼저 비키고, 그래도 겹치면 placeTip이 예전처럼 툴팁을 옮긴다
+viewer.setMeasureLabelAvoid([{ x: px + 12, y: py + 12, width: tipW, height: tipH }]);
+```
+
+### 앱이 할 일
+
+- 세 앱: 코어를 `#v0.13.0`으로 올린다. 새로 보이는 글은 없다
+- STEP(`src/app/aim.ts` 정밀 조준): 조준을 시작하거나 십자선을 옮길 때 십자선 반지름(`pointerRadius: 24` — `.aim-reticle` 48화소의 반)과 손가락 자리 사각형을 넘기고,
+  조준을 마치면 `null`을 준다. 십자선 자리로 펜 `pointermove`를 보내는 같은 처리 안에서 부르면 같은 프레임에 반영된다.
+  마우스로 쓸 때는 커서가 작으므로 조준 중에만 켠다
+- NC(`src/app/measure-lock.ts`): 툴팁을 띄울 때 `placeTip`의 첫 자리(점 오른쪽 아래)를 캔버스 기준으로 바꿔 넘기고, 툴팁을 숨기면 `null`을 준다.
+  `measureLabelRect`를 읽어 툴팁을 옮기는 `placeTip`은 그대로 둬도 된다. 넘기는 자리가 코어 글상자와 상관없이 정해지므로 둘이 서로를 쫓지 않고,
+  코어가 비킬 자리를 못 찾았을 때만 툴팁이 옮긴다. 툴팁 자리는 그리기 뒤에 정하므로 코어 글상자는 다음 프레임에 비킨다
+- SKP: 줄자·각도기는 코어 측정 글상자를 쓰지 않으므로 바꿀 것이 없다
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.12.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.13.0"
 }
 ```
 
@@ -747,6 +799,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
 | `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 추론 붙잡기(교차점·수직 발·축·나란함)와 방향 잠금(선분 방향·앱이 정한 방향 포함), 앱 점 색인(차례 한도) |
+| `src/measurelabel.ts` | 측정 거리 글상자 자리 순수 계산(기본 자리, 앱 영역·커서를 비켜 갈 자리 차례, 겹침 판정) |
 | `src/walk.ts` | 걷기 중력·부딪힘(세계 광선 맞음, 한 걸음) |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
@@ -778,11 +831,13 @@ npm run bench:edit -- --reps 5         # 그물 바꾸기 비용(0.11.0 비용 �
 `npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
 Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
 
-- 합성 장면 94가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+- 합성 장면 98가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
   그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식,
   0.12.0의 모서리 끝 선분 방향 잠금(축·대각)과 앱이 정한 방향 잠금도 찍습니다.
+  0.13.0의 측정 거리 글상자 네 장면(`base-measure-label-*`)은 그림 저장 대신 화면 덧그림 캔버스만 찍습니다(비켜 그리기는 화면에만 한다).
+  기본 자리 한 장은 옛 API만 써서 base와 견주고, 앱 사각형·정밀 조준(커서 둘레와 손가락, 긴 선분·짧은 선분)으로 옮긴 세 장은 새 장면입니다.
   0.11.0의 그물 바꾸기 여섯 가지(`edit-*`)는 head가 `setMesh`·`removeMesh`로 바꾸고, 그 API가 없는 판(base)은 같은 마지막 장면을 `setScene`(카메라 지킴)으로
   다시 준다 — base·head 비교가 곧 "그물 하나 바꾸기 = 장면 전체 다시 올리기"의 확인이다.
 - 값도 비교합니다. 고르기 7,200번, 측정 누르기 2만 4천여 번(앱 점 수천 개 붙잡기·추론 붙잡기, 0.9.1의 축 붙잡기 축, 0.10.0의 차례 한도·추론 잠금·나란함·
@@ -790,6 +845,8 @@ Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), Web
   `edit-same-pixels`는 같은 판 안에서 `setMesh`로 바꾼 그림과 처음부터 `setScene`한 그림의 다른 화소 수(0이어야 한다)입니다.
   0.12.0 `*-measure-edge-lock`은 모서리 끝마다 다른 점을 가리킨 미리 보기·잠글 방향·Shift 잠금·찍은 결과, `*-measure-direction-lock`은
   앱이 정한 방향 잠금(잘못된 값 포함)·찍은 점(`measurePoints`)·거리 글상자 자리(`measureLabelRect`)입니다.
+  0.13.0 `base-measure-label-avoid`는 상자 구석에서 여러 점을 가리킨 기본 자리, 그 자리를 막은 자리, 십자선·손가락을 비킨 자리와
+  확인 값(막은 자리와 겹치지 않는지, 첫 점 표식을 가리지 않는지, 그림 저장 화소가 피할 자리를 주기 전과 같은지, 화면 덧그림은 옮겼을 때만 바뀌는지)입니다.
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
@@ -819,7 +876,8 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
   `pointsFor`는 같은 고르기에서는 다시 쓰지만 커서가 움직여 고른 점이 바뀌면 부른다.
   모서리 끝에서 그 모서리 방향으로 잠그기(0.12.0)는 코어가 아는 곧은 선분(선분 묶음·그물 윤곽선)만 본다. 곡선을 나눈 꺾은선은 그 조각의 방향이고
   곡선의 접선 방향은 없다(앱이 `setMeasureInferenceLock({ direction })`으로 준다)
-- 코어 측정 거리 글상자는 앱 툴팁을 피해 옮기지 않는다(앱이 `measureLabelRect`를 읽어 제 툴팁을 옮긴다)
+- 코어 측정 거리 글상자는 앱이 알려 준 자리(`setMeasureLabelAvoid`)만 비켜 그린다. 앱 화면 요소를 스스로 찾지 않고, 자리는 정해진 차례(기준점 네 귀·선분 위·피할 자리 위아래)
+  가운데서만 고른다(덜 겹치는 자리를 따로 찾지 않아 모두 막히면 기본 자리). 앱 측정 덧그림(`setAnnotations`)의 글상자와 그림 저장은 비켜 그리지 않는다
 - 음영 뒤 모서리 점선은 반투명 그물 뒤 모서리에는 그리지 않는다
 - 그림 저장 배율은 한 변 GPU 한도·약 4천만 화소까지(넘으면 줄인다)
 - 잘린 면 채우기는 스텐실 홀짝이라 `closed` 그물이 정말 닫혀 있어야 한다(틈·겹친 입체가 있으면 줄무늬·구멍). 반투명 그물·X-ray·와이어프레임에서는 채우지 않는다
