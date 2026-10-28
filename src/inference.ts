@@ -13,7 +13,7 @@
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
-import type { SnapSegment } from './snap';
+import type { OpenSnapCandidate, SnapSegment } from './snap';
 
 /** 축 이름(축 붙잡기 — MeasureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB) */
 export type SnapAxis = 'x' | 'y' | 'z';
@@ -314,13 +314,22 @@ export interface NearSegment {
   raw?: number;
 }
 
-/** 추론 후보(세계 점·종류·묶음 id, 0.10.0부터 수직 발은 그 선분 — 잠글 때 기준 선분, 0.14.0부터 수직 발이 놓인 선분의 식별자 — 선분에 번호가 있을 때) */
+/**
+ * 추론 후보(세계 점·종류·묶음 id, 0.10.0부터 수직 발은 그 선분 — 잠글 때 기준 선분, 0.14.0부터 수직 발이 놓인 선분의 식별자 — 선분에 번호가 있을 때,
+ * 0.15.0부터 교차점은 두 선분의 식별자 seg·other — 두 선분 모두 번호가 있을 때)
+ */
 export interface InferenceCandidate {
   p: V3;
   kind: 'intersection' | 'perpendicular';
   id: string;
   edge?: [V3, V3];
   seg?: SnapSegment;
+  other?: SnapSegment;
+}
+
+/** 커서 둘레 선분의 식별자(번호가 없으면 null — 0.13.0 꼴 입력) */
+function segOf(s: NearSegment): SnapSegment | null {
+  return s.kind && s.raw !== undefined ? { kind: s.kind, id: s.id, index: s.index ?? s.raw, raw: s.raw, ends: [s.a, s.b] } : null;
 }
 
 /**
@@ -334,15 +343,121 @@ export function inferenceCandidates(segs: readonly NearSegment[], first: readonl
       for (let j = i + 1; j < segs.length; j++) {
         const s = segs[i]!, t = segs[j]!;
         const p = segmentIntersection(s.a, s.b, t.a, t.b, 0.5 * Math.max(s.wpp, t.wpp));
-        if (p && (!s.keep || s.keep(p)) && (!t.keep || t.keep(p))) out.push({ p, kind: 'intersection', id: s.id });
+        if (!p || (s.keep && !s.keep(p)) || (t.keep && !t.keep(p))) continue;
+        const c: InferenceCandidate = { p, kind: 'intersection', id: s.id };
+        const a = segOf(s), b = a && segOf(t);
+        if (a && b) {
+          c.seg = a;
+          c.other = b;
+        }
+        out.push(c);
       }
   if (o.perpendicular && first)
     for (const s of segs) {
       const p = perpendicularFoot(first, s.a, s.b, 0.5 * s.wpp);
       if (!p || (s.keep && !s.keep(p))) continue;
       const c: InferenceCandidate = { p, kind: 'perpendicular', id: s.id, edge: [s.a, s.b] };
-      if (s.kind && s.raw !== undefined) c.seg = { kind: s.kind, id: s.id, index: s.index ?? s.raw, raw: s.raw, ends: [s.a, s.b] };
+      const g = segOf(s);
+      if (g) c.seg = g;
       out.push(c);
     }
+  return out;
+}
+
+/**
+ * 열린 수직 발(0.15.0): 점 p에서 선분 a–b로 내린 발이 선분 밖이거나 끝점(tol 안)이라 perpendicularFoot가 없을 때, 그 발을 선분 범위로 자른 점
+ * (발 쪽 끝점의 복사본 — 꺾은선 꼭짓점이라 곡선 위 점이고, 곡선 위 발이 그쪽에 있다). 발이 선분 안쪽이면(perpendicularFoot가 있다),
+ * 선분 길이가 0이거나 p가 그 직선 위(tol 안)면 null
+ */
+export function openFoot(p: readonly number[], a: readonly number[], b: readonly number[], tol: number): V3 | null {
+  const ux = b[0]! - a[0]!, uy = b[1]! - a[1]!, uz = b[2]! - a[2]!;
+  const l2 = ux * ux + uy * uy + uz * uz;
+  if (!(l2 > 0)) return null;
+  const t = ((p[0]! - a[0]!) * ux + (p[1]! - a[1]!) * uy + (p[2]! - a[2]!) * uz) / l2;
+  if (!Number.isFinite(t)) return null;
+  const f: V3 = [a[0]! + ux * t, a[1]! + uy * t, a[2]! + uz * t];
+  if (d2(f, p) <= tol) return null;
+  if (t > 0 && t < 1 && d2(f, a) > tol && d2(f, b) > tol) return null;
+  const e = t < 0.5 ? a : b;
+  return [e[0]!, e[1]!, e[2]!];
+}
+
+/**
+ * 넓힌 교차(0.15.0): 두 선분 a0–a1, b0–b1이 허용치 tol로는 만나지 않지만(segmentIntersection이 null) 가장 가까운 두 점(선분 범위 안) 사이가
+ * looseTol 안이면 그 두 점의 가운데. 나란하거나(사잇각 사인² < 1e-10) 길이가 0이거나, 그 가운데가 어느 끝점에서 tol 안이면(꼭짓점에서 만나는 선분 —
+ * 끝점 붙잡기가 맡는다) null. 곡선을 나눈 꺾은선 둘은 곡선이 3D에서 만나도 현의 처짐만큼 비켜 지나가므로 앱이 다듬을 자리를 찾을 때 쓴다
+ */
+export function looseIntersection(a0: readonly number[], a1: readonly number[], b0: readonly number[], b1: readonly number[], tol: number, looseTol: number): V3 | null {
+  if (!(looseTol > tol) || segmentIntersection(a0, a1, b0, b1, tol)) return null;
+  const ux = a1[0]! - a0[0]!, uy = a1[1]! - a0[1]!, uz = a1[2]! - a0[2]!;
+  const vx = b1[0]! - b0[0]!, vy = b1[1]! - b0[1]!, vz = b1[2]! - b0[2]!;
+  const wx = a0[0]! - b0[0]!, wy = a0[1]! - b0[1]!, wz = a0[2]! - b0[2]!;
+  const a = ux * ux + uy * uy + uz * uz, b = ux * vx + uy * vy + uz * vz, c = vx * vx + vy * vy + vz * vz;
+  const d = ux * wx + uy * wy + uz * wz, e = vx * wx + vy * wy + vz * wz;
+  const den = a * c - b * b;
+  if (!(a > 0) || !(c > 0) || den <= 1e-10 * a * c) return null;
+  const clamp = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+  // 선분 범위 안에서 가장 가까운 두 점: 직선끼리의 답을 자르고, 한쪽이 잘리면 다른 쪽을 그 점에서 다시 구한다
+  let s = clamp((b * e - c * d) / den);
+  let t = (b * s + e) / c;
+  if (t < 0 || t > 1) {
+    t = clamp(t);
+    s = clamp((t * b - d) / a);
+  }
+  const p: V3 = [a0[0]! + ux * s, a0[1]! + uy * s, a0[2]! + uz * s];
+  const q: V3 = [b0[0]! + vx * t, b0[1]! + vy * t, b0[2]! + vz * t];
+  if (!(d2(p, q) <= looseTol)) return null;
+  const m: V3 = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2];
+  if (d2(m, a0) <= tol || d2(m, a1) <= tol || d2(m, b0) <= tol || d2(m, b1) <= tol) return null;
+  return m;
+}
+
+/**
+ * 넓힌 교차 허용치의 토막 길이 비(0.15.0): 한 토막이 45°보다 덜 도는 꺾은선이면 현과 곡선 사이(활꼴 높이 = 현 길이/2 × tan(돈 각/4))는
+ * 현 길이의 0.1배 안이다 — 곡선 둘이 만나는 자리에서 두 꺾은선 사이 틈은 두 토막 길이 합의 이만큼 안
+ */
+export const OPEN_INTERSECTION_CHORD = 0.1;
+
+/**
+ * 열린 후보(0.15.0 — 다듬기 MeasureSnapOptions.refine이 있을 때만, 앱이 다듬어야 후보가 된다): 커서 둘레 선분(segmentsNear 차례 — 커서에 가까운 것부터)에서
+ * - 넓힌 교차점(o.intersections): 허용치(화소 반)로는 만나지 않지만 가장 가까운 두 점 사이가 min(OPEN_INTERSECTION_CHORD × 두 토막 길이 합,
+ *   커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안인 두 선분(looseIntersection)
+ * - 열린 수직 발(o.perpendicular, first): 첫 점에서 내린 발이 토막 밖·끝점이라 보통 수직 발이 없는 선분(openFoot)
+ * 두 선분 모두 번호(kind·raw)가 있어야 한다(앱에 넘길 식별자). 차례는 더 먼 쪽 선분의 차례(교차점은 두 선분 가운데 늦은 것)로, 같으면 교차점 먼저 —
+ * 커서에 가까운 선분의 후보가 앱 호출 한도를 먼저 쓴다
+ */
+export function openCandidates(
+  segs: readonly NearSegment[],
+  first: readonly number[] | null,
+  o: Pick<Required<MeasureInference>, 'intersections' | 'perpendicular'>,
+  snapPx: number,
+): OpenSnapCandidate[] {
+  const out: OpenSnapCandidate[] = [];
+  const ids = segs.map(segOf);
+  const len = (s: NearSegment): number => d2(s.a, s.b);
+  for (let j = 0; j < segs.length; j++) {
+    const t = segs[j]!, tg = ids[j];
+    if (!tg) continue;
+    if (o.intersections)
+      for (let i = 0; i < j; i++) {
+        const s = segs[i]!, sg = ids[i];
+        if (!sg) continue;
+        const wpp = Math.max(s.wpp, t.wpp);
+        const tol = 0.5 * wpp;
+        const m = looseIntersection(s.a, s.b, t.a, t.b, tol, Math.min(OPEN_INTERSECTION_CHORD * (len(s) + len(t)), snapPx * wpp));
+        if (!m) continue;
+        const c: OpenSnapCandidate = { kind: 'intersection', p: m, id: s.id, seg: sg, other: tg, tol };
+        if (s.keep || t.keep) c.keep = (q) => (!s.keep || s.keep(q)) && (!t.keep || t.keep(q));
+        out.push(c);
+      }
+    if (o.perpendicular && first) {
+      const tol = 0.5 * t.wpp;
+      const p = openFoot(first, t.a, t.b, tol);
+      if (!p) continue;
+      const c: OpenSnapCandidate = { kind: 'perpendicular', p, id: t.id, seg: tg, edge: [t.a, t.b], tol };
+      if (t.keep) c.keep = t.keep;
+      out.push(c);
+    }
+  }
   return out;
 }
