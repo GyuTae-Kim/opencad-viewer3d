@@ -13,6 +13,7 @@
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
+import type { SnapSegment } from './snap';
 
 /** 축 이름(축 붙잡기 — MeasureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB) */
 export type SnapAxis = 'x' | 'y' | 'z';
@@ -304,14 +305,22 @@ export interface NearSegment {
   keep?: (p: readonly number[]) => boolean;
   /** 커서 쪽 점 깊이에서 한 화소의 세계 길이(교차·수직 발 허용치) */
   wpp: number;
+  /**
+   * 0.14.0: 선분 종류('line' = 선분 묶음, 'edge' = 그물 윤곽선)와 번호(index = 원본 식별 번호, raw = 배열 안 번호 — Pick3d와 같은 뜻).
+   * 있으면 수직 발 후보에 선분 식별자(seg)를 실어 다듬기 손잡이(MeasureSnapOptions.refine)에 넘긴다
+   */
+  kind?: 'line' | 'edge';
+  index?: number;
+  raw?: number;
 }
 
-/** 추론 후보(세계 점·종류·묶음 id, 0.10.0부터 수직 발은 그 선분 — 잠글 때 기준 선분) */
+/** 추론 후보(세계 점·종류·묶음 id, 0.10.0부터 수직 발은 그 선분 — 잠글 때 기준 선분, 0.14.0부터 수직 발이 놓인 선분의 식별자 — 선분에 번호가 있을 때) */
 export interface InferenceCandidate {
   p: V3;
   kind: 'intersection' | 'perpendicular';
   id: string;
   edge?: [V3, V3];
+  seg?: SnapSegment;
 }
 
 /**
@@ -330,7 +339,10 @@ export function inferenceCandidates(segs: readonly NearSegment[], first: readonl
   if (o.perpendicular && first)
     for (const s of segs) {
       const p = perpendicularFoot(first, s.a, s.b, 0.5 * s.wpp);
-      if (p && (!s.keep || s.keep(p))) out.push({ p, kind: 'perpendicular', id: s.id, edge: [s.a, s.b] });
+      if (!p || (s.keep && !s.keep(p))) continue;
+      const c: InferenceCandidate = { p, kind: 'perpendicular', id: s.id, edge: [s.a, s.b] };
+      if (s.kind && s.raw !== undefined) c.seg = { kind: s.kind, id: s.id, index: s.index ?? s.raw, raw: s.raw, ends: [s.a, s.b] };
+      out.push(c);
     }
   return out;
 }

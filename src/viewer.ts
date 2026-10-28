@@ -47,7 +47,21 @@ import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
-import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, samePick, snapLimit, withinSnapLimit } from './snap';
+import {
+  type MeasurePointSnap,
+  type MeasureSnapPick,
+  type SnapCandidate,
+  type SnapRefineInput,
+  acceptRefined,
+  chooseMeasureSnap,
+  finitePoint,
+  measureResult,
+  refineTarget,
+  sameRefineInput,
+  samePick,
+  snapLimit,
+  withinSnapLimit,
+} from './snap';
 import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
 import {
   type InferenceLock,
@@ -318,6 +332,16 @@ export interface MeasureSnapOptions {
    * 처음 값이고, 바꿀 때는 setMeasureSnapLimit(n)(점 목록·색인을 다시 만들지 않는다)
    */
   limit?: number | null;
+  /**
+   * 측정 붙잡기 다듬기(0.14.0, 기본 없음): 코어가 붙잡을 점을 고른 뒤(그리기·찍기 전) 그 점이 수직 발('perpendicular' — 추론 붙잡기),
+   * 코어 선분 가운데 점('midpoint' — midpoints), 붙잡지 않은 선분·윤곽선 위 점('onEdge')이면 한 번 부른다. 화면용 꺾은선 토막 위의 점을
+   * 앱이 아는 정확한 형상(B-rep 곡선 등) 위로 옮길 때 그 세계 점을 돌려준다. null·undefined(또는 수가 아닌 값)면 코어 점 그대로.
+   * 받은 점은 표식 자리·찍은 점·거리·measurePoints·measureHoverSnap에 모두 쓴다. 다만 코어 점과 화면 거리가 붙잡기 거리를 넘거나,
+   * 눈 뒤·가까운 면 앞이거나, 그 묶음의 단면에 잘린 쪽이면 버리고 코어 점을 쓴다. 추론 잠금(Shift·setMeasureInferenceLock) 중에는 부르지 않는다
+   * (잠근 선 위 점이 먼저다). 끝점·꼭짓점·교차점·앱 점(points·pointsFor)·축·나란함은 넘기지 않는다.
+   * 마우스 이동마다 부르므로 가볍게. 바로 앞 호출과 입력이 같으면(같은 자리에서 미리 본 뒤 누르기) 다시 부르지 않고 앞 결과를 쓴다
+   */
+  refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
@@ -336,6 +360,8 @@ export interface MeasureHoverSnap {
   /** 0.10.0: 잠금 중 커서 아래 붙잡은 점(꼭짓점 등)을 잠근 선에 수직으로 내려 찍을 때 그 점과 종류 */
   from?: V3;
   fromSnap?: SnapKind;
+  /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine이 돌려준 점을 받았다)이면 true */
+  refined?: boolean;
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -351,6 +377,8 @@ export interface MeasurePoint {
   axis?: SnapAxis;
   direction?: V3;
   locked?: boolean;
+  /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine)으로 찍었으면 true */
+  refined?: boolean;
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -521,7 +549,8 @@ type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } |
 /**
  * 측정 점 고르기 결과(미리 보기·누르기): 찍을 점·붙잡았는지·종류, 0.9.0 축 붙잡기의 축,
  * 0.10.0 방향 추론의 단위 방향·잠갔는지·기준 선분·잠근 선으로 옮겨 온 점과 그 종류,
- * 0.12.0 점 붙잡기가 놓인 선분 직선이 첫 점을 지날 때 잠글 방향(lineLock — 결과·measureHoverSnap에는 싣지 않는다)
+ * 0.12.0 점 붙잡기가 놓인 선분 직선이 첫 점을 지날 때 잠글 방향(lineLock — 결과·measureHoverSnap에는 싣지 않는다),
+ * 0.14.0 앱이 다듬은 점이면 refined
  */
 type MeasurePick = {
   p: V3;
@@ -534,13 +563,15 @@ type MeasurePick = {
   from?: V3;
   fromSnap?: SnapKind;
   lineLock?: InferenceLock;
+  refined?: boolean;
 };
-/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금 — 있는 것만) */
+/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지 — 있는 것만) */
 const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   const r: MeasurePointSnap = { kind: s.kind };
   if (s.axis) r.axis = s.axis;
   if (s.direction) r.direction = s.direction;
   if (s.locked) r.locked = true;
+  if (s.refined) r.refined = true;
   return r;
 };
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
@@ -731,6 +762,9 @@ export class Viewer3d {
     limit: number | null;
     /** 0.10.0: 바로 앞 pointsFor 호출의 고르기(복사본)와 결과 — 같은 고르기면 다시 부르지 않는다 */
     pfMemo: { pick: Pick3d; res: readonly SnapPoint[] | null | undefined } | null;
+    /** 0.14.0 다듬기 손잡이와 바로 앞 호출의 입력(복사본)·결과(수 셋인 점의 복사본, 아니면 null) — 같은 입력이면 다시 부르지 않는다 */
+    refine: MeasureSnapOptions['refine'];
+    rfMemo: { input: SnapRefineInput; res: V3 | null } | null;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
@@ -2249,7 +2283,7 @@ export class Viewer3d {
   setMeasureSnap(o: MeasureSnapOptions | null): void {
     const pts = o?.points ?? [];
     const inference = normalizeInference(o?.inference);
-    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference)) this.snapOpt = null;
+    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference && !o.refine)) this.snapOpt = null;
     else {
       const xyz = new Float64Array(pts.length * 3);
       const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
@@ -2278,7 +2312,23 @@ export class Viewer3d {
       if (limit === null) delete src.limit;
       else src.limit = limit;
       const orders = ord ? ord.subarray(0, n) : null;
-      const so = (this.snapOpt = { midpoints: !!o.midpoints, edges: o.edges ?? null, pointsFor: o.pointsFor ?? null, src, pts: xyz.subarray(0, n * 3), kinds, ids, inference, index: null as SnapPointIndex | null, orders, limit, pfMemo: null });
+      if (!o.refine) delete src.refine;
+      const so = (this.snapOpt = {
+        midpoints: !!o.midpoints,
+        edges: o.edges ?? null,
+        pointsFor: o.pointsFor ?? null,
+        src,
+        pts: xyz.subarray(0, n * 3),
+        kinds,
+        ids,
+        inference,
+        index: null as SnapPointIndex | null,
+        orders,
+        limit,
+        pfMemo: null,
+        refine: o.refine ?? null,
+        rfMemo: null,
+      });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
         so.index = new SnapPointIndex(so.pts, ids, orders);
@@ -2349,6 +2399,7 @@ export class Viewer3d {
       r.from = [...h.from] as V3;
       if (h.fromSnap) r.fromSnap = h.fromSnap;
     }
+    if (h.refined) r.refined = true;
     return r;
   }
 
@@ -2491,6 +2542,7 @@ export class Viewer3d {
       if (s?.axis) r.axis = s.axis;
       if (s?.direction) r.direction = [...s.direction] as V3;
       if (s?.locked) r.locked = true;
+      if (s?.refined) r.refined = true;
       return r;
     });
   }
@@ -3414,21 +3466,60 @@ export class Viewer3d {
       if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
       if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
     }
-    // 수직 발(0.10.0): 첫 점 → 발 방향(잠글 때)
+    // 다듬기(0.14.0): 수직 발·코어 가운데 점·선분 위 점이면 앱이 정확한 형상 위로 옮긴 점(받을 수 있을 때만). 잠금·축·나란함은 위에서 이미 돌아갔다
+    const rp = so.refine && r ? this.refinedAt(so, f, x, y, snapPx, r, d, first) : null;
+    // 수직 발(0.10.0): 첫 점 → 발 방향(잠글 때). 다듬은 발이면 첫 점 → 다듬은 발
     if (r && r.kind === 'perpendicular' && first) {
-      const dir = unitDir(first, r.p);
-      if (dir) return { ...r, direction: dir };
+      const dir = unitDir(first, rp ?? r.p);
+      if (dir) return rp ? { ...r, p: rp, direction: dir, refined: true } : { ...r, direction: dir };
     }
     // 선분 방향 잠금(0.12.0): 점 붙잡기(또는 고른 선분 위 점)가 놓인 선분 직선이 첫 점을 지나면 Shift·setMeasureInferenceLock(true)가 그 방향으로 잠근다.
-    // 고른 선분(d.ends)을 먼저 보고, 점 붙잡기면 커서 둘레 선분도 본다(여러 모서리가 만나는 꼭짓점에서 고르기가 다른 모서리를 골랐을 때)
+    // 고른 선분(d.ends)을 먼저 보고, 점 붙잡기면 커서 둘레 선분도 본다(여러 모서리가 만나는 꼭짓점에서 고르기가 다른 모서리를 골랐을 때).
+    // 0.14.0: 판정은 코어 점(꺾은선 토막 위)으로 한다 — 다듬어도 잠글 방향은 0.13.0과 같다
     if (first && r && r.kind !== 'perpendicular') {
       const ends = d && r.p === d.snap ? d.ends : undefined;
       if (r.kind || ends) {
         const l = this.lineLockAt(f, first, r.p, ends, r.kind ? nearSegs : null);
-        if (l) return { ...r, lineLock: l };
+        if (l) return rp ? { ...r, p: rp, lineLock: l, refined: true } : { ...r, lineLock: l };
       }
     }
-    return r;
+    return rp && r ? { ...r, p: rp, refined: true } : r;
+  }
+
+  /**
+   * 측정 붙잡기 다듬기(0.14.0): 고른 점 r이 다듬을 종류(refineTarget — 코어 수직 발·코어 선분 가운데 점·붙잡지 않은 선분 위 점)면 앱 refine을 불러
+   * 받을 수 있는 점(수 셋, 코어 점에서 화면 붙잡기 거리 안, 그 묶음 단면의 남는 쪽)이면 그 점. 아니면 null(코어 점 그대로).
+   * 바로 앞 호출과 입력이 같으면 앞 결과를 쓴다(같은 자리 미리 보기 뒤 누르기 — 미리 본 점이 그대로 찍힌다)
+   */
+  private refinedAt(so: NonNullable<Viewer3d['snapOpt']>, f: ViewFrame, x: number, y: number, snapPx: number, r: MeasureSnapPick, d: PickDetail | null, first: V3 | null): V3 | null {
+    const t = refineTarget(r, d);
+    if (!t || !so.refine) return null;
+    const ray = screenRay(f, x, y);
+    // 앱이 입력을 고쳐도 기억이 바뀌지 않게 앱에는 따로 만든 복사본을 준다
+    const make = (): SnapRefineInput => ({
+      kind: t.kind,
+      point: [r.p[0], r.p[1], r.p[2]],
+      segment: { ...t.segment, ends: [[...t.segment.ends[0]] as V3, [...t.segment.ends[1]] as V3] },
+      first: first ? [first[0], first[1], first[2]] : null,
+      ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
+    });
+    const input = make();
+    let q: V3 | null;
+    const memo = so.rfMemo;
+    if (memo && sameRefineInput(memo.input, input)) q = memo.res;
+    else {
+      q = finitePoint(so.refine(make()));
+      so.rfMemo = { input, res: q };
+    }
+    if (!q || !acceptRefined(f, r.p, q, snapPx) || this.clippedAway(q, t.segment.id)) return null;
+    return [q[0], q[1], q[2]];
+  }
+
+  /** 세계 점 p가 묶음 id의 단면 평면(여러 단면이면 그 묶음을 자르는 것, 없는 묶음이면 모든 묶음을 자르는 평면)에 잘린 쪽인지 */
+  private clippedAway(p: V3, id: string): boolean {
+    if (!this.items.has(id)) return this.pointCut(p);
+    for (const c of this.clipsFor(id)) if (planeValue(c, p[0], p[1], p[2]) > 1e-9 * (Math.abs(c[3]) + 1)) return true;
+    return false;
   }
 
   /**
@@ -3455,7 +3546,7 @@ export class Viewer3d {
       ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     }, tolPx);
-    return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth) }));
+    return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw }));
   }
 
   /** 앱 붙잡기 후보 뒤에 추론 후보(0.9.0 — 커서 둘레 선분의 교차점·첫 점에서 내린 수직 발)를 잇는다 */
