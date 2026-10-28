@@ -8,6 +8,7 @@
  * - 나란함(0.10.0): 첫 측정 점을 지나고 커서가 앞서 지나간 선분(모서리)과 나란한 선 위의 점. 축과 같이 점 붙잡기가 없을 때만
  * - 잠금(0.10.0): 방향 추론(축·나란함·수직)을 잠그면 첫 점을 지나는 그 선 위에만 찍는다. 커서가 꼭짓점 같은 점 붙잡기 위면
  *   그 점을 선에 수직으로 내린 자리(SketchUp의 추론 잠금처럼 — 다른 점의 높이·자리를 잠근 방향으로 옮겨 잰다)
+ * - 선분 방향 잠금(0.12.0): 점 붙잡기(끝점·가운데 점·교차점 등)가 놓인 선분 직선이 첫 점을 지나면 그 방향으로도 잠근다(edgeLineLock)
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
@@ -191,6 +192,45 @@ export function lockFromSnap(h: { kind: string | null; axis?: SnapAxis; directio
   if (!h || !h.direction) return null;
   if (h.kind === 'axis') return h.axis ? axisLock(h.axis) : null;
   if (h.kind === 'parallel' || h.kind === 'perpendicular') return { kind: h.kind, direction: [...h.direction] as V3, ...(h.edge ? { edge: h.edge } : {}) };
+  return null;
+}
+
+/** 방향 e와 나란한 축(axisAligned일 때만 — 가장 큰 성분의 축) */
+function alignedAxis(e: readonly number[]): SnapAxis | null {
+  if (!axisAligned(e)) return null;
+  const ax = Math.abs(e[0]!), ay = Math.abs(e[1]!), az = Math.abs(e[2]!);
+  return ax >= ay && ax >= az ? 'x' : ay >= az ? 'y' : 'z';
+}
+
+/** 점 q에서 e0를 지나는 단위 방향 u의 직선까지 거리 */
+function lineDistance(q: readonly number[], e0: readonly number[], u: readonly number[]): number {
+  const wx = q[0]! - e0[0]!, wy = q[1]! - e0[1]!, wz = q[2]! - e0[2]!;
+  const t = wx * u[0]! + wy * u[1]! + wz * u[2]!;
+  return Math.hypot(wx - u[0]! * t, wy - u[1]! * t, wz - u[2]! * t);
+}
+
+/**
+ * 선분 방향 잠금(0.12.0): 붙잡은 점 p가 놓인 선분들(세계 끝점 둘) 가운데 그 직선이 첫 점 a를 지나는 첫 선분의 방향.
+ * 모서리 끝(a)에서 그 모서리를 따라 다른 끝·가운데 점·교차점을 가리키면 점 붙잡기가 방향 추론(축·나란함)보다 먼저라 잠글 방향이 없었다 —
+ * 그 직선이 a를 지나면 이 방향으로 잠근 선은 그 모서리 직선 그대로다(같은 직선 위 떨어진 선분도 된다).
+ * 축과 나란하면(axisAligned) 그 축(axisLock), 아니면 그 선분과 나란히(kind 'parallel', direction = 첫 끝점 → 둘째 끝점, edge = 그 선분).
+ * p가 a 자리(tolA 안 — 여러 모서리가 만나는 꼭짓점이면 어느 모서리인지 모른다)거나, a를 지나면서 p가 놓인 선분이 없으면 null.
+ * tolA = a에서 직선까지, tolP = p에서 직선까지 허용치(세계 길이 — 뷰어는 그 점 깊이에서 화면 반 화소)
+ */
+export function edgeLineLock(
+  a: readonly number[],
+  p: readonly number[],
+  lines: Iterable<readonly [readonly number[], readonly number[]]>,
+  tolA: number,
+  tolP: number = tolA,
+): InferenceLock | null {
+  if (!(d2(p, a) > tolA)) return null;
+  for (const [e0, e1] of lines) {
+    const u = unitDir(e0, e1);
+    if (!u || !(lineDistance(a, e0, u) <= tolA) || !(lineDistance(p, e0, u) <= tolP)) continue;
+    const axis = alignedAxis(u);
+    return axis ? axisLock(axis) : { kind: 'parallel', direction: u, edge: [[e0[0]!, e0[1]!, e0[2]!], [e1[0]!, e1[1]!, e1[2]!]] };
+  }
   return null;
 }
 
