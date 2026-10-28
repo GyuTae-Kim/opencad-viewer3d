@@ -16,7 +16,7 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 음영·음영+윤곽·와이어프레임·X-ray·숨은 선·단색·무늬 없음, 화면 공간 외곽선, 굵은 선·점선, 바닥 격자, 좌표축, 밝은·어두운 테마(CSS 변수 `--v3d-*`로 바꿀 수 있음), 키보드 초점 테두리
 - 뒤 모서리 점선(숨은 선, 켜면 음영 계열도), 바탕과 대비되는 외곽선·윤곽선 색(켤 때만), 그물마다 다른 윤곽선·외곽선 색
 - 해 조명·그림자(PCF)·선형 안개·하늘과 땅 바탕(모두 켤 때만), 1인칭 걷기·둘러보기(켜면 바닥 따라가기·부딪힘), 시야각·굴림·렌즈 이동(2점 투시)
-- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심, 두 선분 교차점·수직 발·축 방향·지나간 모서리와 나란한 방향까지 붙잡기와 Shift·앱 단추로 방향 잠그기 — 앱 점 수십만 개도 색인으로, 재생에 맞춰 차례 한도로 거르기), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
+- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심, 두 선분 교차점·수직 발·축 방향·지나간 모서리와 나란한 방향까지 붙잡기와 Shift·앱 단추로 방향 잠그기(모서리 끝에서 그 모서리를 따라 가리킨 점, 앱이 정한 방향도) — 앱 점 수십만 개도 색인으로, 재생에 맞춰 차례 한도로 거르기), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
 - 단면 보기: 평면 하나 또는 여럿(상자 단면, 평면마다 자를 묶음), 잘린 면 채우기(닫힌 그물·capGroup)·단면 테두리, 고르기·측정도 잘린 쪽을 무시
 - 마주 보는 그물(billboard), 뒷면 색·무늬
 - 무늬(텍스처): 그물마다 무늬 좌표(UV, 원근 무늬는 q까지)와 그림 하나. 되풀이(REPEAT)·밉맵·비등방 거르기, 한 장 크기·전체 GPU 예산 한도
@@ -68,7 +68,8 @@ viewer.fit();
 - `highlight(ids)`, `setItemVisible`, `setGroupVisible`, `groups()`: 항목 단위 강조와 보이기
 - `highlightSegmentIds(ids)`, `setHighlightSegments(positions)`: 선분 단위 강조(예: NC 한 줄). 보이는 부분은 깊이를 따져 굵게, 가려진 부분은 흐리게(`hidden`) 그린다. `highlightSegmentIds`는 `segmentIds`로 찾고 찾은 선분 수를 돌려준다
 - `onPick((pick, e) => …)`: 두 번째 인자 `e`는 누를 때의 `altKey`·`ctrlKey`·`shiftKey`·`metaKey`, `clicks`(1 또는 2 — 바로 앞 누르기와 0.45초·6화소(터치는 24화소) 안이면 2), `button`, `pointerType`. 한 인자 콜백도 그대로 된다
-- `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`
+- `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`, `measurePoints`(찍은 점의 좌표·붙잡은 종류 — 0.12.0)
+- `measureHoverSnap`(커서 아래 붙잡을 점), `measureHoverLock`(Shift·잠금 단추가 지금 잠글 방향 — 0.12.0), `setMeasureInferenceLock(true | 'x' | { direction, edge? } | false)`(앱 단추로 잠그기), `measureLabelRect`(코어 거리 글상자 자리 — 앱 툴팁이 피한다, 0.12.0)
 - `gridVisible`, `viewCubeVisible`, `axesVisible`: 격자·뷰 큐브·좌표축 켜짐 상태
 - `viewCubeSize` 옵션·`setViewCubeSize(px)`: 뷰 큐브 크기(기본 112, 64~160) — 좁은 화면에서 줄여 쓴다
 - `setDrawLimitBySegmentId`, `setMarker`: NC 재생
@@ -640,13 +641,87 @@ viewer.setGroupVisible(pathGroup, prefs.paths);
 viewer.setMesh(grid, { vertices: { start: Math.max(0, j0 - 1) * nx, count: (Math.min(ny - 1, j1 + 1) - Math.max(0, j0 - 1) + 1) * nx } });
 ```
 
+## 0.12.0: 모서리 끝에서 그 모서리 방향 잠그기·앱이 정한 방향 잠금·찍은 측정 점·거리 글상자 자리
+
+새 API를 쓰지 않고 잠그지 않으면 그림·고르기·측정은 0.11.0과 화소·값까지 같다(`npm run pixels -- --base v0.11.0`: 0.11.0의 장면 90개·값 28묶음 모두 같음.
+새 장면 4개·값 5묶음은 0.11.0에 없는 API라 건너뛰고, head에서 두 번 찍어 같은 것을 확인했다).
+바뀐 기본 동작은 하나다. 0.11.0에서 잠글 방향이 없던 자리(모서리 끝에서 그 모서리를 따라 가리킨 점 붙잡기)에서 Shift·`setMeasureInferenceLock(true)`가 잠근다.
+잠그기 전 미리 보기와 찍은 결과는 0.11.0과 같다. 세 앱이 측정 잠금을 화면에 붙이며 따로 메우던 것을 코어로 옮긴 판이다.
+
+### 모서리 끝에서 그 모서리를 따라 가리켜도 잠그기
+
+- 0.10.0·0.11.0은 첫 점이 모서리(선분·그물 윤곽선) 끝이고 커서가 그 모서리의 다른 끝·가운데 점·교차점 위면, 점 붙잡기가 방향 추론(축·나란함)보다 먼저라
+  미리 보기에 방향이 없었다. 그래서 Shift와 `setMeasureInferenceLock(true)`가 아무것도 잠그지 못했다(벽 모서리 끝에서 높이를 잴 때 흔하다).
+  NC·STEP 앱은 첫 점 뒤 마지막으로 본 방향에 기대 우회했지만, 모서리 몸통을 지나지 않고 끝점으로 바로 가면 여전히 잠기지 않았다
+- 0.12.0은 미리 보기의 점 붙잡기(꼭짓점·끝점·가운데 점·중심·앱 점·교차점)나 고른 선분 위 점(붙잡지 않은 점)이 놓인 선분의 직선이 첫 점을 지나면
+  그 방향으로 잠근다. 축과 나란하면 그 축(`kind: 'axis'`), 아니면 그 선분과 나란히(`kind: 'parallel'`, `edge`는 그 선분)다
+  - 고른 선분을 먼저 보고, 점 붙잡기면 커서 둘레 선분(교차점·수직 발 추론이 쓰는 것과 같다 — 한 번만 구한다)도 본다. 세 모서리가 만나는 구석에서
+    고르기가 다른 모서리를 골라도 첫 점을 지나는 모서리를 찾는다. 같은 직선 위 떨어진 선분(잘게 나뉜 NC 직선 이동 등)도 된다
+  - 커서가 첫 점 자리(여러 모서리가 만나는 꼭짓점이라 어느 모서리인지 모른다)거나 첫 점을 지나지 않는 선분이면 잠그지 않는다.
+    허용치는 그 점 깊이에서 화면 반 화소다(교차점·수직 발과 같은 눈금이라 float32 좌표도 견딘다)
+  - 방향 추론(축·나란함·수직)이 있으면 예전처럼 그것이 먼저다. Shift, `setMeasureInferenceLock(true)`, 첫 점 뒤 마지막으로 본 방향(커서가 캔버스를 떠난 뒤 앱 단추)이
+    모두 같은 판정을 쓴다. 나란함 추론(`inference.parallel`)을 켜지 않아도 된다
+- 잠그기 전 미리 보기(`measureHoverSnap`)와 찍은 결과는 그대로다(점 붙잡기 종류, `direction` 없음). 잠근 뒤에는 0.10.0 잠금 그대로
+  잠근 선 위에 찍고(`snapB`는 `'axis'`·`'parallel'`, `lockedB`), 안내선·표식도 축·나란함 잠금 그대로 그린다
+- `measureHoverLock`(새 getter, `InferenceLock | null`): 지금 미리 보기에서 Shift·`setMeasureInferenceLock(true)`가 잠글 방향. 첫 점 전·측정 중이 아니면 `null`.
+  상태 줄의 "Shift로 잠그기" 안내는 `measureHoverSnap.direction` 대신 이것으로 보인다. 순수 함수 `edgeLineLock`(`opencad-viewer3d/inference`)
+
+### 앱이 정한 방향으로 잠그기
+
+- `setMeasureInferenceLock({ direction, edge?, kind? })`(`InferenceLockInput`): 앱이 정한 방향(앱이 아는 모서리, 곡선의 접선 등)으로 잠근다. 축 이름처럼 첫 점을 찍기 전에 줘도 된다
+  - `direction`은 길이와 상관없다. 없으면 `edge`의 첫 끝점에서 둘째 끝점 쪽이다
+  - `kind`가 없으면 축과 나란한 방향은 그 축(`'axis'` — +X·+Y·+Z로 바꾸고 축 색 안내선), 아니면 `'parallel'`(자홍 안내선)이다. `'perpendicular'`도 줄 수 있다
+  - `edge`를 주면 잠근 동안 그 선분을 자홍 점선으로 그린다(나란함 잠금과 같다). `measureHoverSnap.edge`·`measureInferenceLock.edge`에도 실린다
+- 방향이 길이 0이거나 수가 아닐 때, 축과 나란하지 않은데 `kind: 'axis'`일 때, 모르는 종류, 수가 아닌 `edge`면 잠그지 않고 `false`를 돌려준다(앞 잠금은 그대로).
+  순수 함수 `directionLock`
+- 풀리는 때는 0.10.0 그대로다(두 점째, 측정 지우기, 붙잡기 선택 바꾸기, `setMeasureInferenceLock(false)`). `measureInferenceLock.source`는 `'api'`
+
+### 찍은 측정 점 읽기
+
+- `measurePoints`(`MeasurePoint[]` — 0~2개, 찍은 차례, 복사본): `{ point, snap, axis?, direction?, locked? }`. `measurePointCount === 1`일 때 첫 점의 세계 좌표와
+  붙잡은 종류를 읽어, 앱이 그 점에서 잠글 방향을 정하거나 표시를 붙인다. 붙잡기 선택이 없어도 0.7.2 규칙의 종류(`'vertex'`·`'endpoint'`·`null`)가 실린다.
+  두 점이면 `measurement()`의 `a`·`b`와 같은 점이다
+
+### 코어 거리 글상자 자리
+
+- `measureLabelRect`(`MeasureLabelRect | null`): 마지막으로 화면에 그린 측정 거리 글상자(첫 점과 미리 보기 또는 두 점째 사이)의 자리.
+  캔버스 왼쪽 위 기준 CSS 화소 `{ x, y, width, height }`이고, 그리지 않았으면 `null`이다
+- 글상자는 두 점의 화면 가운데에서 오른쪽으로 10화소, 위로 8화소 띄워 그리고 캔버스 밖으로 나가면 안으로 당긴다. 커서가 첫 점 가까이 있으면
+  커서 옆에 그린 앱 툴팁과 겹칠 수 있다. 앱은 툴팁 자리를 정할 때 이 상자와 겹치면 반대쪽으로 옮긴다
+- 그리기는 requestAnimationFrame에서 하므로 미리 보기가 바뀐 다음 프레임(또는 `renderNow()` 뒤)에 읽는다. 그림 저장(`toBlob`·`renderImage`)의 덧그림은 이 값을 바꾸지 않는다.
+  코어 글상자를 앱 툴팁에 맞춰 옮기는 선택은 두지 않았다(코어는 앱 툴팁의 크기를 모른다)
+
+```ts
+// 상태 줄: 잠글 수 있으면 안내(0.10.0 예의 h.direction 대신)
+const h = viewer.measureHoverSnap;
+const name = !h?.snap ? '' : h.snap === 'axis' ? `${h.axis!.toUpperCase()}축 방향` : KIND[h.snap];
+status.textContent = name && (h!.locked ? `${name} (잠금)` : viewer.measureHoverLock ? `${name} — Shift로 잠그기` : name);
+// 앱 단추: 앱이 아는 첫 점의 모서리(곡선이면 접선) 방향으로
+const [first] = viewer.measurePoints;
+if (first) viewer.setMeasureInferenceLock({ direction: tangentAt(first.point) });
+// 툴팁(커서 오른쪽 아래)이 코어 거리 글상자와 겹치면 커서 왼쪽 위로
+const r = viewer.measureLabelRect;
+if (r && tipX < r.x + r.width && r.x < tipX + tipW && tipY < r.y + r.height && r.y < tipY + tipH) [tipX, tipY] = [sx - tipW - 12, sy - tipH - 12];
+```
+
+### 앱이 할 일
+
+- 세 앱: 코어를 `#v0.12.0`으로 올린다. 새로 보이는 글은 없다(잠금은 0.10.0의 축·나란함 이름 그대로)
+- NC(`src/app/measure-lock.ts`): `shiftDown`이 코어 대신 거는 잠금(`setMeasureInferenceLock(true)` 뒤 `from`을 보고 푸는 것)과 `shiftLock`·`shiftUp`을 뺀다.
+  코어 Shift가 직접 잠그고 떼면 푼다. 잠금 단추·↓ 키는 `setMeasureInferenceLock(true)`만 부르고, 거짓이면 "잠글 방향이 없습니다"를 띄운다.
+  툴팁 자리를 정할 때 `measureLabelRect`와 겹치면 옮긴다
+- STEP(`src/app/snap.ts`): `lockMeasure`가 확인할 점을 돌려주는 것과 `lockStillValid`·`shiftFallbackLock`을 뺀다(`setMeasureInferenceLock(true)`의 참·거짓만 본다).
+  `LockViewer`에 `measureHoverLock`을 더해 "Shift·화살표로 방향 잠금" 안내를 잠글 방향이 있을 때만 보일 수 있다
+- SKP: 줄자·각도기는 코어 측정을 쓰지 않고 앱 추정(`src/app/snap.ts`의 `edgeLineLock`)으로 이미 고쳤으므로 바꿀 것이 없다.
+  같은 판정을 코어 순수 함수 `edgeLineLock(첫 점, 점, [모서리, 다른 선분], 허용치)`로 바꿔 쓸 수는 있다(허용치를 세계 길이로 준다 — 앱은 지금 상대 1e-6)
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.11.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.12.0"
 }
 ```
 
@@ -671,7 +746,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/texture.ts` | 무늬 도구(그림 머리 읽기, 크기 한도·예산 나누기, 뒤집어 풀기) |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
-| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 추론 붙잡기(교차점·수직 발·축·나란함)와 방향 잠금, 앱 점 색인(차례 한도) |
+| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 추론 붙잡기(교차점·수직 발·축·나란함)와 방향 잠금(선분 방향·앱이 정한 방향 포함), 앱 점 색인(차례 한도) |
 | `src/walk.ts` | 걷기 중력·부딪힘(세계 광선 맞음, 한 걸음) |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
 | `src/section.ts` | 단면 순수 계산(평면·범위 안 위치·교선·광선/선분 자르기·화면 끌기) |
@@ -703,15 +778,18 @@ npm run bench:edit -- --reps 5         # 그물 바꾸기 비용(0.11.0 비용 �
 `npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
 Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
 
-- 합성 장면 90가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+- 합성 장면 94가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
-  그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식도 찍습니다.
+  그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식,
+  0.12.0의 모서리 끝 선분 방향 잠금(축·대각)과 앱이 정한 방향 잠금도 찍습니다.
   0.11.0의 그물 바꾸기 여섯 가지(`edit-*`)는 head가 `setMesh`·`removeMesh`로 바꾸고, 그 API가 없는 판(base)은 같은 마지막 장면을 `setScene`(카메라 지킴)으로
   다시 준다 — base·head 비교가 곧 "그물 하나 바꾸기 = 장면 전체 다시 올리기"의 확인이다.
 - 값도 비교합니다. 고르기 7,200번, 측정 누르기 2만 4천여 번(앱 점 수천 개 붙잡기·추론 붙잡기, 0.9.1의 축 붙잡기 축, 0.10.0의 차례 한도·추론 잠금·나란함·
   같은 자리 미리 보기 뒤 누르기의 `pointsFor` 포함)의 결과와 화면 위치, 걷기 경로입니다. 0.11.0 `edit-values`는 바꾼 장면의 고르기·측정·미리 보기·범위,
   `edit-same-pixels`는 같은 판 안에서 `setMesh`로 바꾼 그림과 처음부터 `setScene`한 그림의 다른 화소 수(0이어야 한다)입니다.
+  0.12.0 `*-measure-edge-lock`은 모서리 끝마다 다른 점을 가리킨 미리 보기·잠글 방향·Shift 잠금·찍은 결과, `*-measure-direction-lock`은
+  앱이 정한 방향 잠금(잘못된 값 포함)·찍은 점(`measurePoints`)·거리 글상자 자리(`measureLabelRect`)입니다.
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
@@ -738,7 +816,10 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 추론 붙잡기는 선분끼리의 3D 교차, 선분 위 수직 발, 첫 점을 지나는 세계 X·Y·Z 축 방향과 지나간 선분과 나란한 방향뿐이다(선과 면의 교차, 면 위 수직 발,
   모서리에 수직인 방향, 다른 점에서 끌어온 축 안내, 면 잠금은 없다). 나란함의 기준은 마지막으로 지나간 선분 하나다. 잠금은 첫 점을 지나는 선 하나이고
   키보드 화살표로 축을 고르는 잠금(SketchUp의 →·←·↑)은 없다(앱이 `setMeasureInferenceLock('x')` 등으로 단다). 커서 둘레 선분은 화면에서 가까운 24개까지만 짝짓는다.
-  `pointsFor`는 같은 고르기에서는 다시 쓰지만 커서가 움직여 고른 점이 바뀌면 부른다
+  `pointsFor`는 같은 고르기에서는 다시 쓰지만 커서가 움직여 고른 점이 바뀌면 부른다.
+  모서리 끝에서 그 모서리 방향으로 잠그기(0.12.0)는 코어가 아는 곧은 선분(선분 묶음·그물 윤곽선)만 본다. 곡선을 나눈 꺾은선은 그 조각의 방향이고
+  곡선의 접선 방향은 없다(앱이 `setMeasureInferenceLock({ direction })`으로 준다)
+- 코어 측정 거리 글상자는 앱 툴팁을 피해 옮기지 않는다(앱이 `measureLabelRect`를 읽어 제 툴팁을 옮긴다)
 - 음영 뒤 모서리 점선은 반투명 그물 뒤 모서리에는 그리지 않는다
 - 그림 저장 배율은 한 변 GPU 한도·약 4천만 화소까지(넘으면 줄인다)
 - 잘린 면 채우기는 스텐실 홀짝이라 `closed` 그물이 정말 닫혀 있어야 한다(틈·겹친 입체가 있으면 줄무늬·구멍). 반투명 그물·X-ray·와이어프레임에서는 채우지 않는다
