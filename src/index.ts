@@ -14,6 +14,7 @@ export type {
   MeasureFormat,
   MeasureHoverSnap,
   MeasureInferenceLock,
+  MeasureLabelAvoid,
   MeasureLabelRect,
   MeasurePoint,
   MeasureResult,
