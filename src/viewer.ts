@@ -52,10 +52,13 @@ import {
   type MeasureSnapPick,
   type SnapCandidate,
   type SnapRefineInput,
+  OPEN_REFINE_CALLS,
+  RefineMemo,
   acceptRefined,
   chooseMeasureSnap,
   finitePoint,
   measureResult,
+  refineOpen,
   refineTarget,
   sameRefineInput,
   samePick,
@@ -75,6 +78,7 @@ import {
   edgeLineLock,
   inferenceCandidates,
   lockFromSnap,
+  openCandidates,
   lockedSnap,
   normalizeInference,
   parallelSnap,
@@ -338,8 +342,13 @@ export interface MeasureSnapOptions {
    * 앱이 아는 정확한 형상(B-rep 곡선 등) 위로 옮길 때 그 세계 점을 돌려준다. null·undefined(또는 수가 아닌 값)면 코어 점 그대로.
    * 받은 점은 표식 자리·찍은 점·거리·measurePoints·measureHoverSnap에 모두 쓴다. 다만 코어 점과 화면 거리가 붙잡기 거리를 넘거나,
    * 눈 뒤·가까운 면 앞이거나, 그 묶음의 단면에 잘린 쪽이면 버리고 코어 점을 쓴다. 추론 잠금(Shift·setMeasureInferenceLock) 중에는 부르지 않는다
-   * (잠근 선 위 점이 먼저다). 끝점·꼭짓점·교차점·앱 점(points·pointsFor)·축·나란함은 넘기지 않는다.
-   * 마우스 이동마다 부르므로 가볍게. 바로 앞 호출과 입력이 같으면(같은 자리에서 미리 본 뒤 누르기) 다시 부르지 않고 앞 결과를 쓴다
+   * (잠근 선 위 점이 먼저다). 끝점·꼭짓점·앱 점(points·pointsFor)·축·나란함은 넘기지 않는다.
+   * 마우스 이동마다 부르므로 가볍게. 바로 앞 호출과 입력이 같으면(같은 자리에서 미리 본 뒤 누르기) 다시 부르지 않고 앞 결과를 쓴다.
+   * 0.15.0: 코어 교차점('intersection' — 두 선분, 둘째는 SnapRefineInput.other)도 넘긴다. 또 이 함수가 있으면 꺾은선으로는 후보가 없는
+   * "열린 후보"(SnapRefineInput.open — 첫 점에서 내린 발이 토막 밖인 커서 둘레 토막의 수직 발, 허용치보다 조금 떨어져 지나가는 두 토막의 교차점)도
+   * 부른다. 앱이 돌려준 점이 커서에서 붙잡기 거리 안이고 보이면(눈 뒤·가까운 면 앞·단면에 잘린 쪽이 아니고 가리지 않음) 그 점으로 붙잡기 후보가 되고,
+   * null이면 후보가 없다(refine이 없거나 null만 돌려주면 0.14.0과 같다). 열린 후보는 미리 보기 한 번에 새로 OPEN_REFINE_CALLS(6)번까지 부르고,
+   * 커서 광선을 뺀 입력으로 기억해(setMeasureSnap마다 새로) 같은 둘레에서는 다시 부르지 않는다
    */
   refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
 }
@@ -765,6 +774,8 @@ export class Viewer3d {
     /** 0.14.0 다듬기 손잡이와 바로 앞 호출의 입력(복사본)·결과(수 셋인 점의 복사본, 아니면 null) — 같은 입력이면 다시 부르지 않는다 */
     refine: MeasureSnapOptions['refine'];
     rfMemo: { input: SnapRefineInput; res: V3 | null } | null;
+    /** 0.15.0 열린 후보(토막 밖 수직 발·넓힌 교차점) 다듬기 기억 — 커서 광선을 뺀 입력 열쇠 → 결과 */
+    openMemo: RefineMemo;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
@@ -2328,6 +2339,7 @@ export class Viewer3d {
         pfMemo: null,
         refine: o.refine ?? null,
         rfMemo: null,
+        openMemo: new RefineMemo(),
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
@@ -3441,10 +3453,16 @@ export class Viewer3d {
     let near: NearSegment[] | null = null;
     const nearSegs = (): NearSegment[] => (near ??= this.segmentsAround(f, x, y, snapPx, edges));
     const app = this.snapCandidates(f, x, y, snapPx, d?.pick ?? null);
-    const cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app) : app;
+    const lock = first ? this.inferLock : null;
+    // 열린 후보(0.15.0): 다듬기가 있고 잠그지 않았을 때만 — 토막 밖 수직 발·넓힌 교차점을 앱이 다듬은 점으로(받을 수 있는 것만)
+    const refine = so.refine;
+    const open =
+      refine && inf && !lock && (inf.intersections || (inf.perpendicular && first))
+        ? (): SnapCandidate[] => refineOpen(openCandidates(nearSegs(), first, inf, snapPx), first, screenRay(f, x, y), refine, so.openMemo, { calls: OPEN_REFINE_CALLS })
+        : null;
+    const cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app, open) : app;
     const r = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
     // 잠금(0.10.0): 첫 점을 지나는 잠근 선 위에만. 점 붙잡기가 있으면 그 점을 선에 수직으로 내린 자리
-    const lock = first ? this.inferLock : null;
     if (lock && first) {
       const q = r && r.kind ? r : null;
       const l = lockedSnap(f, first, lock.direction, x, y, q ? q.p : null);
@@ -3466,8 +3484,9 @@ export class Viewer3d {
       if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
       if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
     }
-    // 다듬기(0.14.0): 수직 발·코어 가운데 점·선분 위 점이면 앱이 정확한 형상 위로 옮긴 점(받을 수 있을 때만). 잠금·축·나란함은 위에서 이미 돌아갔다
-    const rp = so.refine && r ? this.refinedAt(so, f, x, y, snapPx, r, d, first) : null;
+    // 다듬기(0.14.0): 수직 발·코어 가운데 점·선분 위 점이면 앱이 정확한 형상 위로 옮긴 점(받을 수 있을 때만). 잠금·축·나란함은 위에서 이미 돌아갔다.
+    // 0.15.0: 코어 교차점도. 열린 후보는 이미 다듬은 점이다(다시 부르지 않는다)
+    const rp = r?.refined ? r.p : so.refine && r ? this.refinedAt(so, f, x, y, snapPx, r, d, first) : null;
     // 수직 발(0.10.0): 첫 점 → 발 방향(잠글 때). 다듬은 발이면 첫 점 → 다듬은 발
     if (r && r.kind === 'perpendicular' && first) {
       const dir = unitDir(first, rp ?? r.p);
@@ -3475,11 +3494,11 @@ export class Viewer3d {
     }
     // 선분 방향 잠금(0.12.0): 점 붙잡기(또는 고른 선분 위 점)가 놓인 선분 직선이 첫 점을 지나면 Shift·setMeasureInferenceLock(true)가 그 방향으로 잠근다.
     // 고른 선분(d.ends)을 먼저 보고, 점 붙잡기면 커서 둘레 선분도 본다(여러 모서리가 만나는 꼭짓점에서 고르기가 다른 모서리를 골랐을 때).
-    // 0.14.0: 판정은 코어 점(꺾은선 토막 위)으로 한다 — 다듬어도 잠글 방향은 0.13.0과 같다
+    // 0.14.0: 판정은 코어 점(꺾은선 토막 위)으로 한다 — 다듬어도 잠글 방향은 0.13.0과 같다(0.15.0 열린 교차점은 다듬기 전 코어 점 core)
     if (first && r && r.kind !== 'perpendicular') {
       const ends = d && r.p === d.snap ? d.ends : undefined;
       if (r.kind || ends) {
-        const l = this.lineLockAt(f, first, r.p, ends, r.kind ? nearSegs : null);
+        const l = this.lineLockAt(f, first, r.core ?? r.p, ends, r.kind ? nearSegs : null);
         if (l) return rp ? { ...r, p: rp, lineLock: l, refined: true } : { ...r, lineLock: l };
       }
     }
@@ -3487,8 +3506,8 @@ export class Viewer3d {
   }
 
   /**
-   * 측정 붙잡기 다듬기(0.14.0): 고른 점 r이 다듬을 종류(refineTarget — 코어 수직 발·코어 선분 가운데 점·붙잡지 않은 선분 위 점)면 앱 refine을 불러
-   * 받을 수 있는 점(수 셋, 코어 점에서 화면 붙잡기 거리 안, 그 묶음 단면의 남는 쪽)이면 그 점. 아니면 null(코어 점 그대로).
+   * 측정 붙잡기 다듬기(0.14.0): 고른 점 r이 다듬을 종류(refineTarget — 코어 수직 발·코어 선분 가운데 점·붙잡지 않은 선분 위 점, 0.15.0 코어 교차점)면 앱 refine을 불러
+   * 받을 수 있는 점(수 셋, 코어 점에서 화면 붙잡기 거리 안, 그 묶음(교차점이면 두 묶음) 단면의 남는 쪽)이면 그 점. 아니면 null(코어 점 그대로).
    * 바로 앞 호출과 입력이 같으면 앞 결과를 쓴다(같은 자리 미리 보기 뒤 누르기 — 미리 본 점이 그대로 찍힌다)
    */
   private refinedAt(so: NonNullable<Viewer3d['snapOpt']>, f: ViewFrame, x: number, y: number, snapPx: number, r: MeasureSnapPick, d: PickDetail | null, first: V3 | null): V3 | null {
@@ -3496,13 +3515,17 @@ export class Viewer3d {
     if (!t || !so.refine) return null;
     const ray = screenRay(f, x, y);
     // 앱이 입력을 고쳐도 기억이 바뀌지 않게 앱에는 따로 만든 복사본을 준다
-    const make = (): SnapRefineInput => ({
-      kind: t.kind,
-      point: [r.p[0], r.p[1], r.p[2]],
-      segment: { ...t.segment, ends: [[...t.segment.ends[0]] as V3, [...t.segment.ends[1]] as V3] },
-      first: first ? [first[0], first[1], first[2]] : null,
-      ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
-    });
+    const make = (): SnapRefineInput => {
+      const c: SnapRefineInput = {
+        kind: t.kind,
+        point: [r.p[0], r.p[1], r.p[2]],
+        segment: { ...t.segment, ends: [[...t.segment.ends[0]] as V3, [...t.segment.ends[1]] as V3] },
+        first: first ? [first[0], first[1], first[2]] : null,
+        ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
+      };
+      if (t.other) c.other = { ...t.other, ends: [[...t.other.ends[0]] as V3, [...t.other.ends[1]] as V3] };
+      return c;
+    };
     const input = make();
     let q: V3 | null;
     const memo = so.rfMemo;
@@ -3511,7 +3534,7 @@ export class Viewer3d {
       q = finitePoint(so.refine(make()));
       so.rfMemo = { input, res: q };
     }
-    if (!q || !acceptRefined(f, r.p, q, snapPx) || this.clippedAway(q, t.segment.id)) return null;
+    if (!q || !acceptRefined(f, r.p, q, snapPx) || this.clippedAway(q, t.segment.id) || (t.other && this.clippedAway(q, t.other.id))) return null;
     return [q[0], q[1], q[2]];
   }
 
@@ -3549,11 +3572,15 @@ export class Viewer3d {
     return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw }));
   }
 
-  /** 앱 붙잡기 후보 뒤에 추론 후보(0.9.0 — 커서 둘레 선분의 교차점·첫 점에서 내린 수직 발)를 잇는다 */
-  private *withInference(inf: Required<MeasureInference>, first: V3 | null, near: () => NearSegment[], app: Iterable<SnapCandidate>): Generator<SnapCandidate> {
+  /**
+   * 앱 붙잡기 후보 뒤에 추론 후보(0.9.0 — 커서 둘레 선분의 교차점·첫 점에서 내린 수직 발)를 잇는다.
+   * 0.15.0: 그 뒤에 열린 후보(open — 다듬기가 있을 때만, 앱이 다듬은 점)를 잇는다. 거리가 같으면 앞의 것이 이긴다
+   */
+  private *withInference(inf: Required<MeasureInference>, first: V3 | null, near: () => NearSegment[], app: Iterable<SnapCandidate>, open: (() => SnapCandidate[]) | null): Generator<SnapCandidate> {
     yield* app;
     if (!inf.intersections && !(inf.perpendicular && first)) return;
     for (const c of inferenceCandidates(near(), first, inf)) yield c;
+    if (open) yield* open();
   }
 
   /**

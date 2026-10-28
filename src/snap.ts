@@ -7,6 +7,9 @@
  *
  * 0.14.0 다듬기(MeasureSnapOptions.refine): 코어가 고른 수직 발·선분 가운데 점·붙잡지 않은 선분 위 점은 화면용 꺾은선 토막 위의 점이다.
  * 앱이 정확한 형상(B-rep 곡선 등) 위로 옮길 수 있게 무엇을 넘길지(refineTarget), 돌려받은 점을 받을지(acceptRefined)를 여기서 정한다.
+ *
+ * 0.15.0: 교차점(두 토막 — other)도 넘기고, 꺾은선으로는 후보가 없지만 곡선 위에는 있을 수 있는 "열린 후보"(토막 밖으로 떨어진 수직 발,
+ * 허용치보다 조금 떨어져 지나가는 두 토막의 교차)는 앱이 다듬어 준 점으로 후보를 만든다(refineOpen — 호출 한도와 기억 RefineMemo).
  */
 import type { Pick3d, SnapKind } from './types';
 import { type ViewFrame, projectToScreen } from './camera';
@@ -16,7 +19,8 @@ import type { MeasureResult } from './viewer';
 
 /**
  * 측정 점 고르기 결과: 찍을 점, 붙잡았는지, 붙잡은 종류(붙잡지 않았으면 null), 0.10.0부터 그 후보의 선분(수직 발 — 있을 때만),
- * 0.14.0부터 그 후보가 놓인 선분의 식별자(코어 수직 발 — 있을 때만)
+ * 0.14.0부터 그 후보가 놓인 선분의 식별자(코어 수직 발 — 있을 때만), 0.15.0부터 교차점의 둘째 선분 식별자와
+ * 열린 후보(앱이 이미 다듬은 점 — refined, 다듬기 전 코어 점 core)
  */
 export interface MeasureSnapPick {
   p: V3;
@@ -24,15 +28,24 @@ export interface MeasureSnapPick {
   kind: SnapKind | null;
   edge?: [V3, V3];
   seg?: SnapSegment;
+  other?: SnapSegment;
+  refined?: boolean;
+  core?: V3;
 }
 
-/** 앱 붙잡기 후보(세계 점·종류·묶음 id, 0.10.0부터 추론 후보의 선분, 0.14.0부터 코어 수직 발이 놓인 선분의 식별자) */
+/**
+ * 앱 붙잡기 후보(세계 점·종류·묶음 id, 0.10.0부터 추론 후보의 선분, 0.14.0부터 코어 수직 발이 놓인 선분의 식별자,
+ * 0.15.0부터 코어 교차점의 둘째 선분 식별자, 열린 후보면 refined = true(p는 앱이 다듬은 점)와 다듬기 전 코어 점 core)
+ */
 export interface SnapCandidate {
   p: V3;
   kind: SnapKind;
   id?: string;
   edge?: [V3, V3];
   seg?: SnapSegment;
+  other?: SnapSegment;
+  refined?: boolean;
+  core?: V3;
 }
 
 /**
@@ -54,21 +67,31 @@ export interface SnapSegment {
 
 /**
  * 다듬을 점의 종류(0.14.0): 'perpendicular' = 첫 점에서 커서 둘레 선분으로 내린 수직 발(추론 붙잡기),
- * 'midpoint' = 코어가 붙잡은 선분 가운데 점(midpoints — 앱 점 pointsFor의 가운데 점은 아니다), 'onEdge' = 붙잡지 않은 선분·윤곽선 위 점
+ * 'midpoint' = 코어가 붙잡은 선분 가운데 점(midpoints — 앱 점 pointsFor의 가운데 점은 아니다), 'onEdge' = 붙잡지 않은 선분·윤곽선 위 점.
+ * 0.15.0: 'intersection' = 커서 둘레 두 선분의 교차점(추론 붙잡기 — 둘째 선분은 SnapRefineInput.other)
  */
-export type SnapRefineKind = 'perpendicular' | 'midpoint' | 'onEdge';
+export type SnapRefineKind = 'perpendicular' | 'midpoint' | 'onEdge' | 'intersection';
 
 /** 다듬기 손잡이(MeasureSnapOptions.refine)가 받는 것(0.14.0 — 모두 복사본, 세계 좌표) */
 export interface SnapRefineInput {
   kind: SnapRefineKind;
-  /** 코어가 고른 점(꺾은선 토막 위) */
+  /** 코어가 고른 점(꺾은선 토막 위). 열린 후보(open)면 아래 open의 뜻 */
   point: V3;
-  /** 그 점이 놓인 선분 */
+  /** 그 점이 놓인 선분(교차점이면 첫째 선분) */
   segment: SnapSegment;
+  /** 0.15.0: 교차점('intersection')일 때만 — 둘째 선분 */
+  other?: SnapSegment;
   /** 첫 측정 점(찍었으면 — 수직 발의 기준점), 없으면 null */
   first: V3 | null;
   /** 커서 광선(원점은 가까운 면 위, 방향은 단위) — 선분 위 점을 곡선에서 광선에 가장 가까운 점으로 다듬을 때 */
   ray: { origin: V3; dir: V3 };
+  /**
+   * 0.15.0 열린 후보면 true(아니면 이 필드가 없다): 꺾은선으로는 후보가 없지만 곡선 위에는 있을 수 있는 점이다.
+   * 수직 발은 첫 점에서 그 토막으로 내린 발이 토막 밖(또는 끝점)이라 point는 그 발을 토막 범위로 자른 토막 끝(곡선 위 발이 그쪽에 있다),
+   * 교차점은 두 토막이 허용치보다 조금 떨어져 지나가 point는 가장 가까운 두 점의 가운데다. 앱이 정확한 점을 모르면 null을 돌려준다 — 그러면 후보가 없다.
+   * 결과는 종류·토막·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억해 커서가 움직여도 다시 부르지 않는다)
+   */
+  open?: boolean;
 }
 
 /**
@@ -85,10 +108,10 @@ export function chooseMeasureSnap(
   cands: Iterable<SnapCandidate>,
   visible: (p: V3, sx: number, sy: number, id: string | undefined) => boolean,
 ): MeasureSnapPick | null {
-  let best: { p: V3; kind: SnapKind; dist: number; edge?: [V3, V3] | undefined; seg?: SnapSegment | undefined } | null = null;
+  let best: { dist: number; c: SnapCandidate } | null = null;
   if (base && base.kind) {
     const s = projectToScreen(f, base.p);
-    best = { p: base.p, kind: base.kind, dist: s ? Math.hypot(s[0] - x, s[1] - y) : 0 };
+    best = { c: { p: base.p, kind: base.kind }, dist: s ? Math.hypot(s[0] - x, s[1] - y) : 0 };
   }
   for (const c of cands) {
     const s = projectToScreen(f, c.p);
@@ -97,12 +120,16 @@ export function chooseMeasureSnap(
     if (dist > snapPx || (best && dist >= best.dist)) continue;
     if (f.projection === 'perspective' && s[2] < f.near * 0.999) continue;
     if (!visible(c.p, s[0], s[1], c.id)) continue;
-    best = { p: c.p, kind: c.kind, dist, edge: c.edge, seg: c.seg };
+    best = { c, dist };
   }
   if (best) {
-    const r: MeasureSnapPick = { p: best.p, vertex: true, kind: best.kind };
-    if (best.edge) r.edge = best.edge;
-    if (best.seg) r.seg = best.seg;
+    const c = best.c;
+    const r: MeasureSnapPick = { p: c.p, vertex: true, kind: c.kind };
+    if (c.edge) r.edge = c.edge;
+    if (c.seg) r.seg = c.seg;
+    if (c.other) r.other = c.other;
+    if (c.refined) r.refined = true;
+    if (c.core) r.core = c.core;
     return r;
   }
   return base ? { p: base.p, vertex: false, kind: null } : null;
@@ -111,14 +138,16 @@ export function chooseMeasureSnap(
 /**
  * 다듬을 후보(0.14.0): 고른 점 r이 코어 수직 발(선분 식별자가 실린 후보), 고르기가 붙잡은 선분 가운데 점, 붙잡지 않은 선분·윤곽선 위 점이면
  * 그 종류와 선분(복사본), 아니면 null. base = 고르기 결과(붙잡은 점 snap·종류·고른 것·고른 선분의 세계 끝점).
- * 끝점·꼭짓점(꺾은선 꼭짓점은 곡선 위다), 앱 점(points·pointsFor — 앱이 이미 정확히 준다), 교차점(두 선분), 축·나란함(첫 점을 지나는 선)은 넘기지 않는다
+ * 0.15.0: 코어 교차점(두 선분 식별자가 실린 후보)도 — 둘째 선분은 other. 열린 후보(refined — 앱이 이미 다듬었다)는 넘기지 않는다.
+ * 끝점·꼭짓점(꺾은선 꼭짓점은 곡선 위다), 앱 점(points·pointsFor — 앱이 이미 정확히 준다), 축·나란함(첫 점을 지나는 선)은 넘기지 않는다
  */
 export function refineTarget(
   r: MeasureSnapPick | null,
   base: { snap: V3; snapKind: SnapKind | null; pick: Pick3d; ends?: [V3, V3] | undefined } | null,
-): { kind: SnapRefineKind; segment: SnapSegment } | null {
-  if (!r) return null;
+): { kind: SnapRefineKind; segment: SnapSegment; other?: SnapSegment } | null {
+  if (!r || r.refined) return null;
   if (r.kind === 'perpendicular') return r.seg ? { kind: 'perpendicular', segment: copySegment(r.seg) } : null;
+  if (r.kind === 'intersection') return r.seg && r.other ? { kind: 'intersection', segment: copySegment(r.seg), other: copySegment(r.other) } : null;
   // 고르기가 고른 점 그대로일 때만(앱 점이 이기면 다른 객체다)
   if (!base || r.p !== base.snap || !base.ends) return null;
   const pk = base.pick;
@@ -153,26 +182,128 @@ export function acceptRefined(f: ViewFrame, core: readonly number[], q: readonly
 
 const same3 = (a: readonly number[] | null, b: readonly number[] | null): boolean => (!a || !b ? a === b : a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
 
+/** 같은 선분 식별자인지(종류·id·번호·끝점, 둘 다 없으면 같다) */
+const sameSeg = (s: SnapSegment | undefined, t: SnapSegment | undefined): boolean =>
+  !s || !t ? s === t : s.kind === t.kind && s.id === t.id && s.index === t.index && s.raw === t.raw && same3(s.ends[0], t.ends[0]) && same3(s.ends[1], t.ends[1]);
+
 /**
  * 같은 다듬기 입력인지(0.14.0 — 같은 자리에서 미리 본 뒤 누르기, 한도가 바뀌어 다시 구하기): 종류·코어 점·선분(종류·id·번호·끝점)·첫 점·커서 광선이 모두 같으면 true.
- * 같으면 뷰어는 앱 함수를 다시 부르지 않고 앞 결과를 쓴다(미리 본 점이 그대로 찍힌다)
+ * 같으면 뷰어는 앱 함수를 다시 부르지 않고 앞 결과를 쓴다(미리 본 점이 그대로 찍힌다). 0.15.0: 둘째 선분(other)·열린 후보(open)도 견준다
  */
 export function sameRefineInput(a: SnapRefineInput, b: SnapRefineInput): boolean {
-  const s = a.segment, t = b.segment;
   return (
     a.kind === b.kind &&
     same3(a.point, b.point) &&
-    s.kind === t.kind &&
-    s.id === t.id &&
-    s.index === t.index &&
-    s.raw === t.raw &&
-    same3(s.ends[0], t.ends[0]) &&
-    same3(s.ends[1], t.ends[1]) &&
+    sameSeg(a.segment, b.segment) &&
+    sameSeg(a.other, b.other) &&
+    !!a.open === !!b.open &&
     same3(a.first, b.first) &&
     same3(a.ray.origin, b.ray.origin) &&
     same3(a.ray.dir, b.ray.dir)
   );
 }
+
+/** 열린 후보 다듬기(0.15.0)에서 미리 보기(측정 점 고르기) 한 번에 앱 함수를 새로 부르는 최대 횟수(기억에 있는 것은 세지 않는다) */
+export const OPEN_REFINE_CALLS = 6;
+
+/** 열린 후보 다듬기 기억(0.15.0)의 최대 항목 수(넘으면 가장 오래 쓰지 않은 것부터 지운다) */
+export const OPEN_REFINE_MEMO = 256;
+
+const segKey = (s: SnapSegment): string => `${s.kind}|${s.id.length}:${s.id}|${s.index}|${s.raw}|${s.ends[0].join(',')}|${s.ends[1].join(',')}`;
+
+/**
+ * 열린 후보 다듬기 기억의 열쇠(0.15.0): 종류·코어 점·선분(둘째 선분)·첫 점. 커서 광선은 넣지 않는다 —
+ * 열린 후보의 코어 점은 토막과 첫 점으로만 정해지므로(커서와 상관없다) 커서가 그 둘레에서 움직이는 동안 같은 열쇠다
+ */
+export function openRefineKey(c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first'>): string {
+  return `${c.kind}#${c.point.join(',')}#${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}#${c.first ? c.first.join(',') : '-'}`;
+}
+
+/** 열린 후보 다듬기 기억(0.15.0): 열쇠 → 앱이 돌려준 점(받을 수 있는 수 셋의 복사본, 아니면 null). 가장 오래 쓰지 않은 것부터 지운다 */
+export class RefineMemo {
+  private readonly m = new Map<string, V3 | null>();
+  constructor(readonly max = OPEN_REFINE_MEMO) {}
+  /** 기억한 결과(없으면 undefined) */
+  get(key: string): V3 | null | undefined {
+    const v = this.m.get(key);
+    if (v !== undefined) {
+      this.m.delete(key);
+      this.m.set(key, v);
+    }
+    return v;
+  }
+  set(key: string, v: V3 | null): void {
+    this.m.delete(key);
+    this.m.set(key, v);
+    while (this.m.size > this.max) this.m.delete(this.m.keys().next().value as string);
+  }
+  get size(): number {
+    return this.m.size;
+  }
+}
+
+/** 열린 후보(0.15.0 — inference.openCandidates가 만든다): 종류, 코어 점, 선분 식별자(교차점이면 둘째도), 기준 선분, 남는 쪽 판정, 같은 점으로 볼 거리 */
+export interface OpenSnapCandidate {
+  kind: 'perpendicular' | 'intersection';
+  /** 코어 점(SnapRefineInput.open의 뜻) */
+  p: V3;
+  /** 붙잡기 후보 묶음 id(가림·단면 판정 — 첫째 선분의 묶음) */
+  id: string;
+  seg: SnapSegment;
+  other?: SnapSegment;
+  /** 수직 발이면 그 토막(잠글 때 기준 선분) */
+  edge?: [V3, V3];
+  /** 다듬은 점이 그 묶음(둘 다)의 단면에서 남는 쪽인지 */
+  keep?: (p: readonly number[]) => boolean;
+  /** 같은 점·코어 점 그대로로 볼 세계 거리(그 깊이에서 화면 반 화소) */
+  tol: number;
+}
+
+/**
+ * 열린 후보 풀기(0.15.0, 순수 — 앱 함수는 refine으로 받는다): 차례대로 기억(memo)을 먼저 보고, 없으면 남은 호출 수(budget.calls) 안에서만
+ * 앱 다듬기를 불러(입력은 복사본, open = true) 기억한다. 받을 수 있는 점만 붙잡기 후보(refined = true, p = 다듬은 점, core = 코어 점)로 돌려준다:
+ * 수 셋인 점이고, 코어 점에서 tol보다 멀고(그대로 돌려주면 앱이 정확한 점을 모른다는 뜻으로 본다), 그 묶음의 단면에서 남는 쪽이며,
+ * 앞서 받은 같은 종류의 점과 tol 안에서 겹치지 않을 때(같은 곡선의 이웃 토막에서 같은 발·교차점이 여러 번 나오면 하나 — 커서에 가까운 토막 것).
+ * 커서 거리·가림·눈 뒤는 붙잡기 고르기(chooseMeasureSnap)가 다듬은 점으로 따진다
+ */
+export function refineOpen(
+  cands: Iterable<OpenSnapCandidate>,
+  first: V3 | null,
+  ray: { origin: V3; dir: V3 },
+  refine: (c: SnapRefineInput) => unknown,
+  memo: RefineMemo,
+  budget: { calls: number },
+): SnapCandidate[] {
+  const out: SnapCandidate[] = [];
+  for (const c of cands) {
+    const key = openRefineKey({ kind: c.kind, point: c.p, segment: c.seg, other: c.other, first });
+    let q = memo.get(key);
+    if (q === undefined) {
+      if (budget.calls <= 0) continue;
+      budget.calls--;
+      const input: SnapRefineInput = {
+        kind: c.kind,
+        point: [c.p[0], c.p[1], c.p[2]],
+        segment: copySegment(c.seg),
+        first: first ? [first[0], first[1], first[2]] : null,
+        ray: { origin: [ray.origin[0], ray.origin[1], ray.origin[2]], dir: [ray.dir[0], ray.dir[1], ray.dir[2]] },
+        open: true,
+      };
+      if (c.other) input.other = copySegment(c.other);
+      q = finitePoint(refine(input));
+      memo.set(key, q);
+    }
+    if (!q || dist3(q, c.p) <= c.tol || (c.keep && !c.keep(q))) continue;
+    if (out.some((o) => o.kind === c.kind && dist3(o.p, q) <= c.tol)) continue;
+    const s: SnapCandidate = { p: [q[0], q[1], q[2]], kind: c.kind, id: c.id, seg: c.seg, refined: true, core: c.p };
+    if (c.other) s.other = c.other;
+    if (c.edge) s.edge = c.edge;
+    out.push(s);
+  }
+  return out;
+}
+
+const dist3 = (a: readonly number[], b: readonly number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);
 
 /**
  * 붙잡기 한도 값 고르기(0.10.0, setMeasureSnapLimit·setMeasureSnap({ limit })): 수(NaN 아님, +Infinity 아님)면 그대로, 아니면 null(한도 없음).

@@ -19,9 +19,11 @@ type V = Viewer3d & Record<string, any>;
  * cross = base에 상자 윗면 위로 엇갈린 선분 둘을 더한 자료(0.9.0 교차점 붙잡기),
  * big = 나선 선분 40만 개(위치 9.6 MB·색 12.8 MB — 조각 일곱) 장면을 나눠 올리기로 올린 자료(0.9.0 큰 배열 조각 올리기 — 다 올린 그림이 같아야 한다),
  * edit·edit-big = base에 상자 윗면 위 높이 격자 그물(96² 마디, 큰 쪽은 520²)을 더한 자료(0.11.0 그물 바꾸기 — 장면마다 새로 만든다. 격자 배열을 제자리에서 고치므로),
- * arc = base에 거친 원 둘(상자 위에 뜬 12토막 원 꺾은선 선분 묶음, 상자 앞 바닥의 12토막 원판 그물 둘레 윤곽선)을 더한 자료(0.14.0 붙잡기 다듬기 — 앱이 정확한 원 위로 옮긴다)
+ * arc = base에 거친 원 둘(상자 위에 뜬 12토막 원 꺾은선 선분 묶음, 상자 앞 바닥의 12토막 원판 그물 둘레 윤곽선)을 더한 자료(0.14.0 붙잡기 다듬기 — 앱이 정확한 원 위로 옮긴다),
+ * arc2 = base에 상자 위에 뜬 12토막 원 꺾은선, 그와 한 점에서 3D로 만나는 세로 원 꺾은선, 원을 가로지르는 곧은 선분, 원 밖 멀리 있는 첫 점 선분을 더한 자료
+ * (0.15.0 열린 수직 발·교차점 다듬기)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2';
 
 interface Ctx {
   v: V;
@@ -81,6 +83,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
         ],
       };
     if (d === 'arc') s = { ...s, lines: [...s.lines, arcRing()], meshes: [...s.meshes, arcDisk()] };
+    if (d === 'arc2') s = { ...s, lines: [...s.lines, ...arc2Lines()] };
     scenes.set(d, s);
   }
   return s;
@@ -1741,9 +1744,14 @@ const refineValues: ValueSet = {
     };
     const arcOf = (id: string): Arc | null => (id === ARC_RING.id ? ARC_RING : id === ARC_DISK.id ? ARC_DISK : null);
     const count = { n: 0 };
-    /** 앱 쪽 정확한 원: 토막 위 점 = 광선과 원 평면의 만남을 원 위로, 가운데 점 = 토막 현 가운데를 원 위로, 수직 발 = 첫 점의 지름 방향 두 점 중 코어 점에 가까운 것 */
+    /**
+     * 앱 쪽 정확한 원: 토막 위 점 = 광선과 원 평면의 만남을 원 위로, 가운데 점 = 토막 현 가운데를 원 위로, 수직 발 = 첫 점의 지름 방향 두 점 중 코어 점에 가까운 것.
+     * 호출 수는 0.14.0이 넘기던 것만 센다 — 0.15.0의 열린 후보(open)·교차점(intersection) 호출은 arc2-measure-open에서 따로 본다
+     * (그래서 이 값 묶음은 0.14.0과 0.15.0이 같아야 한다: 0.14.0 종류의 호출과 결과가 그대로인지)
+     */
     const exact = (i: any): number[] | null => {
-      count.n++;
+      if (i.kind === 'intersection') return null;
+      if (!i.open) count.n++;
       const k = arcOf(i.segment.id);
       if (!k) return null;
       if (i.kind === 'onEdge') {
@@ -1869,6 +1877,235 @@ const refineValues: ValueSet = {
   },
 };
 
+// ───────────── 0.15.0 열린 수직 발·교차점 다듬기 ─────────────
+/** arc2 자료의 원: 중심·단위 법선·반지름·틀(u·v)·12토막 시작 각(도) */
+type Circ = { id: string; c: number[]; n: number[]; r: number; u: number[]; v: number[]; start: number };
+/** 상자 위에 뜬 원(z 60 평면, 중심 (60, 40), 반지름 30, 꼭짓점 15° + 30°·k — 0°는 토막 가운데) */
+const C2_RING: Circ = { id: '고리', c: [60, 40, 60], n: [0, 0, 1], r: 30, u: [1, 0, 0], v: [0, 1, 0], start: 15 };
+/** 세로 원(y 40 평면, 중심 (80, 40, 60), 반지름 10) — 고리와 (90, 40, 60) 한 점에서 만난다. 꺾은선끼리는 현의 처짐만큼 비켜 간다 */
+const C2_UP: Circ = { id: '세로 원', c: [80, 40, 60], n: [0, 1, 0], r: 10, u: [1, 0, 0], v: [0, 0, 1], start: 15 };
+const C2_X = [90, 40, 60];
+/** 고리를 가로지르는 곧은 선분(z 60 평면, y 55) */
+const C2_LINE = [
+  [0, 55, 60],
+  [120, 55, 60],
+];
+/** 첫 점(곧은 선분 '기준'의 끝): 고리 중심에서 20° 방향 80 mm — 그 방향 원 위 발은 꼭짓점 15°에서 5°라 둘레 토막으로 내린 꺾은선 발은 모두 토막 밖 */
+const C2_FIRST = [60 + 80 * Math.cos((20 * Math.PI) / 180), 40 + 80 * Math.sin((20 * Math.PI) / 180), 60];
+const circAt = (k: Circ, deg: number): number[] => {
+  const a = (deg * Math.PI) / 180, cs = Math.cos(a), sn = Math.sin(a);
+  return [0, 1, 2].map((j) => k.c[j]! + k.r * (k.u[j]! * cs + k.v[j]! * sn));
+};
+function circLine(k: Circ): LineSet3d {
+  const P: number[] = [];
+  for (let i = 0; i < 12; i++) P.push(...circAt(k, k.start + i * 30), ...circAt(k, k.start + (i + 1) * 30));
+  return { id: k.id, positions: new Float32Array(P), segmentIds: new Uint32Array(Array.from({ length: 12 }, (_, i) => 100 + i)), color: [0.4, 0.95, 0.6, 1], width: 1.5, group: '원' };
+}
+function arc2Lines(): LineSet3d[] {
+  const F = C2_FIRST;
+  return [
+    circLine(C2_RING),
+    circLine(C2_UP),
+    { id: '가로선', positions: new Float32Array([...C2_LINE[0]!, ...C2_LINE[1]!]), segmentIds: new Uint32Array([7]), color: [0.95, 0.8, 0.4, 1], group: '원' },
+    { id: '기준', positions: new Float32Array([...F, F[0]! + 12, F[1]! - 3, F[2]!]), color: [0.95, 0.5, 0.5, 1], group: '원' },
+  ];
+}
+
+/** 0.15.0 열린 후보(토막 밖 수직 발·넓힌 교차점)가 있는 판인지 — 두 원이 만나는 자리를 가리켜 앱 함수가 open으로 불리는지 본다 */
+const v0150open: Need = (v, c) => {
+  const why = v0140refine(v, c);
+  if (why) return why;
+  v.setGroupVisible('공구 경로', false);
+  v.setMeasureMode(true);
+  let open = false;
+  v.setMeasureSnap({ inference: { intersections: true }, refine: (i: any) => ((open ||= !!i.open), null) });
+  const q = c.at(C2_X);
+  if (q) {
+    c.hover(q.x, q.y);
+    v.renderNow();
+  }
+  v.setMeasureSnap(null);
+  v.setMeasureMode(false);
+  v.setGroupVisible('공구 경로', true);
+  return open ? null : '이 판에 없는 동작: 0.15.0 열린 후보 다듬기(SnapRefineInput.open)';
+};
+
+/**
+ * 0.15.0 열린 수직 발·교차점 다듬기 값(arc2 자료): 원 밖 멀리 있는 첫 점에서 원으로 내린 발(꺾은선 발은 토막 밖)을 가리키고 찍은 결과(원 위인지, 거리가 정확한 값과 1e-9 안인지),
+ * 원과 곧은 선분의 교차점(꺾은선 교차점을 정확한 교차점으로), 두 원의 교차점(꺾은선끼리 비켜 가는 자리 — 넓힌 교차)을 가리키고 찍은 결과.
+ * 같은 차례를 refine 없이·null·코어 점 그대로·맞은쪽 점으로 되풀이해 refine 없이와 같은지, 원을 따라 지나갈 때 미리 보기 한 번의 열린 후보 호출 수(한도 안)와
+ * 같은 길을 다시 지나갈 때 0인지(기억), 잠금 중에는 부르지 않는지
+ */
+const openValues: ValueSet = {
+  name: 'arc2-measure-open',
+  data: 'arc2',
+  needs: v0150open,
+  run: (c) => {
+    const { v } = c;
+    v.setGroupVisible('공구 경로', false);
+    v.setGroupVisible('구멍', false);
+    v.setMeasureMode(true);
+    const f32 = (p: readonly number[]): number[] => Array.from(new Float32Array(p));
+    const sub = (a: readonly number[], b: readonly number[]): number[] => [a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!];
+    const dot = (a: readonly number[], b: readonly number[]): number => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+    const cross = (a: readonly number[], b: readonly number[]): number[] => [a[1]! * b[2]! - a[2]! * b[1]!, a[2]! * b[0]! - a[0]! * b[2]!, a[0]! * b[1]! - a[1]! * b[0]!];
+    const dist3 = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+    const lerp = (a: readonly number[], b: readonly number[], t: number): number[] => a.map((x, j) => x + (b[j]! - x) * t);
+    const vtx = (k: Circ, i: number): number[] => f32(circAt(k, k.start + i * 30));
+    const onC = (k: Circ, p: readonly number[]): boolean => Math.abs(dist3(p, k.c) - k.r) < 1e-9 && Math.abs(dot(sub(p, k.c), k.n)) < 1e-9;
+    /** 원 평면 위로 내린 뒤 지름 방향 */
+    const radial = (k: Circ, p: readonly number[]): number[] => {
+      const d = sub(p, k.c), h = dot(d, k.n);
+      const w = [d[0]! - h * k.n[0]!, d[1]! - h * k.n[1]!, d[2]! - h * k.n[2]!];
+      const l = Math.hypot(w[0]!, w[1]!, w[2]!);
+      return [0, 1, 2].map((j) => k.c[j]! + (k.r * w[j]!) / l);
+    };
+    /** 직선(o, d)과 원 */
+    const lineCirc = (o: readonly number[], d: readonly number[], k: Circ): number[][] => {
+      const dn = dot(d, k.n);
+      if (Math.abs(dn) > 1e-12) {
+        const t = dot(sub(k.c, o), k.n) / dn;
+        const p = [0, 1, 2].map((j) => o[j]! + d[j]! * t);
+        return Math.abs(dist3(p, k.c) - k.r) < 1e-9 ? [p] : [];
+      }
+      const w = sub(o, k.c);
+      const A = dot(d, d), B = 2 * dot(w, d), D = B * B - 4 * A * (dot(w, w) - k.r * k.r);
+      return D < 0 ? [] : [-1, 1].map((s) => (-B + s * Math.sqrt(D)) / (2 * A)).map((t) => [0, 1, 2].map((j) => o[j]! + d[j]! * t));
+    };
+    /** 다른 평면의 두 원: 두 평면의 교선과 첫 원의 만남 가운데 둘째 원 위인 것 */
+    const circCirc = (a: Circ, b: Circ): number[][] => {
+      const d = cross(a.n, b.n);
+      const dd = dot(d, d);
+      if (dd < 1e-24) return [];
+      const ha = dot(a.n, a.c), hb = dot(b.n, b.c);
+      const o = cross([0, 1, 2].map((j) => hb * a.n[j]! - ha * b.n[j]!), d).map((x) => -x / dd);
+      return lineCirc(o, d, a).filter((p) => Math.abs(dist3(p, b.c) - b.r) < 1e-9);
+    };
+    const nearest = (ps: number[][], q: readonly number[]): number[] | null => ps.reduce<number[] | null>((m, p) => (!m || dist3(p, q) < dist3(m, q) ? p : m), null);
+    const circOf = (id: string): Circ | null => (id === C2_RING.id ? C2_RING : id === C2_UP.id ? C2_UP : null);
+    const calls = { all: 0, open: 0, intersection: 0 };
+    /** 앱 쪽 정확한 원·곧은 선분 */
+    const exact = (i: any): number[] | null => {
+      calls.all++;
+      if (i.open) calls.open++;
+      if (i.kind === 'intersection') {
+        calls.intersection++;
+        const a = circOf(i.segment.id), b = i.other ? circOf(i.other.id) : null;
+        if (a && b) return nearest(circCirc(a, b), i.point);
+        const k = a ?? b;
+        const isLine = i.segment.id === '가로선' || i.other?.id === '가로선';
+        return k && isLine ? nearest(lineCirc(C2_LINE[0]!, sub(C2_LINE[1]!, C2_LINE[0]!), k), i.point) : null;
+      }
+      const k = circOf(i.segment.id);
+      if (!k) return null;
+      if (i.kind === 'onEdge') {
+        const o = i.ray.origin, d = i.ray.dir;
+        const t = dot(sub(k.c, o), k.n) / dot(d, k.n);
+        return radial(k, [0, 1, 2].map((j) => o[j] + d[j] * t));
+      }
+      if (i.kind === 'midpoint') return radial(k, lerp(i.segment.ends[0], i.segment.ends[1], 0.5));
+      const q = radial(k, i.first);
+      const q2 = [0, 1, 2].map((j) => 2 * k.c[j]! - q[j]!);
+      return dist3(q, i.point) <= dist3(q2, i.point) ? q : q2;
+    };
+    const hoverRow = (name: string, p: readonly number[], want: readonly number[] | null, k: Circ | null): unknown[] => {
+      const q = c.at(p);
+      if (!q) return [name, null];
+      c.hover(q.x, q.y);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, !!h.refined, r10s(h.point), want ? dist3(h.point, want) < 1e-9 : null, k ? onC(k, h.point) : null, r10s(h.direction)] : null];
+    };
+    const clickAt = (p: readonly number[]): boolean => {
+      const q = c.at(p);
+      if (q) c.click(q.x, q.y);
+      return !!q;
+    };
+    // 꺾은선 교차점: 고리 토막 0(15°–45°)과 곧은 선분
+    const lineCore = (() => {
+      const a = vtx(C2_RING, 0), b = vtx(C2_RING, 1), y = Math.fround(C2_LINE[0]![1]!);
+      const t = (y - a[1]!) / (b[1]! - a[1]!);
+      return lerp(a, b, t);
+    })();
+    const lineExact = [C2_RING.c[0]! + Math.sqrt(900 - 225), 55, 60];
+    const sweep = (opt: Record<string, unknown>): unknown[] => {
+      const rows: unknown[] = [];
+      v.setMeasureSnap({ midpoints: true, inference: { perpendicular: true, intersections: true, axes: true, lock: true }, ...opt });
+      // 1. 열린 수직 발
+      v.clearMeasure();
+      if (!clickAt(C2_FIRST)) return ['first', null];
+      const A = v.measurePoints[0]?.point;
+      if (!A) return ['first', null];
+      const T = radial(C2_RING, A);
+      rows.push(['first', r10s(A), v.measurePoints[0].snap], hoverRow('foot', T, T, C2_RING));
+      clickAt(T);
+      const m = v.measurement();
+      const want = dist3(A, C2_RING.c) - C2_RING.r;
+      rows.push(['foot-measure', m ? [r10s(m.b), r10(m.distance), m.snapB ?? null, Math.abs(m.distance - want) < 1e-9] : null, v.measurePoints.map((p: any) => [p.snap, !!p.refined])]);
+      // 2. 원과 곧은 선분(꺾은선 교차점)·두 원(넓힌 교차), 첫 점에서 찍은 거리
+      for (const [name, p, w, k] of [
+        ['line-x', lineCore, lineExact, C2_RING],
+        ['circles-x', C2_X, C2_X, C2_UP],
+      ] as [string, number[], number[], Circ][]) {
+        v.clearMeasure();
+        rows.push(hoverRow(name, p, w, k));
+        clickAt(C2_FIRST);
+        clickAt(p);
+        const mm = v.measurement();
+        rows.push([`${name}-measure`, mm ? [r10s(mm.b), r10(mm.distance), mm.snapB ?? null] : null, v.measurePoints.map((q: any) => [q.snap, !!q.refined])]);
+      }
+      // 3. 원을 따라 지나가기(토막 가운데·꼭짓점 둘레, 첫 점에서)
+      v.clearMeasure();
+      clickAt(C2_FIRST);
+      for (let i = 0; i < 12; i++)
+        for (const t of [0.1, 0.5]) {
+          const p = lerp(vtx(C2_RING, i), vtx(C2_RING, i + 1), t);
+          rows.push(hoverRow(`ring-${i}-${t}`, p, null, C2_RING));
+        }
+      return rows;
+    };
+    const out: unknown[] = [];
+    const refined = sweep({ refine: exact });
+    out.push(['refined', refined], ['calls', { ...calls }]);
+    const plain = sweep({});
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+    out.push(['refined-differs', !same(refined, plain)]);
+    out.push(['null-same', same(sweep({ refine: () => null }), plain)]);
+    out.push(['core-same', same(sweep({ refine: (i: any) => (i.open ? i.point : null) }), plain)]);
+    // 고리 중심에 대해 맞은쪽 점(붙잡기 거리 밖)을 돌려주면 모두 버린다
+    out.push(['far-same', same(sweep({ refine: (i: any) => [2 * C2_RING.c[0]! - i.point[0], 2 * C2_RING.c[1]! - i.point[1], i.point[2]] }), plain)]);
+    // 호출 한도·기억: 원을 따라 지나갈 때 미리 보기 한 번의 열린 후보 호출 수, 같은 길을 다시 지나갈 때
+    v.setMeasureSnap({ inference: { perpendicular: true, intersections: true }, refine: exact });
+    v.clearMeasure();
+    clickAt(C2_FIRST);
+    const per: number[] = [];
+    const path: number[][] = [];
+    for (let i = 0; i < 12; i++) for (let t = 0; t < 1; t += 0.125) path.push(lerp(vtx(C2_RING, i), vtx(C2_RING, i + 1), t));
+    for (const p of path) {
+      const n = calls.open;
+      const q = c.at(p);
+      if (!q) continue;
+      c.hover(q.x, q.y);
+      v.renderNow();
+      per.push(calls.open - n);
+    }
+    const n2 = calls.open;
+    for (const p of path) {
+      const q = c.at(p);
+      if (!q) continue;
+      c.hover(q.x, q.y);
+      v.renderNow();
+    }
+    out.push(['per-move', Math.max(...per), per.reduce((s, x) => s + x, 0), calls.open - n2]);
+    // 잠금 중에는 부르지 않는다
+    const T = radial(C2_RING, v.measurePoints[0]!.point);
+    const n3 = calls.all;
+    out.push(['lock', v.setMeasureInferenceLock('z'), hoverRow('locked', T, null, null), calls.all - n3]);
+    v.setMeasureInferenceLock(false);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -1893,6 +2130,7 @@ const VALUES: ValueSet[] = [
   directionLockValues('off'),
   labelAvoidValues,
   refineValues,
+  openValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
