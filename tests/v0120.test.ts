@@ -2,14 +2,15 @@
  * 0.12.0 측정 잠금 보완.
  * - 선분 방향 잠금(edgeLineLock): 모서리 끝(첫 점)에서 그 모서리를 따라 다른 끝·가운데 점·교차점·선 위를 가리키면 Shift·setMeasureInferenceLock(true)가
  *   그 모서리 방향으로 잠근다(축과 나란하면 그 축). 첫 점 자리·첫 점을 지나지 않는 선분이면 잠그지 않는다
- * - 미리 보기에서 잠글 방향(measureHoverLock)
+ * - 앱이 정한 방향 잠금(directionLock — setMeasureInferenceLock({ direction, edge?, kind? }))
+ * - 찍은 측정 점(measurePoints), 미리 보기에서 잠글 방향(measureHoverLock), 측정 거리 글상자 자리(measureLabelRect)
  * 순수 함수와, 가짜 DOM·가짜 WebGL2로 만든 뷰어에 실제 포인터 사건을 넣어 본다.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import { Viewer3d } from '../src/viewer';
 import { boxMesh } from '../src/synth';
-import { axisLock, edgeLineLock, unitDir } from '../src/inference';
+import { axisLock, directionLock, edgeLineLock, unitDir } from '../src/inference';
 import type { V3 } from '../src/math';
 import type { LineSet3d, Scene3d } from '../src/types';
 
@@ -66,6 +67,40 @@ describe('edgeLineLock(선분 방향 잠금)', () => {
     const p: V3 = [30, 20, 0.01];
     expect(edgeLineLock(A, p, [S1], 1e-9)).toBeNull();
     expect(edgeLineLock(A, p, [S1], 1e-9, 0.02)!.kind).toBe('parallel');
+  });
+});
+
+describe('directionLock(앱이 정한 방향 잠금)', () => {
+  it('축과 나란한 방향은 그 축(+축), 아니면 나란함(단위 방향)', () => {
+    expect(directionLock({ direction: [0, 0, 5] })).toEqual(axisLock('z'));
+    expect(directionLock({ direction: [0, -2, 0] })).toEqual(axisLock('y'));
+    expect(directionLock({ direction: new Float32Array([3, 4, 0]) as unknown as number[] })).toEqual({ kind: 'parallel', direction: [0.6, 0.8, 0] });
+  });
+  it('종류를 주면 따른다(축은 축과 나란할 때만)', () => {
+    expect(directionLock({ direction: [3, 4, 0], kind: 'perpendicular' })).toEqual({ kind: 'perpendicular', direction: [0.6, 0.8, 0] });
+    expect(directionLock({ direction: [1, 0, 0], kind: 'parallel' })).toEqual({ kind: 'parallel', direction: [1, 0, 0] });
+    expect(directionLock({ direction: [3, 4, 0], kind: 'axis' })).toBeNull();
+    expect(directionLock({ direction: [0, 0, -1], kind: 'axis' })).toEqual(axisLock('z'));
+    expect(directionLock({ direction: [1, 0, 0], kind: 'twisted' as never })).toBeNull();
+  });
+  it('기준 선분: 방향이 없으면 그 방향, 있으면 함께 싣는다(복사본)', () => {
+    const e: [V3, V3] = [
+      [1, 1, 0],
+      [4, 5, 0],
+    ];
+    const l = directionLock({ edge: e })!;
+    expect(l).toEqual({ kind: 'parallel', direction: [0.6, 0.8, 0], edge: e });
+    expect(l.edge![0]).not.toBe(e[0]);
+    expect(directionLock({ direction: [0, 0, 1], edge: e })).toEqual({ ...axisLock('z'), edge: e });
+  });
+  it('잘못된 값은 null', () => {
+    expect(directionLock(null)).toBeNull();
+    expect(directionLock({})).toBeNull();
+    expect(directionLock({ direction: [0, 0, 0] })).toBeNull();
+    expect(directionLock({ direction: [NaN, 1, 0] })).toBeNull();
+    expect(directionLock({ direction: [1, 2] as unknown as number[] })).toBeNull();
+    expect(directionLock({ edge: [[0, 0, 0], [0, 0, 0]] })).toBeNull();
+    expect(directionLock({ direction: [1, 0, 0], edge: [[0, 0, 0], [1, NaN, 0]] })).toBeNull();
   });
 });
 
@@ -140,6 +175,7 @@ describe('Viewer3d: 모서리 끝에서 그 모서리를 따라 가리킨 점 �
     // 나란함은 켜지 않는다(선분 방향 잠금은 나란함 추론과 따로 된다)
     v.setMeasureSnap({ midpoints: true, inference: { axes: true, lock: true } });
     clickAt(w, A);
+    expect(v.measurePoints).toEqual([{ point: A, snap: 'endpoint' }]);
     hoverAt(w, B);
     const h = v.measureHoverSnap!;
     expect(h.snap).toBe('endpoint');
@@ -170,8 +206,12 @@ describe('Viewer3d: 모서리 끝에서 그 모서리를 따라 가리킨 점 �
     expect(m.lockedB).toBe(true);
     expect(m.directionB).toEqual(uS1);
     expect(lineDist(m.b, A, uS1)).toBeLessThan(1e-6);
-    // 두 점째에서 풀린다
+    // 두 점째에서 풀린다. 찍은 점 둘은 measurement()와 같다
     expect(v.measureInferenceLock).toBeNull();
+    const pts = v.measurePoints;
+    expect(pts).toHaveLength(2);
+    expect(pts[1]).toEqual({ point: m.b, snap: 'parallel', direction: uS1, locked: true });
+    expect(pts.map((p) => p.point)).toEqual([v.measurement()!.a, v.measurement()!.b]);
   });
 
   it('가운데 점·교차점·붙잡지 않은 선 위 점도(앱 단추 setMeasureInferenceLock(true))', () => {
@@ -219,6 +259,7 @@ describe('Viewer3d: 모서리 끝에서 그 모서리를 따라 가리킨 점 �
       v.setMeasureMode(true);
       v.setMeasureSnap({ edges: true, inference: { axes: true, lock: true } });
       clickAt(w, [260, 0, 30]);
+      expect(v.measurePoints[0]!.point).toEqual([260, 0, 30]);
       hoverAt(w, [260, 40, 30]);
       expect(v.measureHoverSnap!.snap, mode).toBe('endpoint');
       expect(v.measureHoverLock, mode).toEqual(axisLock('y'));
@@ -297,5 +338,99 @@ describe('Viewer3d: 모서리 끝에서 그 모서리를 따라 가리킨 점 �
     expect(v.measureHoverLock).toEqual(S1_LOCK);
     hoverAt(w, B, true);
     expect(v.measureInferenceLock).toBeNull();
+  });
+});
+
+describe('Viewer3d: 앱이 정한 방향 잠금·찍은 점·글상자 자리', () => {
+  it('setMeasureInferenceLock({ direction }): 첫 점 전에 줘도 되고, 첫 점을 지나는 그 선 위에 찍는다', () => {
+    const w = view();
+    const { v } = w;
+    expect(v.setMeasureInferenceLock({ direction: [1, 1, 0] })).toBe(false); // 측정 모드·붙잡기 선택이 없다
+    v.setMeasureMode(true);
+    expect(v.setMeasureInferenceLock({ direction: [1, 1, 0] })).toBe(false);
+    v.setMeasureSnap({ midpoints: true });
+    expect(v.setMeasureInferenceLock({ direction: [0, 0, 0] })).toBe(false);
+    expect(v.measureInferenceLock).toBeNull();
+    const e = unitDir([0, 0, 0], [1, 1, 0])!;
+    expect(v.setMeasureInferenceLock({ direction: [1, 1, 0] })).toBe(true);
+    expect(v.measureInferenceLock).toEqual({ kind: 'parallel', direction: e, source: 'api' });
+    clickAt(w, A);
+    expect(v.measureInferenceLock).not.toBeNull();
+    hoverAt(w, C, false, 10, -20);
+    const h = v.measureHoverSnap!;
+    expect(h.locked).toBe(true);
+    expect(h.snap).toBe('parallel');
+    expect(lineDist(h.point, A, e)).toBeLessThan(1e-6);
+    // 점 붙잡기(C)면 그 점을 선에 수직으로 내린 자리(from)
+    hoverAt(w, C);
+    expect(v.measureHoverSnap!.from).toEqual(C);
+    expect(lineDist(v.measureHoverSnap!.point, A, e)).toBeLessThan(1e-6);
+    // 축 방향은 축 잠금, 기준 선분은 미리 보기에 실린다
+    const edge: [V3, V3] = [
+      [200, 0, 0],
+      [200, 0, 30],
+    ];
+    expect(v.setMeasureInferenceLock({ direction: [0, 0, -3], edge })).toBe(true);
+    expect(v.measureInferenceLock).toEqual({ ...axisLock('z'), edge, source: 'api' });
+    hoverAt(w, B, false, 0, -40);
+    expect(v.measureHoverSnap!.axis).toBe('z');
+    expect(v.measureHoverSnap!.edge).toEqual(edge);
+    // 잘못된 값은 앞 잠금을 그대로 두고 false
+    expect(v.setMeasureInferenceLock({ direction: [3, 4, 0], kind: 'axis' })).toBe(false);
+    expect(v.measureInferenceLock?.axis).toBe('z');
+    expect(v.setMeasureInferenceLock(false)).toBe(false);
+    expect(v.measureInferenceLock).toBeNull();
+  });
+
+  it('measurePoints: 붙잡기 선택이 없어도 0.7.2 규칙의 종류, 지우면 빈 목록, 복사본', () => {
+    const w = view();
+    const { v } = w;
+    v.setMeasureMode(true);
+    expect(v.measurePoints).toEqual([]);
+    clickAt(w, A);
+    const p = v.measurePoints;
+    expect(p).toEqual([{ point: A, snap: 'endpoint' }]);
+    p[0]!.point[0] = 99;
+    expect(v.measurePoints[0]!.point).toEqual(A);
+    // 빈 곳(붙잡지 않은 점)은 종류 null
+    clickAt(w, [30, 20, 0]);
+    expect(v.measurePoints[1]!.snap).toBeNull();
+    expect(v.measurePoints[1]!.point.map((x) => +x.toFixed(3))).toEqual([30, 20, 0]);
+    v.clearMeasure();
+    expect(v.measurePoints).toEqual([]);
+  });
+
+  it('measureLabelRect: 거리 글상자를 그린 자리(캔버스 안), 그리지 않으면 null', () => {
+    const w = view();
+    const { v } = w;
+    v.setMeasureMode(true);
+    v.setMeasureSnap({ inference: { axes: true } });
+    expect(v.measureLabelRect).toBeNull();
+    clickAt(w, A);
+    v.renderNow();
+    // 첫 점만(미리 보기 없음)이면 글상자도 없다
+    expect(v.measureLabelRect).toBeNull();
+    hoverAt(w, B);
+    const r = v.measureLabelRect!;
+    expect(r.width).toBeGreaterThan(14);
+    expect(r.height).toBe(2 * 16 + 8);
+    expect(r.x).toBeGreaterThanOrEqual(4);
+    expect(r.y).toBeGreaterThanOrEqual(4);
+    expect(r.x + r.width).toBeLessThanOrEqual(800 - 4);
+    expect(r.y + r.height).toBeLessThanOrEqual(600 - 4);
+    // 글상자는 A·B 화면 가운데의 오른쪽 위
+    const a = at(w, A), b = at(w, B);
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    expect(r.x).toBeCloseTo(Math.min(Math.max(4, mx + 10), 800 - r.width - 4), 6);
+    expect(r.y).toBeCloseTo(Math.min(Math.max(4, my - r.height - 8), 600 - r.height - 4), 6);
+    r.x = -1;
+    expect(v.measureLabelRect!.x).not.toBe(-1);
+    // 글 꼴이 세 줄이면 높이도
+    v.setMeasureFormat(() => ['a', 'b', 'c']);
+    v.renderNow();
+    expect(v.measureLabelRect!.height).toBe(3 * 16 + 8);
+    v.clearMeasure();
+    v.renderNow();
+    expect(v.measureLabelRect).toBeNull();
   });
 });

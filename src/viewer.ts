@@ -50,11 +50,13 @@ import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingD
 import { type MeasurePointSnap, type SnapCandidate, chooseMeasureSnap, measureResult, samePick, snapLimit, withinSnapLimit } from './snap';
 import {
   type InferenceLock,
+  type InferenceLockInput,
   type MeasureInference,
   type NearSegment,
   type SnapAxis,
   axisLock,
   axisSnap,
+  directionLock,
   edgeLineLock,
   inferenceCandidates,
   lockFromSnap,
@@ -337,6 +339,26 @@ export interface MeasureHoverSnap {
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
 export type MeasureInferenceLock = InferenceLock & { source: 'shift' | 'api' };
+
+/**
+ * 찍은 측정 점(0.12.0, Viewer3d.measurePoints): 세계 좌표와 붙잡은 종류(붙잡지 않았으면 null — 붙잡기 선택이 없으면 0.7.2 규칙의 꼭짓점·끝점),
+ * 축 붙잡기면 그 축, 방향 추론(축·나란함·수직)이면 첫 점을 지나는 그 선의 단위 방향, 추론 잠금으로 찍었으면 locked
+ */
+export interface MeasurePoint {
+  point: V3;
+  snap: SnapKind | null;
+  axis?: SnapAxis;
+  direction?: V3;
+  locked?: boolean;
+}
+
+/** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
+export interface MeasureLabelRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface GroupInfo {
   name: string;
@@ -710,6 +732,8 @@ export class Viewer3d {
   private measureSnaps = new WeakMap<V3, MeasurePointSnap>();
   /** 측정 글 꼴(없으면 기본) */
   private measureFmt: MeasureFormat | null = null;
+  /** 마지막으로 화면에 그린 측정 거리 글상자(0.12.0 — CSS 화소, 그리지 않았으면 null) */
+  private measureLabel: MeasureLabelRect | null = null;
   /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
   private bbList: Mesh3d[] = [];
   private bbCamKey = '';
@@ -2325,11 +2349,13 @@ export class Viewer3d {
    * (0.12.0부터 커서가 첫 점을 지나는 선분 위의 점 붙잡기 — 모서리 끝에서 그 모서리를 따라 가리킨 끝점·가운데 점·교차점 — 면 그 선분 방향,
    * 미리 보기에 잠글 방향이 없거나 커서가 캔버스를 떠났으면 첫 점을 찍은 뒤 마지막으로 본 방향),
    * 'x'·'y'·'z' = 그 축 방향으로 잠근다(첫 점을 찍기 전에 줘도 된다), false·null = 푼다. 잠갔으면 true를 돌려준다.
+   * 0.12.0: { direction, edge?, kind? } = 앱이 정한 방향(모서리 방향 등 — 첫 점을 찍기 전에 줘도 된다). kind가 없으면 축과 나란한 방향은 그 축,
+   * 아니면 'parallel'. 방향이 길이 0·수가 아니거나 'axis'인데 축과 나란하지 않으면 잠그지 않고 false(InferenceLockInput)
    * 잠그면 첫 점을 지나는 그 선 위에만 찍고(커서가 꼭짓점 같은 점 붙잡기 위면 그 점을 선에 수직으로 내린 자리), 두 점째를 찍거나
    * 측정을 지우거나(clearMeasure·측정 모드 끄기·장면 바꾸기) 붙잡기 선택을 바꾸면 풀린다. 측정 모드이고 setMeasureSnap이 켜져 있어야 한다.
    * Shift 잠금(setMeasureSnap({ inference: { lock: true } }))과 같은 상태라 이 함수로 Shift 잠금도 푼다
    */
-  setMeasureInferenceLock(lock: boolean | SnapAxis | null): boolean {
+  setMeasureInferenceLock(lock: boolean | SnapAxis | InferenceLockInput | null): boolean {
     if (lock === false || lock === null || lock === undefined) {
       this.releaseLock();
       return false;
@@ -2342,7 +2368,9 @@ export class Viewer3d {
           : null
         : lock === 'x' || lock === 'y' || lock === 'z'
           ? axisLock(lock)
-          : null;
+          : typeof lock === 'object'
+            ? directionLock(lock)
+            : null;
     if (!l) return false;
     this.inferLock = { ...l, source: 'api' };
     this.rehover();
@@ -2442,6 +2470,31 @@ export class Viewer3d {
   /** 지금 찍힌 측정 점 수(0~2) */
   get measurePointCount(): number {
     return this.measurePts.length;
+  }
+
+  /**
+   * 찍은 측정 점(0.12.0 — 0~2개, 찍은 차례, 복사본): 세계 좌표·붙잡은 종류·축·방향·잠금(MeasurePoint). 첫 점만 찍었을 때(measurePointCount === 1)
+   * 앱이 그 점에서 잠글 방향을 정하거나(모서리 방향 등 — setMeasureInferenceLock({ direction })) 표시를 붙일 때 쓴다. 두 점이면 measurement()의 a·b와 같은 점
+   */
+  get measurePoints(): MeasurePoint[] {
+    return this.measurePts.map((p) => {
+      const s = this.measureSnaps.get(p);
+      const r: MeasurePoint = { point: [p[0], p[1], p[2]], snap: s?.kind ?? null };
+      if (s?.axis) r.axis = s.axis;
+      if (s?.direction) r.direction = [...s.direction] as V3;
+      if (s?.locked) r.locked = true;
+      return r;
+    });
+  }
+
+  /**
+   * 측정 거리 글상자의 화면 자리(0.12.0 — 캔버스 왼쪽 위 기준 CSS 화소, 복사본): 첫 점과 미리 보기(또는 두 점째) 사이 거리 글을 마지막으로 그린 자리.
+   * 앱이 커서 옆에 제 툴팁을 띄울 때 이 상자와 겹치지 않게 옮긴다. 그리지 않았으면(측정 중이 아님, 첫 점이나 미리 보기가 없음) null.
+   * 그리기는 requestAnimationFrame에서 하므로 상태를 바꾼 직후 읽으려면 renderNow() 뒤에 읽는다. 그림 저장(toBlob·renderImage)의 덧그림은 바꾸지 않는다
+   */
+  get measureLabelRect(): MeasureLabelRect | null {
+    const r = this.measureLabel;
+    return r ? { ...r } : null;
   }
 
   clearMeasure(): void {
@@ -4008,17 +4061,17 @@ export class Viewer3d {
     const dpr = this.dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
-    this.drawOverlayOn(ctx, f, dpr);
+    this.drawOverlayOn(ctx, f, dpr, true);
   }
 
-  /** 덧그림(단면 평면·좌표축·덧그림·측정)을 ctx에 CSS 화소 × k 배율로 */
-  private drawOverlayOn(ctx: CanvasRenderingContext2D, f: ViewFrame, k: number): void {
+  /** 덧그림(단면 평면·좌표축·덧그림·측정)을 ctx에 CSS 화소 × k 배율로. screen = 화면 덧그림(측정 글상자 자리를 기억한다 — 0.12.0) */
+  private drawOverlayOn(ctx: CanvasRenderingContext2D, f: ViewFrame, k: number, screen = false): void {
     ctx.setTransform(k, 0, 0, k, 0, 0);
     if (this.multiSection) this.drawSectionPlanes(ctx, f);
     else if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
     if (this.annos) this.drawAnnotations(ctx, f);
-    this.drawMeasure(ctx, f);
+    this.drawMeasure(ctx, f, screen);
   }
 
   /** 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게 */
@@ -4178,7 +4231,8 @@ export class Viewer3d {
     return s === `-${(0).toFixed(digits)}` ? (0).toFixed(digits) : s;
   }
 
-  private drawMeasure(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+  private drawMeasure(ctx: CanvasRenderingContext2D, f: ViewFrame, screen = false): void {
+    if (screen) this.measureLabel = null;
     const pts = this.measurePts;
     const hover = this.measuring ? this.measureHover : null;
     if (!pts.length && !hover) return;
@@ -4283,6 +4337,7 @@ export class Viewer3d {
       let x = at[0] + 10, y = at[1] - h - 8;
       x = Math.min(Math.max(4, x), this.cssW - w - 4);
       y = Math.min(Math.max(4, y), this.cssH - h - 4);
+      if (screen) this.measureLabel = { x, y, width: w, height: h };
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = th.measure;
       ctx.lineWidth = 1;

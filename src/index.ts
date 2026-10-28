@@ -14,6 +14,8 @@ export type {
   MeasureFormat,
   MeasureHoverSnap,
   MeasureInferenceLock,
+  MeasureLabelRect,
+  MeasurePoint,
   MeasureResult,
   MeasureSnapOptions,
   WalkOptions,
@@ -33,7 +35,7 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
-export type { InferenceLock, InferenceLockKind, MeasureInference, SnapAxis } from './inference';
+export type { InferenceLock, InferenceLockInput, InferenceLockKind, MeasureInference, SnapAxis } from './inference';
 export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';

@@ -8,7 +8,8 @@
  * - 나란함(0.10.0): 첫 측정 점을 지나고 커서가 앞서 지나간 선분(모서리)과 나란한 선 위의 점. 축과 같이 점 붙잡기가 없을 때만
  * - 잠금(0.10.0): 방향 추론(축·나란함·수직)을 잠그면 첫 점을 지나는 그 선 위에만 찍는다. 커서가 꼭짓점 같은 점 붙잡기 위면
  *   그 점을 선에 수직으로 내린 자리(SketchUp의 추론 잠금처럼 — 다른 점의 높이·자리를 잠근 방향으로 옮겨 잰다)
- * - 선분 방향 잠금(0.12.0): 점 붙잡기(끝점·가운데 점·교차점 등)가 놓인 선분 직선이 첫 점을 지나면 그 방향으로도 잠근다(edgeLineLock)
+ * - 선분 방향 잠금(0.12.0): 점 붙잡기(끝점·가운데 점·교차점 등)가 놓인 선분 직선이 첫 점을 지나면 그 방향으로도 잠근다(edgeLineLock).
+ *   앱이 정한 방향 잠금(directionLock)
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
@@ -232,6 +233,50 @@ export function edgeLineLock(
     return axis ? axisLock(axis) : { kind: 'parallel', direction: u, edge: [[e0[0]!, e0[1]!, e0[2]!], [e1[0]!, e1[1]!, e1[2]!]] };
   }
   return null;
+}
+
+/** 앱이 정한 방향 잠금(0.12.0, Viewer3d.setMeasureInferenceLock({ direction, edge?, kind? })) */
+export interface InferenceLockInput {
+  /** 잠글 방향(세계 — 길이는 상관없다). 없으면 edge의 첫 끝점 → 둘째 끝점 방향 */
+  direction?: readonly number[] | null;
+  /** 기준 선분(세계 끝점 둘). 잠근 동안 그 선분을 자홍 점선으로 그린다(나란함 잠금과 같다) */
+  edge?: readonly [readonly number[], readonly number[]] | null;
+  /**
+   * 종류(측정 결과·measureInferenceLock·안내선 색에 실린다): 'axis'(방향이 축과 나란해야 한다 — 축 색 안내선), 'parallel', 'perpendicular'(자홍 안내선).
+   * 없으면 축과 나란한 방향은 'axis', 아니면 'parallel'
+   */
+  kind?: InferenceLockKind | null;
+}
+
+/** 수 셋이 모두 유한한 점인지 */
+const finite3 = (q: unknown): q is readonly number[] => {
+  const a = q as ArrayLike<unknown> | null | undefined;
+  return !!a && typeof a === 'object' && Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2]);
+};
+
+/**
+ * 앱이 정한 방향(InferenceLockInput)을 잠금으로(0.12.0). 방향(없으면 기준 선분 방향)이 길이 0이거나 수가 아니거나, 기준 선분을 주었는데 수가 아니거나,
+ * 'axis'인데 축과 나란하지 않거나, 모르는 종류면 null. 축은 +X·+Y·+Z 방향으로 바꾸고(axisLock), 나란함·수직은 준 방향을 단위 길이로
+ */
+export function directionLock(o: InferenceLockInput | null | undefined): InferenceLock | null {
+  if (!o || typeof o !== 'object') return null;
+  let edge: [V3, V3] | undefined;
+  if (o.edge != null) {
+    const e = o.edge as ArrayLike<unknown>;
+    const e0 = e[0], e1 = e[1];
+    if (!finite3(e0) || !finite3(e1)) return null;
+    edge = [[e0[0]!, e0[1]!, e0[2]!], [e1[0]!, e1[1]!, e1[2]!]];
+  }
+  const d = o.direction;
+  const u = d != null ? (finite3(d) ? unitDir([0, 0, 0], d) : null) : edge ? unitDir(edge[0], edge[1]) : null;
+  if (!u) return null;
+  const kind = o.kind ?? (axisAligned(u) ? 'axis' : 'parallel');
+  if (kind === 'axis') {
+    const axis = alignedAxis(u);
+    return axis ? { ...axisLock(axis), ...(edge ? { edge } : {}) } : null;
+  }
+  if (kind !== 'parallel' && kind !== 'perpendicular') return null;
+  return { kind, direction: u, ...(edge ? { edge } : {}) };
 }
 
 /**
