@@ -11,6 +11,7 @@
  * - 끌어온 축과 선분의 교차(0.17.0 trackEdgeSnap): P의 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점
  * - 첫 점 축과 선분의 교차(0.18.0 axisEdgeSnap): 첫 측정 점 A를 지나는 X·Y·Z 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점(trackEdgeSnap과 같은 허용치·빼는 규칙 —
  *   끌어온 점이 없어도 된다. 뷰어는 MeasureInference.axisEdges를 켰을 때)
+ * - 축과 면의 교차(0.18.0 axisFaceSnap): 첫 점 축·끌어온 축이 커서 아래 보이는 면을 뚫는 점(뷰어는 MeasureInference.axisFaces를 켰을 때)
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
  * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
  */
@@ -340,6 +341,87 @@ export function axisEdgeSnap<S extends TrackSegment>(
     distPx: dist,
     seg: s,
   }));
+}
+
+/** 축과 면의 교차(0.18.0 axisFaceSnap)가 보는 면 맞음: 화면 광선이 맞은 세계 점과 그 면의 세계 법선(길이는 상관없다). 부르는 쪽이 식별자를 더 실어도 된다(뷰어는 그물 id·삼각형 번호) */
+export interface TrackFaceHit {
+  point: readonly number[];
+  normal: readonly number[];
+  /** 면 평면 위의 점(없으면 point). 뷰어는 맞은 삼각형의 꼭짓점을 준다 — 광선 맞은 점의 셈 오차 없이 평면을 정하려고 */
+  origin?: readonly number[];
+}
+
+/** 축과 면의 교차가 보는 축 직선 하나(0.18.0): 지나는 점(첫 측정 점이나 끌어온 점)과 축 */
+export interface TrackLine {
+  from: readonly number[];
+  axis: SnapAxis;
+}
+
+/** 축과 면의 교차 결과(0.18.0): 찍을 점, 축, 지나는 점(복사본), 그 축 단위 방향, 커서와의 화면 거리, 그 점의 면 맞음(hitAt이 돌려준 그 객체), 받은 lines 안 번호 */
+export interface AxisFaceSnap<H extends TrackFaceHit = TrackFaceHit> {
+  p: V3;
+  axis: SnapAxis;
+  from: V3;
+  direction: V3;
+  distPx: number;
+  hit: H;
+  line: number;
+}
+
+/** 축과 면의 교차에서 면을 바꿔 다시 구하는 최대 횟수(0.18.0 — 곡면을 나눈 삼각형에서 축이 뚫는 삼각형을 찾아 간다) */
+export const AXIS_FACE_STEPS = 3;
+
+/**
+ * 축과 면의 교차(0.18.0): 축 직선들(lines — 첫 점 축·끌어온 축)이 커서 아래 보이는 면을 뚫는 점 가운데 커서에서 snapPx 안이고 가장 가까운 것
+ * (같으면 lines 차례). under = 커서 아래 면 맞음(없으면 후보가 없다 — 커서가 면 위일 때만), hitAt(sx, sy) = 화면 점에서 맨 앞에 보이는 면 맞음(없으면 null).
+ * - 축 직선과 under 면의 평면이 만나는 점 m을 구하고, m의 화면 자리에서 hitAt으로 다시 맞춰 그 점이 m과 같은 자리(그 깊이에서 화면 반 화소 안)면 받는다.
+ *   다르면(곡면을 나눈 다른 삼각형, 면 밖, 앞에 다른 면) 새로 맞은 면의 평면으로 다시 구한다(steps번까지, 기본 AXIS_FACE_STEPS)
+ * - 가림·단면·면 밖은 hitAt이 맡는다(맨 앞에 보이는 면이 아니면 다른 점이 맞는다). 면과 나란한 축(법선과 사잇각 코사인 < 1e-9), 교차가 지나는 점 자리인 축
+ *   (그 점이 면 위 — 점 붙잡기가 맡는다), 커서가 지나는 점의 화면 자리 snapPx 안인 직선은 뺀다
+ * - 세계 축이면 m은 지나는 점과 남은 두 좌표가 정확히 같다(축 위 점). axes는 trackCrossSnap과 같다(앱의 그리기 축)
+ */
+export function axisFaceSnap<H extends TrackFaceHit>(
+  f: ViewFrame,
+  lines: readonly TrackLine[],
+  x: number,
+  y: number,
+  snapPx: number,
+  under: H | null | undefined,
+  hitAt: (sx: number, sy: number) => H | null | undefined,
+  axes?: TrackAxes | null,
+  steps = AXIS_FACE_STEPS,
+): AxisFaceSnap<H> | null {
+  if (!under || !lines.length) return null;
+  const dirs = axesOf(axes);
+  let best: AxisFaceSnap<H> | null = null;
+  for (let li = 0; li < lines.length; li++) {
+    const { from: O, axis } = lines[li]!;
+    const e = dirs.find(([n]) => n === axis)?.[1];
+    if (!e || cursorOn(f, O, x, y, snapPx)) continue;
+    let plane: TrackFaceHit = under;
+    for (let k = 0; k < steps; k++) {
+      const n = plane.normal, Q = plane.origin ?? plane.point;
+      const nn = Math.hypot(n[0]!, n[1]!, n[2]!);
+      const den = n[0]! * e[0] + n[1]! * e[1] + n[2]! * e[2];
+      if (!(nn > 0) || !(Math.abs(den) > 1e-9 * nn)) break;
+      const t = (n[0]! * (Q[0]! - O[0]!) + n[1]! * (Q[1]! - O[1]!) + n[2]! * (Q[2]! - O[2]!)) / den;
+      const m: V3 = [O[0]! + e[0] * t, O[1]! + e[1] * t, O[2]! + e[2] * t];
+      if (!Number.isFinite(m[0]) || !Number.isFinite(m[1]) || !Number.isFinite(m[2])) break;
+      const tol = meetTol(f, m);
+      if (dist3(m, O) <= tol) break;
+      const dist = screenDistance(f, m, x, y);
+      if (dist === null || dist > snapPx || (best && dist >= best.distPx)) break;
+      const s = projectToScreen(f, m)!;
+      const h = hitAt(s[0], s[1]);
+      if (!h) break;
+      if (dist3(h.point, m) <= tol) {
+        best = { p: m, axis, from: [O[0]!, O[1]!, O[2]!], direction: [e[0], e[1], e[2]], distPx: dist, hit: h, line: li };
+        break;
+      }
+      plane = h;
+    }
+  }
+  return best;
 }
 
 /**

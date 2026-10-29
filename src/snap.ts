@@ -69,6 +69,16 @@ export interface SnapSegment {
 }
 
 /**
+ * 붙잡은 점이 놓인 그물 면(0.18.0 — 축과 면의 교차, MeasureHoverSnap·MeasurePoint의 face): 그물 id, 삼각형 번호(Pick3d.index — 고르기 결과와 같은 뜻),
+ * 맞은 면의 세계 단위 법선(눈 쪽)
+ */
+export interface SnapFace {
+  id: string;
+  index: number;
+  normal: V3;
+}
+
+/**
  * 다듬을 점의 종류(0.14.0): 'perpendicular' = 첫 점에서 커서 둘레 선분으로 내린 수직 발(추론 붙잡기),
  * 'midpoint' = 코어가 붙잡은 선분 가운데 점(midpoints — 앱 점 pointsFor의 가운데 점은 아니다), 'onEdge' = 붙잡지 않은 선분·윤곽선 위 점.
  * 0.15.0: 'intersection' = 커서 둘레 두 선분의 교차점(추론 붙잡기 — 둘째 선분은 SnapRefineInput.other).
@@ -412,6 +422,8 @@ export interface MeasurePointSnap {
   trackFrom?: V3;
   /** 0.17.0: 끌어온 축끼리의 교차로 찍은 점이면 둘째 끌어온 축 — 측정 결과에는 싣지 않는다 */
   trackOther?: { from: V3; axis: SnapAxis };
+  /** 0.18.0: 축과 면의 교차로 찍은 점이면 그 면 — 측정 결과에는 싣지 않는다 */
+  face?: SnapFace;
 }
 
 /**

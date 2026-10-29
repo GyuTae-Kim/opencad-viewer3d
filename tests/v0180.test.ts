@@ -1,18 +1,20 @@
 /**
- * 0.18.0 첫 점 축과 선분의 교차(MeasureInference.axisEdges)와 축과 선분의 교차 다듬기(SnapRefineKind 'axisEdge').
+ * 0.18.0 첫 점 축과 선분의 교차(MeasureInference.axisEdges), 축과 선분의 교차 다듬기(SnapRefineKind 'axisEdge'), 축과 면의 교차(MeasureInference.axisFaces).
  * - 순수 함수: axisEdgeSnap(교차·끝점·나란함·첫 점 자리·단면·가림·커서가 첫 점 둘레·앱의 그리기 축), acceptOnLine(축 위로 내리기·축에서 벗어난 점·먼 점),
  *   openRefineKey·sameRefineInput의 축 직선, normalizeInference의 axisEdges
  * - 뷰어(가짜 DOM — 실제 포인터 사건): 첫 점 X·Y·Z축과 선분의 교차·찍은 결과·선분 식별자·Shift 잠금, 꺼져 있으면 0.17.0과 같음, 차례(점 붙잡기 → 점 후보 → 첫 점 축),
  *   비켜 지나가는 선분·첫 점 둘레, 그리기(첫 점에서 축 색 안내선), 다듬기(축 직선을 넘기고 축 위로 내린 점, 버리기, 기억, 끌어온 축과 선분의 교차도)
+ * - 축과 면의 교차: 순수 axisFaceSnap(평면·접힌 면을 따라 다시 구하기·가린 면·면 밖·나란한 축·지나는 점이 면 위), 뷰어(상자 윗면 — 첫 점 Z축·끌어온 점 Z축, 찍은 점의 face, 꺼져 있으면 없음)
  * 화면 좌표로 가리킬 때는 선·그물의 경계나 바깥 구석을 정확히 가리키지 않고 몇 화소 옆을 가리킨다(Node 판마다 마지막 자리 반올림이 다르다).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import { fake2d } from './fakegl';
-import { type CameraState, computeFrame, defaultCamera, dirToAngles, projectToScreen, viewDepth, worldPerPixel } from '../src/camera';
+import { type CameraState, type ViewFrame, computeFrame, defaultCamera, dirToAngles, projectToScreen, screenRay, viewDepth, worldPerPixel } from '../src/camera';
 import { normalizeInference } from '../src/inference';
 import { type SnapRefineInput, acceptOnLine, openRefineKey, sameRefineInput } from '../src/snap';
-import { axisEdgeSnap } from '../src/track';
+import { AXIS_FACE_STEPS, axisEdgeSnap, axisFaceSnap } from '../src/track';
+import { boxMesh } from '../src/synth';
 import { DARK_THEME } from '../src/theme';
 import { Viewer3d } from '../src/viewer';
 import type { V3 } from '../src/math';
@@ -174,6 +176,13 @@ describe('acceptOnLine·다듬기 입력의 축 직선·normalizeInference.axisE
     expect(normalizeInference({ axes: true, axisEdges: false })).not.toHaveProperty('axisEdges');
     expect(normalizeInference({ axisEdges: true })).toEqual({ intersections: false, perpendicular: false, axes: false, parallel: false, lock: false, axisEdges: true });
     expect(normalizeInference({ axes: true, axisEdges: true, track: true })).toMatchObject({ axes: true, axisEdges: true, track: { dwellMs: 500 } });
+  });
+
+  it('normalizeInference: axisFaces도 켰을 때만 붙고(true에 들지 않는다), 그것만 켜도 선택이 남는다', () => {
+    expect(normalizeInference(true)).not.toHaveProperty('axisFaces');
+    expect(normalizeInference({ axes: true, axisFaces: false })).not.toHaveProperty('axisFaces');
+    expect(normalizeInference({ axisFaces: true })).toEqual({ intersections: false, perpendicular: false, axes: false, parallel: false, lock: false, axisFaces: true });
+    expect(normalizeInference({ axes: true, axisEdges: true, axisFaces: true })).toMatchObject({ axes: true, axisEdges: true, axisFaces: true });
   });
 });
 
@@ -518,6 +527,222 @@ describe('Viewer3d: 축과 선분의 교차 다듬기(0.18.0 refine — axisEdge
     expect(v.measureHoverSnap).toMatchObject({ snap: 'axis', axis: 'x', point: [100.3, 40, 0], refined: true, trackFrom: P, segment: { id: '다' } });
     clickXY(w, c.x, c.y);
     expect(v.measurePoints[0]).toMatchObject({ point: [100.3, 40, 0], refined: true, trackFrom: P });
+    v.dispose();
+  });
+});
+
+// ───────────── 축과 면의 교차 ─────────────
+describe('axisFaceSnap(축과 면의 교차)', () => {
+  const iso = dirToAngles([1, -1, 0.8]);
+  const cam: CameraState = { ...defaultCamera(), yaw: iso.yaw, pitch: iso.pitch, target: [40, 30, 10], distance: 200, projection: 'perspective' };
+  const f = computeFrame(cam, 600, 400, { center: [40, 30, 10], radius: 60 });
+  const at = (p: readonly number[]): [number, number] => {
+    const s = projectToScreen(f, p)!;
+    return [s[0], s[1]];
+  };
+  type Hit = { point: V3; normal: V3; name: string };
+  /** 평면 조각들(점·법선·안쪽 판정) 가운데 화면 광선이 맨 앞에서 맞는 것 */
+  const surface =
+    (parts: { name: string; q: V3; n: V3; inside: (p: V3) => boolean }[]) =>
+    (frame: ViewFrame, sx: number, sy: number): Hit | null => {
+      const r = screenRay(frame, sx, sy);
+      let best: { t: number; h: Hit } | null = null;
+      for (const s of parts) {
+        const den = s.n[0] * r.dir[0] + s.n[1] * r.dir[1] + s.n[2] * r.dir[2];
+        if (Math.abs(den) < 1e-12) continue;
+        const t = (s.n[0] * (s.q[0] - r.origin[0]) + s.n[1] * (s.q[1] - r.origin[1]) + s.n[2] * (s.q[2] - r.origin[2])) / den;
+        const p: V3 = [r.origin[0] + r.dir[0] * t, r.origin[1] + r.dir[1] * t, r.origin[2] + r.dir[2] * t];
+        if (t > 0 && s.inside(p) && (!best || t < best.t)) best = { t, h: { point: p, normal: s.n, name: s.name } };
+      }
+      return best?.h ?? null;
+    };
+  // 바닥 판(z 0, 0 ≤ x ≤ 100, 0 ≤ y ≤ 80)
+  const floor = { name: '바닥', q: [0, 0, 0] as V3, n: [0, 0, 1] as V3, inside: (p: V3) => p[0] >= 0 && p[0] <= 100 && p[1] >= 0 && p[1] <= 80 };
+  const flat = surface([floor]);
+  const O: V3 = [40, 30, 50];
+  const M: V3 = [40, 30, 0];
+
+  it('첫 점 Z축이 커서 아래 면을 뚫는 점(정확히 축 위), 지나는 점·방향·면 맞음·직선 번호', () => {
+    const [x, y] = at(M);
+    const under = flat(f, x + 2, y + 1)!;
+    const asked: number[][] = [];
+    const r = axisFaceSnap(f, [{ from: O, axis: 'x' }, { from: O, axis: 'y' }, { from: O, axis: 'z' }], x + 2, y + 1, 10, under, (sx, sy) => {
+      asked.push([sx, sy]);
+      return flat(f, sx, sy);
+    })!;
+    expect(r.p).toEqual(M);
+    expect(r).toMatchObject({ axis: 'z', from: O, direction: [0, 0, 1], line: 2 });
+    expect(r.hit.name).toBe('바닥');
+    expect(r.distPx).toBeCloseTo(Math.hypot(2, 1), 6);
+    // X·Y축은 면과 나란하다 — 다시 맞춰 보는 것은 Z축 한 번
+    expect(asked).toHaveLength(1);
+    // 커서가 면 위가 아니면(under 없음) 없다, 멀면 없다
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 2, y + 1, 10, null, (sx, sy) => flat(f, sx, sy))).toBeNull();
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 30, y, 10, flat(f, x + 30, y), (sx, sy) => flat(f, sx, sy))).toBeNull();
+  });
+
+  it('지나는 점이 면 위·면 밖·가린 면 뒤면 없다. 커서가 지나는 점 둘레면 그 직선은 보지 않는다', () => {
+    const [x, y] = at(M);
+    const under = flat(f, x + 2, y + 1)!;
+    // 지나는 점이 면 위(교차가 그 점)
+    expect(axisFaceSnap(f, [{ from: M, axis: 'z' }], x + 2, y + 1, 10, under, (sx, sy) => flat(f, sx, sy))).toBeNull();
+    // 면 밖: 바닥이 x ≤ 30까지면 (40, 30, 0)은 면 밖 — 다시 맞추면 맞는 것이 없다
+    const small = surface([{ ...floor, inside: (p: V3) => p[0] >= 0 && p[0] <= 30 && p[1] >= 0 && p[1] <= 80 }]);
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 2, y + 1, 10, under, (sx, sy) => small(f, sx, sy))).toBeNull();
+    // 가림: 교차 자리 앞(눈 쪽)을 높이 10의 판이 가린다 — 커서 아래도 그 판이고, 그 판의 교차(40, 30, 10)는 커서에서 멀다
+    const roof = { name: '지붕', q: [0, 0, 10] as V3, n: [0, 0, 1] as V3, inside: (p: V3) => p[0] >= 30 && p[0] <= 70 && p[1] >= 0 && p[1] <= 40 };
+    const covered = surface([floor, roof]);
+    expect(covered(f, x + 2, y + 1)?.name).toBe('지붕');
+    expect(Math.hypot(at([40, 30, 10])[0] - x, at([40, 30, 10])[1] - y)).toBeGreaterThan(12);
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 2, y + 1, 10, covered(f, x + 2, y + 1), (sx, sy) => covered(f, sx, sy))).toBeNull();
+    // 커서 아래를 바닥으로 잘못 주어도 다시 맞추면 지붕이 맞아 바닥의 교차는 받지 않는다
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 2, y + 1, 10, under, (sx, sy) => covered(f, sx, sy))).toBeNull();
+    // 커서가 지나는 점의 화면 자리 둘레
+    const [ox, oy] = at(O);
+    const reach = Math.hypot(ox - x - 2, oy - y - 1);
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 2, y + 1, reach + 1, under, (sx, sy) => flat(f, sx, sy))).toBeNull();
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }], x + 2, y + 1, reach - 1, under, (sx, sy) => flat(f, sx, sy))).not.toBeNull();
+  });
+
+  it('접힌 면: 커서 아래 면의 평면으로 구한 점이 다른 면 위면 그 면으로 다시 구한다(steps번까지)', () => {
+    // x < 40은 바닥(z 0), x ≥ 40은 45° 내리막(z = 40 − x — 눈 쪽으로 내려가 바닥을 가리지 않는다). 첫 점 (42, 30, 60)의 Z축은 내리막을 (42, 30, −2)에서 뚫는다
+    const ramp = { name: '내리막', q: [40, 0, 0] as V3, n: [Math.SQRT1_2, 0, Math.SQRT1_2] as V3, inside: (p: V3) => p[0] >= 40 && p[0] <= 100 && p[1] >= 0 && p[1] <= 80 };
+    const fold = surface([{ ...floor, inside: (p: V3) => p[0] >= 0 && p[0] < 40 && p[1] >= 0 && p[1] <= 80 }, ramp]);
+    const A: V3 = [42, 30, 60];
+    const W: V3 = [42, 30, -2];
+    // 커서는 바닥 (39.5, 30, 0) 위 — W에서 붙잡기 거리(25) 안
+    const [cx, cy] = at([39.5, 30, 0]);
+    expect(Math.hypot(at(W)[0] - cx, at(W)[1] - cy)).toBeLessThan(25);
+    const under = fold(f, cx, cy)!;
+    expect(under.name).toBe('바닥');
+    // 바닥 평면으로 구한 (42, 30, 0)에서 다시 맞추면 내리막이 맞는다
+    expect(fold(f, ...at([42, 30, 0]))?.name).toBe('내리막');
+    const r = axisFaceSnap(f, [{ from: A, axis: 'z' }], cx, cy, 25, under, (sx, sy) => fold(f, sx, sy))!;
+    expect(r.hit.name).toBe('내리막');
+    expect(r.p[0]).toBe(42);
+    expect(r.p[1]).toBe(30);
+    expect(r.p[2]).toBeCloseTo(-2, 9);
+    expect(AXIS_FACE_STEPS).toBe(3);
+    // 한 번만 구하면 없다
+    expect(axisFaceSnap(f, [{ from: A, axis: 'z' }], cx, cy, 25, under, (sx, sy) => fold(f, sx, sy), null, 1)).toBeNull();
+    // 면 평면 위 점(origin)을 주면 그 점으로 평면을 정한다 — 맞은 점이 셈 오차로 어긋나도 축 위 좌표는 꼭짓점 그대로
+    const off = { ...under, point: [under.point[0], under.point[1], 1e-9] as V3, origin: [0, 0, 0] as V3 };
+    const [mx, my] = at(M);
+    const r2 = axisFaceSnap(f, [{ from: O, axis: 'z' }], mx + 2, my + 1, 10, off, (sx, sy) => flat(f, sx, sy))!;
+    expect(r2.p).toEqual(M);
+  });
+
+  it('여러 직선이면 커서에 가까운 것, 같으면 앞 직선. 앱의 그리기 축', () => {
+    const [x, y] = at(M);
+    const under = flat(f, x + 2, y + 1)!;
+    const B: V3 = [44, 30, 50];
+    const r = axisFaceSnap(f, [{ from: B, axis: 'z' }, { from: O, axis: 'z' }], x + 2, y + 1, 10, under, (sx, sy) => flat(f, sx, sy))!;
+    expect(r.line).toBe(1);
+    expect(axisFaceSnap(f, [{ from: O, axis: 'z' }, { from: O, axis: 'z' }], x + 2, y + 1, 10, under, (sx, sy) => flat(f, sx, sy))!.line).toBe(0);
+    // 앱의 그리기 축: z′ = (0, 1, 1) 방향 — O에서 바닥을 (40, −20, 0)… 바닥 밖이라 y′ = (0, −1, 1)로 (40, 80, 0)
+    const axes = { x: [1, 0, 0], y: [0, -1, 1], z: [0, 0, 1] };
+    const N: V3 = [40, 80, 0];
+    const [nx, ny] = at(N);
+    const r2 = axisFaceSnap(f, [{ from: O, axis: 'y' }], nx - 2, ny + 1, 10, flat(f, nx - 2, ny + 1), (sx, sy) => flat(f, sx, sy), axes)!;
+    expect(dist(r2.p, N)).toBeLessThan(1e-9);
+    expect(dist(r2.direction, [0, -Math.SQRT1_2, Math.SQRT1_2])).toBeLessThan(1e-12);
+  });
+});
+
+describe('Viewer3d: 축과 면의 교차(0.18.0)', () => {
+  /** 상자(0~120, 0~80, 0~40)와 그 위에 선 기둥 선분((60, 40, 90) → (60, 40, 120)) — 기둥 아래 끝의 Z축이 윗면을 (60, 40, 40)에서 뚫는다 */
+  const C: V3 = [60, 40, 90];
+  const T: V3 = [60, 40, 40];
+  const faceScene: Scene3d = {
+    name: 'f',
+    units: 'mm',
+    meshes: [boxMesh('상자', [0, 0, 0], [120, 80, 40], [0.6, 0.6, 0.7, 1])],
+    lines: [{ id: '기둥', positions: new Float32Array([...C, 60, 40, 120]) }],
+    points: [],
+  };
+  function faceView(sc: Scene3d = faceScene): View {
+    const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false });
+    v.setScene(sc);
+    v.setView('seIso', false);
+    v.fit(false);
+    v.renderNow();
+    return { v, canvas: v.canvas as unknown as FakeElement };
+  }
+  const FACES = { inference: { axes: true, lock: true, track: true, axisFaces: true } } as const;
+
+  it('첫 점 Z축이 상자 윗면을 뚫는 점에 붙고 방향·면이 실린다. 두 점째로 찍으면 Z축 붙잡기', () => {
+    const w = faceView();
+    const { v } = w;
+    v.setMeasureMode(true);
+    v.setMeasureSnap(FACES);
+    clickAt(w, C, 1, 0);
+    expect(v.measurePoints[0]!.point).toEqual(C);
+    const s = at(w, T);
+    hoverXY(w, s.x + 3, s.y + 1);
+    const h = v.measureHoverSnap!;
+    expect(h).toMatchObject({ snap: 'axis', axis: 'z', point: T, direction: [0, 0, 1] });
+    expect(h.face).toMatchObject({ id: '상자', normal: [0, 0, 1] });
+    expect(Number.isInteger(h.face!.index)).toBe(true);
+    expect(h).not.toHaveProperty('trackFrom');
+    expect(h).not.toHaveProperty('segment');
+    expect(v.measureHoverLock).toEqual({ kind: 'axis', axis: 'z', direction: [0, 0, 1] });
+    // 복사본
+    h.face!.normal[2] = 9;
+    expect(v.measureHoverSnap!.face!.normal).toEqual([0, 0, 1]);
+    clickXY(w, s.x + 3, s.y + 1);
+    const m = v.measurement()!;
+    expect(m.distance).toBe(50);
+    expect([m.snapB, m.axisB, m.directionB]).toEqual(['axis', 'z', [0, 0, 1]]);
+    expect(v.measurePoints[1]).toMatchObject({ point: T, snap: 'axis', axis: 'z', face: { id: '상자', normal: [0, 0, 1] } });
+    v.dispose();
+  });
+
+  it('끌어온 점의 Z축도(첫 점 전) — 끌어온 점이 실리고 방향은 없다', () => {
+    const w = faceView();
+    const { v } = w;
+    v.setMeasureMode(true);
+    v.setMeasureSnap(FACES);
+    const P: V3 = [100, 20, 70];
+    v.setMeasureTrackPoints([P]);
+    const s = at(w, [100, 20, 40]);
+    hoverXY(w, s.x + 3, s.y + 1);
+    const h = v.measureHoverSnap!;
+    expect(h).toMatchObject({ snap: 'axis', axis: 'z', point: [100, 20, 40], trackFrom: P, face: { id: '상자', normal: [0, 0, 1] } });
+    expect(h).not.toHaveProperty('direction');
+    v.dispose();
+  });
+
+  it('꺼져 있으면 같은 자리는 첫 점 Z축 위 커서 자리이고 면이 없다', () => {
+    const w = faceView();
+    const { v } = w;
+    v.setMeasureMode(true);
+    v.setMeasureSnap({ inference: { axes: true, lock: true, track: true } });
+    expect(v.measureSnap!.inference).not.toHaveProperty('axisFaces');
+    clickAt(w, C, 1, 0);
+    const s = at(w, T);
+    hoverXY(w, s.x + 3, s.y + 1);
+    const h = v.measureHoverSnap!;
+    expect(h.snap).toBe('axis');
+    expect(h.axis).toBe('z');
+    expect(h).not.toHaveProperty('face');
+    expect(h.point).not.toEqual(T);
+    v.dispose();
+  });
+
+  it('뚫는 자리를 지나는 선분(면 위에 그린 금)은 그 면을 가리지 않는다 — 다시 맞춰 볼 때는 그물 면만 본다', () => {
+    // 윗면 위 금 (30, 40, 40) → (90, 40, 40)이 T를 지난다. 커서는 금에서 화면으로 8화소(고르기 허용 6화소 밖, 붙잡기 거리 10화소 안)
+    const w = faceView({ ...faceScene, lines: [...faceScene.lines, { id: '금', positions: new Float32Array([30, 40, 40, 90, 40, 40]) }] });
+    const { v } = w;
+    v.setMeasureMode(true);
+    v.setMeasureSnap(FACES);
+    clickAt(w, C, 1, 0);
+    const s = at(w, T), e = at(w, [90, 40, 40]);
+    const l = Math.hypot(e.x - s.x, e.y - s.y);
+    const ux = (e.x - s.x) / l, uy = (e.y - s.y) / l;
+    hoverXY(w, s.x - uy * 8 + ux * 0.5, s.y + ux * 8 + uy * 0.5);
+    const h = v.measureHoverSnap!;
+    expect(h).toMatchObject({ snap: 'axis', axis: 'z', point: T, direction: [0, 0, 1], face: { id: '상자', normal: [0, 0, 1] } });
+    expect(h).not.toHaveProperty('segment');
     v.dispose();
   });
 });

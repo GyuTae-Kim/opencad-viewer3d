@@ -27,6 +27,8 @@ export interface PickDetail {
   snapKind: SnapKind | null;
   /** 고른 선분·윤곽선의 세계 끝점 둘(0.10.0 — 나란함 추론의 기준 선분, 단면으로 자르기 전). 그물 면·점이면 없다 */
   ends?: [V3, V3];
+  /** 0.18.0: 그물 면이면 맞은 삼각형의 세계 꼭짓점 셋(축과 면의 교차가 면 평면을 광선 맞은 점의 셈 오차 없이 쓴다). 잘린 면(단면 채움)·선분·점이면 없다 */
+  corners?: [V3, V3, V3];
 }
 
 export interface ScenePickItems {
@@ -290,6 +292,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       snap: v ?? mesh.h.point,
       vertex: !!v,
       snapKind: v ? 'vertex' : null,
+      corners: mesh.h.corners,
     };
   }
   return null;

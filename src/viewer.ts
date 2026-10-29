@@ -51,6 +51,7 @@ import {
   type MeasurePointSnap,
   type MeasureSnapPick,
   type SnapCandidate,
+  type SnapFace,
   type SnapRefineInput,
   type SnapRefineLine,
   type SnapSegment,
@@ -73,8 +74,11 @@ import {
 } from './snap';
 import {
   MeasureTracker,
+  type TrackFaceHit,
   type TrackGuide,
+  type TrackLine,
   axisEdgeSnap,
+  axisFaceSnap,
   chooseTrackPoint,
   sameTrackPoint,
   trackAlongFirst,
@@ -356,7 +360,9 @@ export interface MeasureSnapOptions {
    * 0.17.0: 끌어온 두 점의 서로 다른 축이 3D로 만나는 점(trackOther)과 끌어온 축이 커서 둘레 선분·윤곽선과 만나는 점(segment)도 붙잡는다 —
    * 첫 점 축 위 나란한 자리와 함께 점 후보로 첫 점 축·나란함보다 먼저다(셋 사이는 화면에서 가까운 것, 뒤 차례는 1화소 넘게 가까워야 한다). 첫 점 전에도 된다.
    * 0.18.0(true에 들지 않는다): axisEdges = 첫 점을 지나는 X·Y·Z 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점(snap 'axis'·axis·direction·segment —
-   * 끌어온 점이 없어도 된다). 점 후보로 첫 점 축·나란함보다 먼저고, 끌어온 점 후보 셋 뒤 차례로 함께 견준다. 방향이 있어 Shift로 그 축에 잠근다
+   * 끌어온 점이 없어도 된다). 점 후보로 첫 점 축·나란함보다 먼저고, 끌어온 점 후보 셋 뒤 차례로 함께 견준다. 방향이 있어 Shift로 그 축에 잠근다.
+   * axisFaces = 첫 점 축·끌어온 축이 커서 아래 보이는 그물 면을 뚫는 점(snap 'axis'·axis·face — 첫 점 축이면 direction, 끌어온 축이면 trackFrom).
+   * 커서가 그물 면 위일 때만이고, 첫 점 축과 선분의 교차 뒤 차례로 함께 견준다. 다듬지 않는다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -418,6 +424,11 @@ export interface MeasureHoverSnap {
    * 끌어온 축이 선분·윤곽선과 만나는 점은 이 필드 없이 trackFrom·axis와 segment(그 선분)가 실린다
    */
   trackOther?: TrackGuide;
+  /**
+   * 0.18.0: 축(첫 점 축·끌어온 축)이 커서 아래 보이는 그물 면을 뚫는 점(inference.axisFaces)이면 그 면(그물 id·삼각형 번호·세계 단위 법선 — 복사본).
+   * snap 'axis'·axis와 함께, 첫 점 축이면 direction, 끌어온 축이면 trackFrom이 실린다
+   */
+  face?: SnapFace;
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -443,6 +454,8 @@ export interface MeasurePoint {
   trackFrom?: V3;
   /** 0.17.0: 끌어온 축끼리의 교차로 찍었으면 둘째 끌어온 축(복사본 — MeasureHoverSnap.trackOther와 같은 규칙) */
   trackOther?: TrackGuide;
+  /** 0.18.0: 축과 면의 교차로 찍었으면 그 면(복사본 — MeasureHoverSnap.face와 같은 규칙) */
+  face?: SnapFace;
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -615,7 +628,7 @@ type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } |
  * 0.10.0 방향 추론의 단위 방향·잠갔는지·기준 선분·잠근 선으로 옮겨 온 점과 그 종류,
  * 0.12.0 점 붙잡기가 놓인 선분 직선이 첫 점을 지날 때 잠글 방향(lineLock — 결과·measureHoverSnap에는 싣지 않는다),
  * 0.14.0 앱이 다듬은 점이면 refined, 0.16.0 그 점이 놓인 선분 식별자(segment·교차점이면 other)와 끌어온 축의 끌어온 점(trackFrom),
- * 0.17.0 끌어온 축끼리의 교차면 둘째 끌어온 축(trackOther)
+ * 0.17.0 끌어온 축끼리의 교차면 둘째 끌어온 축(trackOther), 0.18.0 축과 면의 교차면 그 면(face)
  */
 type MeasurePick = {
   p: V3;
@@ -633,6 +646,7 @@ type MeasurePick = {
   other?: SnapSegment;
   trackFrom?: V3;
   trackOther?: TrackGuide;
+  face?: SnapFace;
 };
 /** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지, 0.16.0 선분 식별자·끌어온 점 — 있는 것만) */
 const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
@@ -647,10 +661,26 @@ const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   }
   if (s.trackFrom) r.trackFrom = s.trackFrom;
   if (s.trackOther) r.trackOther = s.trackOther;
+  if (s.face) r.face = s.face;
   return r;
 };
 /** 끌어온 축 하나의 복사본(0.17.0) */
 const copyGuide = (g: TrackGuide): TrackGuide => ({ from: [g.from[0], g.from[1], g.from[2]], axis: g.axis });
+/** 그물 면의 복사본(0.18.0) */
+const copyFace = (g: SnapFace): SnapFace => ({ id: g.id, index: g.index, normal: [g.normal[0], g.normal[1], g.normal[2]] });
+/**
+ * 그물 면 고르기 결과 → 축과 면의 교차가 보는 면 맞음(0.18.0): 광선 맞은 점, 단위 법선, 평면 위 점은 맞은 삼각형의 첫 꼭짓점(광선 맞은 점의 셈 오차 없이 —
+ * 축과 수직인 면이면 교차의 그 좌표가 꼭짓점 좌표 그대로), 그물 id·삼각형 번호. 그물 면(잘린 면 아님)이 아니면 null
+ */
+const faceHitOf = (d: PickDetail | null): (TrackFaceHit & SnapFace) | null => {
+  const k = d?.pick;
+  if (!k || k.kind !== 'mesh' || k.section || !k.normal) return null;
+  const n = k.normal;
+  const l = Math.hypot(n[0], n[1], n[2]) || 1;
+  const r: TrackFaceHit & SnapFace = { point: k.point, normal: [n[0] / l, n[1] / l, n[2] / l], id: k.id, index: k.index };
+  if (d!.corners) r.origin = d!.corners[0];
+  return r;
+};
 /** 점 붙잡기(머무르기로 끌어올 수 있는 점 — 0.16.0)인지: 꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발이고 잠근 선 위 점이 아님 */
 const dwellPointOf = (h: MeasurePick | null): V3 | null =>
   h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' ? h.p : null;
@@ -2505,6 +2535,7 @@ export class Viewer3d {
     }
     if (h.trackFrom) r.trackFrom = [...h.trackFrom] as V3;
     if (h.trackOther) r.trackOther = copyGuide(h.trackOther);
+    if (h.face) r.face = copyFace(h.face);
     return r;
   }
 
@@ -2654,6 +2685,7 @@ export class Viewer3d {
       }
       if (s?.trackFrom) r.trackFrom = [...s.trackFrom] as V3;
       if (s?.trackOther) r.trackOther = copyGuide(s.trackOther);
+      if (s?.face) r.face = copyFace(s.face);
       return r;
     });
   }
@@ -3564,11 +3596,23 @@ export class Viewer3d {
     return (this.visLists = { meshes, lines, points });
   }
 
-  /** 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도 */
-  private pickDetail(x: number, y: number, build = true, pointerType?: string, edges = this.opts.pickEdges, midpoints = false): PickDetail | null {
+  /**
+   * 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도.
+   * meshesOnly면 그물 면만(0.18.0 축과 면의 교차가 다시 맞춰 볼 때 — 면 위에 그린 선분·점이 그 면을 가리지 않게)
+   */
+  private pickDetail(
+    x: number,
+    y: number,
+    build = true,
+    pointerType?: string,
+    edges = this.opts.pickEdges,
+    midpoints = false,
+    meshesOnly = false,
+  ): PickDetail | null {
     if (!this.sceneRef) return null;
     const t = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance);
-    return pickScene(this.frame(), x, y, this.visibleItems(), {
+    const items = this.visibleItems();
+    return pickScene(this.frame(), x, y, meshesOnly ? { meshes: items.meshes, lines: [], points: [] } : items, {
       ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
       ...(midpoints ? { midpoints: true } : {}),
       tol: t.tol,
@@ -3632,11 +3676,13 @@ export class Viewer3d {
     }
     // 끌어온 축(0.16.0 — 켰고 기억한 점이 있을 때만): 점 붙잡기가 하나도 없을 때 첫 점 축 위에서 끌어온 점과 나란한 자리가 첫 점 축보다 먼저다.
     // 0.17.0: 끌어온 축끼리의 교차·끌어온 축과 선분의 교차도 점 후보로 함께 견준다(화면에서 가까운 것, 뒤 차례는 TRACK_YIELD_PX 넘게 가까워야) — 첫 점 전에도.
-    // 0.18.0: 첫 점 축과 선분의 교차(inference.axisEdges — 끌어온 점이 없어도)를 그 셋 뒤 차례로 함께 견준다
+    // 0.18.0: 첫 점 축과 선분의 교차(inference.axisEdges — 끌어온 점이 없어도), 축과 면의 교차(inference.axisFaces — 커서가 보이는 그물 면 위일 때)를
+    // 그 셋 뒤 차례로 함께 견준다
     const tracks = this.tracker?.size ? this.tracker.view : null;
     const noPoint = !r || !r.kind;
     const axisEdges = !!(first && inf?.axisEdges);
-    if ((tracks || axisEdges) && noPoint) {
+    const under = inf?.axisFaces && (first || tracks) ? faceHitOf(d) : null;
+    if ((tracks || axisEdges || under) && noPoint) {
       const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
         return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
@@ -3645,7 +3691,18 @@ export class Viewer3d {
       const pair = tracks ? trackPairSnap(f, tracks, x, y, snapPx, first) : null;
       const edge = tracks ? trackEdgeSnap(f, tracks, nearSegs(), x, y, snapPx, first, null, vis) : null;
       const axe = axisEdges ? axisEdgeSnap(f, first!, nearSegs(), x, y, snapPx, null, vis) : null;
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe]);
+      // 축 직선: 첫 점 X·Y·Z, 끌어온 점(새것이 앞, 첫 점과 같은 점은 뺀다) X·Y·Z
+      let lines: TrackLine[] | null = null;
+      if (under) {
+        lines = [];
+        const axes: SnapAxis[] = ['x', 'y', 'z'];
+        if (first) for (const axis of axes) lines.push({ from: first, axis });
+        if (tracks) for (const P of tracks) if (!first || !sameTrackPoint(P, first)) for (const axis of axes) lines.push({ from: P, axis });
+      }
+      const face = under && lines
+        ? axisFaceSnap(f, lines, x, y, snapPx, under, (sx, sy) => faceHitOf(this.pickDetail(sx, sy, true, pointerType, false, false, true)))
+        : null;
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       // 끌어온 점을 지나는 그 축 선이 첫 점도 지나면(끌어온 점이 첫 점 축 위) 첫 점 축 위 점이기도 하다 — 방향을 실어 잠글 수 있게
       const along = (from: V3, axis: SnapAxis): V3 | null => (first ? trackAlongFirst(f, first, from, axis) : null);
@@ -3683,6 +3740,18 @@ export class Viewer3d {
         if (rp) {
           out.p = rp;
           out.refined = true;
+        }
+        return out;
+      }
+      if (t && t === face) {
+        // 0.18.0 축과 면의 교차: 그 면(face). 첫 점 축이면 그 축 방향(잠글 때), 끌어온 축이면 끌어온 점(그 축 선이 첫 점도 지나면 방향도). 다듬지 않는다(선분이 없다)
+        const h = face.hit;
+        const out: MeasurePick = { p: face.p, vertex: true, kind: 'axis', axis: face.axis, face: { id: h.id, index: h.index, normal: h.normal } };
+        if (first && face.line < 3) out.direction = face.direction;
+        else {
+          out.trackFrom = face.from;
+          const dir = along(face.from, face.axis);
+          if (dir) out.direction = dir;
         }
         return out;
       }
