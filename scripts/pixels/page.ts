@@ -3890,6 +3890,167 @@ function onPickMeshesValues(d: 'base' | 'off'): ValueSet {
   };
 }
 
+// ───────────── 0.23.0 반투명 그물을 지나 고르기·덧그림 글상자 비키기 ─────────────
+/** 판(바닥, 반투명 알파 0.35)을 불투명으로, 상자를 반투명으로 둔 겉모습 */
+const PLATE_OPAQUE: [number, number, number, number] = [0.45, 0.65, 0.95, 1];
+/**
+ * 0.23.0 반투명 그물을 지나 고르기가 있는 판인지 — 상자를 반투명·판을 불투명으로 두고 상자 윗면 가운데를 그물 면만·throughTranslucent로 골라 상자가 아닌 면이 오는지 본다
+ * (그 자리 위로 공구 경로가 지나가 그물 면만 고른다 — meshesOnly는 0.20.0부터)
+ */
+const v0230through: Need = (v, c) => {
+  const why = all(v0200meshesOnly, fn('setItemOpacity', 'setItemColor', 'clearItemLooks'))(v, c);
+  if (why) return why;
+  v.setItemOpacity('상자', 0.4);
+  v.setItemColor('판', PLATE_OPAQUE);
+  v.renderNow();
+  const q = c.at(c.world([60, 40, 40]));
+  const p = q ? v.pick(q.x + 0.3, q.y + 0.4, { throughTranslucent: true, meshesOnly: true }) : null;
+  v.clearItemLooks();
+  v.renderNow();
+  return p && p.kind === 'mesh' && p.id !== '상자' ? null : '이 판에 없는 선택: 0.23.0 반투명 그물을 지나 고르기(throughTranslucent)';
+};
+
+/**
+ * 0.23.0 반투명 그물을 지나 고르기 값(base·off): 화면 격자 점마다 pick(x, y)와 pick(x, y, { throughTranslucent: true })의 종류·id 짝 수와 같은 자리 수
+ * (그물 면만 고르기와 함께도 — 장면 그대로면 반투명 판 뒤에 불투명 면이 없어 모두 같다, 상자를 반투명·판을 불투명으로 둔 뒤), 상자 윗면 위 세 자리의 측정 미리 보기
+ * (throughTranslucent 없이·있게 — 붙잡은 종류·점, 공구 경로는 감춘다), throughTranslucent로 단 누르기 알림 값
+ */
+function throughValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-pick-through`,
+    data: d,
+    needs: v0230through,
+    run: (c) => {
+      const { v } = c;
+      const grid = (meshesOnly: boolean): unknown[] => {
+        const kinds = new Map<string, number>();
+        let same = 0, total = 0;
+        for (let y = 26; y < c.h; y += 61)
+          for (let x = 24; x < c.w; x += 67) {
+            const a = v.pick(x + 0.3, y + 0.4, { meshesOnly }), b = v.pick(x + 0.3, y + 0.4, { meshesOnly, throughTranslucent: true });
+            const key = `${a ? `${a.kind}:${a.id}` : '-'}>${b ? `${b.kind}:${b.id}` : '-'}`;
+            kinds.set(key, (kinds.get(key) ?? 0) + 1);
+            if (JSON.stringify(a) === JSON.stringify(b)) same++;
+            total++;
+          }
+        return [[...kinds].sort(), total, same];
+      };
+      const out: unknown[] = [
+        ['scene', grid(false)],
+        ['scene-meshes', grid(true)],
+      ];
+      v.setItemOpacity('상자', 0.4);
+      v.setItemColor('판', PLATE_OPAQUE);
+      v.renderNow();
+      out.push(['looks', grid(false)], ['looks-meshes', grid(true)]);
+      // 측정·누르기 알림은 공구 경로를 감추고(상자 윗면 위를 지나간다) 본다
+      v.setGroupVisible('공구 경로', false);
+      v.setMeasureMode(true);
+      for (const through of [false, true]) {
+        v.setMeasureSnap({ edges: true, ...(through ? { throughTranslucent: true } : {}) });
+        const rows: unknown[] = [];
+        // 상자 윗면 위(seIso에서 (60, 40, 40)은 상자 뒤 아래 모서리와 겹쳐 그 윤곽선이 먼저라 비킨 자리), 구석 둘레
+        for (const p of [
+          [70, 30, 40],
+          [100, 20, 40],
+          [117, 77, 40],
+        ]) {
+          const q = c.at(c.world(p));
+          if (!q) {
+            rows.push(null);
+            continue;
+          }
+          c.hover(q.x + 0.4, q.y + 0.5);
+          v.renderNow();
+          const h = v.measureHoverSnap;
+          rows.push(h ? [h.snap, r10s(h.point)] : null);
+        }
+        out.push([through ? 'measure-through' : 'measure', rows]);
+      }
+      v.setMeasureSnap(null);
+      v.setMeasureMode(false);
+      let got: any = undefined;
+      const off = v.onPick((p: any) => (got = p), { throughTranslucent: true });
+      const q = c.at(c.world([60, 40, 40]));
+      if (q) c.click(q.x + 0.3, q.y + 0.4);
+      off();
+      out.push(['onPick', got ? [got.kind, got.id, r10s(got.point)] : null]);
+      v.setGroupVisible('공구 경로', true);
+      v.clearItemLooks();
+      v.renderNow();
+      return out;
+    },
+  };
+}
+
+/** 0.23.0 덧그림 글상자 자리·뷰 큐브 자리를 읽을 수 있는 판인지 */
+const v0230annoAvoid: Need = (v) =>
+  'annotationLabelRects' in v && 'viewCubeRect' in v && typeof v.setMeasureLabelAvoid === 'function' && typeof v.setAnnotations === 'function'
+    ? null
+    : '이 판에 없는 API: annotationLabelRects·viewCubeRect';
+
+/**
+ * 0.23.0 앱 측정 덧그림 글상자 비키기 값(base): base-annotations 장면의 세 덧그림과 상자 구석 글 하나의 글상자 자리(피할 자리 없이), 뷰 큐브 자리와 첫 글상자 둘레 가로 띠를
+ * 피할 자리로 준 뒤 자리(큐브·띠와 겹치지 않는지, 옮겼는지), 그림 저장 화소가 피할 자리를 주기 전과 같은지(그림 저장은 기본 자리), 화면 덧그림은 옮겼을 때만 바뀌는지,
+ * 끄면 처음 자리인지, viewCubeRect(크기를 바꾸면 따라가고 감추면 null)
+ */
+const annoAvoidValues: ValueSet = {
+  name: 'base-annotation-avoid',
+  data: 'base',
+  needs: v0230annoAvoid,
+  run: (c) => {
+    const { v } = c;
+    type Rect = { x: number; y: number; width: number; height: number };
+    const rect = (r: Rect | null): number[] | null => (r ? [r.x, r.y, r.width, r.height].map(r10) : null);
+    const overlap = (a: Rect, b: Rect): boolean => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+    const overlay = c.host.querySelector<HTMLCanvasElement>('canvas.v3d-overlay')!;
+    const screen = (): Uint8ClampedArray => overlay.getContext('2d')!.getImageData(0, 0, overlay.width, overlay.height).data;
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++;
+      return n;
+    };
+    v.setAnnotations([
+      { kind: 'distance', a: [0, 0, 40], b: [120, 0, 40] },
+      { kind: 'angle', a: [120, 80, 40], b: [0, 80, 40], c: [120, 0, 40] },
+      { kind: 'radius', a: [190, 40, 35], b: [225, 40, 35], normal: [0, 0, 1] },
+      { kind: 'point', a: [120, 80, 40], label: '구석' },
+    ]);
+    v.renderNow();
+    const r0: (Rect | null)[] = v.annotationLabelRects;
+    const img0 = v.renderImage({}).data, scr0 = screen();
+    const cube: Rect = v.viewCubeRect!;
+    const first = r0.find((r) => r) ?? { x: 0, y: 100, width: 10, height: 24 };
+    const band: Rect = { x: 0, y: first.y - 2, width: c.w * 0.6, height: first.height + 4 };
+    v.setMeasureLabelAvoid([cube, band]);
+    v.renderNow();
+    const r1: (Rect | null)[] = v.annotationLabelRects;
+    const img1 = v.renderImage({}).data, scr1 = screen();
+    const moved = r1.map((r, i) => JSON.stringify(r) !== JSON.stringify(r0[i]));
+    const out: unknown[] = [
+      ['before', r0.map(rect)],
+      ['cube', rect(cube)],
+      ['after', r1.map(rect), moved],
+      ['clear', r1.map((r) => (r ? !overlap(r, cube) && !overlap(r, band) : null))],
+      ['snapshot-same', diff(img0, img1)],
+      ['screen-changed', diff(scr0, scr1) > 0 === moved.some((m) => m)],
+    ];
+    v.setMeasureLabelAvoid(null);
+    v.renderNow();
+    out.push(['off', JSON.stringify(v.annotationLabelRects) === JSON.stringify(r0)]);
+    v.setViewCubeSize(80);
+    out.push(['cube-80', rect(v.viewCubeRect)]);
+    v.setViewCubeVisible(false);
+    out.push(['cube-hidden', v.viewCubeRect]);
+    v.setViewCubeVisible(true);
+    v.setViewCubeSize(112);
+    v.setAnnotations(null);
+    v.renderNow();
+    out.push(['none', v.annotationLabelRects]);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -3939,6 +4100,9 @@ const VALUES: ValueSet[] = [
   twiceValues,
   onPickMeshesValues('base'),
   onPickMeshesValues('off'),
+  throughValues('base'),
+  throughValues('off'),
+  annoAvoidValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

@@ -25,6 +25,9 @@
  * 0.22.0: 같은 단추들(잠근 선 교차부터)에서 구 위에 뜬 앱 점 '구 스침'(적도 칸 가운데 바깥)을 첫 점으로 찍고 그 Z축이 구를 스치는 자리를 가리키면
  *   그물 삼각형은 비켜 가도 정확한 구 위 교차에 붙는다(면의 열린 교차 — 상태 줄 "첫 점 Z축 · 구 면(다듬음)", 잠가도). 시연 원 위·아래 토막의 현과 나란히
  *   활꼴 안을 지나는 X축은 두 교차 모두에 붙는다(열린 교차 단추부터). 면만 고르기 단추는 onPick(cb, { meshesOnly: true }) 알림으로 아래 면을 받는다
+ * 0.23.0 단추: 반투명 지나 고르기(상자를 반투명·바닥 판을 불투명으로 두고 누르기 알림·측정 고르기에 throughTranslucent — 상자 너머 판을 고르고 상태 줄 고름 뒤에
+ *   "반투명 너머"), 글상자 비키기(뷰 큐브 자리(viewCubeRect)와 위쪽 띠를 setMeasureLabelAvoid로 넘기고 덧그림 넷을 단다 — 측정 거리 글상자와 덧그림 글상자가
+ *   둘을 비켜 그린다, 띠는 점선 상자로 보인다)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -66,6 +69,9 @@ let hoverInfo = '';
 /** 0.20.0: 누른 자리에서 그물 면만 고른 결과도 보일지(면만 고르기 단추). 0.22.0부터 그 결과는 onPick(cb, { meshesOnly: true }) 알림으로 받는다 */
 let meshesOnly = false;
 let under: { id: string; index: number } | null = null;
+/** 0.23.0: 반투명 그물을 지나 고른 결과도 보일지(반투명 지나 고르기 단추 — onPick throughTranslucent 알림) */
+let through = false;
+let beyond: { id: string; index: number } | null = null;
 const pt = (p: readonly number[]): string => `(${p.map((x) => x.toFixed(1)).join(', ')})`;
 /** 나눠 올리기 진행 알림 기록(자동 확인용) */
 const progress: [number, number][] = [];
@@ -291,6 +297,41 @@ button('다듬기 기억 비우기', () => {
   hoverInfo = `다듬기 기억 ${n}개를 비웠다(잠금·끌어온 점은 그대로)`;
   showStatus();
 }, '앱이 다듬기에 쓰는 자료를 나중에 받았을 때처럼 refine·refineFace 결과 기억만 비운다(clearMeasureRefine)');
+// 0.23.0: 반투명 그물을 지나 고르기(throughTranslucent), 덧그림 글상자 비키기(setMeasureLabelAvoid ↔ setAnnotations, viewCubeRect)
+toggle(
+  '반투명 지나 고르기',
+  (v) => {
+    through = v;
+    viewer.setItemOpacity('상자', v ? 0.4 : null);
+    viewer.setItemColor('판', v ? [0.45, 0.65, 0.95, 1] : null);
+    const so = viewer.measureSnap;
+    if (v || so) viewer.setMeasureSnap({ ...(so ?? {}), throughTranslucent: v });
+  },
+  '상자를 반투명·바닥 판을 불투명으로 두고, 누르기 알림(onPick throughTranslucent)과 측정 고르기가 상자 너머 판을 고른다 — 상태 줄 고름 뒤에 "반투명 너머"',
+);
+/** 글상자 비키기 단추의 위쪽 띠(점선 상자로 보인다) */
+const band = document.createElement('div');
+band.style.cssText = 'position:absolute;left:0;right:0;top:0;height:64px;border:1px dashed #e0a030;pointer-events:none;display:none;';
+viewer.canvas.parentElement?.append(band);
+toggle(
+  '글상자 비키기',
+  (v) => {
+    band.style.display = v ? '' : 'none';
+    const cube = viewer.viewCubeRect;
+    viewer.setMeasureLabelAvoid(v ? [{ x: 0, y: 0, width: viewer.canvas.clientWidth, height: 64 }, ...(cube ? [cube] : [])] : null);
+    viewer.setAnnotations(
+      v
+        ? [
+            { kind: 'distance', a: [0, 0, 40], b: [120, 0, 40] },
+            { kind: 'angle', a: [120, 80, 40], b: [0, 80, 40], c: [120, 0, 40] },
+            { kind: 'radius', a: [190, 40, 35], b: [225, 40, 35], normal: [0, 0, 1] },
+            { kind: 'point', a: [120, 80, 40], label: '상자 구석' },
+          ]
+        : null,
+    );
+  },
+  '위쪽 띠와 뷰 큐브 자리(viewCubeRect)를 setMeasureLabelAvoid로 넘기고 덧그림 넷을 단다 — 덧그림 글상자(0.23.0)와 측정 거리 글상자가 둘을 비켜 그린다',
+);
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -418,12 +459,15 @@ play.addEventListener('input', () => setPlay(Number(play.value)));
 const picks: { id: string | null; alt: boolean; shift: boolean; clicks: number }[] = [];
 // 0.22.0: 그물 면만 받는 알림(면 위 선분·점을 눌러도 그 아래 면) — 아래 알림보다 먼저 달아 같은 누르기의 상태 줄에 함께 보인다
 viewer.onPick((p) => (under = p ? { id: p.id, index: p.index } : null), { meshesOnly: true });
+// 0.23.0: 반투명 그물을 지나 고른 알림(반투명 상자 너머 바닥 판)
+viewer.onPick((p) => (beyond = p ? { id: p.id, index: p.index } : null), { throughTranslucent: true });
 viewer.onPick((p, e) => {
   picks.push({ id: p?.id ?? null, alt: e.altKey, shift: e.shiftKey, clicks: e.clicks });
   viewer.highlight(p ? [p.id] : null);
   const mods = [e.altKey && 'Alt', e.ctrlKey && 'Ctrl', e.shiftKey && 'Shift', e.metaKey && 'Meta', e.clicks > 1 && '두 번'].filter(Boolean).join('+');
   pickInfo = p ? `고름: ${p.kind} "${p.id}" #${p.index}${mods ? ` [${mods}]` : ''} (${p.point.map((v) => v.toFixed(2)).join(', ')})` : '';
   if (meshesOnly) pickInfo += ` · 아래 면: ${under ? `"${under.id}" #${under.index}` : '없음'}`;
+  if (through) pickInfo += ` · 반투명 너머: ${beyond ? `"${beyond.id}" #${beyond.index}` : '없음'}`;
   showStatus();
 });
 /** 단면 알림 기록(자동 확인용) — 단추·슬라이더도 이 알림으로 맞춘다 */
