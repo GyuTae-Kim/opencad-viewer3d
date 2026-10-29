@@ -73,7 +73,8 @@ describe('openEdgeCandidates·openEdgeSnap(선과 꺾은선 토막의 열린 교
     expect(cs[0]!.p).toEqual([R, 0, 0]);
     expect(cs[0]!.line).toBe(0);
     expect(cs[0]!.gap).toBeCloseTo(R - R * Math.cos(deg(15)), 9);
-    expect(Object.keys(cs[0]!).sort()).toEqual(['distPx', 'gap', 'line', 'p', 'seg']);
+    // 0.23.0: 그 토막 범위인 선 조각과 커서의 화면 거리(reachPx)가 더해졌다
+    expect(Object.keys(cs[0]!).sort()).toEqual(['distPx', 'gap', 'line', 'p', 'reachPx', 'seg']);
     const asked: unknown[] = [];
     const r = openEdgeSnap(f, lines, ring, x + 2, y + 1, SNAP, (c) => {
       asked.push(c);

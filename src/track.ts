@@ -27,6 +27,7 @@
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
 import type { V3 } from './math';
+import { segmentScreenPick } from './pick';
 import { acceptOnLine, finitePoint } from './snap';
 
 export { TRACK_DWELL_MS, type MeasureTrackOptions, normalizeTrack } from './inference';
@@ -610,7 +611,9 @@ export interface OpenEdgeLine {
  * 선과 꺾은선 토막의 열린 교차 후보(0.20.0 openEdgeCandidates): 코어 점(선 위에서 토막에 가장 가까운 점 — 세계 축이면 남은 두 좌표가 지나는 점 그대로),
  * 받은 lines 안 번호, 토막(받은 segs의 그 객체), 선과 토막(범위 안) 사이 가장 가까운 거리(세계), 커서와 코어 점의 화면 거리.
  * 0.22.0: 선이 그 토막의 활꼴을 두 번 지날 수 있으면(같은 평면에서 토막 밖에서 만나거나 나란하다) 그 선·토막의 후보 모두 twice = true,
- * 그 가운데 더한 둘째 힌트면 twin = true(아니면 이 필드들이 없다) — twin의 p는 현의 다른 끝(나란하면 각 끝)에서 선에 내린 발이다
+ * 그 가운데 더한 둘째 힌트면 twin = true(아니면 이 필드들이 없다) — twin의 p는 현의 다른 끝(나란하면 각 끝)에서 선에 내린 발이다.
+ * 0.23.0: reachPx = 선에서 그 토막 범위(현에 내린 자리가 토막 안, 현의 직선에서 OPEN_EDGE_CHORD × 토막 길이 안)인 조각과 커서의 화면 거리.
+ * 받는 점은 그 조각 위이므로 커서에서 이보다 가까울 수 없다
  */
 export interface OpenEdgeCandidate<S extends TrackSegment = TrackSegment> {
   p: V3;
@@ -618,6 +621,7 @@ export interface OpenEdgeCandidate<S extends TrackSegment = TrackSegment> {
   seg: S;
   gap: number;
   distPx: number;
+  reachPx: number;
   twice?: true;
   twin?: true;
 }
@@ -678,13 +682,13 @@ function lineSegClosest(
  *   같은 평면에서 곡선에 거의 닿듯 지나가면(활꼴만 지난다) 토막 끝 쪽이다. 커서와 상관없이 선과 토막으로만 정해진다(앱 결과를 기억할 수 있게)
  * - 빼는 것: 선이 지나는 점 자리(그 점이 토막 둘레 — 첫 점이 곡선 위면 그 점에서 만난다), 커서가 지나는 점의 화면 자리 snapPx 안인 선(axisEdgeSnap과 같다),
  *   가장 가까운 자리가 토막 끝 밖인데(나란하면 두 끝) 그 끝을 함께 쓰는 이웃 토막을 선이 3D로 지나는 것(곡선과의 교차는 그 이웃 토막의 코어 교차가 맡는다),
- *   코어 점이 커서에서 2 × snapPx 밖인 것(받는 점은 코어 점에서 snapPx, 커서에서 snapPx 안이어야 한다)
+ *   선에서 그 토막 범위인 조각(현에 내린 자리가 토막 안, 현의 직선에서 OPEN_EDGE_CHORD × 토막 길이 안 — reachPx)이 화면에서 커서 snapPx 밖인 것
+ *   (받는 점은 그 조각 위·커서에서 snapPx 안이어야 한다 — 0.23.0, 0.22.0까지는 "코어 점이 커서에서 2 × snapPx 밖"이었다)
  * - 0.22.0 두 번 지날 수 있는 토막(twice): 가장 가까운 자리가 토막 끝 밖이거나 나란하고(clamped) 선이 현의 직선과 같은 평면이면(엇갈린 거리가 반 화소 안 —
  *   나란하면 늘) 곡선이 선 쪽으로 볼록할 때 활꼴을 두 번 지난다. 다만 현 가운데에서 선까지(현에 수직) 거리가 OPEN_EDGE_CHORD × 토막 길이 안일 때만이고
  *   (곡선에 거의 닿듯 지나 활꼴의 높은 가운데를 지나는 선), segs 안의 이웃 토막이 선이 곡선의 안쪽(볼록하지 않은 쪽)을 지난다고 보이면 뺀다
  *   (이웃이 없으면 볼록한 쪽을 모르므로 남긴다). 현의 다른 끝(나란하면 두 끝 각각)에서 선에 내린 발을 같은 선·토막의 둘째 힌트(twin)로 더한다
- *   (그 끝을 함께 쓰는 이웃 토막을 선이 지나면 그 발은 뺀다). 앞의 후보(코어 점)의 자리는 0.20.0 그대로다. 이 선·토막의 후보는 코어 점이 커서에서 2 × snapPx 밖이어도
- *   남긴다(현 끝 발이라 교차에서 멀 수 있다 — openEdgeSnap이 토막 범위로 받는다)
+ *   (그 끝을 함께 쓰는 이웃 토막을 선이 지나면 그 발은 뺀다). 앞의 후보(코어 점)의 자리는 0.20.0 그대로다
  * 커서에 가까운 코어 점부터(같으면 선 → 토막 차례). 다듬기 손잡이를 부를 차례와 같다
  */
 export function openEdgeCandidates<S extends TrackSegment>(
@@ -708,13 +712,17 @@ export function openEdgeCandidates<S extends TrackSegment>(
       if (!(c.gap > tol) || !(c.gap <= Math.min(OPEN_EDGE_CHORD * dist3(s.a, s.b), snapPx * s.wpp)) || dist3(c.m, P) <= tol) continue;
       // 가장 가까운 자리가 토막 끝 밖이면 그 끝, 나란하면 두 끝을 함께 쓰는 이웃 토막을 선이 3D로 지나는지
       if (c.clamped && throughNeighbor(f, P, e, s, segs, c.parallel ? [s.a, s.b] : [c.t === 0 ? s.a : s.b], tol)) continue;
+      // 0.23.0: 받는 점은 선 위·그 토막 범위 안·커서에서 snapPx 안이다 — 선에서 그 범위인 조각이 화면에서 커서 snapPx 밖이면 앱에 묻지 않는다
+      const span = segSlabSpan(P, e, s.a, s.b, OPEN_EDGE_CHORD * dist3(s.a, s.b) + 2 * tol);
+      const reach = span && segmentReachPx(f, P, e, span, x, y);
+      if (reach == null || reach > snapPx) continue;
       // 0.22.0 두 번 지날 수 있는 토막: 선이 현의 직선과 같은 평면에서 토막 밖에서 만나거나 나란하면, 곡선이 선 쪽으로 볼록할 때 활꼴을 두 번 지난다
       // (현 양 끝에서는 선이 활꼴 밖이다 — 활꼴 안을 지나면 들어가고 나오는 두 교차가 있다)
       const twice = c.clamped && (c.parallel || skewGap(P, e, s.a, s.b) <= tol) && lensSide(P, e, s, segs, tol);
       const push = (m: V3, twin: boolean): void => {
         const d = screenDistance(f, m, x, y);
-        if (d === null || (!twice && d > 2 * snapPx)) return;
-        const o: OpenEdgeCandidate<S> = { p: m, line: li, seg: s, gap: c.gap, distPx: d };
+        if (d === null) return;
+        const o: OpenEdgeCandidate<S> = { p: m, line: li, seg: s, gap: c.gap, distPx: d, reachPx: reach };
         if (twice) o.twice = true;
         if (twin) o.twin = true;
         out.push(o);
@@ -786,6 +794,44 @@ function lineFoot(P: readonly number[], e: readonly number[], V: readonly number
   return [e[0] === 0 ? P[0]! : P[0]! + e[0]! * s, e[1] === 0 ? P[1]! : P[1]! + e[1]! * s, e[2] === 0 ? P[2]! : P[2]! + e[2]! * s];
 }
 
+/**
+ * 선 P + s·e(e는 단위)에서 토막 a → b 범위인 조각의 매개변수 [s0, s1](0.23.0 열린 교차의 받는 범위): 그 점을 현에 내린 자리가 토막 안(매개변수 0~1)이고
+ * 현의 직선에서 h 안이다(현의 직선 둘레 원기둥과 두 끝 평면 사이). 없으면 null. 나란하거나 수직인 선도 범위가 닫혀 있다(둘 가운데 하나는 늘 묶는다)
+ */
+function segSlabSpan(P: readonly number[], e: readonly number[], a: readonly number[], b: readonly number[], h: number): [number, number] | null {
+  const g = sub3(b, a);
+  const C = dot3(g, g);
+  if (!(C > 0) || !(h >= 0)) return null;
+  const w = sub3(P, a);
+  const u0 = dot3(w, g) / C, ue = dot3(e, g) / C;
+  let lo = -Infinity, hi = Infinity;
+  // 현에 내린 자리 u(s) = u0 + ue·s가 0~1
+  if (Math.abs(ue) * Math.sqrt(C) > 1e-12) {
+    const s0 = -u0 / ue, s1 = (1 - u0) / ue;
+    lo = Math.min(s0, s1);
+    hi = Math.max(s0, s1);
+  } else if (!(u0 >= 0 && u0 <= 1)) return null;
+  // 현의 직선까지 거리 |w⊥ + s·e⊥| ≤ h(⊥ = 현에 수직인 성분)
+  const wp: V3 = [w[0] - g[0] * u0, w[1] - g[1] * u0, w[2] - g[2] * u0];
+  const ep: V3 = [e[0]! - g[0] * ue, e[1]! - g[1] * ue, e[2]! - g[2] * ue];
+  const A = dot3(ep, ep), B = dot3(wp, ep), K = dot3(wp, wp) - h * h;
+  if (A > 1e-18) {
+    const disc = B * B - A * K;
+    if (!(disc >= 0)) return null;
+    const r = Math.sqrt(disc);
+    lo = Math.max(lo, (-B - r) / A);
+    hi = Math.min(hi, (-B + r) / A);
+  } else if (K > 0) return null;
+  return Number.isFinite(lo) && Number.isFinite(hi) && lo <= hi ? [lo, hi] : null;
+}
+
+/** 선 P + s·e의 조각 [s0, s1]과 커서의 화면 거리(원근에서 눈 뒤로 넘어간 부분은 가까운 면에서 자른다 — 다 눈 뒤면 null) */
+function segmentReachPx(f: ViewFrame, P: readonly number[], e: readonly number[], span: readonly [number, number], x: number, y: number): number | null {
+  const [s0, s1] = span;
+  const h = segmentScreenPick(f, P[0]! + e[0]! * s0, P[1]! + e[1]! * s0, P[2]! + e[2]! * s0, P[0]! + e[0]! * s1, P[1]! + e[1]! * s1, P[2]! + e[2]! * s1, x, y);
+  return h && Number.isFinite(h.distPx) ? h.distPx : null;
+}
+
 /** 선 P + t·e와 a, b를 지나는 직선 사이 거리(엇갈린 두 직선 — 나란하면 Infinity) */
 function skewGap(P: readonly number[], e: readonly number[], a: readonly number[], b: readonly number[]): number {
   const g0 = b[0]! - a[0]!, g1 = b[1]! - a[1]!, g2 = b[2]! - a[2]!;
@@ -799,14 +845,14 @@ function skewGap(P: readonly number[], e: readonly number[], a: readonly number[
  * 선과 꺾은선 토막의 열린 교차(0.20.0, 순수): openEdgeCandidates의 후보마다(커서에 가까운 코어 점부터) refine(후보)을 불러 곡선과의 정확한 교차 q를 받고,
  * 받을 수 있는 것 가운데 커서에 가장 가까운 것. refine이 null·undefined(모른다, 부르는 쪽 호출 한도가 다 됐다)거나 수 셋이 아니면 그 후보는 없다.
  * 받는 규칙:
- * - q를 선 위로 수직으로 내린 자리 p(acceptOnLine — q에서 그 깊이 화면 반 화소 안, 코어 점에서 화면 snapPx 안, 눈 뒤·가까운 면 앞이 아님). 세계 축이면 남은 두 좌표가 지나는 점 그대로
+ * - q를 선 위로 수직으로 내린 자리 p(acceptOnLine — q에서 그 깊이 화면 반 화소 안, 눈 뒤·가까운 면 앞이 아님). 세계 축이면 남은 두 좌표가 지나는 점 그대로
  * - p가 그 토막의 곡선 조각 위일 만한 자리: 현에 내린 자리가 토막 범위 안(이웃 토막의 곡선 위 점이면 범위 밖이다 — 그 토막이 맡는다)이고 토막 끝에서 반 화소 넘게 떨어지고,
  *   현에서 OPEN_EDGE_CHORD × 토막 길이 안. 선이 지나는 점 자리가 아니다
  * - 그 토막 묶음의 단면에서 남는 쪽(seg.keep), 커서에서 snapPx 안, visible(p, seg)(지금 고른 것보다 가까운 후보에만 묻는다 — 뷰어는 음영 계열의 면 가림)
  * 코어 점 그대로를 돌려줘도 받는다(곡선 평면을 수직으로 뚫는 축은 코어 점이 곧 교차다 — 모르면 null을 돌려준다).
- * 받는 점은 코어 점에서 snapPx 안이므로 코어 점이 커서에서 (지금 고른 거리 + snapPx) 밖인 후보는 부르지 않는다.
- * 0.22.0: 두 번 지날 수 있는 토막의 후보(twice)는 코어 점에서 snapPx 안을 보지 않는다 — 힌트가 현 끝 발이라 활꼴 가운데쯤의 두 교차에서 멀 수 있고,
- * 토막 범위 판정(현에 내린 자리가 범위 안·현에서 0.1 × 토막 길이 안)이 앱 점을 그 토막 곡선 조각으로 묶는다. 그래서 코어 점 거리로 건너뛰지도 않는다
+ * 0.23.0: "코어 점에서 snapPx 안"(0.20.0)은 보지 않는다. 같은 평면에서 현과 거의 나란히 활꼴을 지나는 선은 코어 점이 현 끝(꼭짓점) 위라
+ * 그 둘레에서는 끝점 붙잡기가 먼저 이기고, 토막 범위 판정이 앱 점을 그 토막 곡선 조각으로 이미 묶는다(0.22.0은 두 번 지날 수 있는 토막에서만 그렇게 받았다).
+ * 받는 점은 커서에서 후보의 reachPx보다 가까울 수 없으므로 reachPx가 지금 고른 거리 이상인 후보는 부르지 않는다
  */
 export function openEdgeSnap<S extends TrackSegment>(
   f: ViewFrame,
@@ -820,12 +866,12 @@ export function openEdgeSnap<S extends TrackSegment>(
 ): OpenEdgeSnap<S> | null {
   let best: OpenEdgeSnap<S> | null = null;
   for (const c of openEdgeCandidates(f, lines, segs, x, y, snapPx)) {
-    // 거리 차례라 0.20.0 후보는 여기서 끝내도 같다(continue — 뒤의 두 번 지날 수 있는 토막 후보는 코어 점 거리와 상관없이 본다)
-    if (best && !c.twice && c.distPx - snapPx >= best.distPx) continue;
+    // 받는 점은 커서에서 reachPx보다 가깝지 않다(코어 점 거리 차례라 끝내지 않고 건너뛴다)
+    if (best && c.reachPx >= best.distPx) continue;
     const q = finitePoint(refine(c));
     if (!q) continue;
     const L = lines[c.line]!;
-    const p = acceptOnLine(f, c.p, q, { origin: L.from, dir: L.dir }, c.twice ? Infinity : snapPx);
+    const p = acceptOnLine(f, c.p, q, { origin: L.from, dir: L.dir }, Infinity);
     if (!p) continue;
     const s = c.seg;
     const tol = meetTol(f, p, s.wpp);
@@ -859,7 +905,9 @@ export interface TrackTriangle {
 
 /**
  * 선과 삼각형의 열린 교차 후보(0.22.0 openFaceCandidates): 코어 점(선 위에서 삼각형 무게중심에 가장 가까운 점 — 세계 축이면 남은 두 좌표가 지나는 점 그대로),
- * 받은 lines 안 번호, 삼각형(받은 tris의 그 객체), 선과 삼각형 사이 가장 가까운 거리(세계), 커서와 코어 점의 화면 거리
+ * 받은 lines 안 번호, 삼각형(받은 tris의 그 객체), 선과 삼각형 사이 가장 가까운 거리(세계), 커서와 코어 점의 화면 거리.
+ * 0.23.0: reachPx = 선에서 그 삼각형 위 곡면 조각 자리(삼각형 평면에 내린 발이 삼각형 안, 평면에서 OPEN_FACE_CHORD × 가장 긴 변 안)인 조각과 커서의 화면 거리.
+ * 받는 점은 그 조각 위이므로 커서에서 이보다 가까울 수 없다
  */
 export interface OpenFaceCandidate<T extends TrackTriangle = TrackTriangle> {
   p: V3;
@@ -867,6 +915,7 @@ export interface OpenFaceCandidate<T extends TrackTriangle = TrackTriangle> {
   tri: T;
   gap: number;
   distPx: number;
+  reachPx: number;
 }
 
 /** 열린 면 교차 결과(0.22.0 openFaceSnap): 받은 점(선 위로 내린 자리), 그 후보의 코어 점·선 번호·삼각형, 커서와 받은 점의 화면 거리 */
@@ -935,7 +984,8 @@ function lineTriClosest(P: readonly number[], e: readonly number[], c: readonly 
  * - 빼는 것: 선 위에서 삼각형에 가장 가까운 점이 선이 지나는 점 자리인 것(첫 점이 곡면 위면 그 점에서 만난다), 커서가 지나는 점의 화면 자리 snapPx 안인 선,
  *   가장 가까운 자리가 삼각형의 변(꼭짓점)인데 그 변(꼭짓점)을 함께 쓰는 이웃 삼각형(tris 안)을 선이 뚫고, 그 뚫는 자리에서 곡면 위 교차까지가 붙잡기 거리 안인 것
  *   (선을 따라 OPEN_FACE_CHORD × 이웃의 가장 긴 변 ÷ 이웃 평면과 선 사잇각의 사인 — 그 안이면 이웃의 코어 교차와 0.19.0 다듬기가 맡는다. 비스듬히 스치는 선은
- *   그물을 뚫는 자리와 곡면을 뚫는 자리가 몇 삼각형 떨어질 수 있어 남긴다), 코어 점이 화면에 투영되지 않는 것(눈 뒤)
+ *   그물을 뚫는 자리와 곡면을 뚫는 자리가 몇 삼각형 떨어질 수 있어 남긴다), 코어 점이 화면에 투영되지 않는 것(눈 뒤),
+ *   0.23.0: 선에서 그 삼각형 위 곡면 조각 자리인 조각(reachPx)이 화면에서 커서 snapPx 밖인 것(받는 점은 그 조각 위·커서에서 snapPx 안이어야 한다 — 0.20.0 열린 교차와 같은 근거)
  * 커서에 가까운 코어 점부터(같으면 선 → 삼각형 차례). 다듬기 손잡이를 부를 차례와 같다
  */
 export function openFaceCandidates<T extends TrackTriangle>(
@@ -973,11 +1023,15 @@ export function openFaceCandidates<T extends TrackTriangle>(
         }
       }
       if (through) continue;
+      // 0.23.0: 받는 점은 선 위·그 삼각형 위 곡면 조각 자리·커서에서 snapPx 안이다 — 선에서 그 자리인 조각이 화면에서 커서 snapPx 밖이면 앱에 묻지 않는다
+      const span = triPrismSpan(P, e, t.corners, OPEN_FACE_CHORD * longestEdge(t.corners) + 2 * tol, 2 * tol);
+      const reach = span && segmentReachPx(f, P, e, span, x, y);
+      if (reach == null || reach > snapPx) continue;
       const [A, B, C] = t.corners as [readonly number[], readonly number[], readonly number[]];
       const m = lineFoot(P, e, [(A[0]! + B[0]! + C[0]!) / 3, (A[1]! + B[1]! + C[1]!) / 3, (A[2]! + B[2]! + C[2]!) / 3]);
       const d = screenDistance(f, m, x, y);
       if (d === null) continue;
-      out.push({ p: m, line: li, tri: t, gap: c.gap, distPx: d });
+      out.push({ p: m, line: li, tri: t, gap: c.gap, distPx: d, reachPx: reach });
     }
   }
   // 안정 정렬(같은 거리면 넣은 차례 — 선 → 삼각형)
@@ -994,7 +1048,8 @@ export function openFaceCandidates<T extends TrackTriangle>(
  *   0.20.0의 "코어 점에서 붙잡기 거리 안"은 두지 않는다 — 삼각형 위 조각 자리라는 판정이 앱 점을 그 삼각형 둘레로 이미 묶고, 코어 점(무게중심 쪽)은 큰 삼각형이면
  *   그 삼각형 위 교차에서 붙잡기 거리보다 멀 수 있다
  * - 그 삼각형 그물의 단면에서 남는 쪽(tri.keep), 커서에서 snapPx 안, visible(p, tri)(지금 고른 것보다 가까운 후보에만 묻는다 — 뷰어는 음영 계열의 면 가림)
- * 후보는 모두 묻는다(코어 점 거리로 자를 수 없다 — 부르는 쪽 호출 한도·기억이 횟수를 묶는다)
+ * 코어 점 거리로는 자를 수 없다(부르는 쪽 호출 한도·기억이 횟수를 묶는다). 0.23.0: 받는 점은 커서에서 후보의 reachPx보다 가까울 수 없으므로
+ * reachPx가 지금 고른 거리 이상인 후보는 부르지 않는다
  */
 export function openFaceSnap<T extends TrackTriangle>(
   f: ViewFrame,
@@ -1008,6 +1063,7 @@ export function openFaceSnap<T extends TrackTriangle>(
 ): OpenFaceSnap<T> | null {
   let best: OpenFaceSnap<T> | null = null;
   for (const c of openFaceCandidates(f, lines, tris, x, y, snapPx)) {
+    if (best && c.reachPx >= best.distPx) continue;
     const q = finitePoint(refine(c));
     if (!q) continue;
     const L = lines[c.line]!;
@@ -1027,6 +1083,41 @@ export function openFaceSnap<T extends TrackTriangle>(
     best = { p, core: c.p, line: c.line, tri: t, distPx: dist };
   }
   return best;
+}
+
+/**
+ * 선 P + s·e(e는 단위)에서 삼각형 c 위 곡면 조각 자리인 조각의 매개변수 [s0, s1](0.23.0 열린 면 교차의 받는 범위): 삼각형 평면에 내린 발이 세 변을 바깥으로 grow만큼
+ * 민 삼각형 안이고(openFaceSnap의 "발이 삼각형에서 반 화소 안"을 품는다) 평면에서 h 안이다(세 변의 수직 평면과 두 덮개 평면 사이 — 볼록한 기둥을 선으로 자른다).
+ * 없거나 넓이 0이면 null
+ */
+function triPrismSpan(P: readonly number[], e: readonly number[], c: readonly (readonly number[])[], h: number, grow: number): [number, number] | null {
+  const A = c[0]!, B = c[1]!, C = c[2]!;
+  const n = cross3(sub3(B, A), sub3(C, A));
+  const nn = Math.hypot(n[0], n[1], n[2]);
+  if (!(nn > 0)) return null;
+  const u: V3 = [n[0] / nn, n[1] / nn, n[2] / nn];
+  let lo = -Infinity, hi = Infinity;
+  // α + β·s ≥ 0 꼴의 반공간으로 [lo, hi]를 줄인다(β가 0이면 α로 판정)
+  const clip = (alpha: number, beta: number): boolean => {
+    if (Math.abs(beta) <= 1e-15) return alpha >= 0;
+    const s = -alpha / beta;
+    if (beta > 0) lo = Math.max(lo, s);
+    else hi = Math.min(hi, s);
+    return lo <= hi;
+  };
+  const hp = dot3(u, sub3(P, A)), he = dot3(u, e);
+  if (!clip(h - hp, -he) || !clip(h + hp, he)) return null;
+  for (let k = 0; k < 3; k++) {
+    const a = c[k]!, b = c[(k + 1) % 3]!, o = c[(k + 2) % 3]!;
+    // 변 a → b의 안쪽 수직(삼각형 평면 안, 셋째 꼭짓점 쪽 단위 벡터)
+    let m = cross3(u, sub3(b, a));
+    const ml = Math.hypot(m[0], m[1], m[2]);
+    if (!(ml > 0)) return null;
+    m = [m[0] / ml, m[1] / ml, m[2] / ml];
+    if (dot3(m, sub3(o, a)) < 0) m = [-m[0], -m[1], -m[2]];
+    if (!clip(dot3(m, sub3(P, a)) + grow, dot3(m, e))) return null;
+  }
+  return Number.isFinite(lo) && Number.isFinite(hi) && lo <= hi ? [lo, hi] : null;
 }
 
 /** 삼각형 평면 위 점 q에서 삼각형(채운 면)까지 거리(안이면 0) */
