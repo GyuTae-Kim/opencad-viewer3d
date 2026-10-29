@@ -14,6 +14,8 @@
  * 0.17.0: 같은 단추로 끌어온 두 점의 축이 만나는 점·끌어온 축이 모서리와 만나는 점. 상태 줄에 미리 보기의 끌어온 축(둘째 축·놓인 선분)
  * 0.18.0 단추: 축과 모서리(끌어온 축에 inference.axisEdges까지, 수직 발은 끈다 — 첫 점 축이 모서리와 만나는 점). 상태 줄에 미리 보기의 첫 점 축과 놓인 선분.
  *   축과 면(축과 모서리에 inference.axisFaces까지 — 첫 점 축·끌어온 축이 면을 뚫는 점). 상태 줄에 뚫은 면의 그물 id
+ * 0.19.0 단추: 잠근 선 교차(축과 면에 inference.lockEdges·lockFaces와 refineFace까지 — 잠근 동안 잠근 선이 모서리와 만나는 점·면을 뚫는 점,
+ *   축이 구를 뚫는 점은 정확한 구 위로). 상태 줄에 "잠근 Z축 · 구 면(다듬음)"
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -22,6 +24,7 @@ import { VIEW_LABELS, type ViewName } from './camera';
 import type { RenderMode } from './renderer';
 import type { SectionAxis } from './section';
 import { syntheticScene } from './synth';
+import type { SnapRefineFaceInput } from './snap';
 import type { Scene3d, SnapPoint } from './types';
 import { type SectionCaps, Viewer3d } from './viewer';
 
@@ -210,6 +213,23 @@ toggle(
         : null,
     ),
   '축과 모서리에 더해, 첫 점을 지나는 X·Y·Z 축과 끌어온 축이 커서 아래 면을 뚫는 점에도 붙잡기(첫 점 축이면 Shift로 그 축에 잠그기)',
+);
+// 0.19.0: 잠근 선이 모서리와 만나는 점·면을 뚫는 점, 축이 구를 뚫는 점을 정확한 구 위로(refineFace)
+toggle(
+  '잠근 선 교차',
+  (v) =>
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true },
+            refineFace: demoSphereFace,
+          }
+        : null,
+    ),
+  '축과 면에 더해, Shift·잠금 단추로 잠근 동안 잠근 선이 모서리와 만나는 점·커서 아래 면을 뚫는 점에도 붙잡기. 축이 구를 뚫는 점은 정확한 구 위로 다듬는다',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
@@ -411,9 +431,11 @@ viewer.canvas.addEventListener('pointermove', () =>
     const ax = (a: string | undefined): string => `${(a ?? '').toUpperCase()}축`;
     const face = h?.face ? ` · ${h.face.id} 면` : '';
     const next = !h?.trackFrom
-      ? h?.snap === 'axis' && (h.segment || h.face)
-        ? `미리 보기: 첫 점 ${ax(h.axis)}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}${face}${h.refined ? '(다듬음)' : ''}`
-        : ''
+      ? h?.locked && (h.segment || h.face)
+        ? `미리 보기: 잠근 ${h.axis ? ax(h.axis) : '선'}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}${face}${h.refined ? '(다듬음)' : ''}`
+        : h?.snap === 'axis' && (h.segment || h.face)
+          ? `미리 보기: 첫 점 ${ax(h.axis)}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}${face}${h.refined ? '(다듬음)' : ''}`
+          : ''
       : h.direction && !h.trackOther && !h.segment && !h.face
         ? `미리 보기: 첫 점 ${ax(h.axis)} 위 ${pt(h.trackFrom)}와 나란한 자리`
         : `미리 보기: ${pt(h.trackFrom)}의 ${ax(h.axis)}${h.trackOther ? ` × ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}` : ''}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}${face}`;
@@ -508,6 +530,27 @@ function demoSnapPoints(): SnapPoint[] {
     out.push({ point: c, kind: 'center', id: m.id });
   }
   return out;
+}
+
+/**
+ * 0.19.0 축이 면을 뚫는 점 다듬기(개발 확인용 refineFace): 구 그물이면 축 직선과 정확한 구(그물 범위의 가운데·반지름)의 교차 가운데 코어 점에 가까운 것,
+ * 다른 그물(평면 상자)이면 null — 삼각형 위 점 그대로
+ */
+function demoSphereFace(c: SnapRefineFaceInput): number[] | null {
+  const m = c.face.id === '구' ? scene.meshes.find((k) => k.id === '구') : undefined;
+  if (!m) return null;
+  const b = itemBounds(m);
+  const ctr = [0, 1, 2].map((i) => (b.min[i]! + b.max[i]!) / 2);
+  const r = (b.max[0]! - b.min[0]!) / 2;
+  const o = c.line.origin, d = c.line.dir;
+  const w = [o[0] - ctr[0]!, o[1] - ctr[1]!, o[2] - ctr[2]!];
+  const bb = w[0]! * d[0] + w[1]! * d[1] + w[2]! * d[2];
+  const disc = bb * bb - (w[0]! * w[0]! + w[1]! * w[1]! + w[2]! * w[2]! - r * r);
+  if (disc < 0) return null;
+  const at = (t: number): number[] => [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+  const p = at(-bb - Math.sqrt(disc)), q = at(-bb + Math.sqrt(disc));
+  const far = (s: number[]): number => Math.hypot(s[0]! - c.point[0], s[1]! - c.point[1], s[2]! - c.point[2]);
+  return far(p) <= far(q) ? p : q;
 }
 
 /** 지금 화면(toBlob) → 화소 */

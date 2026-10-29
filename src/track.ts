@@ -12,6 +12,8 @@
  * - 첫 점 축과 선분의 교차(0.18.0 axisEdgeSnap): 첫 측정 점 A를 지나는 X·Y·Z 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점(trackEdgeSnap과 같은 허용치·빼는 규칙 —
  *   끌어온 점이 없어도 된다. 뷰어는 MeasureInference.axisEdges를 켰을 때)
  * - 축과 면의 교차(0.18.0 axisFaceSnap): 첫 점 축·끌어온 축이 커서 아래 보이는 면을 뚫는 점(뷰어는 MeasureInference.axisFaces를 켰을 때)
+ * - 잠근 선과 선분·면의 교차(0.19.0 lockEdgeSnap·lockFaceSnap): 첫 점을 지나는 잠근 선(축이 아닌 방향도)이 커서 둘레 선분과 3D로 만나는 점·커서 아래 보이는 면을
+ *   뚫는 점(axisEdgeSnap·axisFaceSnap과 같은 계산 — 뷰어는 MeasureInference.lockEdges·lockFaces를 켜고 잠갔을 때)
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
  * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
  */
@@ -278,10 +280,10 @@ export function trackEdgeSnap<S extends TrackSegment>(
  * 점 P를 지나는 축들(dirs)이 선분들(segs)과 3D로 만나는 점 가운데 커서에 가장 가까운 것(trackEdgeSnap·axisEdgeSnap이 함께 쓴다 — 규칙은 trackEdgeSnap 머리글).
  * best(지금까지 고른 것)보다 가까운 것만 take로 만들어 돌려주고, 없으면 best 그대로. 축 차례 → 선분 차례, 같으면 앞의 것
  */
-function crossEdges<S extends TrackSegment, T extends { distPx: number }>(
+function crossEdges<S extends TrackSegment, T extends { distPx: number }, A = SnapAxis>(
   f: ViewFrame,
   P: readonly number[],
-  dirs: readonly (readonly [SnapAxis, V3])[],
+  dirs: readonly (readonly [A, V3])[],
   segs: readonly S[],
   x: number,
   y: number,
@@ -289,7 +291,7 @@ function crossEdges<S extends TrackSegment, T extends { distPx: number }>(
   skip: readonly number[] | null | undefined,
   visible: ((p: V3, seg: S) => boolean) | null | undefined,
   best: T | null,
-  take: (p: V3, axis: SnapAxis, e: V3, seg: S, distPx: number) => T,
+  take: (p: V3, axis: A, e: V3, seg: S, distPx: number) => T,
 ): T | null {
   for (const [axis, e] of dirs)
     for (const s of segs) {
@@ -398,30 +400,105 @@ export function axisFaceSnap<H extends TrackFaceHit>(
     const { from: O, axis } = lines[li]!;
     const e = dirs.find(([n]) => n === axis)?.[1];
     if (!e || cursorOn(f, O, x, y, snapPx)) continue;
-    let plane: TrackFaceHit = under;
-    for (let k = 0; k < steps; k++) {
-      const n = plane.normal, Q = plane.origin ?? plane.point;
-      const nn = Math.hypot(n[0]!, n[1]!, n[2]!);
-      const den = n[0]! * e[0] + n[1]! * e[1] + n[2]! * e[2];
-      if (!(nn > 0) || !(Math.abs(den) > 1e-9 * nn)) break;
-      const t = (n[0]! * (Q[0]! - O[0]!) + n[1]! * (Q[1]! - O[1]!) + n[2]! * (Q[2]! - O[2]!)) / den;
-      const m: V3 = [O[0]! + e[0] * t, O[1]! + e[1] * t, O[2]! + e[2] * t];
-      if (!Number.isFinite(m[0]) || !Number.isFinite(m[1]) || !Number.isFinite(m[2])) break;
-      const tol = meetTol(f, m);
-      if (dist3(m, O) <= tol) break;
-      const dist = screenDistance(f, m, x, y);
-      if (dist === null || dist > snapPx || (best && dist >= best.distPx)) break;
-      const s = projectToScreen(f, m)!;
-      const h = hitAt(s[0], s[1]);
-      if (!h) break;
-      if (dist3(h.point, m) <= tol) {
-        best = { p: m, axis, from: [O[0]!, O[1]!, O[2]!], direction: [e[0], e[1], e[2]], distPx: dist, hit: h, line: li };
-        break;
-      }
-      plane = h;
-    }
+    const r: LockFaceSnap<H> | null = faceMeet<H>(f, O, e, x, y, snapPx, under, hitAt, steps, best ? best.distPx : Infinity);
+    if (r) best = { p: r.p, axis, from: [O[0]!, O[1]!, O[2]!], direction: [e[0], e[1], e[2]], distPx: r.distPx, hit: r.hit, line: li };
   }
   return best;
+}
+
+/**
+ * 점 O를 지나는 단위 방향 e의 직선이 커서 아래 면(under)에서 시작해 맨 앞에 보이는 면을 뚫는 점(axisFaceSnap·lockFaceSnap이 함께 쓴다 — 규칙은 axisFaceSnap 머리글).
+ * 커서에서 snapPx 안이고 bestDist보다 가까울 때만 { p, distPx, hit }, 아니면 null
+ */
+function faceMeet<H extends TrackFaceHit>(
+  f: ViewFrame,
+  O: readonly number[],
+  e: readonly number[],
+  x: number,
+  y: number,
+  snapPx: number,
+  under: H,
+  hitAt: (sx: number, sy: number) => H | null | undefined,
+  steps: number,
+  bestDist: number,
+): { p: V3; distPx: number; hit: H } | null {
+  let plane: TrackFaceHit = under;
+  for (let k = 0; k < steps; k++) {
+    const n = plane.normal, Q = plane.origin ?? plane.point;
+    const nn = Math.hypot(n[0]!, n[1]!, n[2]!);
+    const den = n[0]! * e[0]! + n[1]! * e[1]! + n[2]! * e[2]!;
+    if (!(nn > 0) || !(Math.abs(den) > 1e-9 * nn)) return null;
+    const t = (n[0]! * (Q[0]! - O[0]!) + n[1]! * (Q[1]! - O[1]!) + n[2]! * (Q[2]! - O[2]!)) / den;
+    const m: V3 = [O[0]! + e[0]! * t, O[1]! + e[1]! * t, O[2]! + e[2]! * t];
+    if (!Number.isFinite(m[0]) || !Number.isFinite(m[1]) || !Number.isFinite(m[2])) return null;
+    const tol = meetTol(f, m);
+    if (dist3(m, O) <= tol) return null;
+    const dist = screenDistance(f, m, x, y);
+    if (dist === null || dist > snapPx || dist >= bestDist) return null;
+    const s = projectToScreen(f, m)!;
+    const h = hitAt(s[0], s[1]);
+    if (!h) return null;
+    if (dist3(h.point, m) <= tol) return { p: m, distPx: dist, hit: h };
+    plane = h;
+  }
+  return null;
+}
+
+/** 잠근 선과 선분의 교차 결과(0.19.0 lockEdgeSnap): 찍을 점, 커서와의 화면 거리, 그 점이 놓인 선분(받은 segs의 그 객체) */
+export interface LockEdgeSnap<S extends TrackSegment = TrackSegment> {
+  p: V3;
+  distPx: number;
+  seg: S;
+}
+
+/** 잠근 선과 면의 교차 결과(0.19.0 lockFaceSnap): 찍을 점, 커서와의 화면 거리, 그 점의 면 맞음(hitAt이 돌려준 그 객체) */
+export interface LockFaceSnap<H extends TrackFaceHit = TrackFaceHit> {
+  p: V3;
+  distPx: number;
+  hit: H;
+}
+
+/**
+ * 잠근 선과 선분의 교차(0.19.0): 첫 측정 점 a를 지나는 방향 dir(길이는 상관없다 — 잠근 축·나란함·수직·선분 방향·앱이 정한 방향)의 직선이
+ * 선분 segs(커서 둘레 선분·윤곽선)와 3D로 만나는 점이 커서에서 snapPx 안이면 후보(가까운 것, 같으면 선분 차례). 규칙은 axisEdgeSnap과 같다 —
+ * 허용치는 선분 쪽 화면 반 화소(0.5 × wpp), 선분 끝점·잠근 선과 나란한 선분·a 자리의 교차·단면에서 잘린 쪽(seg.keep)은 빼고, visible(p, seg)는 지금 고른 것보다
+ * 가까운 후보에만 묻는다. 커서가 a의 화면 자리 snapPx 안이면 없다. dir가 길이 0이거나 수가 아니면 없다.
+ * 세계 축 방향이면 교차의 남은 두 좌표가 a와 정확히 같다(axisEdgeSnap과 같은 셈)
+ */
+export function lockEdgeSnap<S extends TrackSegment>(
+  f: ViewFrame,
+  a: readonly number[],
+  dir: readonly number[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  visible?: ((p: V3, seg: S) => boolean) | null,
+): LockEdgeSnap<S> | null {
+  const e = unitDir([0, 0, 0], dir);
+  if (!e || !segs.length || cursorOn(f, a, x, y, snapPx)) return null;
+  return crossEdges<S, LockEdgeSnap<S>, null>(f, a, [[null, e]], segs, x, y, snapPx, null, visible, null, (p, _a, _e, s, dist) => ({ p, distPx: dist, seg: s }));
+}
+
+/**
+ * 잠근 선과 면의 교차(0.19.0): 첫 측정 점 a를 지나는 방향 dir의 직선이 커서 아래 보이는 면을 뚫는 점(커서에서 snapPx 안일 때만). 규칙은 axisFaceSnap과 같다 —
+ * under = 커서 아래 면 맞음(없으면 없다), hitAt(sx, sy) = 화면 점에서 맨 앞에 보이는 면 맞음. 교차의 화면 자리에서 다시 맞춰 같은 자리면 받고, 다르면
+ * 새로 맞은 면의 평면으로 다시 구한다(steps번까지). 면과 나란한 선, a 자리의 교차(a가 면 위), 커서가 a의 화면 자리 snapPx 안이면 없다
+ */
+export function lockFaceSnap<H extends TrackFaceHit>(
+  f: ViewFrame,
+  a: readonly number[],
+  dir: readonly number[],
+  x: number,
+  y: number,
+  snapPx: number,
+  under: H | null | undefined,
+  hitAt: (sx: number, sy: number) => H | null | undefined,
+  steps = AXIS_FACE_STEPS,
+): LockFaceSnap<H> | null {
+  const e = unitDir([0, 0, 0], dir);
+  if (!under || !e || cursorOn(f, a, x, y, snapPx)) return null;
+  return faceMeet(f, a, e, x, y, snapPx, under, hitAt, steps, Infinity);
 }
 
 /**
