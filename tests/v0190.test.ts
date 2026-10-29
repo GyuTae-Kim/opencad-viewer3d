@@ -385,7 +385,7 @@ describe('Viewer3d: 잠근 선과 선분의 교차(0.19.0 lockEdges)', () => {
     v.dispose();
   });
 
-  it('축이 아닌 잠근 선(앱이 정한 방향)도 선분과 만나는 자리에 찍고, 다듬지 않는다', () => {
+  it('축이 아닌 잠근 선(앱이 정한 방향)도 선분과 만나는 자리에 찍는다(0.20.0부터 다듬기도 부른다 — null이면 그 자리 그대로, v0200.test.ts)', () => {
     let n = 0;
     const w = withFirst({
       ...LOCK_EDGES,
@@ -407,7 +407,9 @@ describe('Viewer3d: 잠근 선과 선분의 교차(0.19.0 lockEdges)', () => {
     expect(h.point[2]).toBe(0);
     expect(h.segment).toMatchObject({ id: '다', index: 7 });
     expect(h).not.toHaveProperty('axis');
-    expect(n).toBe(0);
+    expect(h).not.toHaveProperty('refined');
+    // 0.19.0은 0번(축이 아닌 잠근 선은 넘기지 않았다), 0.20.0은 축 이름 없는 직선으로 한 번
+    expect(n).toBe(1);
     v.dispose();
   });
 });
@@ -541,7 +543,7 @@ describe('Viewer3d: 잠근 선과 면의 교차(0.19.0 lockFaces)', () => {
     }
   });
 
-  it('끌어온 축이 면을 뚫는 점도 그 끌어온 점을 지나는 축 직선으로 넘기고, 축이 아닌 잠근 선은 부르지 않는다', () => {
+  it('끌어온 축이 면을 뚫는 점도 그 끌어온 점을 지나는 축 직선으로 넘긴다(0.20.0부터 축이 아닌 잠근 선도 넘긴다)', () => {
     const calls: SnapRefineFaceInput[] = [];
     const w = view(faceScene, false);
     const { v } = w;
@@ -560,7 +562,7 @@ describe('Viewer3d: 잠근 선과 면의 교차(0.19.0 lockFaces)', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ point: [100, 20, 40], first: null, line: { origin: P, dir: [0, 0, 1], axis: 'z' } });
     expect(v.measureHoverSnap).toMatchObject({ point: [100, 20, 40.25], refined: true, trackFrom: P, face: { id: '상자' } });
-    // 첫 점 C에서 (0.2, 0, −1) 방향으로 잠근 선은 윗면을 (70, 40, 40)에서 뚫는다 — 다듬지 않는다
+    // 첫 점 C에서 (0.2, 0, −1) 방향으로 잠근 선은 윗면을 (70, 40, 40)에서 뚫는다 — 0.19.0은 다듬지 않았고, 0.20.0은 축 이름 없는 직선으로 넘긴다
     v.setMeasureTrackPoints(null);
     clickAt(w, C, 1, 0);
     expect(v.measurePoints[0]!.point).toEqual(C);
@@ -569,9 +571,9 @@ describe('Viewer3d: 잠근 선과 면의 교차(0.19.0 lockFaces)', () => {
     hoverXY(w, q.x + 3, q.y + 1);
     const h = v.measureHoverSnap!;
     expect(h).toMatchObject({ snap: 'parallel', locked: true, face: { id: '상자' } });
-    expect(dist(h.point, [70, 40, 40])).toBeLessThan(1e-9);
-    expect(h).not.toHaveProperty('refined');
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.line).not.toHaveProperty('axis');
+    expect(dist(calls[1]!.point, [70, 40, 40])).toBeLessThan(1e-9);
     v.dispose();
   });
 
