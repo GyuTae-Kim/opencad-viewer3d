@@ -117,6 +117,7 @@ import {
   nearSegmentId,
   normalizeInference,
   parallelSnap,
+  rayLinePoint,
   unitDir,
 } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
@@ -741,6 +742,25 @@ type OpenRefineLine = { from: V3; dir: V3; axis?: SnapAxis; track: boolean };
 const refineLineOf = (l: OpenRefineLine): SnapRefineLine => (l.axis ? { origin: l.from, dir: l.dir, axis: l.axis } : { origin: l.from, dir: l.dir });
 /** 커서 둘레 그물 삼각형(0.22.0 선과 삼각형의 열린 교차): 세계 꼭짓점 셋·커서 쪽 깊이의 화소 세계 길이·남는 쪽 판정과 그 면(그물 id·삼각형 번호·눈 쪽 법선) */
 type NearTriangle = TrackTriangle & SnapFace & { corners: [V3, V3, V3] };
+/**
+ * 점 from을 지나는 방향 dir의 3D 직선을 화면에 그린 직선이 커서(x, y)에서 px 안을 지날 수 있는지(0.22.0 — 면의 열린 교차에서 삼각형 모으기를 건너뛸 때).
+ * 원근 투영은 직선을 직선으로 옮기므로 눈 앞 두 점(커서 광선에 가장 가까운 점과 그 깊이만큼 떨어진 점)의 화면 자리를 지나는 2D 직선까지 거리가 그 아래 한계다.
+ * 두 점을 화면에 그릴 수 없거나 한 점으로 겹치면(시선과 나란하다) 판정하지 않고 true
+ */
+function lineNearCursor(f: ViewFrame, ray: { origin: V3; dir: V3 }, from: readonly number[], dir: readonly number[], x: number, y: number, px: number): boolean {
+  const e = unitDir([0, 0, 0], dir);
+  if (!e) return false;
+  const q1 = rayLinePoint(ray.origin, ray.dir, from, e) ?? [from[0]!, from[1]!, from[2]!];
+  const L = Math.max(viewDepth(f, q1), f.near, 1e-9);
+  let s1 = projectToScreen(f, q1), s2 = projectToScreen(f, [q1[0] + e[0] * L, q1[1] + e[1] * L, q1[2] + e[2] * L]);
+  if (!s2) s2 = projectToScreen(f, [q1[0] - e[0] * L, q1[1] - e[1] * L, q1[2] - e[2] * L]);
+  if (!s1 || !s2) return true;
+  if (f.projection === 'perspective' && (s1[2] < f.near * 0.999 || s2[2] < f.near * 0.999)) return true;
+  const dx = s2[0] - s1[0], dy = s2[1] - s1[1];
+  const l = Math.hypot(dx, dy);
+  if (!(l > 1e-9) || !Number.isFinite(l)) return true;
+  return Math.abs(dx * (y - s1[1]) - dy * (x - s1[0])) / l <= px;
+}
 /**
  * 그물 면 고르기 결과 → 축과 면의 교차가 보는 면 맞음(0.18.0): 광선 맞은 점, 단위 법선, 평면 위 점은 맞은 삼각형의 첫 꼭짓점(광선 맞은 점의 셈 오차 없이 —
  * 축과 수직인 면이면 교차의 그 좌표가 꼭짓점 좌표 그대로), 그물 id·삼각형 번호. 그물 면(잘린 면 아님)이 아니면 null
@@ -4197,13 +4217,16 @@ export class Viewer3d {
     budget: { calls: number },
   ): { snap: OpenFaceSnap<NearTriangle>; line: OpenRefineLine } | null {
     const refine = so.refineFace;
-    if (!refine || !lines.length) return null;
+    if (!refine) return null;
+    const ray = screenRay(f, x, y);
+    // 화면에 그린 선이 커서에서 붙잡기 거리 안을 지나는 선만(받는 점은 선 위·커서에서 붙잡기 거리 안이다) — 대부분의 미리 보기에서 삼각형 모으기를 건너뛴다
+    const near = lines.filter((l) => lineNearCursor(f, ray, l.from, l.dir, x, y, snapPx));
+    if (!near.length) return null;
     const tris = this.trianglesAround(f, x, y, snapPx);
     if (!tris.length) return null;
-    const ray = screenRay(f, x, y);
     const r = openFaceSnap(
       f,
-      lines,
+      near,
       tris,
       x,
       y,
@@ -4213,7 +4236,7 @@ export class Viewer3d {
           kind: 'axisFace',
           point: [c.p[0], c.p[1], c.p[2]],
           face: copyFace(c.tri),
-          line: copyLine(refineLineOf(lines[c.line]!)),
+          line: copyLine(refineLineOf(near[c.line]!)),
           first: first ? [first[0], first[1], first[2]] : null,
           ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
           open: true,
@@ -4233,7 +4256,7 @@ export class Viewer3d {
         return !!sp && this.snapVisible(f, p, sp[0], sp[1], t.id);
       },
     );
-    return r ? { snap: r, line: lines[r.line]! } : null;
+    return r ? { snap: r, line: near[r.line]! } : null;
   }
 
   /** 커서 tolPx 안의 보이는 그물 삼각형(0.22.0 선과 삼각형의 열린 교차 — scenepick.ts trianglesNear)과 그 깊이의 화소 세계 길이 */
