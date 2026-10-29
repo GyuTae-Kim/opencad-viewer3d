@@ -361,10 +361,11 @@ export interface InferenceCandidate {
   other?: SnapSegment;
 }
 
-/** 커서 둘레 선분의 식별자(번호가 없으면 null — 0.13.0 꼴 입력) */
-function segOf(s: NearSegment): SnapSegment | null {
+/** 커서 둘레 선분의 식별자(번호가 없으면 null — 0.13.0 꼴 입력). 0.17.0부터 끌어온 축과 선분의 교차(뷰어)도 쓴다 */
+export function nearSegmentId(s: NearSegment): SnapSegment | null {
   return s.kind && s.raw !== undefined ? { kind: s.kind, id: s.id, index: s.index ?? s.raw, raw: s.raw, ends: [s.a, s.b] } : null;
 }
+const segOf = nearSegmentId;
 
 /**
  * 커서 둘레 선분들에서 교차점·수직 발 후보(교차점 먼저, 선분 차례대로). first = 첫 측정 점(없으면 수직 발 없음).
