@@ -3,17 +3,22 @@
  * 반투명 그물을 지나 고르기(PickOptions·MeasureSnapOptions의 throughTranslucent), 덧그림 글상자 비키기(setAnnotations ↔ setMeasureLabelAvoid)와 뷰 큐브 화면 사각형(viewCubeRect).
  * - 순수 함수: 같은 평면에서 토막 끝 둘레로 들어와 활꼴을 두 번 지나는 선(두 번 지날 수 있는 토막의 조건 밖)의 먼 교차를 코어 점 거리와 상관없이 받기,
  *   그 토막 범위 밖·현에서 먼 점·커서에서 먼 근은 버리기, 그 토막 범위인 선 조각이 커서에서 붙잡기 거리 밖이면 묻지 않기
- * - 뷰어(가짜 DOM — 실제 포인터 사건): 원호 꼭대기를 현과 거의 나란히 스치는 첫 점 X축(NC 23차 재현 — 확대 12단마다 붙는 것)
+ *   반투명 그물 뒤 불투명 그물 면 고르기(pickScene throughTranslucent — 한 단면·여러 단면, 반투명뿐이면 반투명, 불투명 판정 함수)
+ * - 뷰어(가짜 DOM — 실제 포인터 사건): 원호 꼭대기를 현과 거의 나란히 스치는 첫 점 X축(NC 23차 재현 — 확대 12단마다 붙는 것),
+ *   반투명 덮개 너머 판 고르기(pick·onPick·측정 미리 보기·꼭짓점·축이 면을 뚫는 점, setItemOpacity로 바꾼 투명도)
  * 화면 좌표로 가리킬 때는 선·그물의 경계나 바깥 구석을 정확히 가리키지 않고 몇 화소 옆을 가리킨다(Node 판마다 마지막 자리 반올림이 다르다).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { installDom } from './fakedom';
+import { buildBvh } from '../src/bvh';
 import { type CameraState, computeFrame, defaultCamera, dirToAngles, projectToScreen, viewDepth, worldPerPixel } from '../src/camera';
+import { type ScenePickOptions, pickScene } from '../src/scenepick';
 import type { SnapRefineInput } from '../src/snap';
+import { boxMesh } from '../src/synth';
 import { OPEN_EDGE_CHORD, openEdgeCandidates, openEdgeSnap } from '../src/track';
 import { Viewer3d } from '../src/viewer';
 import type { V3 } from '../src/math';
-import type { Scene3d } from '../src/types';
+import type { Pick3d, Scene3d } from '../src/types';
 
 const dist = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
 const deg = (a: number): number => (a * Math.PI) / 180;
@@ -274,5 +279,185 @@ describe("Viewer3d: 원호 꼭대기를 현과 거의 나란히 스치는 첫 �
     expect(got.map((g) => g.minus)).toEqual(['aooooooooaaa', 'aooooooooaav', 'aooooooooaav', 'ooooooooavvv']);
     // 앱 함수는 기억으로 단마다 몇 번만 불린다(12단 × 두 자리를 가리키는 동안)
     for (const g of got) expect(g.calls).toBeLessThanOrEqual(3 * 12);
+  });
+});
+
+// ───────────── 반투명 그물을 지나 고르기 ─────────────
+/** 불투명 판(0~100, 0~80, 0~20)과 그 위를 덮은 반투명 덮개(−10~110, −10~90, 25~40, 알파 0.35) */
+const PLATE = boxMesh('판', [0, 0, 0], [100, 80, 20], [0.6, 0.6, 0.7, 1]);
+const COVER = boxMesh('덮개', [-10, -10, 25], [110, 90, 40], [0.4, 0.7, 1, 0.35]);
+
+describe('pickScene throughTranslucent(반투명 그물을 지나 고르기)', () => {
+  const a = dirToAngles([0.3, -0.4, 1]);
+  const cam: CameraState = { ...defaultCamera(), yaw: a.yaw, pitch: a.pitch, target: [50, 40, 20], distance: 260, projection: 'perspective' };
+  const f = computeFrame(cam, 600, 400, { center: [50, 40, 20], radius: 90 });
+  const at = (p: readonly number[]): [number, number] => {
+    const s = projectToScreen(f, p)!;
+    return [s[0], s[1]];
+  };
+  const bvhs = new Map<Float32Array, ReturnType<typeof buildBvh>>();
+  const opts = (o: Partial<ScenePickOptions> = {}): ScenePickOptions => ({
+    tol: 6,
+    occlude: true,
+    bvh: (kind, positions, indices) => {
+      let b = bvhs.get(positions);
+      if (!b) bvhs.set(positions, (b = buildBvh(kind, positions, indices)));
+      return b;
+    },
+    ...o,
+  });
+  const items = { meshes: [COVER, PLATE], lines: [], points: [] };
+
+  it('덮개 너머 판 위를 누르면: 기본은 덮개 윗면, throughTranslucent면 판 윗면(가장 앞의 불투명 면)', () => {
+    const [x, y] = at([50.3, 40.2, 20]);
+    const plain = pickScene(f, x, y, items, opts())!;
+    expect(plain.pick).toMatchObject({ kind: 'mesh', id: '덮개' });
+    expect(plain.pick.point[2]).toBeCloseTo(40, 6);
+    const thru = pickScene(f, x, y, items, opts({ throughTranslucent: true }))!;
+    expect(thru.pick).toMatchObject({ kind: 'mesh', id: '판', normal: [0, 0, 1] });
+    expect(thru.pick.point[2]).toBeCloseTo(20, 6);
+    expect(dist(thru.pick.point, [50.3, 40.2, 20])).toBeLessThan(1e-6);
+    expect(thru.corners).toHaveLength(3);
+    // 묶음 차례와 상관없다
+    expect(pickScene(f, x, y, { ...items, meshes: [PLATE, COVER] }, opts({ throughTranslucent: true }))!.pick.id).toBe('판');
+  });
+
+  it('반투명 면만 맞으면 그 면(판 밖 덮개 둘레), 불투명 판정 함수(겉모습)를 따른다, 여러 단면 고르기도 같다', () => {
+    const [ox, oy] = at([105, 40, 40]);
+    expect(pickScene(f, ox, oy, items, opts({ throughTranslucent: true }))!.pick.id).toBe('덮개');
+    const [x, y] = at([50.3, 40.2, 20]);
+    // 판도 반투명으로 보면(겉모습 투명도) 가장 앞의 반투명 면 — 덮개
+    expect(pickScene(f, x, y, items, opts({ throughTranslucent: true, opaque: () => false }))!.pick.id).toBe('덮개');
+    // 덮개를 불투명으로 보면 덮개
+    expect(pickScene(f, x, y, items, opts({ throughTranslucent: true, opaque: () => true }))!.pick.id).toBe('덮개');
+    // 묶음마다 단면(빈 목록 — 자르지 않는다)이면 여러 단면 고르기 길이다
+    const multi = opts({ throughTranslucent: true, clips: () => [] });
+    expect(pickScene(f, x, y, items, multi)!.pick.id).toBe('판');
+    expect(pickScene(f, x, y, items, opts({ clips: () => [] }))!.pick.id).toBe('덮개');
+    // 위에서 판을 자르는 평면(z > 15 쪽을 잘라냄)도 같은 규칙 — 판은 잘린 아래만 남아 그 안쪽 면(z 0 바닥 윗면은 뒷면)이 맞는다
+    const cut = opts({ throughTranslucent: true, clips: (it) => (it.id === '판' ? [[0, 0, 1, -15]] : []) });
+    const c = pickScene(f, x, y, items, cut)!;
+    expect(c.pick.id).toBe('판');
+    expect(c.pick.point[2]).toBeLessThanOrEqual(15 + 1e-6);
+  });
+});
+
+describe('Viewer3d: 반투명 그물을 지나 고르기(0.23.0 throughTranslucent)', () => {
+  const sc: Scene3d = {
+    name: 't',
+    units: 'mm',
+    meshes: [COVER, PLATE],
+    // 덮개 윗면 위 선분(그 아래로 판이 보이는 자리)
+    lines: [{ id: '금', positions: new Float32Array([30, 50, 40, 90, 50, 40]) }],
+    points: [],
+  };
+  function make(): Viewer3d {
+    const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false });
+    v.setScene(sc);
+    v.setView('seIso', false);
+    v.fit(false);
+    v.renderNow();
+    return v;
+  }
+  const scr = (v: Viewer3d, p: readonly number[]): { x: number; y: number } => {
+    const s = v.project(p)!;
+    expect(s.onScreen).toBe(true);
+    return { x: s.x, y: s.y };
+  };
+
+  it('pick: 기본은 덮개, throughTranslucent면 판. setItemOpacity로 판을 반투명으로 하면 덮개, 덮개를 불투명(색 알파 1)으로 하면 덮개', () => {
+    const v = make();
+    const s = scr(v, [50.3, 40.2, 20]);
+    expect(v.pick(s.x, s.y)).toMatchObject({ kind: 'mesh', id: '덮개' });
+    const t = v.pick(s.x, s.y, { throughTranslucent: true })!;
+    expect(t).toMatchObject({ kind: 'mesh', id: '판', normal: [0, 0, 1] });
+    expect(dist(t.point, [50.3, 40.2, 20])).toBeLessThan(1e-6);
+    expect(v.pick(s.x, s.y, { throughTranslucent: true, meshesOnly: true })).toEqual(t);
+    expect(v.pick(s.x, s.y, { throughTranslucent: false })).toEqual(v.pick(s.x, s.y));
+    v.setItemOpacity('판', 0.5);
+    expect(v.pick(s.x, s.y, { throughTranslucent: true })).toMatchObject({ id: '덮개' });
+    v.setItemOpacity('판', null);
+    v.setItemColor('덮개', [0.4, 0.7, 1, 1]);
+    expect(v.pick(s.x, s.y, { throughTranslucent: true })).toMatchObject({ id: '덮개' });
+    v.setItemColor('덮개', null);
+    expect(v.pick(s.x, s.y, { throughTranslucent: true })).toMatchObject({ id: '판' });
+    v.dispose();
+  });
+
+  it('onPick: throughTranslucent 알림은 판, 선택 없이 단 알림은 덮개, meshesOnly와 함께면 덮개 위 선분 아래도 판', () => {
+    const v = make();
+    const log: [string, Pick3d | null][] = [];
+    v.onPick((p) => log.push(['plain', p]));
+    v.onPick((p) => log.push(['thru', p]), { throughTranslucent: true });
+    v.onPick((p) => log.push(['both', p]), { throughTranslucent: true, meshesOnly: true });
+    const s = scr(v, [50.3, 40.2, 20]);
+    clickXY(v, s.x, s.y);
+    expect(log.map((e) => [e[0], e[1]?.id])).toEqual([
+      ['plain', '덮개'],
+      ['thru', '판'],
+      ['both', '판'],
+    ]);
+    expect(log[1]![1]).toEqual(v.pick(s.x, s.y, { throughTranslucent: true }));
+    // 덮개 위 선분: 선택 없이·throughTranslucent는 선분(선분은 그대로), meshesOnly와 함께면 그 아래 판
+    log.length = 0;
+    const l = scr(v, [60, 50, 40]);
+    clickXY(v, l.x + 0.4, l.y + 0.3);
+    expect(log.map((e) => [e[0], e[1]?.kind, e[1]?.id])).toEqual([
+      ['plain', 'line', '금'],
+      ['thru', 'line', '금'],
+      ['both', 'mesh', '판'],
+    ]);
+    v.dispose();
+  });
+
+  it('측정: throughTranslucent면 미리 보기·찍은 점이 판 위(면 위 점·꼭짓점), 주지 않으면 0.22.0처럼 덮개 위', () => {
+    const run = (through: boolean): { face: V3; corner: V3 | null; cornerSnap: string | null; first: V3 } => {
+      const v = make();
+      v.setMeasureMode(true);
+      v.setMeasureSnap(through ? { throughTranslucent: true } : { edges: false });
+      const s = scr(v, [50.3, 40.2, 20]);
+      hoverXY(v, s.x, s.y);
+      const face = v.measureHoverSnap!.point;
+      // 판 윗면 구석(100, 80, 20) 둘레(판 윗면 안쪽 (99, 79, 20)) — 덮개 너머 판의 꼭짓점
+      const c = scr(v, [99, 79, 20]);
+      hoverXY(v, c.x, c.y);
+      const h = v.measureHoverSnap;
+      clickXY(v, s.x, s.y);
+      const first = v.measurePoints[0]!.point;
+      v.dispose();
+      return { face, corner: h ? h.point : null, cornerSnap: h ? h.snap : null, first };
+    };
+    const t = run(true);
+    expect(t.face[2]).toBeCloseTo(20, 6);
+    expect(t.first[2]).toBeCloseTo(20, 6);
+    expect(t.corner).toEqual([100, 80, 20]);
+    expect(t.cornerSnap).toBe('vertex');
+    const p = run(false);
+    expect(p.face[2]).toBeCloseTo(40, 6);
+    expect(p.first[2]).toBeCloseTo(40, 6);
+    expect(p.cornerSnap).not.toBe('vertex');
+  });
+
+  it('측정 축이 면을 뚫는 점(axisFaces): 덮개 너머 판 윗면을 뚫는 첫 점 Z축 자리에 붙는다(주지 않으면 덮개 면만 본다)', () => {
+    const run = (through: boolean): { snap: string | null; point: V3; face: string | null } | null => {
+      const v = make();
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ points: [{ point: [50, 40, 70], kind: 'point' }], inference: { axes: true, axisFaces: true }, ...(through ? { throughTranslucent: true } : {}) });
+      const a = scr(v, [50, 40, 70]);
+      clickXY(v, a.x + 1, a.y);
+      expect(v.measurePoints[0]!.point).toEqual([50, 40, 70]);
+      // Z축이 판 윗면을 뚫는 자리(50, 40, 20)에서 몇 화소 옆
+      const s = scr(v, [50, 40, 20]);
+      hoverXY(v, s.x + 3, s.y + 1);
+      const h = v.measureHoverSnap;
+      v.dispose();
+      return h ? { snap: h.snap, point: h.point, face: h.face?.id ?? null } : null;
+    };
+    const t = run(true)!;
+    expect(t).toMatchObject({ snap: 'axis', face: '판' });
+    expect(t.point).toEqual([50, 40, 20]);
+    const p = run(false);
+    expect(p?.face ?? null).not.toBe('판');
+    expect(p ? dist(p.point, [50, 40, 20]) : Infinity).toBeGreaterThan(1e-6);
   });
 });
