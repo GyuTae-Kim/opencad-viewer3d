@@ -12,6 +12,7 @@
  * 0.10.0 단추: 나란함·잠금(추론 붙잡기에 나란함과 Shift 잠금까지), 잠금(앱 단추 꼴 setMeasureInferenceLock)
  * 0.16.0 단추: 끌어온 축(나란함·잠금에 inference.track까지). 측정 상태 줄에 둘째 점이 놓인 선분(묶음 id#번호)·끌어온 점
  * 0.17.0: 같은 단추로 끌어온 두 점의 축이 만나는 점·끌어온 축이 모서리와 만나는 점. 상태 줄에 미리 보기의 끌어온 축(둘째 축·놓인 선분)
+ * 0.18.0 단추: 축과 모서리(끌어온 축에 inference.axisEdges까지, 수직 발은 끈다 — 첫 점 축이 모서리와 만나는 점). 상태 줄에 미리 보기의 첫 점 축과 놓인 선분
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -175,6 +176,23 @@ toggle(
     ),
   '나란함·잠금에 더해, 점(꼭짓점·끝점·중심 등) 위에 0.5초 머물면 그 점을 기억하고(최근 셋) 그 점을 지나는 X·Y·Z 축과 첫 점 축 위에서 그 점과 나란한 자리, ' +
     '기억한 두 점의 축이 만나는 점, 그 축이 모서리와 만나는 점에도 붙잡기(Esc로 지우기)',
+);
+// 0.18.0: 첫 점 X·Y·Z 축이 모서리(선분·윤곽선)와 만나는 점
+toggle(
+  '축과 모서리',
+  (v) =>
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true },
+          }
+        : null,
+    ),
+  '끌어온 축에 더해, 첫 점을 지나는 X·Y·Z 축이 모서리와 만나는 점에도 붙잡기(Shift로 그 축에 잠그기). ' +
+    '상자 모서리처럼 축과 수직인 모서리에서는 그 점이 곧 수직 발이라 수직 발을 끈다',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
@@ -366,13 +384,18 @@ viewer.onMeasure((m) => {
   info = m ? `측정: ${m.distance.toFixed(3)} mm (ΔX ${m.dx.toFixed(3)} ΔY ${m.dy.toFixed(3)} ΔZ ${m.dz.toFixed(3)})${snap}${seg}${from}` : '';
   showStatus();
 });
-/** 0.17.0: 측정 미리 보기의 끌어온 축 — 첫 점 축 위 나란한 자리, 끌어온 점의 축(둘째 축과 만나는 점이면 그 축도, 모서리와 만나는 점이면 그 선분) */
+/**
+ * 0.17.0: 측정 미리 보기의 끌어온 축 — 첫 점 축 위 나란한 자리, 끌어온 점의 축(둘째 축과 만나는 점이면 그 축도, 모서리와 만나는 점이면 그 선분).
+ * 0.18.0: 첫 점 축이 모서리와 만나는 점이면 그 축과 선분(앱이 다듬었으면 표시)
+ */
 viewer.canvas.addEventListener('pointermove', () =>
   requestAnimationFrame(() => {
     const h = viewer.measureHoverSnap;
     const ax = (a: string | undefined): string => `${(a ?? '').toUpperCase()}축`;
     const next = !h?.trackFrom
-      ? ''
+      ? h?.snap === 'axis' && h.segment
+        ? `미리 보기: 첫 점 ${ax(h.axis)} · ${h.segment.id}#${h.segment.index} 위${h.refined ? '(다듬음)' : ''}`
+        : ''
       : h.direction && !h.trackOther && !h.segment
         ? `미리 보기: 첫 점 ${ax(h.axis)} 위 ${pt(h.trackFrom)}와 나란한 자리`
         : `미리 보기: ${pt(h.trackFrom)}의 ${ax(h.axis)}${h.trackOther ? ` × ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}` : ''}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}`;
