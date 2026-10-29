@@ -2319,6 +2319,137 @@ function trackValues(d: 'base' | 'off'): ValueSet {
   };
 }
 
+// ───────────── 0.17.0 끌어온 축끼리의 교차·끌어온 축과 선분의 교차 ─────────────
+/** 0.17.0 끌어온 축끼리의 교차 자리: P의 X축과 P2의 Y축이 (30, 50, 40)에서, P의 Y축과 P2의 X축이 (90, 30, 40)에서 만난다(구멍 점 둘 다 높이 40) */
+const PAIR_XY = [30, 50, 40];
+const PAIR_YX = [90, 30, 40];
+/** 0.17.0 끌어온 축과 선분의 교차 자리: P의 X축이 상자 오른쪽 윗모서리와(120, 50, 40), P의 Y축이 뒤 윗모서리와(90, 80, 40) */
+const EDGE_X = [120, 50, 40];
+const EDGE_Y = [90, 80, 40];
+/** 0.17.0 끌어온 축끼리의 교차(MeasureHoverSnap.trackOther)가 있는 판인지 — 구멍 점 둘을 주고 두 축이 만나는 자리를 가리켜 본다 */
+const v0170pair: Need = (v, c) => {
+  const why = v0160track(v, c);
+  if (why) return why;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference: { track: true } });
+  v.setMeasureTrackPoints([c.world(TRACK_P), c.world(TRACK_P2)]);
+  const q = c.at(c.world(PAIR_XY));
+  if (q) {
+    c.hover(q.x + 3, q.y + 1);
+    v.renderNow();
+  }
+  const ok = !!v.measureHoverSnap?.trackOther;
+  v.setMeasureSnap(null);
+  v.setMeasureMode(false);
+  v.setGroupVisible('공구 경로', true);
+  v.setGroupVisible('구멍', true);
+  return ok ? null : '이 판에 없는 값: 0.17.0 끌어온 축끼리의 교차(MeasureHoverSnap.trackOther)';
+};
+const trackPairShots: Shot[] = [
+  // 첫 점 전: 구멍 점 P의 X축과 P2의 Y축이 만나는 점(상자 윗면 위) — 두 끌어온 점에서 X축 색·Y축 색 점선 둘, 두 점 모두 큰 십자
+  { name: 'base-measure-track-pair', data: 'base', needs: v0170pair, setup: (c) => trackPreview(c, PAIR_XY, false) },
+  // 첫 점(상자 앞 왼쪽 위 구석)에서: P의 X축이 상자 오른쪽 윗모서리와 만나는 점 — P에서 X축 색 점선, 첫 점에서 측정 색 점선
+  {
+    name: 'base-measure-track-edge',
+    data: 'base',
+    needs: v0170pair,
+    setup: (c) => {
+      trackPreview(c, null, true);
+      c.v.setMeasureTrackPoints([c.world(TRACK_P)]);
+      const q = c.at(c.world(EDGE_X));
+      if (q) c.hover(q.x + 1, q.y + 3);
+    },
+  },
+  // 밝은 테마의 끌어온 축끼리의 교차
+  {
+    name: 'base-measure-track-pair-light',
+    data: 'base',
+    needs: v0170pair,
+    setup: (c) => {
+      c.v.setTheme('light');
+      trackPreview(c, PAIR_XY, false);
+    },
+  },
+];
+SHOTS.push(...trackPairShots);
+
+/**
+ * 0.17.0 끌어온 축끼리의 교차·선분 교차 값(base·off): 첫 점 전에 구멍 점 둘(P·P2)의 축이 만나는 두 자리, 높이가 다른 점(P2를 20 올린 점)과는 만나지 않는 자리,
+ * P의 축이 상자 윗모서리와 만나는 두 자리를 가리킨 미리 보기(종류·축·점·방향·끌어온 점·둘째 끌어온 축·선분). 교차 자리를 첫 점으로 찍은 점(trackOther),
+ * 잠근 동안(교차 없음), 모서리 교차를 두 점째로 찍은 결과·찍은 점의 선분·두 점째 뒤 잊는지. 같은 차례를 track 없이 되풀이한 값
+ */
+function trackPairValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-track-pair`,
+    data: d,
+    needs: v0170pair,
+    run: (c) => {
+      const { v } = c;
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      v.setMeasureMode(true);
+      const guide = (g: any): unknown[] | null => (g ? [r10s(g.from), g.axis] : null);
+      const hoverRow = (name: string, p: readonly number[], dx = 3, dy = 1): unknown[] => {
+        const q = c.at(c.world(p));
+        if (!q) return [name, null];
+        c.hover(q.x + dx, q.y + dy);
+        v.renderNow();
+        const h = v.measureHoverSnap;
+        return [
+          name,
+          h ? [h.snap, h.axis ?? null, r10s(h.point), r10s(h.direction), r10s(h.trackFrom), guide(h.trackOther), segRow(h.segment)] : null,
+          lockState(v.measureHoverLock),
+        ];
+      };
+      const sweep = (track: boolean): unknown[] => {
+        const rows: unknown[] = [];
+        const got: unknown[] = [];
+        const off = v.onMeasure((m: any) => m && got.push([r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null, m.axisA ?? null, m.axisB ?? null, r10s(m.directionB)]));
+        v.setMeasureSnap({ edges: true, inference: { axes: true, ...(track ? { track: true } : {}) } });
+        v.clearMeasure();
+        const P = c.world(TRACK_P), P2 = c.world(TRACK_P2);
+        rows.push(['set', v.setMeasureTrackPoints([P, P2])]);
+        rows.push(hoverRow('pair-xy', PAIR_XY), hoverRow('pair-yx', PAIR_YX));
+        // 높이가 다른 점과는 만나지 않는다(화면에서 엇갈려도)
+        v.setMeasureTrackPoints([P, c.world([30, 30, 60])]);
+        rows.push(hoverRow('pair-apart', PAIR_XY));
+        // 끌어온 축과 상자 윗모서리
+        v.setMeasureTrackPoints([P]);
+        rows.push(hoverRow('edge-x', EDGE_X, 1, 3), hoverRow('edge-y', EDGE_Y, 3, 1));
+        // 교차 자리를 첫 점으로
+        v.setMeasureTrackPoints([P, P2]);
+        const a = c.at(c.world(PAIR_XY));
+        if (a) {
+          c.hover(a.x + 3, a.y + 1);
+          c.click(a.x + 3, a.y + 1);
+        }
+        rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap, q.axis ?? null, r10s(q.trackFrom), guide(q.trackOther)])]);
+        // 잠근 동안에는 없다
+        rows.push(['lock', v.setMeasureInferenceLock('z'), hoverRow('locked', PAIR_YX)]);
+        v.setMeasureInferenceLock(false);
+        // 모서리 교차를 두 점째로
+        rows.push(hoverRow('edge-x2', EDGE_X, 1, 3));
+        const e = c.at(c.world(EDGE_X));
+        if (e) c.click(e.x + 1, e.y + 3);
+        rows.push([
+          'measure',
+          got.at(-1) ?? null,
+          v.measurePoints.map((q: any) => [q.snap, q.axis ?? null, r10s(q.trackFrom), guide(q.trackOther), segRow(q.segment)]),
+          (v.measureTrackPoints ?? []).map(r10s),
+        ]);
+        off();
+        return rows;
+      };
+      return [
+        ['track', sweep(true)],
+        ['off', sweep(false)],
+      ];
+    },
+  };
+}
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -2347,6 +2478,8 @@ const VALUES: ValueSet[] = [
   segmentValues,
   trackValues('base'),
   trackValues('off'),
+  trackPairValues('base'),
+  trackPairValues('off'),
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
