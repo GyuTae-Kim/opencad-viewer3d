@@ -861,6 +861,8 @@ interface Drag {
 const FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif";
 const ROT_PER_PX = 0.0085;
 const CUBE_CSS = 112;
+/** 뷰 큐브를 뷰어 위·오른쪽 가장자리에서 띄우는 거리(CSS 화소 — viewCubeRect가 같은 값을 쓴다) */
+const CUBE_INSET = 8;
 /** 그림 저장 2D 캔버스 넓이 한도(화소): iOS Safari 캔버스 한도(약 16.7 Mpx = 4096²) */
 export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
 /** 그림 저장 한 변 한도(화소) */
@@ -1008,6 +1010,8 @@ export class Viewer3d {
   private measureLabel: MeasureLabelRect | null = null;
   /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
   private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number } | null = null;
+  /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
+  private annoLabels: (MeasureLabelRect | null)[] = [];
   /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
   private bbList: Mesh3d[] = [];
   private bbCamKey = '';
@@ -1106,7 +1110,7 @@ export class Viewer3d {
     const cube = document.createElement('canvas');
     cube.className = 'v3d-cube';
     cube.title = '뷰 큐브: 면·모서리·구석을 누르면 그 방향으로 봅니다';
-    cube.style.cssText = `position:absolute;top:8px;right:8px;width:${this.opts.viewCubeSize}px;height:${this.opts.viewCubeSize}px;cursor:pointer;touch-action:none;`;
+    cube.style.cssText = `position:absolute;top:${CUBE_INSET}px;right:${CUBE_INSET}px;width:${this.opts.viewCubeSize}px;height:${this.opts.viewCubeSize}px;cursor:pointer;touch-action:none;`;
     if (!this.opts.viewCube) cube.style.display = 'none';
     wrap.append(focusCss, canvas, overlay, cube);
     host.append(wrap);
@@ -2906,7 +2910,9 @@ export class Viewer3d {
    * 차례로 보고 겹치지 않는 첫 자리에 그린다(모두 겹치면 기본 자리 — 순수 함수 placeMeasureLabel).
    * 옮길 때는 두 측정 점 표식도 가리지 않는 자리를 먼저 찾는다(그런 자리가 없으면 앱 영역만 비켜 간 자리).
    * 화면 덧그림에만 쓰고 그림 저장(toBlob·renderImage)은 기본 자리에 그린다. 사각형은 캔버스 왼쪽 위 기준 CSS 화소이고, 앱의 십자선·툴팁이
-   * 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). null·빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지워도 남는다
+   * 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). null·빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지워도 남는다.
+   * 0.23.0: 앱 측정 덧그림(setAnnotations)의 글상자도 이 사각형을 같은 차례로 비켜 그린다(커서 둘레는 보지 않는다 — annotationLabelRects).
+   * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
@@ -2930,7 +2936,27 @@ export class Viewer3d {
           return r.x === s.x && r.y === s.y && r.width === s.width && r.height === s.height;
         }));
     this.labelAvoid = next;
-    if (!same && this.measuring && this.measurePts.length) this.invalidate();
+    // 0.23.0: 앱 측정 덧그림 글상자도 비켜 그리므로 덧그림이 있으면 다시 그린다
+    if (!same && ((this.measuring && this.measurePts.length) || this.annos)) this.invalidate();
+  }
+
+  /**
+   * 앱 측정 덧그림(setAnnotations)의 글상자를 마지막으로 화면에 그린 자리(0.23.0 — 덧그림 차례대로, 캔버스 왼쪽 위 기준 CSS 화소, 복사본).
+   * 글자 상자가 없거나(빈 label), 기준점이 화면 밖이거나, 가려서 그리지 않은 것은 null. setMeasureLabelAvoid의 사각형이 있으면 그것을 비켜 그린 자리다.
+   * 그리기는 requestAnimationFrame에서 하므로 바꾼 직후 읽으려면 renderNow() 뒤에 읽는다
+   */
+  get annotationLabelRects(): (MeasureLabelRect | null)[] {
+    return this.annoLabels.map((r) => (r ? { ...r } : null));
+  }
+
+  /**
+   * 뷰 큐브의 화면 사각형(0.23.0 — 캔버스 왼쪽 위 기준 CSS 화소, setMeasureLabelAvoid의 사각형과 같은 좌표): 코어가 둔 자리(위·오른쪽에서 8화소, 한 변 viewCubeSize).
+   * 뷰 큐브를 감췄으면 null. 앱이 CSS로 큐브를 옮겼으면 그 요소를 직접 잰다
+   */
+  get viewCubeRect(): MeasureLabelRect | null {
+    if (!this.opts.viewCube) return null;
+    const s = this.opts.viewCubeSize;
+    return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
   /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null) */
@@ -3260,7 +3286,8 @@ export class Viewer3d {
     const ctx = c.getContext('2d')!;
     ctx.drawImage(this.canvas, 0, 0);
     // 화면 덧그림을 그대로 쓴다. 다만 거리 글상자를 비켜 그렸으면(0.13.0 — 앱 십자선·툴팁은 그림에 없다) 덧그림만 기본 자리로 다시 그린다
-    if (this.labelAvoid && this.measuring && this.measurePts.length) this.drawOverlayOn(ctx, this.frame(), this.dpr);
+    // (0.23.0: 앱 측정 덧그림 글상자를 비켜 그렸을 때도)
+    if (this.labelAvoid && ((this.measuring && this.measurePts.length) || (this.annos && this.labelAvoid.rects.length))) this.drawOverlayOn(ctx, this.frame(), this.dpr);
     else ctx.drawImage(this.overlay, 0, 0);
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
   }
@@ -5121,13 +5148,21 @@ export class Viewer3d {
     if (this.multiSection) this.drawSectionPlanes(ctx, f);
     else if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
-    if (this.annos) this.drawAnnotations(ctx, f);
+    if (this.annos) this.drawAnnotations(ctx, f, screen);
+    else if (screen) this.annoLabels = [];
     this.drawMeasure(ctx, f, screen);
   }
 
-  /** 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게 */
-  private drawAnnotations(ctx: CanvasRenderingContext2D, f: ViewFrame): void {
+  /**
+   * 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게.
+   * 0.23.0: screen(화면 덧그림)이고 setMeasureLabelAvoid의 사각형이 있으면 글상자도 측정 거리 글상자와 같은 차례(placeMeasureLabel)로 비켜 그린다 —
+   * 기준점은 글자 상자를 붙일 자리, 거리·반지름이면 두 점을 잇는 선분을 따라서도, 옮길 때는 그 덧그림의 점 표식도 될 수 있으면 가리지 않는다.
+   * 커서 둘레(pointerRadius)는 보지 않는다(커서를 따라다니지 않는 글상자다). 그림 저장은 기본 자리
+   */
+  private drawAnnotations(ctx: CanvasRenderingContext2D, f: ViewFrame, screen = false): void {
     const A = this.annos!;
+    const rects = screen && this.labelAvoid?.rects.length ? this.labelAvoid.rects : null;
+    const placed: (MeasureLabelRect | null)[] = screen ? A.list.map(() => null) : [];
     const th = this.theme;
     const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
     // 점이 많으면 끄는 동안은 가림을 따지지 않는다(놓으면 다시 그린다)
@@ -5168,9 +5203,16 @@ export class Viewer3d {
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 14;
       const h = lines.length * 16 + 8;
-      let x = at[0] + 10, y = at[1] - h - 8;
-      x = Math.min(Math.max(4, x), this.cssW - w - 4);
-      y = Math.min(Math.max(4, y), this.cssH - h - 4);
+      // 기본 자리(기준점 오른쪽 위 — placeMeasureLabel의 첫 자리와 한 줄씩 같다)와, 피할 사각형이 있으면 비킨 자리
+      let avoid: LabelAvoidAreas | null = null;
+      let seg: [V3, V3] | null = null;
+      if (rects) {
+        const ds = g.dots.map((p) => projectToScreen(f, p)).filter((s): s is V3 => !!s);
+        if ((an.kind === 'distance' || an.kind === 'radius') && ds.length === 2) seg = [ds[0]!, ds[1]!];
+        avoid = { rects, soft: ds.map((s) => ({ x: s[0], y: s[1], r: LABEL_POINT_R })) };
+      }
+      const { x, y } = placeMeasureLabel(at, { width: w, height: h }, { width: this.cssW, height: this.cssH }, avoid, seg);
+      if (screen) placed[i] = { x, y, width: w, height: h };
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
@@ -5184,6 +5226,7 @@ export class Viewer3d {
       lines.forEach((t, k) => ctx.fillText(t, x + 7, y + 5 + k * 16));
     });
     ctx.restore();
+    if (screen) this.annoLabels = placed;
   }
 
   /** 단면 평면 위치: 평면 ∩ 장면 범위(조금 넓힌) 다각형을 옅게 칠하고 점선 테두리 */

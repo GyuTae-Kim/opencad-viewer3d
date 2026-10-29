@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { installDom } from './fakedom';
 import { buildBvh } from '../src/bvh';
-import { type CameraState, computeFrame, defaultCamera, dirToAngles, projectToScreen, viewDepth, worldPerPixel } from '../src/camera';
+import { type CameraState, computeFrame, defaultCamera, dirToAngles, projectToScreen, screenRay, viewDepth, worldPerPixel } from '../src/camera';
 import { type ScenePickOptions, pickScene } from '../src/scenepick';
 import type { SnapRefineInput } from '../src/snap';
 import { boxMesh } from '../src/synth';
@@ -459,5 +459,97 @@ describe('Viewer3d: 반투명 그물을 지나 고르기(0.23.0 throughTransluce
     const p = run(false);
     expect(p?.face ?? null).not.toBe('판');
     expect(p ? dist(p.point, [50, 40, 20]) : Infinity).toBeGreaterThan(1e-6);
+  });
+});
+
+// ───────────── 덧그림 글상자 비키기·뷰 큐브 자리 ─────────────
+describe('Viewer3d: 앱 측정 덧그림 글상자도 setMeasureLabelAvoid를 비킨다(0.23.0 annotationLabelRects)·viewCubeRect', () => {
+  const sc: Scene3d = { name: 'a', units: 'mm', meshes: [PLATE], lines: [], points: [] };
+  function make(): Viewer3d {
+    const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false });
+    v.setScene(sc);
+    v.setView('seIso', false);
+    v.fit(false);
+    v.renderNow();
+    return v;
+  }
+  const DIST = { kind: 'distance' as const, a: [0, 0, 20], b: [100, 0, 20] };
+  const POINT = { kind: 'point' as const, a: [100, 80, 20], label: '구석' };
+  const EMPTY = { kind: 'point' as const, a: [0, 80, 20], label: '' };
+
+  it('피할 자리가 없으면 0.22.0과 같은 자리(기준점 오른쪽 위 10·8, 캔버스 안으로 당김), 빈 글이면 null', () => {
+    const v = make();
+    v.setAnnotations([DIST, POINT, EMPTY]);
+    v.renderNow();
+    const rs = v.annotationLabelRects;
+    expect(rs).toHaveLength(3);
+    const mid = v.project([50, 0, 20])!;
+    // 가짜 2D 글 너비 10 → 상자 24 × 24
+    expect(rs[0]).toEqual({ x: Math.min(Math.max(4, mid.x + 10), 800 - 24 - 4), y: Math.min(Math.max(4, mid.y - 24 - 8), 600 - 24 - 4), width: 24, height: 24 });
+    expect(rs[2]).toBeNull();
+    // 겹치지 않는 사각형·커서 둘레만 주면 그대로
+    v.setMeasureLabelAvoid({ rects: [{ x: 0, y: 0, width: 20, height: 20 }], pointerRadius: 30 });
+    v.renderNow();
+    expect(v.annotationLabelRects).toEqual(rs);
+    // 돌려준 값은 복사본
+    v.annotationLabelRects[0]!.x = -1;
+    expect(v.annotationLabelRects[0]!.x).toBe(rs[0]!.x);
+    v.dispose();
+  });
+
+  it('기본 자리를 덮는 사각형(띠)을 주면 측정 거리 글상자와 같은 차례로 비켜 그리고, 끄면 돌아온다. 덧그림을 지우면 빈 목록', () => {
+    const v = make();
+    v.setAnnotations([DIST, POINT]);
+    v.renderNow();
+    const [r0, r1] = v.annotationLabelRects as [{ x: number; y: number; width: number; height: number }, { x: number; y: number; width: number; height: number }];
+    // 거리 글상자 기본 자리를 덮는 가로 띠
+    const band = { x: 0, y: r0.y - 2, width: 800, height: r0.height + 4 };
+    v.setMeasureLabelAvoid([band]);
+    v.renderNow();
+    const moved = v.annotationLabelRects[0]!;
+    expect(moved).not.toEqual(r0);
+    const overlap = (a: typeof band, b: typeof band): boolean => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+    expect(overlap(moved, band)).toBe(false);
+    expect([moved.width, moved.height]).toEqual([r0.width, r0.height]);
+    // 띠와 겹치지 않던 글상자는 그대로
+    if (!overlap(r1, band)) expect(v.annotationLabelRects[1]).toEqual(r1);
+    v.setMeasureLabelAvoid(null);
+    v.renderNow();
+    expect(v.annotationLabelRects[0]).toEqual(r0);
+    v.setAnnotations(null);
+    v.renderNow();
+    expect(v.annotationLabelRects).toEqual([]);
+    v.dispose();
+  });
+
+  it('viewCubeRect: 위·오른쪽에서 8화소, 한 변 viewCubeSize. 크기를 바꾸면 따라가고 감추면 null. 큐브 자리를 넘기면 그 밑 글상자가 비킨다', () => {
+    const v = make();
+    expect(v.viewCubeRect).toEqual({ x: 800 - 8 - 112, y: 8, width: 112, height: 112 });
+    v.setViewCubeSize(80);
+    expect(v.viewCubeRect).toEqual({ x: 800 - 8 - 80, y: 8, width: 80, height: 80 });
+    v.setViewCubeVisible(false);
+    expect(v.viewCubeRect).toBeNull();
+    v.setViewCubeVisible(true);
+    // 큐브 왼쪽 가장자리(680) 둘레 화면 자리(685, 90)에 보이는 세계 점에 붙인 글 — 기본 자리(오른쪽 위)가 큐브와 겹친다
+    const cube = v.viewCubeRect!;
+    const f = computeFrame(v.getCamera(), 800, 600, { center: [50, 40, 10], radius: 70 });
+    const ray = screenRay(f, 685, 90);
+    const d = v.getCamera().distance;
+    const anchor: V3 = [ray.origin[0] + ray.dir[0] * d, ray.origin[1] + ray.dir[1] * d, ray.origin[2] + ray.dir[2] * d];
+    const s = v.project(anchor)!;
+    expect(Math.hypot(s.x - 685, s.y - 90)).toBeLessThan(0.01);
+    v.setAnnotations([{ kind: 'point', a: anchor, label: '큐브 밑' }]);
+    v.renderNow();
+    const r0 = v.annotationLabelRects[0]!;
+    const hits = (r: typeof cube): boolean => r.x < cube.x + cube.width && cube.x < r.x + r.width && r.y < cube.y + cube.height && cube.y < r.y + r.height;
+    expect(hits(r0)).toBe(true);
+    v.setMeasureLabelAvoid([cube]);
+    v.renderNow();
+    const r1 = v.annotationLabelRects[0]!;
+    expect(hits(r1)).toBe(false);
+    // 왼쪽 위 귀(기준점 왼쪽 10 — 큐브 왼쪽 가장자리에서 5화소)로 옮긴다 — 측정 거리 글상자와 같은 차례의 둘째 자리
+    expect(r1.x).toBeCloseTo(s.x - 10 - 24, 9);
+    expect([r1.y, r1.width, r1.height]).toEqual([r0.y, 24, 24]);
+    v.dispose();
   });
 });
