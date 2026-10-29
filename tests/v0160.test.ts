@@ -194,8 +194,12 @@ describe('Viewer3d: 붙잡은 선분 식별자(segment·other)', () => {
     const { v } = w;
     v.setMeasureMode(true);
     v.setMeasureSnap({ points: [{ point: APP, kind: 'center' }], inference: { axes: true } });
-    hoverAt(w, [-20, -20, 0]);
+    // 그물 바깥 구석을 정확히 가리키면 광선이 면(두께 0인 BVH 상자)의 모서리에 한 점으로 닿아 맞음 여부가 마지막 자리 반올림에 달린다
+    // (Node 20·22와 23·24의 fit 거리가 마지막 자리에서 달라 갈렸다). 면 안쪽으로 3화소 — 꼭짓점은 붙잡기 거리 안이다
+    const inside = toward(w, [-20, -20, 0], [-30, -30, 0], 3);
+    hoverXY(w, inside.x, inside.y);
     expect(v.measureHoverSnap!.snap).toBe('vertex');
+    expect(v.measureHoverSnap!.point).toEqual([-20, -20, 0]);
     expect(v.measureHoverSnap).not.toHaveProperty('segment');
     hoverAt(w, APP);
     expect(v.measureHoverSnap!.snap).toBe('center');
@@ -211,7 +215,7 @@ describe('Viewer3d: 붙잡은 선분 식별자(segment·other)', () => {
     // 윤곽선을 고르면 그 꼭짓점은 윤곽선 끝점(윤곽선 번호 1 또는 2 — 고른 쪽)
     v.setMeasureSnap({ edges: true });
     v.clearMeasure();
-    hoverAt(w, [-20, -20, 0]);
+    hoverXY(w, inside.x, inside.y);
     const h = v.measureHoverSnap!;
     expect(h.snap).toBe('endpoint');
     expect(h.segment!.kind).toBe('edge');
