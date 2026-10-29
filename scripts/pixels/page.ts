@@ -3040,6 +3040,224 @@ const lockRefineValues: ValueSet = {
   },
 };
 
+// ───────────── 0.20.0 선과 꺾은선 토막의 열린 교차·그물 면만 고르기 ─────────────
+/**
+ * arc 자료의 원판 둘레 0° 자리 OPEN_T(토막 가운데 바깥 — 현과는 처짐 r·(1 − cos15°) = 0.68 mm 떨어진다)와 그 위 OPEN_UP(첫 점 — 그 Z축이 원판 원을 OPEN_T에서 뚫는다),
+ * OPEN_T로 비스듬히 내려가는 선의 첫 점 OPEN_SLANT. 첫 점은 앱 붙잡기 점(points)으로 찍는다
+ */
+const OPEN_T = [ARC_DISK.c[0]! + ARC_DISK.r, ARC_DISK.c[1]!, ARC_DISK.c[2]!];
+const OPEN_UP = [OPEN_T[0]!, OPEN_T[1]!, 20];
+const OPEN_SLANT = [OPEN_T[0]! - 10, OPEN_T[1]!, 20];
+/** 원판을 맞춰 본 뒤 2.5배 물러난다(arc-measure-axis-edge와 같다 — 한 mm가 5화소쯤, 현의 처짐 3.4화소) */
+function openCamera(v: V): void {
+  v.fitItems([ARC_DISK.id], false);
+  const cam = v.getCamera();
+  v.setCamera({ ...cam, distance: cam.distance * 2.5 });
+  v.renderNow();
+}
+/** 0.20.0 축과 꺾은선 토막의 열린 교차가 있는 판인지 — OPEN_UP을 첫 점으로 찍고 OPEN_T를 가리켜 앱 함수가 'axisEdge'·open으로 불리는지 본다 */
+const v0200open: Need = (v, c) => {
+  const why = all(v0180axisEdge, v0140refine, fn('fitItems', 'getCamera', 'setCamera'))(v, c);
+  if (why) return why;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  openCamera(v);
+  v.setMeasureMode(true);
+  let open = false;
+  v.setMeasureSnap({ edges: true, points: [{ point: c.world(OPEN_UP), kind: 'point' }], inference: { axisEdges: true }, refine: (i: any) => ((open ||= i.kind === 'axisEdge' && !!i.open), null) });
+  const a = c.at(c.world(OPEN_UP));
+  const t = c.at(c.world(OPEN_T));
+  if (a && t) {
+    c.click(a.x + 1, a.y);
+    c.hover(t.x + 1, t.y + 3);
+    v.renderNow();
+  }
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setGroupVisible('공구 경로', true);
+  v.setGroupVisible('구멍', true);
+  v.setView('seIso', false);
+  v.fit(false);
+  return open ? null : '이 판에 없는 동작: 0.20.0 축과 꺾은선 토막의 열린 교차(refine — axisEdge, open)';
+};
+
+/**
+ * 0.20.0 축·잠근 선과 꺾은선 토막의 열린 교차 값(arc 자료): 원판 둘레 0° 자리 위 OPEN_UP을 첫 점으로 찍고 그 Z축이 원판 원을 뚫는 자리 OPEN_T를 가리킨다
+ * (축은 현과 3D로 만나지 않는다 — 0.19.0은 첫 점 Z축 위 커서 자리). 앱 refine은 직선과 정확한 원의 교차(원 평면을 뚫는 점이 원 위일 때만)를 준다.
+ * 미리 보기(종류·축·점·다듬었는지·원 위인지·방향·선분·끌어온 점), 앱 호출 수(열린 후보 — 같은 자리 둘레를 두 번 가리켜도 한 번, Shift로 잠가도 0번),
+ * 두 점째로 찍은 거리(높이 20과 1e-9 안인지), 끌어온 Z축(첫 점 전), 비스듬한 방향 잠금(축이 아닌 잠근 선 — 넘긴 직선에 축 이름이 없는지)과
+ * 같은 차례를 refine 없이·null·먼 점·선에서 벗어난 원 위 점으로 되풀이한 값이 refine 없이와 같은지
+ */
+const axisOpenValues: ValueSet = {
+  name: 'arc-measure-axis-open',
+  data: 'arc',
+  needs: v0200open,
+  run: (c) => {
+    const { v } = c;
+    const K = ARC_DISK;
+    const dist3 = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+    const onArc = (p: readonly number[]): boolean => Math.abs(Math.hypot(p[0]! - K.c[0]!, p[1]! - K.c[1]!) - K.r) < 1e-9 && Math.abs(p[2]! - K.c[2]!) < 1e-9;
+    const count = { open: 0, all: 0 };
+    const axisNames: (string | null)[] = [];
+    /** 직선(origin, dir)과 원판 원: 원 평면을 뚫는 점이 원 위면 그 점, 평면 위 직선이면 point에 가까운 근 */
+    const lineCircle = (i: any): number[] | null => {
+      const o = i.line.origin, d = i.line.dir;
+      if (Math.abs(d[2]) > 1e-12) {
+        const t = (K.c[2]! - o[2]) / d[2];
+        const p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        return onArc(p) ? p : null;
+      }
+      if (Math.abs(o[2] - K.c[2]!) > 1e-9) return null;
+      const wx = o[0] - K.c[0]!, wy = o[1] - K.c[1]!;
+      const b = wx * d[0] + wy * d[1], cc = wx * wx + wy * wy - K.r * K.r, a = d[0] * d[0] + d[1] * d[1];
+      const disc = b * b - a * cc;
+      if (disc < 0) return null;
+      const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0] + d[0] * t, o[1] + d[1] * t, o[2]]);
+      return dist3(ts[0]!, i.point) <= dist3(ts[1]!, i.point) ? ts[0]! : ts[1]!;
+    };
+    const exact = (i: any): number[] | null => {
+      if (i.kind !== 'axisEdge') return null;
+      count.all++;
+      if (i.open) {
+        count.open++;
+        axisNames.push(i.line.axis ?? null);
+      }
+      return i.segment.id === K.id ? lineCircle(i) : null;
+    };
+    const row = (name: string, p: readonly number[], dx: number, dy: number, shift = false): unknown[] => {
+      const q = c.at(c.world(p));
+      if (!q) return [name, null];
+      c.hover(q.x + dx, q.y + dy, 'mouse', shift);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [
+        name,
+        h ? [h.snap, h.axis ?? null, r10s(h.point), !!h.refined, onArc(h.point), r10s(h.direction), !!h.locked, segRow(h.segment), r10s(h.trackFrom)] : null,
+      ];
+    };
+    const first = (p: readonly number[]): unknown[] => {
+      v.clearMeasure();
+      const a = c.at(c.world(p));
+      if (a) c.click(a.x + 1, a.y);
+      return ['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])];
+    };
+    const points = [
+      { point: c.world(OPEN_UP), kind: 'point' as const },
+      { point: c.world(OPEN_SLANT), kind: 'point' as const },
+    ];
+    const sweep = (refine: ((i: any) => number[] | null) | null): unknown[] => {
+      const rows: unknown[] = [];
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      openCamera(v);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ edges: true, points, inference: { axes: true, lock: true, axisEdges: true, lockEdges: true }, ...(refine ? { refine } : {}) });
+      // 1. 첫 점 Z축: 두 자리, Shift 잠금, 두 점째
+      rows.push(first(OPEN_UP));
+      const n0 = count.open;
+      rows.push(row('hit', OPEN_T, 1, 3), row('hit', OPEN_T, 3, 1), ['calls', count.open - n0]);
+      const n1 = count.open;
+      rows.push(row('shift', OPEN_T, 3, 1, true), ['lock', lockState(v.measureInferenceLock)], ['calls', count.open - n1]);
+      const e = c.at(c.world(OPEN_T));
+      if (e) c.click(e.x + 3, e.y + 1, 'mouse', true);
+      c.hover(e ? e.x + 3 : 0, e ? e.y + 1 : 0, 'mouse', false);
+      const m = v.measurement();
+      rows.push([
+        'measure',
+        m ? [r10s(m.b), r10(m.distance), m.snapB ?? null, m.axisB ?? null, m.lockedB ?? null] : null,
+        !!m && Math.abs(m.distance - OPEN_UP[2]!) < 1e-9,
+        v.measurePoints.map((q: any) => [q.snap, !!q.refined, !!q.locked, segRow(q.segment)]),
+      ]);
+      // 2. 비스듬한 방향 잠금(OPEN_SLANT → OPEN_T — 축이 아닌 잠근 선)
+      rows.push(first(OPEN_SLANT));
+      v.setMeasureInferenceLock({ direction: [OPEN_T[0]! - OPEN_SLANT[0]!, OPEN_T[1]! - OPEN_SLANT[1]!, OPEN_T[2]! - OPEN_SLANT[2]!] });
+      rows.push(row('slant', OPEN_T, 1, 3));
+      v.setMeasureInferenceLock(false);
+      // 3. 끌어온 Z축(첫 점 전)
+      v.clearMeasure();
+      v.setMeasureSnap({ edges: true, inference: { track: true }, ...(refine ? { refine } : {}) });
+      v.setMeasureTrackPoints([c.world(OPEN_UP)]);
+      rows.push(row('track', OPEN_T, 1, 3));
+      v.setMeasureTrackPoints(null);
+      return rows;
+    };
+    const out: unknown[] = [];
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+    const refined = sweep(exact);
+    out.push(['refined', refined], ['calls', { ...count }], ['line-axis', axisNames]);
+    const plain = sweep(null);
+    out.push(['refined-differs', !same(refined, plain)]);
+    out.push(['null-same', same(sweep(() => null), plain)]);
+    // 선 위 먼 점(붙잡기 거리 밖)·선에서 벗어난 원 위 점(원 위 10° 옆)은 버린다
+    out.push(['far-same', same(sweep((i: any) => (i.kind === 'axisEdge' && i.line ? [i.point[0], i.point[1], i.point[2] - 30] : null)), plain)]);
+    out.push([
+      'off-line-same',
+      same(
+        sweep((i: any) => {
+          if (i.kind !== 'axisEdge') return null;
+          const t = Math.atan2(i.point[1] - K.c[1]!, i.point[0] - K.c[0]!) + (10 * Math.PI) / 180;
+          return [K.c[0]! + K.r * Math.cos(t), K.c[1]! + K.r * Math.sin(t), K.c[2]!];
+        }),
+        plain,
+      ),
+    ]);
+    return out;
+  },
+};
+
+/** 0.20.0 그물 면만 고르기(pick(x, y, { meshesOnly }))가 있는 판인지 — 상자 앞 윗모서리(윤곽선 고르기)를 그물 면만으로 골라 본다 */
+const v0200meshesOnly: Need = (v, c) => {
+  const why = fn('project', 'setPickEdges')(v, c);
+  if (why) return why;
+  v.setPickEdges(true);
+  const q = c.at(c.world([30, 0, 40]));
+  const p = q ? v.pick(q.x, q.y + 0.5, { meshesOnly: true }) : null;
+  v.setPickEdges(false);
+  return p && p.kind === 'mesh' ? null : '이 판에 없는 선택: 0.20.0 그물 면만 고르기(pick meshesOnly)';
+};
+
+/**
+ * 0.20.0 그물 면만 고르기 값(base·off): 화면 격자 점마다(윤곽선 고르기를 켜고) 보통 고르기와 meshesOnly 고르기의 종류 짝 수, 보통 고르기가 그물 면이면 두 결과가 같은지,
+ * meshesOnly가 그물 면이 아닌 것을 고르지 않는지, 상자 윗모서리·공구 경로(나선 선분) 위 몇 자리의 두 결과(그 아래 면·법선)
+ */
+function meshesOnlyValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-pick-meshes-only`,
+    data: d,
+    needs: v0200meshesOnly,
+    run: (c) => {
+      const { v } = c;
+      v.setPickEdges(true);
+      const kinds = new Map<string, number>();
+      let sameMesh = 0, meshTotal = 0, nonMesh = 0;
+      for (let y = 20; y < c.h; y += 37)
+        for (let x = 20; x < c.w; x += 41) {
+          const a = v.pick(x + 0.3, y + 0.4);
+          const b = v.pick(x + 0.3, y + 0.4, { meshesOnly: true });
+          const key = `${a?.kind ?? '-'}>${b?.kind ?? '-'}`;
+          kinds.set(key, (kinds.get(key) ?? 0) + 1);
+          if (b && b.kind !== 'mesh') nonMesh++;
+          if (a?.kind === 'mesh') {
+            meshTotal++;
+            if (JSON.stringify(a) === JSON.stringify(b)) sameMesh++;
+          }
+        }
+      const at = (p: number[], dx: number, dy: number): unknown[] => {
+        const q = c.at(c.world(p));
+        if (!q) return [p, null];
+        const a = v.pick(q.x + dx, q.y + dy);
+        const b = v.pick(q.x + dx, q.y + dy, { meshesOnly: true });
+        const r = (k: any): unknown[] | null => (k ? [k.kind, k.id, k.index, r10s(k.point), r10s(k.normal), !!k.section] : null);
+        return [p, r(a), r(b)];
+      };
+      const rows = [at([30, 0, 40], 0, 0.5), at([120, 40, 40], 0.5, 0), at([60, 40, 40], 0.4, 0.3), at([60, 40, 70], 0.4, 0.3)];
+      v.setPickEdges(false);
+      return [['grid', [...kinds.entries()].sort()], ['mesh-same', sameMesh, meshTotal], ['non-mesh', nonMesh], ['rows', rows]];
+    },
+  };
+}
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -3078,6 +3296,9 @@ const VALUES: ValueSet[] = [
   lockEdgeValues('off'),
   lockFaceValues,
   lockRefineValues,
+  axisOpenValues,
+  meshesOnlyValues('base'),
+  meshesOnlyValues('off'),
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

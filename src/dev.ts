@@ -16,6 +16,9 @@
  *   축과 면(축과 모서리에 inference.axisFaces까지 — 첫 점 축·끌어온 축이 면을 뚫는 점). 상태 줄에 뚫은 면의 그물 id
  * 0.19.0 단추: 잠근 선 교차(축과 면에 inference.lockEdges·lockFaces와 refineFace까지 — 잠근 동안 잠근 선이 모서리와 만나는 점·면을 뚫는 점,
  *   축이 구를 뚫는 점은 정확한 구 위로). 상태 줄에 "잠근 Z축 · 구 면(다듬음)"
+ * 0.20.0 단추: 열린 교차(잠근 선 교차에 시연 원·기둥과 refine까지 — 기둥 아래 끝을 첫 점으로 찍고 그 Z축이 원을 뚫는 자리를 가리키면 현과는 만나지 않아도
+ *   정확한 원 위 교차에 붙는다. 잠근 선이 축이 아니어도 다듬는다). 상태 줄에 "첫 점 Z축 · 시연 원#111 위(다듬음)".
+ *   면만 고르기(누른 자리의 pick(x, y, { meshesOnly: true }) — 상태 줄 고름 뒤에 "아래 면")
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -24,8 +27,8 @@ import { VIEW_LABELS, type ViewName } from './camera';
 import type { RenderMode } from './renderer';
 import type { SectionAxis } from './section';
 import { syntheticScene } from './synth';
-import type { SnapRefineFaceInput } from './snap';
-import type { Scene3d, SnapPoint } from './types';
+import type { SnapRefineFaceInput, SnapRefineInput } from './snap';
+import type { LineSet3d, Scene3d, SnapPoint } from './types';
 import { type SectionCaps, Viewer3d } from './viewer';
 
 const q = new URLSearchParams(location.search);
@@ -54,6 +57,9 @@ let secInfo = '';
 let upInfo = '';
 /** 0.17.0: 측정 미리 보기의 끌어온 축 설명(상태 줄) */
 let hoverInfo = '';
+/** 0.20.0: 누른 자리에서 그물 면만 고른 결과도 보일지(면만 고르기 단추)와 마지막으로 누른 캔버스 자리 */
+let meshesOnly = false;
+let lastDown: { x: number; y: number } | null = null;
 const pt = (p: readonly number[]): string => `(${p.map((x) => x.toFixed(1)).join(', ')})`;
 /** 나눠 올리기 진행 알림 기록(자동 확인용) */
 const progress: [number, number][] = [];
@@ -231,6 +237,28 @@ toggle(
     ),
   '축과 면에 더해, Shift·잠금 단추로 잠근 동안 잠근 선이 모서리와 만나는 점·커서 아래 면을 뚫는 점에도 붙잡기. 축이 구를 뚫는 점은 정확한 구 위로 다듬는다',
 );
+// 0.20.0: 축·잠근 선이 꺾은선 토막과 3D로 만나지 않고 그 활꼴만 지날 때도 앱 refine('axisEdge', open)이 준 곡선 위 교차에 붙기(시연 원·기둥을 장면에 더한다)
+toggle(
+  '열린 교차',
+  (v) => {
+    viewer.setScene(v ? { ...scene, lines: [...scene.lines, ...demoRingLines()] } : scene, { keepView: true });
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true },
+            refine: demoRingEdge,
+            refineFace: demoSphereFace,
+          }
+        : null,
+    );
+  },
+  '잠근 선 교차에 더해, 시연 원(바닥 12토막)과 기둥을 더한다. 기둥 아래 끝을 첫 점으로 찍고 그 Z축이 원을 뚫는 자리를 가리키면 꺾은선 현과는 만나지 않아도 ' +
+    '정확한 원 위 교차에 붙는다(Shift로 잠가도, 비스듬히 잠근 선도)',
+);
+toggle('면만 고르기', (v) => (meshesOnly = v), '누른 자리에서 그물 면만 고른 결과(pick meshesOnly)를 상태 줄 고름 뒤에 보인다 — 면 위 선분·점 아래의 면');
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -361,7 +389,14 @@ viewer.onPick((p, e) => {
   viewer.highlight(p ? [p.id] : null);
   const mods = [e.altKey && 'Alt', e.ctrlKey && 'Ctrl', e.shiftKey && 'Shift', e.metaKey && 'Meta', e.clicks > 1 && '두 번'].filter(Boolean).join('+');
   pickInfo = p ? `고름: ${p.kind} "${p.id}" #${p.index}${mods ? ` [${mods}]` : ''} (${p.point.map((v) => v.toFixed(2)).join(', ')})` : '';
+  // 0.20.0: 그물 면만 고르기 — 면 위 선분·점을 눌러도 그 아래 면
+  const under = meshesOnly && lastDown ? viewer.pick(lastDown.x, lastDown.y, { meshesOnly: true, pointerType: e.pointerType }) : null;
+  if (meshesOnly) pickInfo += ` · 아래 면: ${under ? `"${under.id}" #${under.index}` : '없음'}`;
   showStatus();
+});
+viewer.canvas.addEventListener('pointerdown', (e) => {
+  const r = viewer.canvas.getBoundingClientRect();
+  lastDown = { x: e.clientX - r.left, y: e.clientY - r.top };
 });
 /** 단면 알림 기록(자동 확인용) — 단추·슬라이더도 이 알림으로 맞춘다 */
 const sections: (number | null)[] = [];
@@ -551,6 +586,48 @@ function demoSphereFace(c: SnapRefineFaceInput): number[] | null {
   const p = at(-bb - Math.sqrt(disc)), q = at(-bb + Math.sqrt(disc));
   const far = (s: number[]): number => Math.hypot(s[0]! - c.point[0], s[1]! - c.point[1], s[2]! - c.point[2]);
   return far(p) <= far(q) ? p : q;
+}
+
+/** 0.20.0 시연 원(바닥 z 0, 중심 (60, −70), 반지름 25, 12토막 — 꼭짓점 15° + 30°·k라 0°는 토막 가운데)과 그 0° 자리 위 기둥(아래 끝 (85, −70, 30)) */
+const DEMO_RING = { c: [60, -70, 0], r: 25 };
+function demoRingLines(): LineSet3d[] {
+  const off = offset ? offsetVec(offset) : null;
+  const at = (a: number): number[] => [DEMO_RING.c[0]! + DEMO_RING.r * Math.cos(a), DEMO_RING.c[1]! + DEMO_RING.r * Math.sin(a), DEMO_RING.c[2]!];
+  const P: number[] = [];
+  for (let k = 0; k < 12; k++) P.push(...at(((15 + 30 * k) * Math.PI) / 180), ...at(((45 + 30 * k) * Math.PI) / 180));
+  const post = [85, -70, 30, 85, -70, 50];
+  // 큰 좌표: 원점 방식이면 origin, 굽기면 positions에 더한다(장면과 같은 방식)
+  const place = (p: number[]): Pick<LineSet3d, 'positions' | 'origin'> =>
+    !off ? { positions: new Float32Array(p) } : bake ? { positions: new Float32Array(p.map((x, i) => x + off[i % 3]!)) } : { positions: new Float32Array(p), origin: off };
+  return [
+    { id: '시연 원', name: '시연 원', ...place(P), segmentIds: new Uint32Array(Array.from({ length: 12 }, (_, k) => 100 + k)), color: [0.4, 0.95, 0.6, 1], width: 1.5 },
+    { id: '시연 기둥', name: '시연 기둥', ...place(post), color: [0.95, 0.5, 0.5, 1], width: 1.5 },
+  ];
+}
+
+/**
+ * 0.20.0 열린 교차 다듬기(개발 확인용 refine): 시연 원 토막과 만나는 직선('axisEdge' — 축·잠근 선, 열린 후보도)이면 정확한 원과의 교차.
+ * 원 평면을 뚫는 직선은 그 점이 원 위일 때만, 평면 위 직선은 코어 점에 가까운 근. 그 밖은 null
+ */
+function demoRingEdge(c: SnapRefineInput): number[] | null {
+  if (c.kind !== 'axisEdge' || !c.line || c.segment.id !== '시연 원') return null;
+  const off = offset ? offsetVec(offset) : [0, 0, 0];
+  const C = DEMO_RING.c.map((x, i) => x + off[i]!);
+  const o = c.line.origin, d = c.line.dir;
+  const tol = 1e-9 * (1 + Math.abs(C[0]!) + Math.abs(C[1]!) + Math.abs(C[2]!));
+  if (Math.abs(d[2]) > 1e-12) {
+    const t = (C[2]! - o[2]) / d[2];
+    const p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+    return Math.abs(Math.hypot(p[0]! - C[0]!, p[1]! - C[1]!) - DEMO_RING.r) <= tol + 1e-9 * DEMO_RING.r ? p : null;
+  }
+  if (Math.abs(o[2] - C[2]!) > tol) return null;
+  const wx = o[0] - C[0]!, wy = o[1] - C[1]!;
+  const a = d[0] * d[0] + d[1] * d[1], b = wx * d[0] + wy * d[1], k = wx * wx + wy * wy - DEMO_RING.r * DEMO_RING.r;
+  const disc = b * b - a * k;
+  if (disc < 0) return null;
+  const ps = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0] + d[0] * t, o[1] + d[1] * t, o[2]]);
+  const far = (s: number[]): number => Math.hypot(s[0]! - c.point[0], s[1]! - c.point[1], s[2]! - c.point[2]);
+  return far(ps[0]!) <= far(ps[1]!) ? ps[0]! : ps[1]!;
 }
 
 /** 지금 화면(toBlob) → 화소 */

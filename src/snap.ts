@@ -16,6 +16,9 @@
  *
  * 0.19.0: 축(첫 점 축·끌어온 축·잠근 축)이 면을 뚫는 점('axisFace')을 선분 대신 그 면(SnapRefineFaceInput.face)과 축 직선으로 넘긴다
  * (따로 둔 손잡이 MeasureSnapOptions.refineFace — 받는 규칙은 'axisEdge'와 같다).
+ *
+ * 0.20.0: 축이 아닌 잠근 선도 'axisEdge'·'axisFace'로 넘긴다(SnapRefineLine.axis 없음). 축·잠근 선이 꺾은선 토막과 3D로 만나지 않고 그 활꼴만 지나는
+ * 열린 후보('axisEdge', open — 계산은 track.ts openEdgeSnap)도 넘긴다.
  */
 import type { Pick3d, SnapKind } from './types';
 import { type ViewFrame, projectToScreen, viewDepth, worldPerPixel } from './camera';
@@ -89,11 +92,15 @@ export interface SnapFace {
  */
 export type SnapRefineKind = 'perpendicular' | 'midpoint' | 'onEdge' | 'intersection' | 'axisEdge';
 
-/** 다듬을 점이 놓인 축 직선(0.18.0 — 'axisEdge'만): 지나는 점(첫 측정 점이나 끌어온 점), 단위 방향, 축 이름. 모두 복사본 */
+/**
+ * 다듬을 점이 놓인 직선(0.18.0 'axisEdge'·0.19.0 'axisFace'): 지나는 점(첫 측정 점이나 끌어온 점), 단위 방향, 축 이름. 모두 복사본.
+ * 0.20.0: 축이 아닌 잠근 선(나란함·수직·선분 방향·앱이 정한 방향 — inference.lockEdges·lockFaces)도 넘기며 그때는 axis가 없다(앱은 origin·dir만으로 푼다)
+ */
 export interface SnapRefineLine {
   origin: V3;
   dir: V3;
-  axis: SnapAxis;
+  /** 세계 축 직선이면 그 축(첫 점 축·끌어온 축·축 잠금). 0.20.0부터 축이 아닌 잠근 선이면 없다 */
+  axis?: SnapAxis;
 }
 
 /** 다듬기 손잡이(MeasureSnapOptions.refine)가 받는 것(0.14.0 — 모두 복사본, 세계 좌표) */
@@ -107,7 +114,9 @@ export interface SnapRefineInput {
   other?: SnapSegment;
   /**
    * 0.18.0: 축과 선분의 교차('axisEdge')일 때만 — 그 축 직선. 앱은 이 직선이 segment의 곡선과 만나는 점(point 둘레)을 돌려준다.
-   * 만나지 않거나 모르면 null. 결과는 종류·코어 점·토막·축 직선·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억한다 — 0.15.0 열린 후보와 같다)
+   * 만나지 않거나 모르면 null. 결과는 종류·코어 점·토막·축 직선·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억한다 — 0.15.0 열린 후보와 같다).
+   * 0.20.0: 축이 아닌 잠근 선이면 axis가 없다. 열린 후보(open — 직선이 토막과 3D로 만나지 않고 그 활꼴만 지난다)면 point는 직선 위에서 토막에 가장 가까운 점이고,
+   * 곡선 평면을 뚫는 직선이면 그 점이 곧 교차일 수 있다(그대로 돌려줘도 받는다 — 모르면 null)
    */
   line?: SnapRefineLine;
   /** 첫 측정 점(찍었으면 — 수직 발의 기준점), 없으면 null */
@@ -118,7 +127,8 @@ export interface SnapRefineInput {
    * 0.15.0 열린 후보면 true(아니면 이 필드가 없다): 꺾은선으로는 후보가 없지만 곡선 위에는 있을 수 있는 점이다.
    * 수직 발은 첫 점에서 그 토막으로 내린 발이 토막 밖(또는 끝점)이라 point는 그 발을 토막 범위로 자른 토막 끝(곡선 위 발이 그쪽에 있다),
    * 교차점은 두 토막이 허용치보다 조금 떨어져 지나가 point는 가장 가까운 두 점의 가운데다. 앱이 정확한 점을 모르면 null을 돌려준다 — 그러면 후보가 없다.
-   * 결과는 종류·토막·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억해 커서가 움직여도 다시 부르지 않는다)
+   * 결과는 종류·토막·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억해 커서가 움직여도 다시 부르지 않는다).
+   * 0.20.0: 'axisEdge'도 열린 후보가 있다 — 직선(line)이 토막과 3D로 만나지 않지만 그 활꼴(현과 곡선 사이)을 지날 만큼 가까이 지나간다. point는 직선 위에서 토막에 가장 가까운 점
    */
   open?: boolean;
 }
@@ -134,7 +144,7 @@ export interface SnapRefineFaceInput {
   point: V3;
   /** 뚫은 면(그물 id·삼각형 번호 — Pick3d.index와 같은 뜻·세계 단위 법선(눈 쪽)) — MeasureHoverSnap.face와 같은 값 */
   face: SnapFace;
-  /** 그 축 직선(지나는 점·단위 방향·축 이름). 앱은 이 직선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 모르면 null */
+  /** 그 축 직선(지나는 점·단위 방향·축 이름 — 0.20.0부터 축이 아닌 잠근 선이면 축 이름이 없다). 앱은 이 직선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 모르면 null */
   line: SnapRefineLine;
   /** 첫 측정 점(없으면 null) */
   first: V3 | null;
@@ -315,7 +325,7 @@ export function openRefineKey(
 ): string {
   const l = c.line;
   const where = c.kind === 'axisFace' ? `face|${c.face.id.length}:${c.face.id}|${c.face.index}|${c.face.normal.join(',')}#-` : `${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}`;
-  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
+  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis ?? '-'}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
 }
 
 /** 열린 후보 다듬기 기억(0.15.0): 열쇠 → 앱이 돌려준 점(받을 수 있는 수 셋의 복사본, 아니면 null). 가장 오래 쓰지 않은 것부터 지운다 */

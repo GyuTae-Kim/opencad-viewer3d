@@ -14,12 +14,15 @@
  * - 축과 면의 교차(0.18.0 axisFaceSnap): 첫 점 축·끌어온 축이 커서 아래 보이는 면을 뚫는 점(뷰어는 MeasureInference.axisFaces를 켰을 때)
  * - 잠근 선과 선분·면의 교차(0.19.0 lockEdgeSnap·lockFaceSnap): 첫 점을 지나는 잠근 선(축이 아닌 방향도)이 커서 둘레 선분과 3D로 만나는 점·커서 아래 보이는 면을
  *   뚫는 점(axisEdgeSnap·axisFaceSnap과 같은 계산 — 뷰어는 MeasureInference.lockEdges·lockFaces를 켜고 잠갔을 때)
+ * - 선과 꺾은선 토막의 열린 교차(0.20.0 openEdgeCandidates·openEdgeSnap): 축·잠근 선이 커서 둘레 토막과 3D로 만나지 않지만 그 토막의 활꼴(현과 곡선 사이)을
+ *   지날 만큼 가까이 지나가면, 부르는 쪽(뷰어는 앱 refine — 'axisEdge', open)이 곡선과의 정확한 교차를 줄 때만 그 점을 후보로 받는다
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
  * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
-import { type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
+import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
 import type { V3 } from './math';
+import { acceptOnLine, finitePoint } from './snap';
 
 export { TRACK_DWELL_MS, type MeasureTrackOptions, normalizeTrack } from './inference';
 
@@ -499,6 +502,176 @@ export function lockFaceSnap<H extends TrackFaceHit>(
   const e = unitDir([0, 0, 0], dir);
   if (!under || !e || cursorOn(f, a, x, y, snapPx)) return null;
   return faceMeet(f, a, e, x, y, snapPx, under, hitAt, steps, Infinity);
+}
+
+/**
+ * 열린 교차의 토막 길이 비(0.20.0 — 0.15.0 넓힌 교차 OPEN_INTERSECTION_CHORD와 같은 값 0.1): 한 토막이 45°보다 덜 도는 꺾은선이면 현과 곡선 사이(활꼴 높이 =
+ * 현 길이/2 × tan(돈 각/4))는 현 길이의 0.1배 안이다. 곡선과 만나는 선은 그 토막의 활꼴을 지나므로 현에서 이만큼 안을 지나고, 곡선 위 교차점도 현에서 이만큼 안이다
+ */
+export const OPEN_EDGE_CHORD = OPEN_INTERSECTION_CHORD;
+
+/** 열린 교차가 보는 선 하나(0.20.0): 지나는 점(첫 측정 점·끌어온 점)과 방향(길이는 상관없다 — 축·잠근 선) */
+export interface OpenEdgeLine {
+  from: readonly number[];
+  dir: readonly number[];
+}
+
+/**
+ * 선과 꺾은선 토막의 열린 교차 후보(0.20.0 openEdgeCandidates): 코어 점(선 위에서 토막에 가장 가까운 점 — 세계 축이면 남은 두 좌표가 지나는 점 그대로),
+ * 받은 lines 안 번호, 토막(받은 segs의 그 객체), 선과 토막(범위 안) 사이 가장 가까운 거리(세계), 커서와 코어 점의 화면 거리
+ */
+export interface OpenEdgeCandidate<S extends TrackSegment = TrackSegment> {
+  p: V3;
+  line: number;
+  seg: S;
+  gap: number;
+  distPx: number;
+}
+
+/** 열린 교차 결과(0.20.0 openEdgeSnap): 받은 점(선 위로 내린 자리), 그 후보의 코어 점·선 번호·토막, 커서와 받은 점의 화면 거리 */
+export interface OpenEdgeSnap<S extends TrackSegment = TrackSegment> {
+  p: V3;
+  core: V3;
+  line: number;
+  seg: S;
+  distPx: number;
+}
+
+/**
+ * 직선 P + s·e(e는 단위)와 토막 a → b(범위 안)에서 가장 가까운 두 점: 직선 위 점 m(e 성분이 0인 좌표는 P 그대로), 토막 매개변수 t(0~1), 둘 사이 거리,
+ * 토막 안쪽이 아닌지(clamped — 가장 가까운 자리가 토막 끝 밖이라 끝으로 잘랐거나 나란해 어디서나 같다), 나란한지. 토막 길이 0이면 null
+ */
+function lineSegClosest(
+  P: readonly number[],
+  e: readonly number[],
+  a: readonly number[],
+  b: readonly number[],
+): { m: V3; t: number; gap: number; clamped: boolean; parallel: boolean } | null {
+  const g0 = b[0]! - a[0]!, g1 = b[1]! - a[1]!, g2 = b[2]! - a[2]!;
+  const C = g0 * g0 + g1 * g1 + g2 * g2;
+  if (!(C > 0)) return null;
+  const w0 = P[0]! - a[0]!, w1 = P[1]! - a[1]!, w2 = P[2]! - a[2]!;
+  const B = e[0]! * g0 + e[1]! * g1 + e[2]! * g2;
+  const D = e[0]! * w0 + e[1]! * w1 + e[2]! * w2;
+  const E = g0 * w0 + g1 * w1 + g2 * w2;
+  const den = C - B * B;
+  // |w + s·e − t·g|² 최소(closestMid와 같은 식, A = 1). 토막과 나란하면 어디서나 거리가 같다 — 토막 가운데
+  const parallel = !(den > 1e-10 * C);
+  let t = parallel ? 0.5 : (E - B * D) / den;
+  let clamped = parallel;
+  if (t < 0 || t > 1) {
+    t = t < 0 ? 0 : 1;
+    clamped = true;
+  }
+  if (!Number.isFinite(t)) return null;
+  const s = B * t - D;
+  const m: V3 = [0, 0, 0];
+  let gap2 = 0;
+  const g = [g0, g1, g2];
+  for (let k = 0; k < 3; k++) {
+    m[k] = e[k] === 0 ? P[k]! : P[k]! + e[k]! * s;
+    const q = a[k]! + g[k]! * t;
+    gap2 += (m[k]! - q) * (m[k]! - q);
+  }
+  return { m, t, gap: Math.sqrt(gap2), clamped, parallel };
+}
+
+/**
+ * 선과 꺾은선 토막의 열린 교차 후보(0.20.0, 순수): 선 lines(지나는 점 from·방향 dir)가 토막 segs(커서 둘레 선분·윤곽선)와 3D로 만나지 않지만
+ * (가장 가까운 두 점 사이가 그 깊이의 화면 반 화소를 넘는다 — 만나면 axisEdgeSnap·trackEdgeSnap·lockEdgeSnap이 맡는다) 그 토막의 활꼴을 지날 만큼 가까운 것.
+ * - 가까움: 선과 토막(범위 안) 사이 거리가 min(OPEN_EDGE_CHORD × 토막 길이, 커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안(0.15.0 넓힌 교차와 같은 근거)
+ * - 코어 점은 선 위에서 토막에 가장 가까운 점이다. 다른 평면의 곡선(축이 곡선 평면을 뚫는다)이면 곡선 위 교차와 거의 같은 자리이고,
+ *   같은 평면에서 곡선에 거의 닿듯 지나가면(활꼴만 지난다) 토막 끝 쪽이다. 커서와 상관없이 선과 토막으로만 정해진다(앱 결과를 기억할 수 있게)
+ * - 빼는 것: 선이 지나는 점 자리(그 점이 토막 둘레 — 첫 점이 곡선 위면 그 점에서 만난다), 커서가 지나는 점의 화면 자리 snapPx 안인 선(axisEdgeSnap과 같다),
+ *   가장 가까운 자리가 토막 끝 밖인데(나란하면 두 끝) 그 끝을 함께 쓰는 이웃 토막을 선이 3D로 지나는 것(곡선과의 교차는 그 이웃 토막의 코어 교차가 맡는다),
+ *   코어 점이 커서에서 2 × snapPx 밖인 것(받는 점은 코어 점에서 snapPx, 커서에서 snapPx 안이어야 한다)
+ * 커서에 가까운 코어 점부터(같으면 선 → 토막 차례). 다듬기 손잡이를 부를 차례와 같다
+ */
+export function openEdgeCandidates<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+): OpenEdgeCandidate<S>[] {
+  const out: OpenEdgeCandidate<S>[] = [];
+  if (!lines.length || !segs.length) return out;
+  for (let li = 0; li < lines.length; li++) {
+    const { from: P, dir } = lines[li]!;
+    const e = unitDir([0, 0, 0], dir);
+    if (!e || !P.every(Number.isFinite) || cursorOn(f, P, x, y, snapPx)) continue;
+    for (const s of segs) {
+      const c = lineSegClosest(P, e, s.a, s.b);
+      if (!c) continue;
+      const tol = meetTol(f, c.m, s.wpp);
+      if (!(c.gap > tol) || !(c.gap <= Math.min(OPEN_EDGE_CHORD * dist3(s.a, s.b), snapPx * s.wpp)) || dist3(c.m, P) <= tol) continue;
+      if (c.clamped) {
+        // 가장 가까운 자리가 토막 끝 밖이면 그 끝, 나란하면 두 끝을 함께 쓰는 이웃 토막을 선이 3D로 지나는지
+        const ends = c.parallel ? [s.a, s.b] : [c.t === 0 ? s.a : s.b];
+        let through = false;
+        for (const n of segs) {
+          if (n === s || !ends.some((V) => dist3(n.a, V) <= tol || dist3(n.b, V) <= tol)) continue;
+          const k = closestMid(P, e, n.a, [n.b[0]! - n.a[0]!, n.b[1]! - n.a[1]!, n.b[2]! - n.a[2]!], true);
+          if (k && k.gap <= meetTol(f, k.m, n.wpp)) {
+            through = true;
+            break;
+          }
+        }
+        if (through) continue;
+      }
+      const d = screenDistance(f, c.m, x, y);
+      if (d === null || d > 2 * snapPx) continue;
+      out.push({ p: c.m, line: li, seg: s, gap: c.gap, distPx: d });
+    }
+  }
+  // 안정 정렬(같은 거리면 넣은 차례 — 선 → 토막)
+  return out.sort((p, q) => p.distPx - q.distPx);
+}
+
+/**
+ * 선과 꺾은선 토막의 열린 교차(0.20.0, 순수): openEdgeCandidates의 후보마다(커서에 가까운 코어 점부터) refine(후보)을 불러 곡선과의 정확한 교차 q를 받고,
+ * 받을 수 있는 것 가운데 커서에 가장 가까운 것. refine이 null·undefined(모른다, 부르는 쪽 호출 한도가 다 됐다)거나 수 셋이 아니면 그 후보는 없다.
+ * 받는 규칙:
+ * - q를 선 위로 수직으로 내린 자리 p(acceptOnLine — q에서 그 깊이 화면 반 화소 안, 코어 점에서 화면 snapPx 안, 눈 뒤·가까운 면 앞이 아님). 세계 축이면 남은 두 좌표가 지나는 점 그대로
+ * - p가 그 토막의 곡선 조각 위일 만한 자리: 현에 내린 자리가 토막 범위 안(이웃 토막의 곡선 위 점이면 범위 밖이다 — 그 토막이 맡는다)이고 토막 끝에서 반 화소 넘게 떨어지고,
+ *   현에서 OPEN_EDGE_CHORD × 토막 길이 안. 선이 지나는 점 자리가 아니다
+ * - 그 토막 묶음의 단면에서 남는 쪽(seg.keep), 커서에서 snapPx 안, visible(p, seg)(지금 고른 것보다 가까운 후보에만 묻는다 — 뷰어는 음영 계열의 면 가림)
+ * 코어 점 그대로를 돌려줘도 받는다(곡선 평면을 수직으로 뚫는 축은 코어 점이 곧 교차다 — 모르면 null을 돌려준다).
+ * 받는 점은 코어 점에서 snapPx 안이므로 코어 점이 커서에서 (지금 고른 거리 + snapPx) 밖인 후보부터는 부르지 않는다
+ */
+export function openEdgeSnap<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  refine: (c: OpenEdgeCandidate<S>) => readonly number[] | null | undefined,
+  visible?: ((p: V3, seg: S) => boolean) | null,
+): OpenEdgeSnap<S> | null {
+  let best: OpenEdgeSnap<S> | null = null;
+  for (const c of openEdgeCandidates(f, lines, segs, x, y, snapPx)) {
+    if (best && c.distPx - snapPx >= best.distPx) break;
+    const q = finitePoint(refine(c));
+    if (!q) continue;
+    const L = lines[c.line]!;
+    const p = acceptOnLine(f, c.p, q, { origin: L.from, dir: L.dir }, snapPx);
+    if (!p) continue;
+    const s = c.seg;
+    const tol = meetTol(f, p, s.wpp);
+    const g0 = s.b[0]! - s.a[0]!, g1 = s.b[1]! - s.a[1]!, g2 = s.b[2]! - s.a[2]!;
+    const C = g0 * g0 + g1 * g1 + g2 * g2;
+    const u = ((p[0] - s.a[0]!) * g0 + (p[1] - s.a[1]!) * g1 + (p[2] - s.a[2]!) * g2) / C;
+    if (!(u >= 0 && u <= 1) || dist3(p, s.a) <= tol || dist3(p, s.b) <= tol || dist3(p, L.from) <= tol) continue;
+    const off = Math.hypot(p[0] - s.a[0]! - g0 * u, p[1] - s.a[1]! - g1 * u, p[2] - s.a[2]! - g2 * u);
+    if (!(off <= OPEN_EDGE_CHORD * Math.sqrt(C) + tol) || (s.keep && !s.keep(p))) continue;
+    const dist = screenDistance(f, p, x, y);
+    if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
+    if (visible && !visible(p, s)) continue;
+    best = { p, core: c.p, line: c.line, seg: s, distPx: dist };
+  }
+  return best;
 }
 
 /**
