@@ -52,10 +52,12 @@ import {
   type MeasureSnapPick,
   type SnapCandidate,
   type SnapRefineInput,
+  type SnapSegment,
   OPEN_REFINE_CALLS,
   RefineMemo,
   acceptRefined,
   chooseMeasureSnap,
+  copySegment,
   finitePoint,
   measureResult,
   refineOpen,
@@ -63,6 +65,7 @@ import {
   sameRefineInput,
   samePick,
   snapLimit,
+  snapSegmentsOf,
   withinSnapLimit,
 } from './snap';
 import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
@@ -371,6 +374,13 @@ export interface MeasureHoverSnap {
   fromSnap?: SnapKind;
   /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine이 돌려준 점을 받았다)이면 true */
   refined?: boolean;
+  /**
+   * 0.16.0: 그 점이 놓인 선분의 식별자(SnapSegment — 0.14.0 다듬기 입력과 같은 꼴, 복사본). 끝점(꺾은선 꼭짓점이면 고르기가 고른 쪽 하나)·가운데 점·
+   * 붙잡지 않은 선분·윤곽선 위 점·수직 발·교차점(첫째 선분)과 그 다듬은 점에만 있다. 그물 꼭짓점·면 위 점·점 묶음의 점·앱 점·축·나란함·잠근 선 위 점에는 없다
+   */
+  segment?: SnapSegment;
+  /** 0.16.0: 교차점이면 둘째 선분(복사본) */
+  other?: SnapSegment;
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -388,6 +398,10 @@ export interface MeasurePoint {
   locked?: boolean;
   /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine)으로 찍었으면 true */
   refined?: boolean;
+  /** 0.16.0: 그 점이 놓인 선분의 식별자(복사본 — MeasureHoverSnap.segment와 같은 규칙). 붙잡기 선택(setMeasureSnap)이 있을 때만 */
+  segment?: SnapSegment;
+  /** 0.16.0: 교차점이면 둘째 선분(복사본) */
+  other?: SnapSegment;
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -559,7 +573,7 @@ type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } |
  * 측정 점 고르기 결과(미리 보기·누르기): 찍을 점·붙잡았는지·종류, 0.9.0 축 붙잡기의 축,
  * 0.10.0 방향 추론의 단위 방향·잠갔는지·기준 선분·잠근 선으로 옮겨 온 점과 그 종류,
  * 0.12.0 점 붙잡기가 놓인 선분 직선이 첫 점을 지날 때 잠글 방향(lineLock — 결과·measureHoverSnap에는 싣지 않는다),
- * 0.14.0 앱이 다듬은 점이면 refined
+ * 0.14.0 앱이 다듬은 점이면 refined, 0.16.0 그 점이 놓인 선분 식별자(segment·교차점이면 other)
  */
 type MeasurePick = {
   p: V3;
@@ -573,14 +587,20 @@ type MeasurePick = {
   fromSnap?: SnapKind;
   lineLock?: InferenceLock;
   refined?: boolean;
+  segment?: SnapSegment;
+  other?: SnapSegment;
 };
-/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지 — 있는 것만) */
+/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지, 0.16.0 선분 식별자 — 있는 것만) */
 const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   const r: MeasurePointSnap = { kind: s.kind };
   if (s.axis) r.axis = s.axis;
   if (s.direction) r.direction = s.direction;
   if (s.locked) r.locked = true;
   if (s.refined) r.refined = true;
+  if (s.segment) {
+    r.segment = s.segment;
+    if (s.other) r.other = s.other;
+  }
   return r;
 };
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
@@ -2412,6 +2432,10 @@ export class Viewer3d {
       if (h.fromSnap) r.fromSnap = h.fromSnap;
     }
     if (h.refined) r.refined = true;
+    if (h.segment) {
+      r.segment = copySegment(h.segment);
+      if (h.other) r.other = copySegment(h.other);
+    }
     return r;
   }
 
@@ -2555,6 +2579,10 @@ export class Viewer3d {
       if (s?.direction) r.direction = [...s.direction] as V3;
       if (s?.locked) r.locked = true;
       if (s?.refined) r.refined = true;
+      if (s?.segment) {
+        r.segment = copySegment(s.segment);
+        if (s.other) r.other = copySegment(s.other);
+      }
       return r;
     });
   }
@@ -3484,13 +3512,23 @@ export class Viewer3d {
       if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
       if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
     }
+    // 그 점이 놓인 선분 식별자(0.16.0): 아래 점 붙잡기·선분 위 점에 싣는다(다듬은 점도 같은 선분)
+    const sg = snapSegmentsOf(r, d);
+    const seg = (m: MeasurePick): MeasurePick => {
+      if (sg) {
+        m.segment = sg.segment;
+        if (sg.other) m.other = sg.other;
+        else delete m.other;
+      }
+      return m;
+    };
     // 다듬기(0.14.0): 수직 발·코어 가운데 점·선분 위 점이면 앱이 정확한 형상 위로 옮긴 점(받을 수 있을 때만). 잠금·축·나란함은 위에서 이미 돌아갔다.
     // 0.15.0: 코어 교차점도. 열린 후보는 이미 다듬은 점이다(다시 부르지 않는다)
     const rp = r?.refined ? r.p : so.refine && r ? this.refinedAt(so, f, x, y, snapPx, r, d, first) : null;
     // 수직 발(0.10.0): 첫 점 → 발 방향(잠글 때). 다듬은 발이면 첫 점 → 다듬은 발
     if (r && r.kind === 'perpendicular' && first) {
       const dir = unitDir(first, rp ?? r.p);
-      if (dir) return rp ? { ...r, p: rp, direction: dir, refined: true } : { ...r, direction: dir };
+      if (dir) return seg(rp ? { ...r, p: rp, direction: dir, refined: true } : { ...r, direction: dir });
     }
     // 선분 방향 잠금(0.12.0): 점 붙잡기(또는 고른 선분 위 점)가 놓인 선분 직선이 첫 점을 지나면 Shift·setMeasureInferenceLock(true)가 그 방향으로 잠근다.
     // 고른 선분(d.ends)을 먼저 보고, 점 붙잡기면 커서 둘레 선분도 본다(여러 모서리가 만나는 꼭짓점에서 고르기가 다른 모서리를 골랐을 때).
@@ -3499,10 +3537,11 @@ export class Viewer3d {
       const ends = d && r.p === d.snap ? d.ends : undefined;
       if (r.kind || ends) {
         const l = this.lineLockAt(f, first, r.core ?? r.p, ends, r.kind ? nearSegs : null);
-        if (l) return rp ? { ...r, p: rp, lineLock: l, refined: true } : { ...r, lineLock: l };
+        if (l) return seg(rp ? { ...r, p: rp, lineLock: l, refined: true } : { ...r, lineLock: l });
       }
     }
-    return rp && r ? { ...r, p: rp, refined: true } : r;
+    if (!r) return null;
+    return sg ? seg(rp ? { ...r, p: rp, refined: true } : { ...r }) : rp ? { ...r, p: rp, refined: true } : r;
   }
 
   /**

@@ -298,7 +298,8 @@ describe('Viewer3d: 측정 붙잡기 다듬기(refine)', () => {
     const n = calls.length;
     clickAt(w, pc);
     expect(calls.length).toBe(n);
-    expect(v.measurePoints).toEqual([{ point: h.point, snap: null, refined: true }]);
+    // 0.16.0부터 다듬기에 넘긴 것과 같은 선분 식별자도 실린다
+    expect(v.measurePoints).toEqual([{ point: h.point, snap: null, refined: true, segment: c.segment }]);
   });
 
   it('가운데 점(midpoints): 토막 현의 가운데가 그 토막 호의 가운데로. 곧은 선분은 앱이 null이라 그대로', () => {

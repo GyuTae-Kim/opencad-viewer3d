@@ -157,8 +157,30 @@ export function refineTarget(
   return { kind, segment: copySegment({ kind: pk.kind, id: pk.id, index: pk.index, raw: pk.raw ?? pk.index, ends: base.ends }) };
 }
 
-function copySegment(s: SnapSegment): SnapSegment {
+/** 선분 식별자의 복사본(끝점 배열까지 새로) */
+export function copySegment(s: SnapSegment): SnapSegment {
   return { kind: s.kind, id: s.id, index: s.index, raw: s.raw, ends: [[s.ends[0][0], s.ends[0][1], s.ends[0][2]], [s.ends[1][0], s.ends[1][1], s.ends[1][2]]] };
+}
+
+/**
+ * 붙잡은 점이 놓인 선분의 식별자(0.16.0 — MeasureHoverSnap·MeasurePoint의 segment·other, 복사본). r = 고른 점, base = 고르기 결과.
+ * - 코어 수직 발·교차점·열린 후보(선분 식별자가 실린 후보 — 다듬은 점도 같다): 그 선분, 교차점이면 둘째 선분 other도
+ * - 고르기가 고른 점 그대로이고 고른 것이 선분 묶음·윤곽선이면 그 선분: 끝점(두 선분이 만나는 꺾은선 꼭짓점이면 고르기가 고른 쪽 하나 —
+ *   커서에 가까운 선분), 가운데 점, 붙잡지 않은 선분 위 점(다듬은 점도)
+ * - 그 밖은 null: 그물 꼭짓점·점 묶음의 점·면 위 점(선분이 아니다), 앱 점(points·pointsFor — 앱이 준 점이라 앱이 안다),
+ *   축·나란함·잠근 선 위 점(첫 점을 지나는 선 위 점 — 이 함수를 거치지 않는다)
+ */
+export function snapSegmentsOf(
+  r: MeasureSnapPick | null,
+  base: { snap: V3; pick: Pick3d; ends?: [V3, V3] | undefined } | null,
+): { segment: SnapSegment; other?: SnapSegment } | null {
+  if (!r) return null;
+  if (r.seg) return r.other ? { segment: copySegment(r.seg), other: copySegment(r.other) } : { segment: copySegment(r.seg) };
+  // 고르기가 고른 점 그대로일 때만(앱 점이 이기면 다른 객체다 — refineTarget과 같은 판정)
+  if (!base || r.p !== base.snap || !base.ends) return null;
+  const pk = base.pick;
+  if (pk.kind !== 'line' && pk.kind !== 'edge') return null;
+  return { segment: copySegment({ kind: pk.kind, id: pk.id, index: pk.index, raw: pk.raw ?? pk.index, ends: base.ends }) };
 }
 
 /** 앱이 돌려준 값이 수 셋이 모두 유한한 점이면 그 복사본(0.14.0 — 배열·Float64Array 등), 아니면 null */
@@ -342,6 +364,9 @@ export interface MeasurePointSnap {
   locked?: boolean;
   /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine)이면 true — 측정 결과에는 싣지 않는다(measurePoints·measureHoverSnap에만) */
   refined?: boolean;
+  /** 0.16.0: 그 점이 놓인 선분(snapSegmentsOf)과 교차점의 둘째 선분 — 측정 결과에는 싣지 않는다(measurePoints·measureHoverSnap에만) */
+  segment?: SnapSegment;
+  other?: SnapSegment;
 }
 
 /**

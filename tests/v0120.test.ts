@@ -175,7 +175,8 @@ describe('Viewer3d: 모서리 끝에서 그 모서리를 따라 가리킨 점 �
     // 나란함은 켜지 않는다(선분 방향 잠금은 나란함 추론과 따로 된다)
     v.setMeasureSnap({ midpoints: true, inference: { axes: true, lock: true } });
     clickAt(w, A);
-    expect(v.measurePoints).toEqual([{ point: A, snap: 'endpoint' }]);
+    // 0.16.0부터 그 끝점이 놓인 선분 식별자도 실린다
+    expect(v.measurePoints).toEqual([{ point: A, snap: 'endpoint', segment: { kind: 'line', id: 'path', index: 0, raw: 0, ends: [A, [60, 40, 0]] } }]);
     hoverAt(w, B);
     const h = v.measureHoverSnap!;
     expect(h.snap).toBe('endpoint');
