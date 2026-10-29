@@ -16,6 +16,8 @@
  *   뚫는 점(axisEdgeSnap·axisFaceSnap과 같은 계산 — 뷰어는 MeasureInference.lockEdges·lockFaces를 켜고 잠갔을 때)
  * - 선과 꺾은선 토막의 열린 교차(0.20.0 openEdgeCandidates·openEdgeSnap): 축·잠근 선이 커서 둘레 토막과 3D로 만나지 않지만 그 토막의 활꼴(현과 곡선 사이)을
  *   지날 만큼 가까이 지나가면, 부르는 쪽(뷰어는 앱 refine — 'axisEdge', open)이 곡선과의 정확한 교차를 줄 때만 그 점을 후보로 받는다
+ * - 잠근 선과 끌어온 축의 교차(0.21.0 lockTrackSnap): 첫 점을 지나는 잠근 선이 기억한 점의 X·Y·Z 축과 3D로 만나는 점, 축으로 잠갔으면 잠근 축 위에서
+ *   기억한 점과 나란한 자리(trackCrossSnap과 같은 점 — 뷰어는 MeasureInference.lockTracks를 켜고 잠갔을 때)
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
  * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
  */
@@ -502,6 +504,91 @@ export function lockFaceSnap<H extends TrackFaceHit>(
   const e = unitDir([0, 0, 0], dir);
   if (!under || !e || cursorOn(f, a, x, y, snapPx)) return null;
   return faceMeet(f, a, e, x, y, snapPx, under, hitAt, steps, Infinity);
+}
+
+/**
+ * 잠근 선과 끌어온 축의 교차 결과(0.21.0 lockTrackSnap): 찍을 점(잠근 선 위), 끌어온 점(복사본), 이 점에서 잠근 선과 만나는 그 점의 축
+ * (축으로 잠근 선 위에서 끌어온 점과 나란한 자리일 뿐 그 점의 어느 축과도 만나지 않으면 없다), 커서와의 화면 거리
+ */
+export interface LockTrackSnap {
+  p: V3;
+  from: V3;
+  axis?: SnapAxis;
+  distPx: number;
+}
+
+/** 점 q에서 점 P를 지나는 단위 방향 e의 직선까지 거리 */
+function lineGap(q: readonly number[], P: readonly number[], e: readonly number[]): number {
+  const wx = q[0]! - P[0]!, wy = q[1]! - P[1]!, wz = q[2]! - P[2]!;
+  const t = wx * e[0]! + wy * e[1]! + wz * e[2]!;
+  return Math.hypot(wx - e[0]! * t, wy - e[1]! * t, wz - e[2]! * t);
+}
+
+/**
+ * 잠근 선과 끌어온 축의 교차(0.21.0): 첫 측정 점 a를 지나는 방향 dir(길이는 상관없다 — 잠근 축·나란함·수직·선분 방향·앱이 정한 방향)의 직선이
+ * 기억한 점 P(tracks — 새것이 앞)를 지나는 X·Y·Z 축과 3D로 만나는 점이 커서에서 snapPx 안이면 후보(가까운 것, 같으면 앞 점 → X·Y·Z 차례).
+ * - 만난다: 두 직선 사이 가장 가까운 자리가 그 점 깊이에서 화면 반 화소(0.17.0 trackPairSnap과 같은 허용치) 안. 찍는 점은 잠근 선 위의 그 자리다
+ *   (잠근 선의 방향 성분이 0인 좌표는 a 그대로 — 세계 축으로 잠갔으면 남은 두 좌표가 a와 정확히 같다)
+ * - 잠근 선이 축(axes의 하나 — 없으면 세계 X·Y·Z)과 나란하면 P를 잠근 선에 수직으로 내린 자리 a + u·((P − a)·u)다(0.16.0 trackCrossSnap의 그 축 자리와 같은 셈 —
+ *   잠그기 전 첫 점 축 위 나란한 자리를 Shift로 잠가도 같은 점이다). P가 a와 다른 좌표 하나를 함께 쓰면 그 자리에서 P의 다른 축이 잠근 축과 3D로 만나고(결과 axis),
+ *   아니면 나란한 자리일 뿐이다(axis 없음 — 0.10.0 잠금에서 P를 가리킨 자리 from과 같은 점)
+ * - 빼는 것: a와 같은 P(그 축은 첫 점 축이다), 커서가 P의 화면 자리 snapPx 안인 P(점 붙잡기가 맡는다), 잠근 선과 나란한 P의 축, 교차가 a 자리거나 P 자리인 것
+ *   (P가 잠근 선 위), 원근에서 가까운 면보다 앞인 점. 커서가 a의 화면 자리 snapPx 안이면 없다. dir가 길이 0이거나 수가 아니면 없다. 단면·가림은 따지지 않는다(trackPairSnap과 같다)
+ * - 만나지 않는 축(화면에서만 엇갈린다)은 받지 않는다. 축이 아닌 잠근 선 위에서 P에 가장 가까운 자리는 P의 축 위 점이 아니라 0.10.0 from과 같은 자리이고,
+ *   0.15.0 넓힌 교차의 허용치(토막 길이의 0.1배)는 곡선을 나눈 꺾은선의 처짐 때문이라 곧은 두 직선에는 없다
+ * axes는 trackCrossSnap과 같다(앱의 그리기 축)
+ */
+export function lockTrackSnap(
+  f: ViewFrame,
+  a: readonly number[],
+  dir: readonly number[],
+  tracks: readonly (readonly number[])[],
+  x: number,
+  y: number,
+  snapPx: number,
+  axes?: TrackAxes | null,
+): LockTrackSnap | null {
+  const u = unitDir([0, 0, 0], dir);
+  if (!u || !tracks.length || !a.every(Number.isFinite) || cursorOn(f, a, x, y, snapPx)) return null;
+  const dirs = axesOf(axes);
+  // 잠근 선과 나란한 축(axisAligned와 같은 문턱)
+  const along = dirs.find(([, e]) => Math.abs(e[0] * u[0] + e[1] * u[1] + e[2] * u[2]) >= 1 - 1e-6)?.[0] ?? null;
+  let best: LockTrackSnap | null = null;
+  const consider = (p: V3, P: readonly number[], axis: SnapAxis | undefined): void => {
+    const dist = screenDistance(f, p, x, y);
+    if (dist === null || dist > snapPx || (best && dist >= best.distPx)) return;
+    best = { p, from: [P[0]!, P[1]!, P[2]!], distPx: dist };
+    if (axis) best.axis = axis;
+  };
+  for (const P of tracks) {
+    if (!P.every(Number.isFinite) || sameTrackPoint(P, a) || cursorOn(f, P, x, y, snapPx)) continue;
+    if (along) {
+      // 잠근 축 위 나란한 자리(trackCrossSnap과 같은 식 — 같은 수가 나온다)
+      const t = (P[0]! - a[0]!) * u[0] + (P[1]! - a[1]!) * u[1] + (P[2]! - a[2]!) * u[2];
+      const q: V3 = [a[0]! + u[0] * t, a[1]! + u[1] * t, a[2]! + u[2] * t];
+      if (sameTrackPoint(q, a)) continue;
+      const tol = meetTol(f, q);
+      if (dist3(q, P) <= tol) continue;
+      const on = dirs.find(([n, e]) => n !== along && lineGap(q, P, e) <= tol)?.[0];
+      consider(q, P, on);
+      continue;
+    }
+    for (const [axis, e] of dirs) {
+      // 잠근 선 a + s·u와 P의 축 P + t·e 사이 가장 가까운 자리(잠근 선 위 점)
+      const B = u[0] * e[0] + u[1] * e[1] + u[2] * e[2];
+      const den = 1 - B * B;
+      if (!(den > 1e-10)) continue;
+      const wx = a[0]! - P[0]!, wy = a[1]! - P[1]!, wz = a[2]! - P[2]!;
+      const D = u[0] * wx + u[1] * wy + u[2] * wz, E = e[0] * wx + e[1] * wy + e[2] * wz;
+      const s = (B * E - D) / den;
+      const m: V3 = [u[0] === 0 ? a[0]! : a[0]! + u[0] * s, u[1] === 0 ? a[1]! : a[1]! + u[1] * s, u[2] === 0 ? a[2]! : a[2]! + u[2] * s];
+      if (!m.every(Number.isFinite)) continue;
+      const tol = meetTol(f, m);
+      if (!(lineGap(m, P, e) <= tol) || dist3(m, a) <= tol || dist3(m, P) <= tol) continue;
+      consider(m, P, axis);
+    }
+  }
+  return best;
 }
 
 /**

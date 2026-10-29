@@ -19,10 +19,13 @@
  *
  * 0.20.0: 축이 아닌 잠근 선도 'axisEdge'·'axisFace'로 넘긴다(SnapRefineLine.axis 없음). 축·잠근 선이 꺾은선 토막과 3D로 만나지 않고 그 활꼴만 지나는
  * 열린 후보('axisEdge', open — 계산은 track.ts openEdgeSnap)도 넘긴다.
+ *
+ * 0.21.0: 붙잡지 않은 면 위 점('onFace' — line은 커서 광선)도 refineFace로 넘기고(acceptOnFace — 광선 위로 내린 자리, 삼각형 크기로 자른다),
+ * 기억을 비우는 RefineMemo.clear(Viewer3d.clearMeasureRefine)를 둔다.
  */
 import type { Pick3d, SnapKind } from './types';
 import { type ViewFrame, projectToScreen, viewDepth, worldPerPixel } from './camera';
-import { type SnapAxis, unitDir } from './inference';
+import { OPEN_INTERSECTION_CHORD, type SnapAxis, unitDir } from './inference';
 import type { V3 } from './math';
 import type { MeasureResult } from './viewer';
 
@@ -136,21 +139,33 @@ export interface SnapRefineInput {
 /**
  * 축이 면을 뚫는 점의 다듬기 입력(0.19.0 — 'axisFace', MeasureSnapOptions.refineFace가 받는다, 모두 복사본, 세계 좌표). 축(첫 점 축·끌어온 축 — inference.axisFaces,
  * 잠근 축 — inference.lockFaces)이 그물 면을 뚫는 점은 면을 나눈 삼각형 위 점이라, 앱이 아는 정확한 곡면(B-rep 면 등)과 그 축 직선의 교차로 옮길 수 있게 넘긴다.
- * 선분이 없으므로 SnapRefineInput(0.14.0부터 segment가 늘 있는 꼴 — 앱 함수가 그 꼴로 적혀 있다)과 따로 두고 손잡이도 따로다
+ * 선분이 없으므로 SnapRefineInput(0.14.0부터 segment가 늘 있는 꼴 — 앱 함수가 그 꼴로 적혀 있다)과 따로 두고 손잡이도 따로다.
+ * 0.21.0: 붙잡지 않은 면 위 점('onFace' — 커서 광선이 그 삼각형을 맞은 점)도 같은 꼴로 넘긴다. line이 곧 커서 광선이라 앱은 'axisFace'와 같은 계산
+ * (그 직선이 face가 놓인 곡면을 뚫는 점, point 둘레)으로 커서 아래 곡면 위 점을 준다
  */
 export interface SnapRefineFaceInput {
-  kind: 'axisFace';
-  /** 코어가 고른 점(축 직선과 그 삼각형 평면의 교차) */
+  /** 'axisFace' = 축·잠근 선이 면을 뚫는 점(0.19.0), 'onFace' = 붙잡지 않은 면 위 점(0.21.0 — 커서 광선과 그 삼각형의 교차) */
+  kind: SnapRefineFaceKind;
+  /** 코어가 고른 점(축 직선과 그 삼각형 평면의 교차, 'onFace'면 커서 광선이 맞은 삼각형 위 점 — 고르기 Pick3d.point) */
   point: V3;
   /** 뚫은 면(그물 id·삼각형 번호 — Pick3d.index와 같은 뜻·세계 단위 법선(눈 쪽)) — MeasureHoverSnap.face와 같은 값 */
   face: SnapFace;
-  /** 그 축 직선(지나는 점·단위 방향·축 이름 — 0.20.0부터 축이 아닌 잠근 선이면 축 이름이 없다). 앱은 이 직선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 모르면 null */
+  /**
+   * 그 축 직선(지나는 점·단위 방향·축 이름 — 0.20.0부터 축이 아닌 잠근 선이면 축 이름이 없다). 앱은 이 직선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 모르면 null.
+   * 0.21.0 'onFace'면 커서 광선 그대로(ray와 같은 값, 축 이름 없음)
+   */
   line: SnapRefineLine;
   /** 첫 측정 점(없으면 null) */
   first: V3 | null;
-  /** 커서 광선. 결과는 이것과 상관없이 종류·코어 점·면·축 직선·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억한다 — 'axisEdge'와 같다) */
+  /**
+   * 커서 광선. 'axisFace'의 결과는 이것과 상관없이 종류·코어 점·면·축 직선·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억한다 — 'axisEdge'와 같다).
+   * 'onFace'는 커서마다 다른 점이라 바로 앞 호출과 입력이 같을 때만 다시 쓴다(0.14.0 'onEdge'와 같다)
+   */
   ray: { origin: V3; dir: V3 };
 }
+
+/** 면 위 점 다듬기 종류(0.21.0 — SnapRefineFaceInput.kind): 'axisFace'(0.19.0)·'onFace' */
+export type SnapRefineFaceKind = 'axisFace' | 'onFace';
 
 /**
  * base = 고르기 결과(붙잡은 점이면 kind가 있다, 아무것도 고르지 않았으면 null), cands = 앱 붙잡기 후보,
@@ -318,13 +333,14 @@ const segKey = (s: SnapSegment): string => `${s.kind}|${s.id.length}:${s.id}|${s
  * 열린 후보 다듬기 기억의 열쇠(0.15.0): 종류·코어 점·선분(둘째 선분)·첫 점. 커서 광선은 넣지 않는다 —
  * 열린 후보의 코어 점은 토막과 첫 점으로만 정해지므로(커서와 상관없다) 커서가 그 둘레에서 움직이는 동안 같은 열쇠다.
  * 0.18.0: 축과 선분의 교차('axisEdge')도 이 기억을 쓴다 — 축 직선(line)이 있으면 열쇠 끝에 붙는다(없으면 0.15.0 열쇠 그대로).
- * 0.19.0: 축이 면을 뚫는 점('axisFace')은 선분 자리에 면(그물 id·삼각형 번호·법선)이 들어간다
+ * 0.19.0: 축이 면을 뚫는 점('axisFace')은 선분 자리에 면(그물 id·삼각형 번호·법선)이 들어간다. 0.21.0 'onFace'도 같은 꼴이다(line이 커서 광선이라 커서마다 다른 열쇠 —
+ * 뷰어는 이 기억에 넣지 않고 바로 앞 입력 하나만 견준다)
  */
 export function openRefineKey(
   c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line'> | Pick<SnapRefineFaceInput, 'kind' | 'point' | 'face' | 'first' | 'line'>,
 ): string {
   const l = c.line;
-  const where = c.kind === 'axisFace' ? `face|${c.face.id.length}:${c.face.id}|${c.face.index}|${c.face.normal.join(',')}#-` : `${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}`;
+  const where = 'face' in c ? `face|${c.face.id.length}:${c.face.id}|${c.face.index}|${c.face.normal.join(',')}#-` : `${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}`;
   return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis ?? '-'}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
 }
 
@@ -349,6 +365,40 @@ export class RefineMemo {
   get size(): number {
     return this.m.size;
   }
+  /** 모두 잊는다(0.21.0 — Viewer3d.clearMeasureRefine). 지운 항목 수를 돌려준다 */
+  clear(): number {
+    const n = this.m.size;
+    this.m.clear();
+    return n;
+  }
+}
+
+/**
+ * 면 위 점 다듬기에서 받는 점이 코어 점(삼각형 위)에서 떨어져도 되는 거리의 삼각형 변 길이 비(0.21.0 'onFace' — 0.15.0 OPEN_INTERSECTION_CHORD와 같은 0.1).
+ * 곡면을 나눈 삼각형의 한 변이 45°보다 덜 도는 나눔이면 곡면과 그 변 사이(활꼴 높이)는 변 길이의 0.1배 안이다
+ */
+export const ON_FACE_CHORD = OPEN_INTERSECTION_CHORD;
+
+/**
+ * 붙잡지 않은 면 위 점을 앱이 다듬은 점 q를 받을지(0.21.0, 'onFace'): q를 커서 광선 ray 위로 내린 자리 p(acceptOnLine — q에서 그 깊이 화면 반 화소 안,
+ * 눈 뒤·가까운 면 앞이 아님. 광선 위 점이라 화면 자리는 코어 점과 같다)가 코어 점 core에서 ON_FACE_CHORD × (맞은 삼각형 corners의 가장 긴 변) 안이면 p, 아니면 null.
+ * 화면 거리로는 광선을 따라 앞뒤로 벗어난 점(곡면의 맞은편 근 등)을 가를 수 없어 삼각형 크기로 자른다
+ */
+export function acceptOnFace(
+  f: ViewFrame,
+  core: readonly number[],
+  q: readonly number[],
+  ray: { origin: readonly number[]; dir: readonly number[] },
+  corners: readonly (readonly number[])[],
+  maxPx: number,
+): V3 | null {
+  if (corners.length < 3) return null;
+  const p = acceptOnLine(f, core, q, ray, maxPx);
+  if (!p) return null;
+  let edge = 0;
+  for (let i = 0; i < 3; i++) edge = Math.max(edge, dist3(corners[i]!, corners[(i + 1) % 3]!));
+  const tol = Math.max(0.5 * worldPerPixel(f, viewDepth(f, p)), 1e-9 * (1 + Math.max(Math.abs(p[0]), Math.abs(p[1]), Math.abs(p[2]))));
+  return Number.isFinite(edge) && dist3(p, core) <= ON_FACE_CHORD * edge + tol ? p : null;
 }
 
 /** 열린 후보(0.15.0 — inference.openCandidates가 만든다): 종류, 코어 점, 선분 식별자(교차점이면 둘째도), 기준 선분, 남는 쪽 판정, 같은 점으로 볼 거리 */

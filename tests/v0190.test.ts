@@ -577,10 +577,12 @@ describe('Viewer3d: 잠근 선과 면의 교차(0.19.0 lockFaces)', () => {
     v.dispose();
   });
 
-  it('refineFace만 줘도 붙잡기가 켜지고(measureSnap에 그대로), 면 교차를 켜지 않으면 부르지 않는다', () => {
+  it('refineFace만 줘도 붙잡기가 켜지고(measureSnap에 그대로), 면 교차를 켜지 않으면 축이 면을 뚫는 점으로는 부르지 않는다(0.21.0부터 면 위 점은 onFace — v0210.test.ts)', () => {
     let n = 0;
-    const fnc = (): null => {
-      n++;
+    const kinds: string[] = [];
+    const fnc = (c: SnapRefineFaceInput): null => {
+      kinds.push(c.kind);
+      if (c.kind === 'axisFace') n++;
       return null;
     };
     const w = faceFirst({ refineFace: fnc });
@@ -590,6 +592,8 @@ describe('Viewer3d: 잠근 선과 면의 교차(0.19.0 lockFaces)', () => {
     const s = at(w, T);
     hoverXY(w, s.x + 3, s.y + 1);
     expect(n).toBe(0);
+    // 0.19.0·0.20.0은 한 번도 부르지 않았고, 0.21.0은 붙잡지 않은 면 위 점을 'onFace'로 한 번 넘긴다
+    expect(kinds).toEqual(['onFace']);
     v.setMeasureSnap({ inference: { axes: true } });
     expect(v.measureSnap).not.toHaveProperty('refineFace');
     v.dispose();

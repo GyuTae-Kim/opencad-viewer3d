@@ -37,13 +37,14 @@ export type {
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
 export type { InferenceLock, InferenceLockInput, InferenceLockKind, MeasureInference, MeasureTrackOptions, NormalizedInference, SnapAxis } from './inference';
-export type { SnapFace, SnapRefineFaceInput, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
+export type { SnapFace, SnapRefineFaceInput, SnapRefineFaceKind, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
 export type {
   AxisEdgeSnap,
   AxisFaceSnap,
   DwellStep,
   LockEdgeSnap,
   LockFaceSnap,
+  LockTrackSnap,
   OpenEdgeCandidate,
   OpenEdgeLine,
   OpenEdgeSnap,
