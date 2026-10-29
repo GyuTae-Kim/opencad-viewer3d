@@ -15,10 +15,10 @@ import { type CameraState, computeFrame, defaultCamera, dirToAngles, projectToSc
 import { type ScenePickOptions, pickScene } from '../src/scenepick';
 import type { SnapRefineInput } from '../src/snap';
 import { boxMesh } from '../src/synth';
-import { OPEN_EDGE_CHORD, openEdgeCandidates, openEdgeSnap } from '../src/track';
+import { OPEN_EDGE_CHORD, hiddenByOwnPatch, openEdgeCandidates, openEdgeSnap } from '../src/track';
 import { Viewer3d } from '../src/viewer';
 import type { V3 } from '../src/math';
-import type { Pick3d, Scene3d } from '../src/types';
+import type { Mesh3d, Pick3d, Scene3d } from '../src/types';
 
 const dist = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
 const deg = (a: number): number => (a * Math.PI) / 180;
@@ -551,5 +551,111 @@ describe('Viewer3d: 앱 측정 덧그림 글상자도 setMeasureLabelAvoid를 �
     expect(r1.x).toBeCloseTo(s.x - 10 - 24, 9);
     expect([r1.y, r1.width, r1.height]).toEqual([r0.y, 24, 24]);
     v.dispose();
+  });
+});
+
+// ───────────── 오목하게 보이는 곡면의 열린 면 교차 ─────────────
+/**
+ * 원기둥 구멍 벽(반지름 30, Z축 둘레 24칸 — 꼭짓점 7.5° + 15°·k, 높이 −10~20, 안에서 본다). 각 0° 둘레 칸의 현(x = 30·cos7.5° = 29.74)과
+ * 원기둥(x = 30) 사이를 지나는 Y축 선(x = 29.9, z = 5)은 삼각형을 뚫지 않고 원기둥만 y = ±√(30² − 29.9²)에서 뚫는다. 안에서 보면 그 교차는 벽 삼각형 뒤다
+ */
+describe("Viewer3d: 오목하게 보이는 곡면의 열린 면 교차(0.23.0 — refineFace 'axisFace', open)", () => {
+  const RC = 30;
+  const tube = ((): Mesh3d => {
+    const P: number[] = [];
+    const I: number[] = [];
+    const N = 24;
+    for (let k = 0; k < N; k++) {
+      const a = deg(7.5 + 15 * k);
+      P.push(RC * Math.cos(a), RC * Math.sin(a), -10, RC * Math.cos(a), RC * Math.sin(a), 20);
+    }
+    for (let k = 0; k < N; k++) {
+      const a = 2 * k, b = 2 * ((k + 1) % N);
+      I.push(a, b, b + 1, a, b + 1, a + 1);
+    }
+    return { id: '구멍', positions: new Float32Array(P), indices: new Uint32Array(I), color: [0.7, 0.7, 0.75, 1], doubleSided: true };
+  })();
+  const X0 = 29.9;
+  const YR = Math.sqrt(RC * RC - X0 * X0);
+  const HIT: V3 = [X0, YR, 5];
+  /** 앱의 정확한 원기둥: 'axisFace'면 직선과 원기둥의 교차 가운데 point에 가까운 근 */
+  const cylinder = (calls: number[]) => (c: { kind: string; line: { origin: readonly number[]; dir: readonly number[] }; point: readonly number[]; open?: boolean }): V3 | null => {
+    if (c.kind !== 'axisFace') return null;
+    if (c.open) calls.push(1);
+    const o = c.line.origin, d = c.line.dir;
+    const a = d[0]! * d[0]! + d[1]! * d[1]!, b = o[0]! * d[0]! + o[1]! * d[1]!, k = o[0]! * o[0]! + o[1]! * o[1]! - RC * RC;
+    const disc = b * b - a * k;
+    if (!(a > 0) || disc < 0) return null;
+    const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t): V3 => [o[0]! + d[0]! * t, o[1]! + d[1]! * t, o[2]! + d[2]! * t]);
+    return dist(ts[0]!, c.point) <= dist(ts[1]!, c.point) ? ts[0]! : ts[1]!;
+  };
+  function inside(extra: Mesh3d[] = []): Viewer3d {
+    const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false });
+    v.setScene({ name: 'h', units: 'mm', meshes: [tube, ...extra], lines: [], points: [] });
+    // 구멍 안 (12, −2, 6)에서 +X 쪽 벽을 본다(한 화소 약 0.03 — 처짐 0.26이 붙잡기 거리 안, 2화소보다 크다)
+    const a = dirToAngles([-1, 0.12, -0.05]);
+    v.setCamera({ ...v.getCamera(), yaw: a.yaw, pitch: a.pitch, target: [X0, YR, 5], distance: 18, projection: 'perspective' });
+    v.setMeasureMode(true);
+    v.renderNow();
+    return v;
+  }
+
+  it('전제: Y축 선은 벽 삼각형을 뚫지 않고(그 칸의 현과 나란히 뒤를 지난다) 원기둥을 그 칸 범위에서 뚫는다. 교차는 안에서 보아 삼각형 뒤 2화소보다 멀다', () => {
+    expect(RC * Math.cos(deg(7.5))).toBeLessThan(X0);
+    expect(Math.atan2(YR, X0)).toBeLessThan(deg(7.5));
+    const v = inside();
+    const s = v.project(HIT)!;
+    // 그 자리 광선이 처음 맞는 면은 벽(그 칸 삼각형)이고, 교차는 그 뒤
+    const k = v.pick(s.x, s.y, { meshesOnly: true })!;
+    expect(k.id).toBe('구멍');
+    expect(k.point[0]).toBeLessThan(X0);
+    const v0 = v.project(k.point)!, v1 = v.project(HIT)!;
+    // 음영 계열의 가림 판정(그 깊이 2화소·깊이의 1e-4 가운데 큰 것보다 뒤면 가린다)에 걸리는 깊이 차
+    const fr = computeFrame(v.getCamera(), 800, 600, { center: [0, 0, 5], radius: 40 });
+    expect(v1.depth! - v0.depth!).toBeGreaterThan(Math.max(v1.depth! * 1e-4, 2 * worldPerPixel(fr, v1.depth!)));
+    v.dispose();
+  });
+
+  it('끌어온 점의 Y축이 벽 뒤 원기둥을 뚫는 자리에 붙는다(0.22.0은 그 칸 삼각형에 가려 받지 않았다)', () => {
+    const calls: number[] = [];
+    const v = inside();
+    v.setMeasureSnap({ inference: { axes: true, track: true, axisFaces: true }, refineFace: cylinder(calls) });
+    v.setMeasureTrackPoints([[X0, 0, 5]]);
+    const s = v.project(HIT)!;
+    hoverXY(v, s.x + 1, s.y + 2);
+    const h = v.measureHoverSnap!;
+    expect(h).toMatchObject({ snap: 'axis', axis: 'y', refined: true, face: { id: '구멍' }, trackFrom: [X0, 0, 5] });
+    expect(dist(h.point, HIT)).toBeLessThan(1e-9);
+    expect([h.point[0], h.point[2]]).toEqual([X0, 5]);
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    v.dispose();
+  });
+
+  it('다른 면에 가린 교차는 그대로 받지 않는다: 그 앞에 불투명 상자를 두면 끌어온 축 위 커서 자리', () => {
+    // 교차 앞(카메라 쪽 x 26~27)을 가리는 상자 — 벽과 꼭짓점을 함께 쓰지 않는다
+    const blocker = boxMesh('가림', [26, YR - 1.5, 3.5], [27, YR + 1.5, 6.5], [0.3, 0.3, 0.3, 1]);
+    const v = inside([blocker]);
+    v.setMeasureSnap({ inference: { axes: true, track: true, axisFaces: true }, refineFace: cylinder([]) });
+    v.setMeasureTrackPoints([[X0, 0, 5]]);
+    const s = v.project(HIT)!;
+    expect(v.pick(s.x, s.y, { meshesOnly: true })!.id).toBe('가림');
+    hoverXY(v, s.x + 1, s.y + 2);
+    const h = v.measureHoverSnap;
+    expect(h?.refined).not.toBe(true);
+    v.dispose();
+  });
+
+  it('순수 hiddenByOwnPatch: 맞은 면이 그 삼각형·이웃이고 처짐 한도 안이면 true, 다른 면이거나 한도보다 멀면 false', () => {
+    const A: V3 = [0, 0, 0], B: V3 = [10, 0, 0], C: V3 = [0, 10, 0], D: V3 = [10, 10, 0];
+    const tri = [A, B, C];
+    const hitSelf = { corners: [A, B, C], point: [2, 2, 0], normal: [0, 0, 1] };
+    const hitNb = { corners: [B, D, C], point: [7, 7, 0], normal: [0, 0, 2] };
+    const other = { corners: [[20, 0, 0], [30, 0, 0], [20, 10, 0]], point: [22, 2, 0], normal: [0, 0, 1] };
+    const L = Math.hypot(10, 10);
+    expect(hiddenByOwnPatch(tri, hitSelf, [2, 2, -0.5], 0.01)).toBe(true);
+    expect(hiddenByOwnPatch(tri, hitNb, [7, 7, -0.1 * L], 0.01)).toBe(true);
+    expect(hiddenByOwnPatch(tri, hitNb, [7, 7, -0.1 * L - 0.1], 0.01)).toBe(false);
+    expect(hiddenByOwnPatch(tri, other, [22, 2, -0.2], 0.01)).toBe(false);
+    expect(hiddenByOwnPatch(tri, { ...hitSelf, normal: [0, 0, 0] }, [2, 2, -0.5], 0.01)).toBe(false);
   });
 });

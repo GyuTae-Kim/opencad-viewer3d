@@ -85,6 +85,7 @@ import {
   axisEdgeSnap,
   axisFaceSnap,
   chooseTrackPoint,
+  hiddenByOwnPatch,
   lockEdgeSnap,
   lockFaceSnap,
   lockTrackSnap,
@@ -4305,7 +4306,15 @@ export class Viewer3d {
       },
       (p, t) => {
         const sp = projectToScreen(f, p);
-        return !!sp && this.snapVisible(f, p, sp[0], sp[1], t.id);
+        if (!sp) return false;
+        if (this.snapVisible(f, p, sp[0], sp[1], t.id)) return true;
+        // 0.23.0: 곡면이 오목하게 보이는 자리(구멍 안쪽 벽)는 앱 점이 그 삼각형(과 이웃) 뒤라 그 조각에 가린다 — 그 자리 광선이 처음 맞은 불투명 면이
+        // 그 삼각형이나 꼭짓점을 함께 쓰는 이웃이고 앱 점이 그 면에서 처짐 한도 안이면 보인다고 본다(track.ts hiddenByOwnPatch). 음영 계열에서만 가린다
+        if (!this.shadedMode) return false;
+        const d = this.pickDetail(sp[0], sp[1], true, undefined, false, false, true, true);
+        const k = d?.pick;
+        if (!k || k.kind !== 'mesh' || k.section || k.id !== t.id || !k.normal || !d!.corners) return false;
+        return hiddenByOwnPatch(t.corners, { corners: d!.corners, point: k.point, normal: k.normal }, p, 2 * t.wpp);
       },
     );
     return r ? { snap: r, line: near[r.line]! } : null;

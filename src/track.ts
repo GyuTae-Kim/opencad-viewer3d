@@ -1120,6 +1120,31 @@ function triPrismSpan(P: readonly number[], e: readonly number[], c: readonly (r
   return Number.isFinite(lo) && Number.isFinite(hi) && lo <= hi ? [lo, hi] : null;
 }
 
+/**
+ * 열린 면 교차의 앱 점 p가 그 삼각형 tri 둘레 조각에만 가렸는지(0.23.0 — 곡면이 오목하게 보이는 자리, 구멍 안쪽 벽): 곡면이 눈에서 보아 오목하면
+ * 곡면은 그 삼각형 뒤에 있어 앱 점이 그 삼각형(과 이웃)에 가린다. p 화면 자리의 광선이 처음 맞은 면 hit(세계 꼭짓점 셋·맞은 점·법선)이 tri이거나
+ * tri와 꼭짓점을 함께 쓰는 이웃이고, p가 그 면에서 OPEN_FACE_CHORD × 두 삼각형 가운데 가장 긴 변 + tol 안(면 뒤)이면 true —
+ * 그 조각이 곧 p가 놓인 곡면을 나눈 것이므로 보이는 것으로 본다. 다른 면(앞의 다른 벽 등)에 맞았거나 그보다 멀리 뒤면 false
+ */
+export function hiddenByOwnPatch(
+  tri: readonly (readonly number[])[],
+  hit: { corners: readonly (readonly number[])[]; point: readonly number[]; normal: readonly number[] },
+  p: readonly number[],
+  tol: number,
+): boolean {
+  if (tri.length < 3 || hit.corners.length < 3) return false;
+  const L = Math.max(longestEdge(tri), longestEdge(hit.corners));
+  let mag = 0;
+  for (const c of [...tri, ...hit.corners]) mag = Math.max(mag, Math.abs(c[0]!), Math.abs(c[1]!), Math.abs(c[2]!));
+  const eps = 1e-6 * L + 1e-9 * (1 + mag);
+  if (!hit.corners.some((c) => tri.some((q) => dist3(c, q) <= eps))) return false;
+  const n = hit.normal;
+  const nl = Math.hypot(n[0]!, n[1]!, n[2]!);
+  if (!(nl > 0)) return false;
+  const h = Math.abs(dot3(sub3(p, hit.point), n)) / nl;
+  return h <= OPEN_FACE_CHORD * L + tol;
+}
+
 /** 삼각형 평면 위 점 q에서 삼각형(채운 면)까지 거리(안이면 0) */
 function triGap(q: readonly number[], c: readonly (readonly number[])[]): number {
   const w = barycentric(q, c[0]!, c[1]!, c[2]!);
