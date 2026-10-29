@@ -13,6 +13,7 @@
  * - 끌어온 축(0.16.0): 선택 normalizeTrack·TRACK_DWELL_MS만 여기 두고, 계산은 track.ts(점 목록·머무르기·축 붙잡기)
  * - 첫 점 축과 선분의 교차(0.18.0): 선택 axisEdges만 여기 두고, 계산은 track.ts axisEdgeSnap(끌어온 축과 선분의 교차와 같은 규칙)
  * - 축과 면의 교차(0.18.0): 선택 axisFaces만 여기 두고, 계산은 track.ts axisFaceSnap
+ * - 잠근 선과 선분·면의 교차(0.19.0): 선택 lockEdges·lockFaces만 여기 두고, 계산은 track.ts lockEdgeSnap·lockFaceSnap(같은 허용치·빼는 규칙)
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
@@ -51,6 +52,17 @@ export interface MeasureInference {
    * 점 후보로 첫 점 축·나란함보다 먼저다. 첫 점 축이면 방향이 있어 Shift로 그 축에 잠근다(opencad-viewer3d/track axisFaceSnap)
    */
   axisFaces?: boolean;
+  /**
+   * 0.19.0: 잠근 동안(Shift·setMeasureInferenceLock — 축·나란함·수직·선분 방향·앱이 정한 방향) 잠근 선이 커서 둘레 선분·윤곽선과 3D로 만나는 점
+   * (기본 꺼짐 — true에 들지 않는다). 커서 아래 점 붙잡기가 없을 때 잠근 선 위 커서에 가까운 점보다 먼저다(axisEdges와 같은 허용치·빼는 규칙 —
+   * opencad-viewer3d/track lockEdgeSnap). 그 점에는 잠근 선의 값(종류·방향·locked)과 그 선분(segment)이 실린다
+   */
+  lockEdges?: boolean;
+  /**
+   * 0.19.0: 잠근 동안 잠근 선이 커서 아래 보이는 그물 면을 뚫는 점(기본 꺼짐 — true에 들지 않는다). 커서가 그물 면 위일 때만이고(axisFaces와 같은 규칙 —
+   * opencad-viewer3d/track lockFaceSnap), 잠근 선과 선분의 교차 뒤 차례다. 그 점에는 잠근 선의 값과 그 면(face)이 실린다
+   */
+  lockFaces?: boolean;
 }
 
 /** 끌어온 축 안내 선택(0.16.0, MeasureInference.track) */
@@ -64,7 +76,7 @@ export const TRACK_DWELL_MS = 500;
 
 /**
  * 편 inference 선택(Viewer3d.measureSnap.inference): 0.9.0·0.10.0 다섯 값, 0.16.0 끌어온 축은 켰을 때만 track이,
- * 0.18.0 첫 점 축과 선분의 교차·축과 면의 교차는 켰을 때만 axisEdges·axisFaces가 있다
+ * 0.18.0 첫 점 축과 선분의 교차·축과 면의 교차는 켰을 때만 axisEdges·axisFaces가, 0.19.0 잠근 선과 선분·면의 교차는 켰을 때만 lockEdges·lockFaces가 있다
  */
 export interface NormalizedInference {
   intersections: boolean;
@@ -75,6 +87,8 @@ export interface NormalizedInference {
   track?: { dwellMs: number };
   axisEdges?: true;
   axisFaces?: true;
+  lockEdges?: true;
+  lockFaces?: true;
 }
 
 /** 끌어온 축 선택을 편다(0.16.0): 꺼짐(없음·false·null)이면 null, true·객체면 { dwellMs }(수가 아니거나 음수면 기본값) */
@@ -87,7 +101,8 @@ export function normalizeTrack(o: boolean | MeasureTrackOptions | null | undefin
 /**
  * inference 선택을 다섯 값으로 편다(아무것도 켜지 않았으면 null). true는 0.9.0의 셋(교차점·수직 발·축)만 — 0.10.0의 나란함·잠금은
  * 따로 켠다(true로 켜 둔 앱의 동작이 바뀌지 않게). 0.16.0: 끌어온 축(track)은 켰을 때만 track 열쇠가 붙는다(끄면 0.15.0과 같은 꼴).
- * 0.18.0: 첫 점 축과 선분의 교차(axisEdges)·축과 면의 교차(axisFaces)도 켰을 때만 그 열쇠가 true로 붙는다(끄면 0.17.0과 같은 꼴)
+ * 0.18.0: 첫 점 축과 선분의 교차(axisEdges)·축과 면의 교차(axisFaces)도 켰을 때만 그 열쇠가 true로 붙는다(끄면 0.17.0과 같은 꼴).
+ * 0.19.0: 잠근 선과 선분의 교차(lockEdges)·면의 교차(lockFaces)도 같다(끄면 0.18.0과 같은 꼴)
  */
 export function normalizeInference(o: MeasureInference | boolean | null | undefined): NormalizedInference | null {
   if (!o) return null;
@@ -101,7 +116,11 @@ export function normalizeInference(o: MeasureInference | boolean | null | undefi
   if (axisEdges) r.axisEdges = true;
   const axisFaces = o !== true && !!o.axisFaces;
   if (axisFaces) r.axisFaces = true;
-  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track || axisEdges || axisFaces ? r : null;
+  const lockEdges = o !== true && !!o.lockEdges;
+  if (lockEdges) r.lockEdges = true;
+  const lockFaces = o !== true && !!o.lockFaces;
+  if (lockFaces) r.lockFaces = true;
+  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track || axisEdges || axisFaces || lockEdges || lockFaces ? r : null;
 }
 
 const d2 = (a: readonly number[], b: readonly number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);

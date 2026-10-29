@@ -13,6 +13,9 @@
  *
  * 0.18.0: 축(첫 점 축·끌어온 축)과 선분의 교차('axisEdge')도 그 축 직선(line)과 함께 넘긴다. 앱이 축 직선과 곡선의 교차점을 주면
  * 그 점을 축 직선 위로 내린 자리를 쓴다(acceptOnLine — 축에서 화면 반 화소 넘게 벗어난 점은 버린다).
+ *
+ * 0.19.0: 축(첫 점 축·끌어온 축·잠근 축)이 면을 뚫는 점('axisFace')을 선분 대신 그 면(SnapRefineFaceInput.face)과 축 직선으로 넘긴다
+ * (따로 둔 손잡이 MeasureSnapOptions.refineFace — 받는 규칙은 'axisEdge'와 같다).
  */
 import type { Pick3d, SnapKind } from './types';
 import { type ViewFrame, projectToScreen, viewDepth, worldPerPixel } from './camera';
@@ -118,6 +121,25 @@ export interface SnapRefineInput {
    * 결과는 종류·토막·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억해 커서가 움직여도 다시 부르지 않는다)
    */
   open?: boolean;
+}
+
+/**
+ * 축이 면을 뚫는 점의 다듬기 입력(0.19.0 — 'axisFace', MeasureSnapOptions.refineFace가 받는다, 모두 복사본, 세계 좌표). 축(첫 점 축·끌어온 축 — inference.axisFaces,
+ * 잠근 축 — inference.lockFaces)이 그물 면을 뚫는 점은 면을 나눈 삼각형 위 점이라, 앱이 아는 정확한 곡면(B-rep 면 등)과 그 축 직선의 교차로 옮길 수 있게 넘긴다.
+ * 선분이 없으므로 SnapRefineInput(0.14.0부터 segment가 늘 있는 꼴 — 앱 함수가 그 꼴로 적혀 있다)과 따로 두고 손잡이도 따로다
+ */
+export interface SnapRefineFaceInput {
+  kind: 'axisFace';
+  /** 코어가 고른 점(축 직선과 그 삼각형 평면의 교차) */
+  point: V3;
+  /** 뚫은 면(그물 id·삼각형 번호 — Pick3d.index와 같은 뜻·세계 단위 법선(눈 쪽)) — MeasureHoverSnap.face와 같은 값 */
+  face: SnapFace;
+  /** 그 축 직선(지나는 점·단위 방향·축 이름). 앱은 이 직선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 모르면 null */
+  line: SnapRefineLine;
+  /** 첫 측정 점(없으면 null) */
+  first: V3 | null;
+  /** 커서 광선. 결과는 이것과 상관없이 종류·코어 점·면·축 직선·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억한다 — 'axisEdge'와 같다) */
+  ray: { origin: V3; dir: V3 };
 }
 
 /**
@@ -285,11 +307,15 @@ const segKey = (s: SnapSegment): string => `${s.kind}|${s.id.length}:${s.id}|${s
 /**
  * 열린 후보 다듬기 기억의 열쇠(0.15.0): 종류·코어 점·선분(둘째 선분)·첫 점. 커서 광선은 넣지 않는다 —
  * 열린 후보의 코어 점은 토막과 첫 점으로만 정해지므로(커서와 상관없다) 커서가 그 둘레에서 움직이는 동안 같은 열쇠다.
- * 0.18.0: 축과 선분의 교차('axisEdge')도 이 기억을 쓴다 — 축 직선(line)이 있으면 열쇠 끝에 붙는다(없으면 0.15.0 열쇠 그대로)
+ * 0.18.0: 축과 선분의 교차('axisEdge')도 이 기억을 쓴다 — 축 직선(line)이 있으면 열쇠 끝에 붙는다(없으면 0.15.0 열쇠 그대로).
+ * 0.19.0: 축이 면을 뚫는 점('axisFace')은 선분 자리에 면(그물 id·삼각형 번호·법선)이 들어간다
  */
-export function openRefineKey(c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line'>): string {
+export function openRefineKey(
+  c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line'> | Pick<SnapRefineFaceInput, 'kind' | 'point' | 'face' | 'first' | 'line'>,
+): string {
   const l = c.line;
-  return `${c.kind}#${c.point.join(',')}#${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
+  const where = c.kind === 'axisFace' ? `face|${c.face.id.length}:${c.face.id}|${c.face.index}|${c.face.normal.join(',')}#-` : `${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}`;
+  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
 }
 
 /** 열린 후보 다듬기 기억(0.15.0): 열쇠 → 앱이 돌려준 점(받을 수 있는 수 셋의 복사본, 아니면 null). 가장 오래 쓰지 않은 것부터 지운다 */

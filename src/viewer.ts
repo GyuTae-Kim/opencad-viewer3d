@@ -52,6 +52,7 @@ import {
   type MeasureSnapPick,
   type SnapCandidate,
   type SnapFace,
+  type SnapRefineFaceInput,
   type SnapRefineInput,
   type SnapRefineLine,
   type SnapSegment,
@@ -80,6 +81,8 @@ import {
   axisEdgeSnap,
   axisFaceSnap,
   chooseTrackPoint,
+  lockEdgeSnap,
+  lockFaceSnap,
   sameTrackPoint,
   trackAlongFirst,
   trackAxisSnap,
@@ -362,7 +365,10 @@ export interface MeasureSnapOptions {
    * 0.18.0(true에 들지 않는다): axisEdges = 첫 점을 지나는 X·Y·Z 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점(snap 'axis'·axis·direction·segment —
    * 끌어온 점이 없어도 된다). 점 후보로 첫 점 축·나란함보다 먼저고, 끌어온 점 후보 셋 뒤 차례로 함께 견준다. 방향이 있어 Shift로 그 축에 잠근다.
    * axisFaces = 첫 점 축·끌어온 축이 커서 아래 보이는 그물 면을 뚫는 점(snap 'axis'·axis·face — 첫 점 축이면 direction, 끌어온 축이면 trackFrom).
-   * 커서가 그물 면 위일 때만이고, 첫 점 축과 선분의 교차 뒤 차례로 함께 견준다. 다듬지 않는다
+   * 커서가 그물 면 위일 때만이고, 첫 점 축과 선분의 교차 뒤 차례로 함께 견준다(0.19.0부터 refineFace가 있으면 다듬는다).
+   * 0.19.0(true에 들지 않는다): lockEdges·lockFaces = 잠근 동안(Shift·setMeasureInferenceLock) 커서 아래 점 붙잡기가 없으면 잠근 선이 커서 둘레 선분·윤곽선과
+   * 3D로 만나는 점(segment)·커서 아래 보이는 그물 면을 뚫는 점(face)을 잠근 선 위 커서에 가까운 점보다 먼저 찍는다(axisEdges·axisFaces와 같은 허용치·빼는 규칙,
+   * 선분 → 면 차례 — 뒤 차례는 1화소 넘게 가까워야 한다). 값은 잠근 선 위 점 그대로(종류·방향·locked)에 segment나 face가 더해진다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -385,9 +391,20 @@ export interface MeasureSnapOptions {
    * 커서 광선을 뺀 입력으로 기억해(setMeasureSnap마다 새로) 같은 둘레에서는 다시 부르지 않는다.
    * 0.18.0: 축(첫 점 축 — inference.axisEdges, 끌어온 축 — inference.track)이 선분과 만나는 점도 'axisEdge'로 그 축 직선(SnapRefineInput.line)과 함께 넘긴다.
    * 앱이 축 직선과 그 선분 곡선의 교차점을 주면 축 직선 위로 내린 자리를 쓰고(앱 점에서 화면 반 화소 넘게 축을 벗어나면 버린다), null이면 꺾은선 위 점 그대로다.
-   * 열린 후보처럼 커서 광선을 뺀 입력으로 기억한다
+   * 열린 후보처럼 커서 광선을 뺀 입력으로 기억한다.
+   * 0.19.0: 잠근 동안에는 부르지 않는 것(0.14.0)의 예외로, 잠근 축이 선분과 만나는 점(inference.lockEdges)은 잠근 선이 축일 때 'axisEdge'로 부른다
+   * (잠그기 전 첫 점 축과 선분의 교차와 같은 입력이라 기억을 함께 쓴다. 나란함·수직·앱이 정한 방향으로 잠근 선은 부르지 않는다)
    */
   refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
+  /**
+   * 축이 면을 뚫는 점 다듬기(0.19.0, 기본 없음): 축(첫 점 축·끌어온 축 — inference.axisFaces, 잠근 축 — inference.lockFaces)이 커서 아래 그물 면을 뚫는 점을 고른 뒤
+   * 'axisFace'로 그 면(SnapRefineFaceInput.face — 그물 id·삼각형 번호·법선)과 축 직선(line)을 넘긴다. 앱이 그 직선과 정확한 곡면의 교차(point 둘레)를 주면
+   * 축 직선 위로 내린 자리를 쓴다 — 받는 규칙·기억은 refine의 'axisEdge'와 같다(앱 점에서 화면 반 화소 넘게 축을 벗어나거나 코어 점에서 붙잡기 거리 밖·눈 뒤·
+   * 그 그물 단면에 잘린 쪽이면 버린다, 가림은 다시 따지지 않는다, 커서 광선을 뺀 입력으로 기억). null·undefined면 삼각형 위 점 그대로다.
+   * 잠근 선이 축일 때만 잠근 동안에도 부른다. refine과 따로 둔 까닭: refine 입력(SnapRefineInput)은 0.14.0부터 선분(segment)이 늘 있는 꼴이라
+   * 선분이 없는 종류를 더하면 그 꼴로 적힌 앱 함수가 컴파일되지 않는다. 주지 않으면 0.18.0과 같다(refine만 줘도 붙잡기가 켜지는 것처럼 이것만 줘도 켜진다)
+   */
+  refineFace?: ((c: SnapRefineFaceInput) => readonly number[] | null | undefined) | null;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
@@ -879,8 +896,10 @@ export class Viewer3d {
     pfMemo: { pick: Pick3d; res: readonly SnapPoint[] | null | undefined } | null;
     /** 0.14.0 다듬기 손잡이와 바로 앞 호출의 입력(복사본)·결과(수 셋인 점의 복사본, 아니면 null) — 같은 입력이면 다시 부르지 않는다 */
     refine: MeasureSnapOptions['refine'];
+    /** 0.19.0 축이 면을 뚫는 점 다듬기 손잡이(기억은 openMemo) */
+    refineFace: MeasureSnapOptions['refineFace'];
     rfMemo: { input: SnapRefineInput; res: V3 | null } | null;
-    /** 0.15.0 열린 후보(토막 밖 수직 발·넓힌 교차점) 다듬기 기억 — 커서 광선을 뺀 입력 열쇠 → 결과 */
+    /** 0.15.0 열린 후보(토막 밖 수직 발·넓힌 교차점) 다듬기 기억 — 커서 광선을 뺀 입력 열쇠 → 결과(0.18.0 'axisEdge'·0.19.0 'axisFace'도) */
     openMemo: RefineMemo;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
@@ -2404,7 +2423,7 @@ export class Viewer3d {
   setMeasureSnap(o: MeasureSnapOptions | null): void {
     const pts = o?.points ?? [];
     const inference = normalizeInference(o?.inference);
-    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference && !o.refine)) this.snapOpt = null;
+    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference && !o.refine && !o.refineFace)) this.snapOpt = null;
     else {
       const xyz = new Float64Array(pts.length * 3);
       const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
@@ -2434,6 +2453,7 @@ export class Viewer3d {
       else src.limit = limit;
       const orders = ord ? ord.subarray(0, n) : null;
       if (!o.refine) delete src.refine;
+      if (!o.refineFace) delete src.refineFace;
       const so = (this.snapOpt = {
         midpoints: !!o.midpoints,
         edges: o.edges ?? null,
@@ -2448,6 +2468,7 @@ export class Viewer3d {
         limit,
         pfMemo: null,
         refine: o.refine ?? null,
+        refineFace: o.refineFace ?? null,
         rfMemo: null,
         openMemo: new RefineMemo(),
       });
@@ -3663,11 +3684,20 @@ export class Viewer3d {
     // 잠금(0.10.0): 첫 점을 지나는 잠근 선 위에만. 점 붙잡기가 있으면 그 점을 선에 수직으로 내린 자리
     if (lock && first) {
       const q = r && r.kind ? r : null;
+      const lockOut = (p: V3): MeasurePick => {
+        const m: MeasurePick = { p, vertex: true, kind: lock.kind, direction: [...lock.direction] as V3, locked: true };
+        if (lock.axis) m.axis = lock.axis;
+        if (lock.edge) m.edge = lock.edge;
+        return m;
+      };
+      // 0.19.0: 점 붙잡기가 없으면 잠근 선이 커서 둘레 선분과 만나는 점(lockEdges)·커서 아래 면을 뚫는 점(lockFaces)이 커서에 가까운 선 위 점보다 먼저
+      if (!q && (inf?.lockEdges || inf?.lockFaces)) {
+        const m = this.lockedMeet(so, inf, f, x, y, snapPx, first, lock, d, nearSegs, pointerType, lockOut);
+        if (m) return m;
+      }
       const l = lockedSnap(f, first, lock.direction, x, y, q ? q.p : null);
       if (!l) return null;
-      const out: MeasurePick = { p: l.p, vertex: true, kind: lock.kind, direction: [...lock.direction] as V3, locked: true };
-      if (lock.axis) out.axis = lock.axis;
-      if (lock.edge) out.edge = lock.edge;
+      const out = lockOut(l.p);
       if (l.from) {
         out.from = l.from;
         out.fromSnap = q!.kind!;
@@ -3744,7 +3774,7 @@ export class Viewer3d {
         return out;
       }
       if (t && t === face) {
-        // 0.18.0 축과 면의 교차: 그 면(face). 첫 점 축이면 그 축 방향(잠글 때), 끌어온 축이면 끌어온 점(그 축 선이 첫 점도 지나면 방향도). 다듬지 않는다(선분이 없다)
+        // 0.18.0 축과 면의 교차: 그 면(face). 첫 점 축이면 그 축 방향(잠글 때), 끌어온 축이면 끌어온 점(그 축 선이 첫 점도 지나면 방향도)
         const h = face.hit;
         const out: MeasurePick = { p: face.p, vertex: true, kind: 'axis', axis: face.axis, face: { id: h.id, index: h.index, normal: h.normal } };
         if (first && face.line < 3) out.direction = face.direction;
@@ -3752,6 +3782,12 @@ export class Viewer3d {
           out.trackFrom = face.from;
           const dir = along(face.from, face.axis);
           if (dir) out.direction = dir;
+        }
+        // 0.19.0 다듬기: 앱이 그 축 직선과 정확한 곡면의 교차를 주면 그 점(축 위로 내린 자리). 잠글 방향은 코어 점으로 정했다(0.14.0 규칙)
+        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, face.from, face.axis, first) : null;
+        if (rp) {
+          out.p = rp;
+          out.refined = true;
         }
         return out;
       }
@@ -3873,6 +3909,98 @@ export class Viewer3d {
     if (!q) return null;
     const p = acceptOnLine(f, core, q, line, snapPx);
     return p && !this.clippedAway(p, sg.id) ? p : null;
+  }
+
+  /**
+   * 축이 면을 뚫는 점 다듬기(0.19.0, 'axisFace'): 코어 점 core(축과 삼각형 평면의 교차), 그 면 face, 축 직선(origin을 지나는 세계 축 axis)을 앱 refineFace에 넘겨
+   * 받을 수 있는 점이면 그 자리. 받는 규칙·기억은 axisEdgeRefined와 같다(acceptOnLine, 그 그물 단면에서 남는 쪽, 커서 광선을 뺀 입력으로 RefineMemo — 열쇠의 선분 자리에 면).
+   * 가림은 다시 따지지 않는다(곡면 위 점은 삼각형으로 만든 면에서 처짐만큼 벗어나 면 깊이와 어긋날 수 있다 — 코어 점이 보이므로 그 바로 둘레다)
+   */
+  private axisFaceRefined(
+    so: NonNullable<Viewer3d['snapOpt']>,
+    f: ViewFrame,
+    x: number,
+    y: number,
+    snapPx: number,
+    core: V3,
+    face: SnapFace,
+    origin: readonly number[],
+    axis: SnapAxis,
+    first: V3 | null,
+  ): V3 | null {
+    const refine = so.refineFace;
+    if (!refine) return null;
+    const line: SnapRefineLine = { origin: [origin[0]!, origin[1]!, origin[2]!], dir: axisLock(axis).direction, axis };
+    const ray = screenRay(f, x, y);
+    const input: SnapRefineFaceInput = {
+      kind: 'axisFace',
+      point: [core[0], core[1], core[2]],
+      face: copyFace(face),
+      line: { origin: [...line.origin] as V3, dir: [...line.dir] as V3, axis },
+      first: first ? [first[0], first[1], first[2]] : null,
+      ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
+    };
+    const key = openRefineKey(input);
+    let q = so.openMemo.get(key);
+    if (q === undefined) {
+      q = finitePoint(refine(input));
+      so.openMemo.set(key, q);
+    }
+    if (!q) return null;
+    const p = acceptOnLine(f, core, q, line, snapPx);
+    return p && !this.clippedAway(p, face.id) ? p : null;
+  }
+
+  /**
+   * 잠근 선 위의 교차(0.19.0 — inference.lockEdges·lockFaces, 잠근 동안 커서 아래 점 붙잡기가 없을 때): 첫 점을 지나는 잠근 선이 커서 둘레 선분과 3D로 만나는 점
+   * (lockEdgeSnap — 0.18.0 axisEdgeSnap과 같은 허용치·빼는 규칙·가림)과 커서 아래 보이는 그물 면을 뚫는 점(lockFaceSnap — axisFaceSnap과 같다)을 견줘
+   * (선분 → 면 차례, chooseTrackPoint — 뒤 차례는 TRACK_YIELD_PX 넘게 가까워야) 잠근 선 위 점(lockOut)에 그 선분(segment)·면(face)을 싣는다.
+   * 잠근 선이 축이면 앱 refine('axisEdge')·refineFace('axisFace')로 다듬는다(잠그기 전 첫 점 축 교차와 같은 축 직선·코어 점이라 기억을 함께 쓴다).
+   * 나란함·수직·앱이 정한 방향으로 잠근 선은 다듬지 않는다(SnapRefineLine.axis가 축 이름이다). 둘 다 없으면 null
+   */
+  private lockedMeet(
+    so: NonNullable<Viewer3d['snapOpt']>,
+    inf: NormalizedInference,
+    f: ViewFrame,
+    x: number,
+    y: number,
+    snapPx: number,
+    first: V3,
+    lock: InferenceLock,
+    d: PickDetail | null,
+    nearSegs: () => NearSegment[],
+    pointerType: string | undefined,
+    lockOut: (p: V3) => MeasurePick,
+  ): MeasurePick | null {
+    const vis = (p: V3, sg: NearSegment): boolean => {
+      const sp = projectToScreen(f, p);
+      return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
+    };
+    const edge = inf.lockEdges ? lockEdgeSnap(f, first, lock.direction, nearSegs(), x, y, snapPx, vis) : null;
+    const under = inf.lockFaces ? faceHitOf(d) : null;
+    const face = under
+      ? lockFaceSnap(f, first, lock.direction, x, y, snapPx, under, (sx, sy) => faceHitOf(this.pickDetail(sx, sy, true, pointerType, false, false, true)))
+      : null;
+    const t = chooseTrackPoint<{ distPx: number }>([edge, face]);
+    if (!t) return null;
+    let out: MeasurePick;
+    let rp: V3 | null = null;
+    if (t === edge) {
+      out = lockOut(edge.p);
+      const sg = nearSegmentId(edge.seg);
+      if (sg) out.segment = copySegment(sg);
+      if (sg && lock.axis && so.refine) rp = this.axisEdgeRefined(so, f, x, y, snapPx, edge.p, sg, first, lock.axis, first);
+    } else {
+      const h = face!.hit;
+      out = lockOut(face!.p);
+      out.face = { id: h.id, index: h.index, normal: h.normal };
+      if (lock.axis && so.refineFace) rp = this.axisFaceRefined(so, f, x, y, snapPx, face!.p, out.face, first, lock.axis, first);
+    }
+    if (rp) {
+      out.p = rp;
+      out.refined = true;
+    }
+    return out;
   }
 
   /** 세계 점 p가 묶음 id의 단면 평면(여러 단면이면 그 묶음을 자르는 것, 없는 묶음이면 모든 묶음을 자르는 평면)에 잘린 쪽인지 */
