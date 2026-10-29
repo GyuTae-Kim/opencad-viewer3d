@@ -22,6 +22,9 @@
  * 0.21.0 단추: 끌어온 축 잠금(열린 교차에 inference.lockTracks까지 — 잠근 동안 잠근 선이 끌어온 점의 축과 만나는 점, 상태 줄에 "잠근 X축 · (…)의 Y축과 만나는 점").
  *   구 위 아무 데나 가리키면 refineFace('onFace')로 정확한 구 위 점(상태 줄에 "면 위(다듬음)" — 0.19.0 단추부터 같은 함수라 함께 붙는다).
  *   다듬기 기억 비우기(clearMeasureRefine — 상태 줄에 비운 수)
+ * 0.22.0: 같은 단추들(잠근 선 교차부터)에서 구 위에 뜬 앱 점 '구 스침'(적도 칸 가운데 바깥)을 첫 점으로 찍고 그 Z축이 구를 스치는 자리를 가리키면
+ *   그물 삼각형은 비켜 가도 정확한 구 위 교차에 붙는다(면의 열린 교차 — 상태 줄 "첫 점 Z축 · 구 면(다듬음)", 잠가도). 시연 원 위·아래 토막의 현과 나란히
+ *   활꼴 안을 지나는 X축은 두 교차 모두에 붙는다(열린 교차 단추부터). 면만 고르기 단추는 onPick(cb, { meshesOnly: true }) 알림으로 아래 면을 받는다
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -60,9 +63,9 @@ let secInfo = '';
 let upInfo = '';
 /** 0.17.0: 측정 미리 보기의 끌어온 축 설명(상태 줄) */
 let hoverInfo = '';
-/** 0.20.0: 누른 자리에서 그물 면만 고른 결과도 보일지(면만 고르기 단추)와 마지막으로 누른 캔버스 자리 */
+/** 0.20.0: 누른 자리에서 그물 면만 고른 결과도 보일지(면만 고르기 단추). 0.22.0부터 그 결과는 onPick(cb, { meshesOnly: true }) 알림으로 받는다 */
 let meshesOnly = false;
-let lastDown: { x: number; y: number } | null = null;
+let under: { id: string; index: number } | null = null;
 const pt = (p: readonly number[]): string => `(${p.map((x) => x.toFixed(1)).join(', ')})`;
 /** 나눠 올리기 진행 알림 기록(자동 확인용) */
 const progress: [number, number][] = [];
@@ -261,7 +264,7 @@ toggle(
   '잠근 선 교차에 더해, 시연 원(바닥 12토막)과 기둥을 더한다. 기둥 아래 끝을 첫 점으로 찍고 그 Z축이 원을 뚫는 자리를 가리키면 꺾은선 현과는 만나지 않아도 ' +
     '정확한 원 위 교차에 붙는다(Shift로 잠가도, 비스듬히 잠근 선도)',
 );
-toggle('면만 고르기', (v) => (meshesOnly = v), '누른 자리에서 그물 면만 고른 결과(pick meshesOnly)를 상태 줄 고름 뒤에 보인다 — 면 위 선분·점 아래의 면');
+toggle('면만 고르기', (v) => (meshesOnly = v), '누른 자리에서 그물 면만 고른 결과(onPick meshesOnly 알림)를 상태 줄 고름 뒤에 보인다 — 면 위 선분·점 아래의 면');
 // 0.21.0: 잠근 선이 끌어온 축과 만나는 점(inference.lockTracks), 다듬기 기억만 비우기(clearMeasureRefine)
 toggle(
   '끌어온 축 잠금',
@@ -413,19 +416,15 @@ play.addEventListener('input', () => setPlay(Number(play.value)));
 
 /** 고르기 알림 기록(자동 확인용) */
 const picks: { id: string | null; alt: boolean; shift: boolean; clicks: number }[] = [];
+// 0.22.0: 그물 면만 받는 알림(면 위 선분·점을 눌러도 그 아래 면) — 아래 알림보다 먼저 달아 같은 누르기의 상태 줄에 함께 보인다
+viewer.onPick((p) => (under = p ? { id: p.id, index: p.index } : null), { meshesOnly: true });
 viewer.onPick((p, e) => {
   picks.push({ id: p?.id ?? null, alt: e.altKey, shift: e.shiftKey, clicks: e.clicks });
   viewer.highlight(p ? [p.id] : null);
   const mods = [e.altKey && 'Alt', e.ctrlKey && 'Ctrl', e.shiftKey && 'Shift', e.metaKey && 'Meta', e.clicks > 1 && '두 번'].filter(Boolean).join('+');
   pickInfo = p ? `고름: ${p.kind} "${p.id}" #${p.index}${mods ? ` [${mods}]` : ''} (${p.point.map((v) => v.toFixed(2)).join(', ')})` : '';
-  // 0.20.0: 그물 면만 고르기 — 면 위 선분·점을 눌러도 그 아래 면
-  const under = meshesOnly && lastDown ? viewer.pick(lastDown.x, lastDown.y, { meshesOnly: true, pointerType: e.pointerType }) : null;
   if (meshesOnly) pickInfo += ` · 아래 면: ${under ? `"${under.id}" #${under.index}` : '없음'}`;
   showStatus();
-});
-viewer.canvas.addEventListener('pointerdown', (e) => {
-  const r = viewer.canvas.getBoundingClientRect();
-  lastDown = { x: e.clientX - r.left, y: e.clientY - r.top };
 });
 /** 단면 알림 기록(자동 확인용) — 단추·슬라이더도 이 알림으로 맞춘다 */
 const sections: (number | null)[] = [];
@@ -600,6 +599,12 @@ function demoSnapPoints(): SnapPoint[] {
     const b = itemBounds(m);
     const c = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, m.id === '상자' ? b.max[2] : (b.min[2] + b.max[2]) / 2];
     out.push({ point: c, kind: 'center', id: m.id });
+    // 0.22.0 '구 스침': 적도 칸 가운데(경도 180°/칸 수)에서 현(반지름 r·cos(180°/칸 수))과 구 사이 가운데 거리 위 — 그 Z축은 그물을 비켜 가며 구를 스친다
+    if (m.id === '구') {
+      const r = (b.max[0] - b.min[0]) / 2, a = Math.PI / sseg;
+      const rho = (r * (1 + Math.cos(a))) / 2;
+      out.push({ point: [c[0]! + rho * Math.cos(a), c[1]! + rho * Math.sin(a), c[2]! + 1.9 * r], kind: 'point' });
+    }
   }
   return out;
 }
