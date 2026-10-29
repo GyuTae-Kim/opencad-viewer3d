@@ -10,6 +10,7 @@
  *   그 점을 선에 수직으로 내린 자리(SketchUp의 추론 잠금처럼 — 다른 점의 높이·자리를 잠근 방향으로 옮겨 잰다)
  * - 선분 방향 잠금(0.12.0): 점 붙잡기(끝점·가운데 점·교차점 등)가 놓인 선분 직선이 첫 점을 지나면 그 방향으로도 잠근다(edgeLineLock).
  *   앱이 정한 방향 잠금(directionLock)
+ * - 끌어온 축(0.16.0): 선택 normalizeTrack·TRACK_DWELL_MS만 여기 두고, 계산은 track.ts(점 목록·머무르기·축 붙잡기)
  */
 import { type ViewFrame, projectToScreen, screenRay } from './camera';
 import type { V3 } from './math';
@@ -33,19 +34,52 @@ export interface MeasureInference {
    * 터치처럼 Shift가 없으면 앱이 Viewer3d.setMeasureInferenceLock으로 잠근다(이 선택과 상관없이 된다)
    */
   lock?: boolean;
+  /**
+   * 0.16.0: 다른 점에서 끌어온 축 안내(기본 꺼짐 — true에 들지 않는다). 마우스·펜으로 점 붙잡기 위에 머문 점(2화소 안에서 dwellMs, 기본 500 ms)을
+   * 최근 셋까지 기억하고, 그 점을 지나는 X·Y·Z 축과 첫 점 축 위에서 그 점과 나란한 자리에도 붙잡는다(opencad-viewer3d/track). true면 { dwellMs: 500 }
+   */
+  track?: boolean | MeasureTrackOptions | null;
+}
+
+/** 끌어온 축 안내 선택(0.16.0, MeasureInference.track) */
+export interface MeasureTrackOptions {
+  /** 점 붙잡기 위에서 이만큼(ms) 머물면 그 점을 기억한다(기본 TRACK_DWELL_MS 500, 0 이상) */
+  dwellMs?: number;
+}
+
+/** 끌어온 축: 점 붙잡기 위에 머물러야 하는 시간 기본값(ms, 0.16.0) */
+export const TRACK_DWELL_MS = 500;
+
+/** 편 inference 선택(Viewer3d.measureSnap.inference): 0.9.0·0.10.0 다섯 값, 0.16.0 끌어온 축은 켰을 때만 track이 있다 */
+export interface NormalizedInference {
+  intersections: boolean;
+  perpendicular: boolean;
+  axes: boolean;
+  parallel: boolean;
+  lock: boolean;
+  track?: { dwellMs: number };
+}
+
+/** 끌어온 축 선택을 편다(0.16.0): 꺼짐(없음·false·null)이면 null, true·객체면 { dwellMs }(수가 아니거나 음수면 기본값) */
+export function normalizeTrack(o: boolean | MeasureTrackOptions | null | undefined): { dwellMs: number } | null {
+  if (!o) return null;
+  const ms = o === true ? undefined : o.dwellMs;
+  return { dwellMs: typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? ms : TRACK_DWELL_MS };
 }
 
 /**
  * inference 선택을 다섯 값으로 편다(아무것도 켜지 않았으면 null). true는 0.9.0의 셋(교차점·수직 발·축)만 — 0.10.0의 나란함·잠금은
- * 따로 켠다(true로 켜 둔 앱의 동작이 바뀌지 않게)
+ * 따로 켠다(true로 켜 둔 앱의 동작이 바뀌지 않게). 0.16.0: 끌어온 축(track)은 켰을 때만 track 열쇠가 붙는다(끄면 0.15.0과 같은 꼴)
  */
-export function normalizeInference(o: MeasureInference | boolean | null | undefined): Required<MeasureInference> | null {
+export function normalizeInference(o: MeasureInference | boolean | null | undefined): NormalizedInference | null {
   if (!o) return null;
-  const r =
+  const r: NormalizedInference =
     o === true
       ? { intersections: true, perpendicular: true, axes: true, parallel: false, lock: false }
       : { intersections: !!o.intersections, perpendicular: !!o.perpendicular, axes: !!o.axes, parallel: !!o.parallel, lock: !!o.lock };
-  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock ? r : null;
+  const track = o === true ? null : normalizeTrack(o.track);
+  if (track) r.track = track;
+  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track ? r : null;
 }
 
 const d2 = (a: readonly number[], b: readonly number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);
@@ -125,8 +159,8 @@ export function rayLinePoint(o: readonly number[], d: readonly number[], a: read
   return [a[0]! + e[0]! * t, a[1]! + e[1]! * t, a[2]! + e[2]! * t];
 }
 
-/** 세계 점 p의 화면 자리와 커서(x, y) 사이 화소 거리. 투영할 수 없거나 원근에서 가까운 면보다 앞(눈 뒤 포함)이면 null */
-function screenDistance(f: ViewFrame, p: readonly number[], x: number, y: number): number | null {
+/** 세계 점 p의 화면 자리와 커서(x, y) 사이 화소 거리. 투영할 수 없거나 원근에서 가까운 면보다 앞(눈 뒤 포함)이면 null(0.16.0부터 track도 쓴다) */
+export function screenDistance(f: ViewFrame, p: readonly number[], x: number, y: number): number | null {
   const s = projectToScreen(f, p);
   if (!s || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) return null;
   if (f.projection === 'perspective' && s[2] < f.near * 0.999) return null;

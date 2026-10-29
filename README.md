@@ -16,7 +16,7 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 음영·음영+윤곽·와이어프레임·X-ray·숨은 선·단색·무늬 없음, 화면 공간 외곽선, 굵은 선·점선, 바닥 격자, 좌표축, 밝은·어두운 테마(CSS 변수 `--v3d-*`로 바꿀 수 있음), 키보드 초점 테두리
 - 뒤 모서리 점선(숨은 선, 켜면 음영 계열도), 바탕과 대비되는 외곽선·윤곽선 색(켤 때만), 그물마다 다른 윤곽선·외곽선 색
 - 해 조명·그림자(PCF)·선형 안개·하늘과 땅 바탕(모두 켤 때만), 1인칭 걷기·둘러보기(켜면 바닥 따라가기·부딪힘), 시야각·굴림·렌즈 이동(2점 투시)
-- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심, 두 선분 교차점·수직 발·축 방향·지나간 모서리와 나란한 방향까지 붙잡기와 Shift·앱 단추로 방향 잠그기(모서리 끝에서 그 모서리를 따라 가리킨 점, 앱이 정한 방향도), 코어가 고른 수직 발·모서리 위 점·가운데 점·교차점을 앱이 정확한 곡선 위로 다듬기, 꺾은선으로는 후보가 없는 곡선 위 발·두 곡선의 교차점도 앱이 다듬어 붙잡기 — 앱 점 수십만 개도 색인으로, 재생에 맞춰 차례 한도로 거르기), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
+- BVH 고르기(그물·윤곽선·선분·점), 두 점 측정(꼭짓점·끝점, 켜면 가운데 점·앱이 준 원 중심, 두 선분 교차점·수직 발·축 방향·지나간 모서리와 나란한 방향까지 붙잡기와 Shift·앱 단추로 방향 잠그기(모서리 끝에서 그 모서리를 따라 가리킨 점, 앱이 정한 방향도), 코어가 고른 수직 발·모서리 위 점·가운데 점·교차점을 앱이 정확한 곡선 위로 다듬기, 꺾은선으로는 후보가 없는 곡선 위 발·두 곡선의 교차점도 앱이 다듬어 붙잡기, 붙잡은 점이 놓인 선분 식별자, 켜면 머문 점에서 끌어온 X·Y·Z 축 — 앱 점 수십만 개도 색인으로, 재생에 맞춰 차례 한도로 거르기), 앱 측정 덧그림(거리·각·반지름·점)·화면 위치(`project`), 두 묶음 최근접점, 묶음별 켜고 끄기·불투명도·색·행렬(분해도), 선분 그리기 범위(재생용), 그림 저장(배율·투명 바탕), 창 확대
 - 단면 보기: 평면 하나 또는 여럿(상자 단면, 평면마다 자를 묶음), 잘린 면 채우기(닫힌 그물·capGroup)·단면 테두리, 고르기·측정도 잘린 쪽을 무시
 - 마주 보는 그물(billboard), 뒷면 색·무늬
 - 무늬(텍스처): 그물마다 무늬 좌표(UV, 원근 무늬는 q까지)와 그림 하나. 되풀이(REPEAT)·밉맵·비등방 거르기, 한 장 크기·전체 GPU 예산 한도
@@ -926,13 +926,126 @@ viewer.setMeasureSnap({
   `refine`을 주지 않는 판은 코어를 올려도 값이 같다
 - SKP: 할 일이 없다(곡선이 모형 선분 그대로라 코어 점이 정확한 값이다)
 
+## 0.16.0: 붙잡은 선분 식별자·다른 점에서 끌어온 축
+
+`inference.track`을 켜지 않으면 그림·고르기·측정은 0.15.0과 화소·값까지 같다(`npm run pixels -- --base v0.15.0`: 0.15.0의 장면 98개·값 36묶음 모두 같음.
+새 장면 3개(`base-measure-track-*`)·값 3묶음(`cross-measure-segments`, `base·off-measure-track`)은 0.15.0에 없는 API라 건너뛰고, head에서 두 번 찍어 같은 것을 확인했다).
+바뀐 기본 동작은 없다. 미리 보기와 찍은 점(`measureHoverSnap`·`measurePoints`)에 필드가 더해질 뿐이고, 측정 결과(`MeasureResult`)는 그대로다.
+
+### 붙잡은 선분 식별자
+
+0.15.0까지 NC·STEP 앱은 첫 점이 놓인 곡선을 찾으려고 찍은 점 좌표를 꼭짓점·토막 끝과 다시 견줬다. 코어는 붙잡을 때 이미 그 선분을 알고 있었다.
+
+- `MeasureHoverSnap.segment`·`MeasurePoint.segment`(`SnapSegment` — 0.14.0 다듬기 입력과 같은 꼴 `{ kind, id, index, raw, ends }`, 복사본)와 교차점의 둘째 선분 `other`.
+  앱은 `pointsFor`·`refine`에서 쓰던 찾기(묶음 id와 원본 번호 → 앱의 이동·모서리 표)를 그대로 쓴다
+- 어느 점에 싣는지와 까닭
+
+  | 붙잡은 점 | `segment` | `other` | 까닭 |
+  |---|---|---|---|
+  | 끝점 | 고르기가 고른 선분 하나 | 없음 | 꺾은선 꼭짓점은 두 토막이 함께 쓴다. 커서에 가까운 쪽(고르기가 고른 쪽)을 준다. 이웃 토막이 필요하면 앱이 `raw ± 1`이나 끝점으로 찾는다 |
+  | 가운데 점, 붙잡지 않은 선분·윤곽선 위 점 | 그 선분 | 없음 | 점이 그 선분 위에 있다 |
+  | 수직 발(0.15.0 열린 수직 발 포함) | 발이 놓인 토막 | 없음 | 다듬기 입력과 같다 |
+  | 교차점(넓힌 교차 포함) | 첫째 선분 | 둘째 선분 | 다듬기 입력(0.15.0)과 같은 차례 |
+  | 앱이 다듬은 점(`refined`) | 다듬기 전 코어 점의 선분 | 교차점이면 둘째 | 앱이 다듬은 곡선이 그 선분의 곡선이다 |
+  | 그물 꼭짓점·면 위 점·점 묶음의 점 | 없음 | 없음 | 선분이 아니다. 윤곽선을 고르면(`edges`) 그물 꼭짓점도 윤곽선 끝점이 되어 윤곽선 식별자가 실린다 |
+  | 앱 점(`points`·`pointsFor` — 중심 등) | 없음 | 없음 | 앱이 준 점이라 앱이 이미 안다 |
+  | 축·나란함·잠근 선 위 점, 끌어온 축 | 없음 | 없음 | 첫 점(또는 끌어온 점)을 지나는 선 위 점이라 형상의 선분이 아니다 |
+
+- 붙잡기 선택(`setMeasureSnap`)이 있을 때만 싣는다(0.7.2 규칙의 측정 점에는 없다). `MeasureResult`(`onMeasure`·측정 글 꼴)에는 싣지 않는다(0.14.0 `refined`와 같다).
+  `onMeasure` 안에서 읽는 `measurePoints`가 그 두 점이다
+- 순수 함수 `snapSegmentsOf`·`copySegment`(`opencad-viewer3d/snap`)
+
+```ts
+// NC·STEP: 첫 점이 놓인 곡선을 식별자로 찾는다(좌표로 꼭짓점·토막 끝을 다시 견주지 않는다)
+const [first] = viewer.measurePoints;
+const s = first?.segment;
+const curve = !s ? null : s.kind === 'edge' ? curveAt(s.id, edgeAt(table, s.raw)) : moveCurve(s.id, s.index); // 앱 표 찾기
+if (curve) viewer.setMeasureInferenceLock({ direction: curve.tangentAt(first!.point) });
+```
+
+### 다른 점에서 끌어온 축
+
+- `setMeasureSnap({ inference: { …, track } })`(`MeasureInference.track` — `true` 또는 `{ dwellMs }`, 기본 꺼짐, `inference: true`에 들지 않는다).
+  `measureSnap.inference`는 켰을 때만 `track: { dwellMs }`가 붙는다
+- 머무르기: 마우스·펜 커서가 점 붙잡기(꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발) 위에서 머물기 시작한 자리 2화소(`TRACK_DWELL_PX`) 안으로
+  `dwellMs`(기본 500 ms, `TRACK_DWELL_MS`) 동안 머물면 그 점(P)을 기억한다. 최근 셋(`TRACK_MAX`)까지, 새것이 앞이고 같은 점은 앞으로 옮긴다.
+  미리 보기를 구할 때 `setTimeout`을 다시 걸어 재고, 2화소를 벗어나거나 다른 점·점 붙잡기 없음·캔버스를 떠남·끌기·누르기면 버린다
+  - 2화소로 정한 까닭: 붙잡기 거리(10화소) 안에서 같은 점이 붙잡혀 있는 시간으로 재면 그 점을 천천히 지나가는 커서도 기억한다. 멈춘 커서만 센다
+- 터치: 머무르지 않는다. 손가락은 누른 채 움직이면 끌기이고 떼면 점을 찍으므로 "머문 커서"가 없다. 코어가 길게 누르기를 가로채면 앱의 정밀 조준과 겹친다.
+  앱이 길게 누르기·단추로 고른 점을 `setMeasureTrackPoints`로 준다. 앱이 정밀 조준 십자선 자리로 보내는 펜 포인터 미리 보기는 마우스처럼 머무른다
+- 붙잡기 차례(점 붙잡기가 하나도 없을 때, 앞의 것이 있으면 그것)
+  1. 첫 점 축 위 나란한 자리: 첫 점 A를 지나는 X·Y·Z 축 위에서 P와 그 축 방향 자리가 같은 점, 곧 P를 그 축에 수직으로 내린 자리 A + e·((P − A)·e)가
+     커서에서 붙잡기 거리 안이면 그 점이다. A와 P가 다른 좌표 하나를 함께 쓰면 A의 축과 P의 다른 축이 3D로 만나는 점이고, 아니면 0.10.0 잠금에서 P를 가리킨
+     자리(`from`)와 같은 점이다. 첫 점 축 붙잡기보다 먼저다 — 축 위의 한 점이라 더 구체적이고, 이 둘레 붙잡기 거리에서는 축을 따라 움직여도 이 자리에 붙는다.
+     `snap: 'axis'`, `axis`, `direction`(첫 점 축), `trackFrom: P`. 방향이 있으므로 Shift·`setMeasureInferenceLock(true)`가 그 축으로 잠근다
+  2. 첫 점 축·나란함(0.9.0·0.10.0 그대로)
+  3. 끌어온 축: P를 지나는 X·Y·Z 축 위에서 커서 광선에 가장 가까운 점(붙잡기 거리 안). 첫 점 전에도 된다. `snap: 'axis'`, `axis`, `trackFrom: P`.
+     첫 점을 지나는 선이 아니므로 `direction`이 없고 잠그지 않는다(첫 점 축으로 잠그면 점이 다른 선으로 튄다)
+  - 여러 점·축이 붙잡기 거리 안이면 커서에 가까운 것, 같으면 새 점 → X·Y·Z 차례다. 커서가 P 둘레(붙잡기 거리)면 P의 축은 보지 않고(점 붙잡기가 맡는다),
+    P가 첫 점이면 뺀다. 단면·가림은 따지지 않는다(0.9.0 축 붙잡기와 같다)
+- 잠금과의 관계: 잠근 동안(Shift·`setMeasureInferenceLock`)에는 끌어온 축을 쓰지 않고 잠근 선 위 점이 먼저다(0.14.0 다듬기와 같은 차례).
+  잠근 선 위 점은 점 붙잡기가 아니므로 머무르지 않고, 기억한 점은 남는다. 잠근 축에서 P를 가리키면 0.10.0처럼 P를 그 선에 내린 자리를 찍는다
+- 그리기: P에서 붙잡을 점까지 점선. 끌어온 축은 그 축 색이고, 첫 점 축 위 나란한 자리는 P와 그 점을 잇는 선이 축과 나란할 때만 그 축 색(아니면 측정 색)이다.
+  첫 점에서 그은 선은 첫 점 축 위 자리면 0.9.0처럼 축 색, 끌어온 축 위 점이면 보통 측정 색이다. 기억한 점마다 작은 십자(그 점에서 끌어왔으면 크게, 점선 색),
+  붙잡을 점은 축 붙잡기 표식(축 색 동그라미)이다. 측정 모드에서 기억한 점이 있으면 커서가 캔버스를 떠나도 십자를 그린다
+- 값: `measureHoverSnap.trackFrom`·`measurePoints[i].trackFrom`(복사본). `MeasureResult`는 0.9.1 축 붙잡기 그대로 `snapB: 'axis'`·`axisB`를 싣는다.
+  첫 점 축 위 나란한 자리는 `directionB`도 있고, 끌어온 축 위 점은 `directionB`가 없다(첫 점에서 그 축 방향이 아니다). 앱이 "Z축"과 "끌어온 점에서 Z축"을
+  가르려면 `measurePoints`의 `trackFrom`을 본다. 끌어온 축으로 첫 점을 찍으면 `snapA: 'axis'`·`axisA`가 실린다(0.15.0까지 비어 있던 자리)
+- 잊는 때: 두 점째를 찍을 때(첫 점에서는 남긴다 — 첫 점 축 위 나란한 자리에 쓴다), 측정을 지울 때(`clearMeasure`·Esc·측정 모드 끄기·장면 바꾸기),
+  붙잡기 선택을 다시 줄 때(`setMeasureSnap`), `setMeasureTrackPoints(null)`. Esc는 첫 점 전이라도 기억한 점이 있으면 지운다(그때 `handleKey`가 `true`)
+- 꺼져 있으면 상태가 없다. 머물러도 기억하지 않고 `measureTrackPoints`는 빈 배열, `setMeasureTrackPoints`는 0을 돌려준다. 화소·값도 0.15.0과 같다
+- API: `measureTrackPoints`(`V3[]` — 새것이 앞, 복사본), `setMeasureTrackPoints(points | null)`(측정 모드이고 track을 켰을 때만, 기억한 수를 돌려준다 —
+  앞이 가장 최근, 셋까지, 수 셋이 아닌 것은 버린다)
+- 순수(`opencad-viewer3d/track`): `trackCrossSnap(f, first, tracks, x, y, snapPx, axes?)`·`trackAxisSnap(f, tracks, x, y, snapPx, skip?, axes?)`
+  (`axes`는 앱의 그리기 축 `{ x, y, z }` — 없으면 세계 축), `MeasureTracker`(점 목록과 머무르기 상태 — `hover(p, x, y)`가 `'start' | 'keep' | 'none'`, `commit()`,
+  `add`·`set`·`clear`, 시간은 부르는 쪽이 잰다), `sameTrackPoint`, `TRACK_DWELL_MS`·`TRACK_DWELL_PX`·`TRACK_MAX`, `normalizeTrack`
+
+```ts
+viewer.setMeasureSnap({ ...options, inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true } });
+// 상태 줄: 끌어온 축이면 "끌어온 점에서 Z축"(KIND는 0.10.0 예의 종류 이름표)
+const h = viewer.measureHoverSnap;
+const axisName = (a: SnapAxis) => `${a.toUpperCase()}축`;
+status.textContent = !h?.snap ? '' : h.snap === 'axis' ? (h.trackFrom && !h.direction ? `끌어온 점에서 ${axisName(h.axis!)}` : `${axisName(h.axis!)} 방향`) : KIND[h.snap];
+// 터치: 앱의 길게 누르기로 고른 점을 끌어올 점으로(가장 최근이 앞)
+onLongPress((x, y) => {
+  const p = viewer.pick(x, y, 'touch');
+  if (p) viewer.setMeasureTrackPoints([p.point, ...viewer.measureTrackPoints]);
+});
+```
+
+```ts
+// SKP 줄자(코어 측정 모드를 쓰지 않는다): 같은 규칙을 순수 함수로. snap.ts의 점 붙잡기·첫 점 축 뒤에 잇는다
+import { MeasureTracker, TRACK_DWELL_MS, trackAxisSnap, trackCrossSnap } from 'opencad-viewer3d/track';
+const tracker = new MeasureTracker();
+let timer = 0;
+function onHover(point: V3 | null, x: number, y: number): void {
+  const step = tracker.hover(point, x, y); // point = 점 붙잡기(꼭짓점·끝점 등)일 때만, 아니면 null
+  if (step === 'keep') return;
+  clearTimeout(timer);
+  if (step === 'start') timer = window.setTimeout(() => tracker.commit() && redraw(), TRACK_DWELL_MS);
+}
+// 점 붙잡기가 없을 때: 나란한 자리 → 첫 점 축 → 끌어온 축(모형 축 axes를 그대로 준다)
+const t = (first && trackCrossSnap(frame, first, tracker.view, x, y, 10, axes)) || axisLockAt(first) || trackAxisSnap(frame, tracker.view, x, y, 10, first, axes);
+```
+
+### 앱이 할 일
+
+- NC·STEP: 코어를 `#v0.16.0`으로 올리고, 첫 점이 놓인 곡선을 좌표로 다시 찾던 곳(STEP `src/app/tangent.ts`의 첫 점에 닿는 곡선 끝 찾기와
+  커서 아래 점이 그 모서리 위인지 판정, NC의 첫 점 원호·직선 이동 찾기)을 `measurePoints[0].segment`·`measureHoverSnap.segment`로 바꾼다
+  (`kind`·`id`·`index`·`raw`는 `pointsFor`·`refine`이 받는 것과 같은 뜻). 끝점은 고른 쪽 토막 하나라 곡선이 바뀌는 꼭짓점(두 모서리의 끝)에서는
+  다른 쪽 모서리도 끝점으로 볼지 앱이 정한다. 식별자가 없는 점(그물 꼭짓점·앱 점·축 위 점)은 예전 좌표 찾기로 남기거나 잠글 방향이 없다고 본다.
+  끌어온 축을 켜려면 `inference.track`을 더하고, 상태 줄에 "끌어온 점에서 Z축"을 보인다(새로 보이는 글은 앱 사전 en·ja·zh-CN·de에).
+  터치 화면은 길게 누르기로 `setMeasureTrackPoints`를 줄지 정한다
+- SKP: 줄자·각도기는 코어 측정 모드를 쓰지 않으므로 켤 것이 없다. 같은 동작을 원하면 `opencad-viewer3d/track`의 순수 함수(`MeasureTracker`·
+  `trackCrossSnap`·`trackAxisSnap`)를 `snap.ts`의 추정 차례(점 → 첫 점 축 위 나란한 자리 → 첫 점 축 → 끌어온 축)에 넣는다. 모형 축이 세계 축과 다르면 `axes`로 준다
+
 ## 다른 저장소에서 가져다 쓰기
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.15.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.16.0"
 }
 ```
 
@@ -957,7 +1070,7 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/texture.ts` | 무늬 도구(그림 머리 읽기, 크기 한도·예산 나누기, 뒤집어 풀기) |
 | `src/camera.ts`, `src/viewcube.ts` | 카메라·표준 뷰·뷰 큐브 |
 | `src/bvh.ts`, `src/pick.ts`, `src/scenepick.ts`, `src/bounds.ts`, `src/segments.ts` | 고르기 가속 구조·고르기(묶음·장면)·범위, 원본 번호로 강조 선분 모으기 |
-| `src/snap.ts`, `src/inference.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 앱이 다듬을 점 고르기와 받을지 판정, 추론 붙잡기(교차점·수직 발·축·나란함)와 방향 잠금(선분 방향·앱이 정한 방향 포함), 앱 점 색인(차례 한도) |
+| `src/snap.ts`, `src/inference.ts`, `src/track.ts`, `src/snapindex.ts` | 측정 점 붙잡기 고르기(고르기가 붙잡은 점·앱 점·추론 점 가운데)와 측정 결과, 붙잡은 점이 놓인 선분 식별자, 앱이 다듬을 점 고르기와 받을지 판정, 추론 붙잡기(교차점·수직 발·축·나란함)와 방향 잠금(선분 방향·앱이 정한 방향 포함), 끌어온 축(머무르기·끌어온 점 목록·축 붙잡기), 앱 점 색인(차례 한도) |
 | `src/measurelabel.ts` | 측정 거리 글상자 자리 순수 계산(기본 자리, 앱 영역·커서를 비켜 갈 자리 차례, 겹침 판정) |
 | `src/walk.ts` | 걷기 중력·부딪힘(세계 광선 맞음, 한 걸음) |
 | `src/ranges.ts` | 묶음 안 구간 순수 계산(합치기·숨김/강조 나누기·판정·색인 모으기) |
@@ -978,7 +1091,8 @@ npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 
                    #   0.7.0 모드(숨은 선·단색·무늬 없음)·외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기,
                    #   0.8.0 붙잡기+(가운데 점·중심)·음영 뒤 모서리·대비 선 색·중력·부딪힘,
                    #   0.9.0 추론 붙잡기(교차점·수직 발·축)·그물 선 색,
-                   #   0.10.0 나란함·잠금(Shift)·잠금 단추(setMeasureInferenceLock)
+                   #   0.10.0 나란함·잠금(Shift)·잠금 단추(setMeasureInferenceLock),
+                   #   0.16.0 끌어온 축(점 위에 0.5초 머물기 — 측정 상태 줄에 둘째 점의 선분 식별자·끌어온 점)
 npm run typecheck
 npm test
 npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
@@ -990,11 +1104,11 @@ npm run bench:edit -- --reps 5         # 그물 바꾸기 비용(0.11.0 비용 �
 `npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
 Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
 
-- 합성 장면 98가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+- 합성 장면 101가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
   그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식,
-  0.12.0의 모서리 끝 선분 방향 잠금(축·대각)과 앱이 정한 방향 잠금도 찍습니다.
+  0.12.0의 모서리 끝 선분 방향 잠금(축·대각)과 앱이 정한 방향 잠금, 0.16.0의 끌어온 축(첫 점 축 위 나란한 자리 — 어두운·밝은 테마, 첫 점 전 끌어온 Z축)도 찍습니다.
   0.13.0의 측정 거리 글상자 네 장면(`base-measure-label-*`)은 그림 저장 대신 화면 덧그림 캔버스만 찍습니다(비켜 그리기는 화면에만 한다).
   기본 자리 한 장은 옛 API만 써서 base와 견주고, 앱 사각형·정밀 조준(커서 둘레와 손가락, 긴 선분·짧은 선분)으로 옮긴 세 장은 새 장면입니다.
   0.11.0의 그물 바꾸기 여섯 가지(`edit-*`)는 head가 `setMesh`·`removeMesh`로 바꾸고, 그 API가 없는 판(base)은 같은 마지막 장면을 `setScene`(카메라 지킴)으로
@@ -1013,6 +1127,10 @@ Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), Web
   0.15.0 `arc2-measure-open`은 상자 위에 뜬 12토막 원, 그와 한 점에서 3D로 만나는 세로 원, 원을 가로지르는 곧은 선분에서 원 밖 멀리 있는 첫 점에서 내린 곡선 위 발,
   원과 곧은 선분의 교차점, 두 원의 교차점을 가리키고 찍은 값(정확한 값과 1e-9 안인지)과, 같은 차례를 `refine` 없이·`null`·코어 점 그대로·맞은쪽 점으로 되풀이한 값이
   `refine` 없이와 같은지, 원을 따라 지나갈 때 이동 한 번의 열린 후보 호출 수와 같은 길을 다시 지나갈 때의 호출 수(기억), 잠금 중 호출 수입니다.
+  0.16.0 `cross-measure-segments`는 상자 윗면 위 엇갈린 두 선분의 교차점·끝점, 상자 윤곽선 끝점·가운데 점·위 점, 구멍 점, 수직 발을 가리킨 미리 보기와 찍은 점의
+  선분·둘째 선분 식별자이고, 같은 차례를 다듬는 `refine`으로 되풀이해 다듬은 점도 같은 선분인지 함께 남깁니다.
+  `*-measure-track`은 구멍 점 위에 머물러(실제 타이머) 기억한 점, 그 점을 지나는 Z축, 첫 점 X·Y축 위 나란한 자리, 잠근 동안, 찍은 거리·찍은 점의 끌어온 점,
+  두 점째 뒤 잊는지, Esc로 지우는지와, 같은 차례를 `track` 없이 되풀이한 값입니다.
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
@@ -1037,7 +1155,7 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 걷기 부딪힘은 눈·무릎 높이 광선 둘이라 그 사이 높이의 가는 막대·난간 살은 지나가고, 머리 위 천장은 따지지 않는다. 중력은 바로 내려앉는다(떨어지는 시간 없음).
   마주 보는 그물은 Z축 둘레만(axis 'z')
 - 추론 붙잡기는 선분끼리의 3D 교차, 선분 위 수직 발, 첫 점을 지나는 세계 X·Y·Z 축 방향과 지나간 선분과 나란한 방향뿐이다(선과 면의 교차, 면 위 수직 발,
-  모서리에 수직인 방향, 다른 점에서 끌어온 축 안내, 면 잠금은 없다). 나란함의 기준은 마지막으로 지나간 선분 하나다. 잠금은 첫 점을 지나는 선 하나이고
+  모서리에 수직인 방향, 면 잠금은 없다). 나란함의 기준은 마지막으로 지나간 선분 하나다. 잠금은 첫 점을 지나는 선 하나이고
   키보드 화살표로 축을 고르는 잠금(SketchUp의 →·←·↑)은 없다(앱이 `setMeasureInferenceLock('x')` 등으로 단다). 커서 둘레 선분은 화면에서 가까운 24개까지만 짝짓는다.
   `pointsFor`는 같은 고르기에서는 다시 쓰지만 커서가 움직여 고른 점이 바뀌면 부른다.
   모서리 끝에서 그 모서리 방향으로 잠그기(0.12.0)는 코어가 아는 곧은 선분(선분 묶음·그물 윤곽선)만 본다. 곡선을 나눈 꺾은선은 그 조각의 방향이고
@@ -1045,7 +1163,10 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
   앱이 붙잡을 점을 다듬는 것(0.14.0 `refine`)은 수직 발·코어 가운데 점·붙잡지 않은 선분 위 점·교차점(0.15.0)뿐이다. 잠근 선으로 옮겨 오는 점, 면 위 점은 꺾은선·삼각형 그대로다.
   다듬은 점으로 후보를 견주는 것은 열린 후보(0.15.0 — 토막 밖 수직 발, 넓힌 교차점)뿐이고, 다른 후보는 코어 점으로 견준 뒤 한 점만 다듬는다.
   열린 후보는 미리 보기 한 번에 앱 함수를 6번까지만 새로 부르므로, 커서 둘레에 토막이 아주 많으면(촘촘한 곡선 여럿) 기억이 찰 때까지 몇 번의 이동 뒤에 붙는다.
-  곡선과 면의 교차, 곡선 위 접점(첫 점에서 곡선에 그은 접선이 닿는 점)은 없다
+  곡선과 면의 교차, 곡선 위 접점(첫 점에서 곡선에 그은 접선이 닿는 점)은 없다.
+  끝점의 선분 식별자(0.16.0)는 고르기가 고른 토막 하나다(꺾은선 꼭짓점을 함께 쓰는 다른 토막은 싣지 않는다).
+  끌어온 축(0.16.0)은 기억한 점을 지나는 세계 X·Y·Z 축과 첫 점 축 위 나란한 자리뿐이다(끌어온 점에서 나란함·수직 방향, 끌어온 축끼리의 교차, 첫 점 전의 나란한 자리는 없다).
+  머무르기는 마우스·펜 미리 보기에서만 재고, 터치는 앱이 `setMeasureTrackPoints`로 준다. 뷰어는 세계 축만 쓴다(그리기 축을 바꾸는 `axes`는 순수 함수에만)
 - 코어 측정 거리 글상자는 앱이 알려 준 자리(`setMeasureLabelAvoid`)만 비켜 그린다. 앱 화면 요소를 스스로 찾지 않고, 자리는 정해진 차례(기준점 네 귀·선분 위·피할 자리 위아래)
   가운데서만 고른다(덜 겹치는 자리를 따로 찾지 않아 모두 막히면 기본 자리). 앱 측정 덧그림(`setAnnotations`)의 글상자와 그림 저장은 비켜 그리지 않는다
 - 음영 뒤 모서리 점선은 반투명 그물 뒤 모서리에는 그리지 않는다

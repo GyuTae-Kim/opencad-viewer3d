@@ -2106,6 +2106,219 @@ const openValues: ValueSet = {
   },
 };
 
+// ───────────── 0.16.0 붙잡은 선분 식별자·끌어온 축 ─────────────
+/** 0.16.0 붙잡은 선분 식별자(MeasureHoverSnap.segment)가 있는 판인지 — 상자 앞 윗모서리 위를 가리켜 본다 */
+const v0160seg: Need = (v, c) => {
+  const why = all(v090infer, fn('project', 'setGroupVisible'))(v, c);
+  if (why) return why;
+  v.setGroupVisible('공구 경로', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true });
+  const q = c.at(c.world([30, 0, 40]));
+  if (q) {
+    c.hover(q.x, q.y);
+    v.renderNow();
+  }
+  const ok = !!v.measureHoverSnap?.segment;
+  v.setMeasureSnap(null);
+  v.setMeasureMode(false);
+  v.setGroupVisible('공구 경로', true);
+  return ok ? null : '이 판에 없는 값: 0.16.0 MeasureHoverSnap.segment(붙잡은 선분 식별자)';
+};
+/** 0.16.0 끌어온 축(inference.track)이 있는 판인지 */
+const v0160track: Need = (v, c) => {
+  const why = all(v090infer, fn('project', 'setGroupVisible', 'setMeasureTrackPoints'))(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { track: true } });
+  const ok = !!(v.measureSnap?.inference as any)?.track;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.16.0 끌어온 축(setMeasureSnap({ inference: { track } }))';
+};
+const segRow = (s: any): unknown[] | null => (s ? [s.kind, s.id, s.index, s.raw, s.ends.map(r10s)] : null);
+
+/**
+ * 0.16.0 붙잡은 선분 식별자 값(cross 자료 — 상자 윗면 위 엇갈린 두 선분): 엇갈린 선분의 교차점·끝점, 상자 윤곽선 끝점·가운데 점·위 점, 구멍 점(점 묶음),
+ * 구멍 점에서 상자 앞 윗모서리로 내린 수직 발을 가리킨 미리 보기의 종류와 선분·둘째 선분, 찍은 점(measurePoints)의 선분.
+ * 같은 차례를 선분 위 점·가운데 점을 조금 옮겨 다듬는 refine으로 되풀이해 다듬은 점도 같은 선분인지
+ */
+const segmentValues: ValueSet = {
+  name: 'cross-measure-segments',
+  data: 'cross',
+  needs: v0160seg,
+  run: (c) => {
+    const { v } = c;
+    v.setGroupVisible('공구 경로', false);
+    v.setMeasureMode(true);
+    // 가운데 점 없이(엇갈린 두 선분은 가운데 점에서 만난다 — 교차점을 보려고)·구멍 점을 숨기고(첫 구멍 점이 엇갈린 선분 끝과 겹친다)
+    const plainTargets: [string, number[]][] = [
+      ['cross', [60, 40, 40.5]],
+      ['cross-end', [10, 10, 40.5]],
+      ['corner', [120, 0, 40]],
+      ['on-edge', [30, 0, 40]],
+    ];
+    // 가운데 점을 켜고 구멍 점을 보이고
+    const midTargets: [string, number[]][] = [
+      ['mid', [60, 0, 40]],
+      ['hole', [50, 70, 40]],
+    ];
+    const run = (refine: ((i: any) => number[] | null) | null): unknown[] => {
+      const rows: unknown[] = [];
+      const sweep = (targets: [string, number[]][]): void => {
+        for (const [name, p] of targets) {
+          const q = c.at(c.world(p));
+          if (!q) {
+            rows.push([name, null]);
+            continue;
+          }
+          c.hover(q.x + 1, q.y);
+          v.renderNow();
+          const h = v.measureHoverSnap;
+          rows.push([name, h ? [h.snap, !!h.refined, segRow(h.segment), segRow(h.other)] : null]);
+        }
+      };
+      v.setGroupVisible('구멍', false);
+      v.setMeasureSnap({ edges: true, inference: true, ...(refine ? { refine } : {}) });
+      sweep(plainTargets);
+      v.setGroupVisible('구멍', true);
+      v.setMeasureSnap({ midpoints: true, edges: true, inference: true, ...(refine ? { refine } : {}) });
+      v.clearMeasure();
+      sweep(midTargets);
+      // 구멍 점에서 상자 앞 윗모서리로 내린 수직 발
+      const a = c.at(c.world([50, 70, 40])), f = c.at(c.world([50, 0, 40]));
+      if (a && f) {
+        c.click(a.x + 1, a.y);
+        c.hover(f.x + 4, f.y + 1);
+        v.renderNow();
+        const h = v.measureHoverSnap;
+        rows.push(['foot', h ? [h.snap, !!h.refined, segRow(h.segment)] : null]);
+        c.click(f.x + 4, f.y + 1);
+        rows.push(['points', v.measurePoints.map((p: any) => [p.snap, segRow(p.segment), segRow(p.other)])]);
+      }
+      return rows;
+    };
+    const plain = run(null);
+    const nudge = (i: any): number[] | null => (i.kind === 'onEdge' || i.kind === 'midpoint' ? [i.point[0] + 0.01, i.point[1], i.point[2]] : null);
+    const refined = run(nudge);
+    // 다듬은 점은 refined만 다르고 선분은 같아야 한다
+    const strip = (rows: unknown[]): string => JSON.stringify(rows, (k, x) => (k === '1' && typeof x === 'boolean' ? null : x));
+    return [['plain', plain], ['refined', refined], ['refined-same-segments', strip(plain) === strip(refined)]];
+  },
+};
+
+/** 0.16.0 끌어온 축 장면 자리: 구멍 점 P(90, 50, 40)·P2(30, 30, 40), 첫 점 A = 상자 앞 왼쪽 위 구석 */
+const TRACK_P = [90, 50, 40];
+const TRACK_P2 = [30, 30, 40];
+const TRACK_A = [0, 0, 40];
+/**
+ * 첫 점을 찍고 끌어온 점 둘을 준 뒤 커서를 대상 자리 옆에(화면 dx, dy). 구멍 점(점 묶음)은 숨긴다 — 상자 모서리 위 나란한 자리 둘레에
+ * 구멍 점이 붙잡기 거리 안에 들 수 있다(점 붙잡기가 먼저라 끌어온 축을 보지 못한다)
+ */
+function trackPreview(c: Ctx, target: number[] | null, first: boolean, dx = 3, dy = 1): void {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference: { axes: true, track: true } });
+  if (first) {
+    const a = c.at(c.world(TRACK_A));
+    if (a) c.click(a.x + 1, a.y + 1);
+  }
+  v.setMeasureTrackPoints([c.world(TRACK_P), c.world(TRACK_P2)]);
+  const q = target ? c.at(c.world(target)) : null;
+  if (q) c.hover(q.x + dx, q.y + dy);
+}
+const trackShots: Shot[] = [
+  // 첫 점 X축 위에서 구멍 점 P와 나란한 자리(90, 0, 40): 첫 점에서 X축 색 안내선, P에서 점선, 끌어온 점 표식 둘
+  { name: 'base-measure-track-cross', data: 'base', needs: v0160track, setup: (c) => trackPreview(c, [90, 0, 40], true, 6, 0) },
+  // 첫 점 전: 구멍 점 P를 지나는 Z축(상자 위 빈 곳)
+  { name: 'base-measure-track-axis', data: 'base', needs: v0160track, setup: (c) => trackPreview(c, [90, 50, 85], false) },
+  // 밝은 테마의 같은 나란한 자리(점선·십자 바탕 테가 밝은 바탕에서도 보이는지)
+  {
+    name: 'base-measure-track-cross-light',
+    data: 'base',
+    needs: v0160track,
+    setup: (c) => {
+      c.v.setTheme('light');
+      trackPreview(c, [90, 0, 40], true, 6, 0);
+    },
+  },
+];
+SHOTS.push(...trackShots);
+
+/**
+ * 0.16.0 끌어온 축 값(base·off): 구멍 점 위에 머물러(dwellMs 40 — 실제 타이머) 기억한 점, 그 점을 지나는 Z축 미리 보기, 첫 점 X·Y축 위 나란한 자리(커서를 옆에 두어도
+ * 그 자리), 찍은 거리·결과·찍은 점의 끌어온 점, 두 점째 뒤 잊는지, 잠근 동안 끌어온 축이 없는지, Esc로 지우는지.
+ * 같은 커서 차례를 track 없이 되풀이한 미리 보기(꺼지면 0.15.0과 같은 첫 점 축·면 위 점)
+ */
+function trackValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-track`,
+    data: d,
+    needs: v0160track,
+    run: async (c) => {
+      const { v } = c;
+      v.setGroupVisible('공구 경로', false);
+      v.setMeasureMode(true);
+      const out: unknown[] = [];
+      const hoverRow = (name: string, p: readonly number[], dx = 3, dy = 1): unknown[] => {
+        const q = c.at(c.world(p));
+        if (!q) return [name, null];
+        c.hover(q.x + dx, q.y + dy);
+        v.renderNow();
+        const h = v.measureHoverSnap;
+        return [name, h ? [h.snap, h.axis ?? null, r10s(h.point), r10s(h.direction), r10s(h.trackFrom)] : null, lockState(v.measureHoverLock)];
+      };
+      const sweep = async (track: boolean): Promise<unknown[]> => {
+        const rows: unknown[] = [];
+        const got: unknown[] = [];
+        const off = v.onMeasure((m: any) => m && got.push([r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null, m.axisA ?? null, m.axisB ?? null, r10s(m.directionB)]));
+        v.setMeasureSnap({ edges: true, inference: { axes: true, ...(track ? { track: { dwellMs: 40 } } : {}) } });
+        v.clearMeasure();
+        v.setGroupVisible('구멍', true);
+        // 구멍 점 P 위에 머물기(실제 타이머 — 40 ms 뒤 기억, 150 ms 기다린다)
+        const p = c.at(c.world(TRACK_P));
+        if (p) {
+          c.hover(p.x + 1, p.y);
+          v.renderNow();
+          rows.push(['on-p', v.measureHoverSnap?.snap ?? null]);
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        rows.push(['tracked', (v.measureTrackPoints ?? []).map(r10s)]);
+        rows.push(hoverRow('p-axis-z', [90, 50, 85]));
+        // 구멍 점을 숨긴다(끌어온 점은 남는다 — 상자 모서리 위 나란한 자리 둘레의 구멍 점이 점 붙잡기로 먼저 잡히지 않게)
+        v.setGroupVisible('구멍', false);
+        // 첫 점 A
+        const a = c.at(c.world(TRACK_A));
+        if (a) c.click(a.x + 1, a.y + 1);
+        rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap, r10s(q.trackFrom)])]);
+        rows.push(hoverRow('cross-x', [90, 0, 40], 6, 0), hoverRow('cross-y', [0, 50, 40], 0, 5), hoverRow('plain-x', [40, 0, 40], 2, 0));
+        // 잠그면 끌어온 축이 없다
+        rows.push(['lock', v.setMeasureInferenceLock('z'), hoverRow('locked', [90, 0, 40], 6, 0)]);
+        v.setMeasureInferenceLock(false);
+        // 나란한 자리를 찍는다(두 점째) — 끌어온 점은 잊는다
+        const x = c.at(c.world([90, 0, 40]));
+        if (x) {
+          c.hover(x.x + 6, x.y);
+          c.click(x.x + 6, x.y);
+        }
+        rows.push(['measure', got.at(-1) ?? null, v.measurePoints.map((q: any) => [q.snap, q.axis ?? null, r10s(q.trackFrom)]), (v.measureTrackPoints ?? []).map(r10s)]);
+        // 첫 점 전 Esc
+        if (track) {
+          v.clearMeasure();
+          v.setMeasureTrackPoints([c.world(TRACK_P)]);
+          const before = v.measureTrackPoints.length;
+          const esc = v.handleKey(new KeyboardEvent('keydown', { key: 'Escape' }));
+          rows.push(['esc', before, esc, v.measureTrackPoints.length]);
+        }
+        off();
+        return rows;
+      };
+      out.push(['track', await sweep(true)], ['off', await sweep(false)]);
+      return out;
+    },
+  };
+}
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -2131,6 +2344,9 @@ const VALUES: ValueSet[] = [
   labelAvoidValues,
   refineValues,
   openValues,
+  segmentValues,
+  trackValues('base'),
+  trackValues('off'),
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

@@ -52,10 +52,12 @@ import {
   type MeasureSnapPick,
   type SnapCandidate,
   type SnapRefineInput,
+  type SnapSegment,
   OPEN_REFINE_CALLS,
   RefineMemo,
   acceptRefined,
   chooseMeasureSnap,
+  copySegment,
   finitePoint,
   measureResult,
   refineOpen,
@@ -63,15 +65,19 @@ import {
   sameRefineInput,
   samePick,
   snapLimit,
+  snapSegmentsOf,
   withinSnapLimit,
 } from './snap';
+import { MeasureTracker, sameTrackPoint, trackAxisSnap, trackCrossSnap } from './track';
 import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
 import {
   type InferenceLock,
   type InferenceLockInput,
   type MeasureInference,
   type NearSegment,
+  type NormalizedInference,
   type SnapAxis,
+  axisAligned,
   axisLock,
   axisSnap,
   directionLock,
@@ -329,6 +335,9 @@ export interface MeasureSnapOptions {
    * 그물 윤곽선은 측정 중 윤곽선을 고를 때만(edges 또는 pickEdges) 쓴다.
    * 0.10.0(true에 들지 않는다 — 따로 켠다): parallel = 첫 측정 점에서 커서가 앞서 지나간 선분과 나란한 방향(점 붙잡기가 없을 때만, 축과 견줘 가까운 것 —
    * 자홍 안내선), lock = Shift를 누르고 있는 동안 지금 방향 추론(축·나란함·수직)을 잠근다(Viewer3d.setMeasureInferenceLock은 이 선택과 상관없이 된다)
+   * 0.16.0(true에 들지 않는다): track = 다른 점에서 끌어온 축 안내 — 마우스·펜이 점 붙잡기 위에 머문 점(2화소 안에서 dwellMs, 기본 500 ms)을 최근 셋까지 기억하고
+   * (터치는 머무르기가 없다 — 앱이 setMeasureTrackPoints로 준다), 첫 점 축 위에서 그 점과 나란한 자리와 그 점을 지나는 X·Y·Z 축에도 붙잡는다.
+   * 차례는 점 붙잡기 → 첫 점 축 위 나란한 자리 → 첫 점 축·나란함 → 끌어온 축. 두 점째를 찍거나 측정을 지우거나 붙잡기 선택을 다시 주면 잊는다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -371,6 +380,15 @@ export interface MeasureHoverSnap {
   fromSnap?: SnapKind;
   /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine이 돌려준 점을 받았다)이면 true */
   refined?: boolean;
+  /**
+   * 0.16.0: 그 점이 놓인 선분의 식별자(SnapSegment — 0.14.0 다듬기 입력과 같은 꼴, 복사본). 끝점(꺾은선 꼭짓점이면 고르기가 고른 쪽 하나)·가운데 점·
+   * 붙잡지 않은 선분·윤곽선 위 점·수직 발·교차점(첫째 선분)과 그 다듬은 점에만 있다. 그물 꼭짓점·면 위 점·점 묶음의 점·앱 점·축·나란함·잠근 선 위 점에는 없다
+   */
+  segment?: SnapSegment;
+  /** 0.16.0: 교차점이면 둘째 선분(복사본) */
+  other?: SnapSegment;
+  /** 0.16.0: 끌어온 축(inference.track)이면 그 축을 끌어온 점 P(복사본) — 점선은 P에서 이 점까지 */
+  trackFrom?: V3;
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -388,6 +406,12 @@ export interface MeasurePoint {
   locked?: boolean;
   /** 0.14.0: 앱이 다듬은 점(MeasureSnapOptions.refine)으로 찍었으면 true */
   refined?: boolean;
+  /** 0.16.0: 그 점이 놓인 선분의 식별자(복사본 — MeasureHoverSnap.segment와 같은 규칙). 붙잡기 선택(setMeasureSnap)이 있을 때만 */
+  segment?: SnapSegment;
+  /** 0.16.0: 교차점이면 둘째 선분(복사본) */
+  other?: SnapSegment;
+  /** 0.16.0: 끌어온 축(inference.track)으로 찍었으면 그 축을 끌어온 점(복사본) */
+  trackFrom?: V3;
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -559,7 +583,7 @@ type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } |
  * 측정 점 고르기 결과(미리 보기·누르기): 찍을 점·붙잡았는지·종류, 0.9.0 축 붙잡기의 축,
  * 0.10.0 방향 추론의 단위 방향·잠갔는지·기준 선분·잠근 선으로 옮겨 온 점과 그 종류,
  * 0.12.0 점 붙잡기가 놓인 선분 직선이 첫 점을 지날 때 잠글 방향(lineLock — 결과·measureHoverSnap에는 싣지 않는다),
- * 0.14.0 앱이 다듬은 점이면 refined
+ * 0.14.0 앱이 다듬은 점이면 refined, 0.16.0 그 점이 놓인 선분 식별자(segment·교차점이면 other)와 끌어온 축의 끌어온 점(trackFrom)
  */
 type MeasurePick = {
   p: V3;
@@ -573,16 +597,27 @@ type MeasurePick = {
   fromSnap?: SnapKind;
   lineLock?: InferenceLock;
   refined?: boolean;
+  segment?: SnapSegment;
+  other?: SnapSegment;
+  trackFrom?: V3;
 };
-/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지 — 있는 것만) */
+/** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지, 0.16.0 선분 식별자·끌어온 점 — 있는 것만) */
 const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   const r: MeasurePointSnap = { kind: s.kind };
   if (s.axis) r.axis = s.axis;
   if (s.direction) r.direction = s.direction;
   if (s.locked) r.locked = true;
   if (s.refined) r.refined = true;
+  if (s.segment) {
+    r.segment = s.segment;
+    if (s.other) r.other = s.other;
+  }
+  if (s.trackFrom) r.trackFrom = s.trackFrom;
   return r;
 };
+/** 점 붙잡기(머무르기로 끌어올 수 있는 점 — 0.16.0)인지: 꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발이고 잠근 선 위 점이 아님 */
+const dwellPointOf = (h: MeasurePick | null): V3 | null =>
+  h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' ? h.p : null;
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
 
 /** 묶음 하나의 구간 상태(숨김·강조, 합친 것)와 그로부터 만든 것 */
@@ -753,6 +788,11 @@ export class Viewer3d {
    */
   private lastLockable: InferenceLock | null = null;
   /**
+   * 끌어온 축(0.16.0 — inference.track을 켰을 때만, 끄면 null이라 상태가 없다): 기억한 점과 머무르기, 머무르기 타이머(dwellMs 뒤 commit)
+   */
+  private tracker: MeasureTracker | null = null;
+  private dwellTimer = 0;
+  /**
    * 측정 붙잡기 선택(0.8.0, 없으면 0.7.2 규칙 그대로)과 늘 후보인 앱 점(세계 xyz·종류·묶음 id),
    * 추론 붙잡기(0.9.0)와 앱 점 색인(0.9.0 — 점이 SNAP_INDEX_MIN개 이상일 때 처음 쓸 때 만든다)
    */
@@ -764,7 +804,7 @@ export class Viewer3d {
     pts: Float64Array;
     kinds: SnapKind[];
     ids: (string | undefined)[];
-    inference: Required<MeasureInference> | null;
+    inference: NormalizedInference | null;
     index: SnapPointIndex | null;
     /** 0.10.0 차례 값(점마다, 차례가 없는 점은 −Infinity — 한 점도 차례가 없으면 null)과 붙잡기 한도(없으면 null) */
     orders: Float64Array | null;
@@ -984,6 +1024,7 @@ export class Viewer3d {
     this.measureHover = null;
     this.inferLock = null;
     this.lastLockable = null;
+    this.clearTrack();
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
@@ -1034,6 +1075,7 @@ export class Viewer3d {
     this.measureHover = null;
     this.inferLock = null;
     this.lastLockable = null;
+    this.clearTrack();
     this.marker = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
@@ -1203,6 +1245,7 @@ export class Viewer3d {
     this.raf = 0;
     clearTimeout(this.bvhTimer);
     clearTimeout(this.wheelTimer);
+    clearTimeout(this.dwellTimer);
     this.bvhGen++;
     for (const f of this.off) f();
     this.off = [];
@@ -1229,6 +1272,7 @@ export class Viewer3d {
     this.measureHover = null;
     this.inferLock = null;
     this.lastLockable = null;
+    this.tracker = null;
     this.bvhs = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
@@ -2354,6 +2398,9 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.parallelRef = null;
+    // 0.16.0: 끌어온 점도 새로(끄면 상태가 없다)
+    this.clearTrack();
+    this.tracker = this.snapOpt?.inference?.track ? new MeasureTracker() : null;
     if (this.measuring) this.measureHover = null;
     this.invalidate();
   }
@@ -2391,7 +2438,11 @@ export class Viewer3d {
   get measureSnap(): MeasureSnapOptions | null {
     if (!this.snapOpt) return null;
     const r = { ...this.snapOpt.src };
-    if (r.inference) r.inference = { ...(r.inference as Required<MeasureInference>) };
+    if (r.inference) {
+      const inf = { ...(r.inference as NormalizedInference) };
+      if (inf.track) inf.track = { ...inf.track };
+      r.inference = inf;
+    }
     return r;
   }
 
@@ -2412,6 +2463,11 @@ export class Viewer3d {
       if (h.fromSnap) r.fromSnap = h.fromSnap;
     }
     if (h.refined) r.refined = true;
+    if (h.segment) {
+      r.segment = copySegment(h.segment);
+      if (h.other) r.other = copySegment(h.other);
+    }
+    if (h.trackFrom) r.trackFrom = [...h.trackFrom] as V3;
     return r;
   }
 
@@ -2555,8 +2611,66 @@ export class Viewer3d {
       if (s?.direction) r.direction = [...s.direction] as V3;
       if (s?.locked) r.locked = true;
       if (s?.refined) r.refined = true;
+      if (s?.segment) {
+        r.segment = copySegment(s.segment);
+        if (s.other) r.other = copySegment(s.other);
+      }
+      if (s?.trackFrom) r.trackFrom = [...s.trackFrom] as V3;
       return r;
     });
+  }
+
+  /**
+   * 끌어온 점(0.16.0 — setMeasureSnap({ inference: { track } })를 켰을 때, 새것이 앞, 최근 셋까지, 복사본): 마우스·펜이 점 붙잡기 위에 머물러 기억한 점과
+   * 앱이 setMeasureTrackPoints로 준 점. 이 점들을 지나는 X·Y·Z 축과 첫 점 축 위에서 이 점과 나란한 자리에도 붙잡는다. 꺼져 있으면 빈 배열
+   */
+  get measureTrackPoints(): V3[] {
+    return this.tracker?.points ?? [];
+  }
+
+  /**
+   * 끌어온 점을 앱이 정한다(0.16.0 — 터치처럼 머무르기가 없을 때 길게 누르기·단추로 고른 점, 앞이 가장 최근, 셋까지, 수 셋이 아닌 것은 버린다).
+   * null·빈 배열이면 지운다. 측정 모드이고 inference.track을 켰을 때만 되고, 기억한 수를 돌려준다(아니면 0 — 상태를 만들지 않는다).
+   * 머무르기로 기억한 점과 같은 목록이라 그 뒤 머무르기는 이 목록 앞에 더한다
+   */
+  setMeasureTrackPoints(points: readonly (readonly number[])[] | null): number {
+    const t = this.tracker;
+    if (!t || !this.measuring) return 0;
+    clearTimeout(this.dwellTimer);
+    this.dwellTimer = 0;
+    const n = t.set(points);
+    this.rehover();
+    this.invalidate();
+    return n;
+  }
+
+  /** 끌어온 점과 머무르기를 지운다(0.16.0 — 두 점째·측정 지우기·붙잡기 선택·장면 바꾸기). 지울 것이 있었으면 true */
+  private clearTrack(): boolean {
+    clearTimeout(this.dwellTimer);
+    this.dwellTimer = 0;
+    return !!this.tracker?.clear();
+  }
+
+  /**
+   * 머무르기(0.16.0): 미리 보기를 구할 때마다 커서 아래 점 붙잡기로 MeasureTracker.hover를 부르고, 새로 머물기 시작하면 dwellMs 타이머를 다시 건다(마우스·펜만).
+   * 타이머가 끝날 때 같은 머무르기가 이어지고 있고(그 사이 다른 점·벗어남·떠남이 없었다) 미리 보기가 그 점이면 기억한다
+   */
+  private dwell(h: MeasurePick | null, at: { x: number; y: number; pointerType: string } | null): void {
+    const t = this.tracker, ms = this.snapOpt?.inference?.track?.dwellMs;
+    if (!t || ms === undefined) return;
+    // 터치 포인터는 머무르지 않는다(손가락은 누른 채 움직이면 끌기이고 떼면 찍는다 — 앱이 setMeasureTrackPoints로 준다)
+    const step = at && !isTouch(at.pointerType) ? t.hover(dwellPointOf(h), at.x, at.y) : (t.cancel(), 'none');
+    if (step === 'keep') return;
+    clearTimeout(this.dwellTimer);
+    this.dwellTimer = 0;
+    if (step !== 'start') return;
+    this.dwellTimer = window.setTimeout(() => {
+      this.dwellTimer = 0;
+      if (this.disposed || this.tracker !== t || !this.measuring || this.drag) return t.cancel();
+      const p = dwellPointOf(this.measureHover), q = t.dwelling;
+      if (!p || !q || !sameTrackPoint(p, q)) return t.cancel();
+      if (t.commit()) this.invalidate();
+    }, ms);
   }
 
   /**
@@ -2628,12 +2742,14 @@ export class Viewer3d {
     };
   }
 
+  /** 측정을 지운다(찍은 점·미리 보기·잠금, 0.16.0부터 끌어온 점도) */
   clearMeasure(): void {
     const had = this.measurePts.length > 0;
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
     this.lastLockable = null;
+    this.clearTrack();
     if (had) for (const cb of this.measureCbs) cb(null);
     this.invalidate();
   }
@@ -3476,21 +3592,43 @@ export class Viewer3d {
       }
       return out;
     }
+    // 끌어온 축(0.16.0 — 켰고 기억한 점이 있을 때만): 점 붙잡기가 하나도 없을 때 첫 점 축 위에서 끌어온 점과 나란한 자리가 첫 점 축보다 먼저다
+    const tracks = this.tracker?.size ? this.tracker.view : null;
+    const noPoint = !r || !r.kind;
+    if (tracks && noPoint && first) {
+      const t = trackCrossSnap(f, first, tracks, x, y, snapPx);
+      if (t) return { p: t.p, vertex: true, kind: 'axis', axis: t.axis, direction: t.direction!, trackFrom: t.from };
+    }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
-    if (first && (!r || !r.kind) && (inf?.axes || inf?.parallel)) {
+    if (first && noPoint && (inf?.axes || inf?.parallel)) {
       const a = inf.axes ? axisSnap(f, first, x, y, snapPx) : null;
       const ref = inf.parallel ? this.parallelRef : null;
       const pr = ref ? parallelSnap(f, first, ref, x, y, snapPx, inf.axes) : null;
       if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
       if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
     }
+    // 끌어온 점을 지나는 축(0.16.0): 첫 점 축·나란함 다음(첫 점 전에도). 첫 점 축이 아니므로 방향(잠글 것)이 없다
+    if (tracks && noPoint) {
+      const t = trackAxisSnap(f, tracks, x, y, snapPx, first);
+      if (t) return { p: t.p, vertex: true, kind: 'axis', axis: t.axis, trackFrom: t.from };
+    }
+    // 그 점이 놓인 선분 식별자(0.16.0): 아래 점 붙잡기·선분 위 점에 싣는다(다듬은 점도 같은 선분)
+    const sg = snapSegmentsOf(r, d);
+    const seg = (m: MeasurePick): MeasurePick => {
+      if (sg) {
+        m.segment = sg.segment;
+        if (sg.other) m.other = sg.other;
+        else delete m.other;
+      }
+      return m;
+    };
     // 다듬기(0.14.0): 수직 발·코어 가운데 점·선분 위 점이면 앱이 정확한 형상 위로 옮긴 점(받을 수 있을 때만). 잠금·축·나란함은 위에서 이미 돌아갔다.
     // 0.15.0: 코어 교차점도. 열린 후보는 이미 다듬은 점이다(다시 부르지 않는다)
     const rp = r?.refined ? r.p : so.refine && r ? this.refinedAt(so, f, x, y, snapPx, r, d, first) : null;
     // 수직 발(0.10.0): 첫 점 → 발 방향(잠글 때). 다듬은 발이면 첫 점 → 다듬은 발
     if (r && r.kind === 'perpendicular' && first) {
       const dir = unitDir(first, rp ?? r.p);
-      if (dir) return rp ? { ...r, p: rp, direction: dir, refined: true } : { ...r, direction: dir };
+      if (dir) return seg(rp ? { ...r, p: rp, direction: dir, refined: true } : { ...r, direction: dir });
     }
     // 선분 방향 잠금(0.12.0): 점 붙잡기(또는 고른 선분 위 점)가 놓인 선분 직선이 첫 점을 지나면 Shift·setMeasureInferenceLock(true)가 그 방향으로 잠근다.
     // 고른 선분(d.ends)을 먼저 보고, 점 붙잡기면 커서 둘레 선분도 본다(여러 모서리가 만나는 꼭짓점에서 고르기가 다른 모서리를 골랐을 때).
@@ -3499,10 +3637,11 @@ export class Viewer3d {
       const ends = d && r.p === d.snap ? d.ends : undefined;
       if (r.kind || ends) {
         const l = this.lineLockAt(f, first, r.core ?? r.p, ends, r.kind ? nearSegs : null);
-        if (l) return rp ? { ...r, p: rp, lineLock: l, refined: true } : { ...r, lineLock: l };
+        if (l) return seg(rp ? { ...r, p: rp, lineLock: l, refined: true } : { ...r, lineLock: l });
       }
     }
-    return rp && r ? { ...r, p: rp, refined: true } : r;
+    if (!r) return null;
+    return sg ? seg(rp ? { ...r, p: rp, refined: true } : { ...r }) : rp ? { ...r, p: rp, refined: true } : r;
   }
 
   /**
@@ -3576,7 +3715,7 @@ export class Viewer3d {
    * 앱 붙잡기 후보 뒤에 추론 후보(0.9.0 — 커서 둘레 선분의 교차점·첫 점에서 내린 수직 발)를 잇는다.
    * 0.15.0: 그 뒤에 열린 후보(open — 다듬기가 있을 때만, 앱이 다듬은 점)를 잇는다. 거리가 같으면 앞의 것이 이긴다
    */
-  private *withInference(inf: Required<MeasureInference>, first: V3 | null, near: () => NearSegment[], app: Iterable<SnapCandidate>, open: (() => SnapCandidate[]) | null): Generator<SnapCandidate> {
+  private *withInference(inf: NormalizedInference, first: V3 | null, near: () => NearSegment[], app: Iterable<SnapCandidate>, open: (() => SnapCandidate[]) | null): Generator<SnapCandidate> {
     yield* app;
     if (!inf.intersections && !(inf.perpendicular && first)) return;
     for (const c of inferenceCandidates(near(), first, inf)) yield c;
@@ -3704,8 +3843,16 @@ export class Viewer3d {
       this.measureSnaps.set(p, pointSnapOf(s));
       this.measurePts.push(p);
       this.measureHover = null;
-      // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다. 마지막으로 본 방향 추론은 첫 점이 바뀌면 잊는다
-      if (this.measurePts.length === 2) this.inferLock = null;
+      // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다. 마지막으로 본 방향 추론은 첫 점이 바뀌면 잊는다.
+      // 0.16.0: 끌어온 점도 두 점째에서 잊는다(첫 점에서는 남긴다 — 첫 점 축과 나란한 자리에 쓴다). 누르면 머무르기는 버린다
+      if (this.measurePts.length === 2) {
+        this.inferLock = null;
+        this.clearTrack();
+      } else if (this.tracker) {
+        clearTimeout(this.dwellTimer);
+        this.dwellTimer = 0;
+        this.tracker.cancel();
+      }
       this.lastLockable = null;
       const m = this.measurement();
       if (m) for (const cb of this.measureCbs) cb(m);
@@ -4023,7 +4170,8 @@ export class Viewer3d {
     }
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
-    else if (e.key === 'Escape' && this.measurePts.length) this.clearMeasure();
+    // 0.16.0: 첫 점 전이라도 끌어온 점이 있으면 Esc가 지운다
+    else if (e.key === 'Escape' && (this.measurePts.length || (this.measuring && this.tracker?.size))) this.clearMeasure();
     else return false;
     e.preventDefault();
     return true;
@@ -4126,6 +4274,8 @@ export class Viewer3d {
       this.lastHoverAt = this.hoverAt;
       this.hoverAt = null;
       if (this.measurePts.length === 1 && !this.measureHover?.locked) this.lastLockable = this.hoverLock(this.measureHover) ?? this.lastLockable;
+      // 0.16.0 끌어온 축: 점 붙잡기 위 머무르기(켰을 때만)
+      if (this.tracker) this.dwell(this.measureHover, this.lastHoverAt);
     }
     if (this.renderer.uploading) this.pumpUpload(this.renderer.uploadProgress ? (this.upload?.budget ?? 8) : this.meshBudget);
     if (this.cutDirty) {
@@ -4422,7 +4572,9 @@ export class Viewer3d {
     if (screen) this.measureLabel = null;
     const pts = this.measurePts;
     const hover = this.measuring ? this.measureHover : null;
-    if (!pts.length && !hover) return;
+    // 0.16.0: 끌어온 점(켰을 때만 — 기억한 점이 있으면 커서가 떠나도 표식을 그린다)
+    const tracks = this.measuring && this.tracker?.size ? this.tracker.view : null;
+    if (!pts.length && !hover && !tracks) return;
     const th = this.theme;
     const axisColor = (ax: SnapAxis): string => (ax === 'x' ? th.axisX : ax === 'y' ? th.axisY : th.axisZ);
     const inferColor = th.inference ?? DARK_THEME.inference!;
@@ -4551,8 +4703,13 @@ export class Viewer3d {
       // 0.9.0 축 붙잡기 미리 보기: 첫 점에서 그 축 색 안내선.
       // 0.10.0: 나란함·잠근 수직은 추론 색(자홍) 안내선과 기준 선분 점선, 잠금은 바탕 테 위 굵은 실선, 잠근 선으로 옮겨 온 점에서 가는 점선
       const hk = pts.length === 1 ? hover : null;
+      // 0.16.0: 끌어온 점을 지나는 축(방향 없음)은 첫 점 축이 아니므로 첫 점에서 그은 선은 보통 측정 색
       const guide =
-        hk?.kind === 'axis' && hk.axis ? axisColor(hk.axis) : hk && (hk.kind === 'parallel' || (hk.kind === 'perpendicular' && hk.locked)) ? inferColor : null;
+        hk?.kind === 'axis' && hk.axis && !(hk.trackFrom && !hk.direction)
+          ? axisColor(hk.axis)
+          : hk && (hk.kind === 'parallel' || (hk.kind === 'perpendicular' && hk.locked))
+            ? inferColor
+            : null;
       if (hk?.edge && (hk.kind === 'parallel' || hk.locked)) {
         const e0 = P(hk.edge[0]), e1 = P(hk.edge[1]);
         line(e0, e1, th.textBg, 5, []);
@@ -4576,6 +4733,39 @@ export class Viewer3d {
           : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
         sa && sb ? [sa, sb] : null,
       );
+    }
+    // 0.16.0 끌어온 축: 끌어온 점에서 붙잡을 점까지 점선(그 선이 축과 나란하면 축 색 — 끌어온 점을 지나는 축은 늘, 첫 점 축 위 나란한 자리는
+    // 두 점이 다른 좌표 하나를 함께 쓸 때), 기억한 점마다 작은 십자(끌어온 점은 크게, 점선 색)
+    if (tracks) {
+      const tf = hover?.trackFrom ?? null;
+      let col = th.measure;
+      if (tf && hover) {
+        const u = unitDir(tf, hover.p);
+        const ax: SnapAxis | null = !hover.direction ? (hover.axis ?? null) : u && axisAligned(u) ? (Math.abs(u[0]) > 0.5 ? 'x' : Math.abs(u[1]) > 0.5 ? 'y' : 'z') : null;
+        if (ax) col = axisColor(ax);
+        const s0 = P(tf), s1 = P(hover.p);
+        line(s0, s1, th.textBg, 3.5, []);
+        line(s0, s1, col, 1.5, [4, 3]);
+      }
+      for (const q of tracks) {
+        const sp = P(q);
+        if (!sp) continue;
+        const on = !!tf && sameTrackPoint(q, tf);
+        const r = on ? 6 : 4;
+        for (const [color, w] of [
+          [th.textBg, on ? 4 : 3.5],
+          [on ? col : th.measure, on ? 2 : 1.5],
+        ] as const) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          ctx.moveTo(sp[0] - r, sp[1]);
+          ctx.lineTo(sp[0] + r, sp[1]);
+          ctx.moveTo(sp[0], sp[1] - r);
+          ctx.lineTo(sp[0], sp[1] + r);
+          ctx.stroke();
+        }
+      }
     }
     for (const p of pts) dotAt(P(p), false);
     if (hover) {
