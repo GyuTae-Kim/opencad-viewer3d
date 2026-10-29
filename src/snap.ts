@@ -22,6 +22,9 @@
  *
  * 0.21.0: 붙잡지 않은 면 위 점('onFace' — line은 커서 광선)도 refineFace로 넘기고(acceptOnFace — 광선 위로 내린 자리, 삼각형 크기로 자른다),
  * 기억을 비우는 RefineMemo.clear(Viewer3d.clearMeasureRefine)를 둔다.
+ *
+ * 0.22.0: 축·잠근 선이 곡면을 나눈 삼각형을 비켜 가지만 그 삼각형과 곡면 사이를 지날 만큼 가까운 열린 후보('axisFace', open — 계산은 track.ts openFaceSnap)도
+ * refineFace로 넘긴다. 'axisEdge' 열린 후보는 선이 한 토막의 활꼴을 두 번 지날 수 있으면 힌트(point)를 두 자리로 나눠 부른다(track.ts openEdgeCandidates의 twin).
  */
 import type { Pick3d, SnapKind } from './types';
 import { type ViewFrame, projectToScreen, viewDepth, worldPerPixel } from './camera';
@@ -131,7 +134,9 @@ export interface SnapRefineInput {
    * 수직 발은 첫 점에서 그 토막으로 내린 발이 토막 밖(또는 끝점)이라 point는 그 발을 토막 범위로 자른 토막 끝(곡선 위 발이 그쪽에 있다),
    * 교차점은 두 토막이 허용치보다 조금 떨어져 지나가 point는 가장 가까운 두 점의 가운데다. 앱이 정확한 점을 모르면 null을 돌려준다 — 그러면 후보가 없다.
    * 결과는 종류·토막·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억해 커서가 움직여도 다시 부르지 않는다).
-   * 0.20.0: 'axisEdge'도 열린 후보가 있다 — 직선(line)이 토막과 3D로 만나지 않지만 그 활꼴(현과 곡선 사이)을 지날 만큼 가까이 지나간다. point는 직선 위에서 토막에 가장 가까운 점
+   * 0.20.0: 'axisEdge'도 열린 후보가 있다 — 직선(line)이 토막과 3D로 만나지 않지만 그 활꼴(현과 곡선 사이)을 지날 만큼 가까이 지나간다. point는 직선 위에서 토막에 가장 가까운 점.
+   * 0.22.0: 직선이 현의 직선과 같은 평면에서 토막 밖에서 만나거나 나란하면(활꼴을 두 번 지날 수 있다) 현의 다른 끝(나란하면 각 끝)에서 직선에 내린 발을 point로
+   * 한 번 더 부른다. 앱은 같은 계산(point 둘레의 교차 하나)이면 두 교차를 따로 준다
    */
   open?: boolean;
 }
@@ -162,6 +167,12 @@ export interface SnapRefineFaceInput {
    * 'onFace'는 커서마다 다른 점이라 바로 앞 호출과 입력이 같을 때만 다시 쓴다(0.14.0 'onEdge'와 같다)
    */
   ray: { origin: V3; dir: V3 };
+  /**
+   * 0.22.0 열린 후보면 true(아니면 이 필드가 없다 — 'axisFace'만): 선(line)이 face 삼각형을 뚫지 않지만 그 삼각형과 곡면 사이를 지날 만큼 가까이 지나간다
+   * (곡면이 삼각형 밖으로 볼록해 선이 곡면만 뚫는 자리 — 실루엣 둘레 등). point는 선 위에서 그 삼각형에 가장 가까운 점이다.
+   * 앱은 열린 후보가 아닐 때와 같이 그 선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 만나지 않거나 모르면 null — 그러면 후보가 없다
+   */
+  open?: boolean;
 }
 
 /** 면 위 점 다듬기 종류(0.21.0 — SnapRefineFaceInput.kind): 'axisFace'(0.19.0)·'onFace' */

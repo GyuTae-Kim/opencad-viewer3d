@@ -20,6 +20,7 @@ export type {
   MeasureResult,
   MeasureSnapOptions,
   WalkOptions,
+  OnPickOptions,
   PickEvent,
   PickOptions,
   ProjectedPoint,
@@ -48,12 +49,15 @@ export type {
   OpenEdgeCandidate,
   OpenEdgeLine,
   OpenEdgeSnap,
+  OpenFaceCandidate,
+  OpenFaceSnap,
   TrackEdgeSnap,
   TrackFaceHit,
   TrackGuide,
   TrackLine,
   TrackSegment,
   TrackSnap,
+  TrackTriangle,
 } from './track';
 export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
