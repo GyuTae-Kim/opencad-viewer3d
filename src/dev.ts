@@ -10,6 +10,7 @@
  * 0.8.0 단추: 붙잡기+(가운데 점·앱 중심 점), 음영 뒤 모서리, 대비 선 색, 중력·부딪힘(걷기)
  * 0.9.0 단추: 추론 붙잡기(붙잡기+에 교차점·수직 발·축 방향까지), 그물 선 색(상자·구의 윤곽선·외곽선 색)
  * 0.10.0 단추: 나란함·잠금(추론 붙잡기에 나란함과 Shift 잠금까지), 잠금(앱 단추 꼴 setMeasureInferenceLock)
+ * 0.16.0 단추: 끌어온 축(나란함·잠금에 inference.track까지). 측정 상태 줄에 둘째 점이 놓인 선분(묶음 id#번호)·끌어온 점
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -159,6 +160,17 @@ toggle(
   '추론 붙잡기에 더해 지나간 선분과 나란한 방향, Shift를 누르고 있는 동안 지금 방향(축·나란함·수직) 잠금',
 );
 button('잠금', () => viewer.setMeasureInferenceLock(!viewer.measureInferenceLock), '지금 미리 보기의 방향을 잠그거나 푼다(터치 단추 꼴 — setMeasureInferenceLock)');
+// 0.16.0: 다른 점에서 끌어온 축(점 붙잡기 위에 0.5초 머문 점의 X·Y·Z 축과 첫 점 축 위 나란한 자리)
+toggle(
+  '끌어온 축',
+  (v) =>
+    viewer.setMeasureSnap(
+      v
+        ? { midpoints: true, edges: true, points: demoSnapPoints(), inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true } }
+        : null,
+    ),
+  '나란함·잠금에 더해, 점(꼭짓점·끝점·중심 등) 위에 0.5초 머물면 그 점을 기억하고(최근 셋) 그 점을 지나는 X·Y·Z 축과 첫 점 축 위에서 그 점과 나란한 자리에도 붙잡기(Esc로 지우기)',
+);
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -341,7 +353,11 @@ const hiBtn = button('구간 강조', () => {
 viewer.onMeasure((m) => {
   // 붙잡기를 켰으면 두 점의 종류(축 붙잡기는 0.9.1부터 그 축)
   const snap = m && (m.snapA !== undefined || m.snapB !== undefined) ? ` · ${m.snapA ?? '자유'} → ${m.snapB === 'axis' && m.axisB ? `${m.axisB.toUpperCase()}축` : (m.snapB ?? '자유')}` : '';
-  info = m ? `측정: ${m.distance.toFixed(3)} mm (ΔX ${m.dx.toFixed(3)} ΔY ${m.dy.toFixed(3)} ΔZ ${m.dz.toFixed(3)})${snap}` : '';
+  // 0.16.0: 둘째 점이 놓인 선분(묶음 id#원본 번호, 교차점이면 둘째 선분도)과 끌어온 축의 끌어온 점
+  const pb = m ? viewer.measurePoints[1] : undefined;
+  const seg = pb?.segment ? ` [${pb.segment.id}#${pb.segment.index}${pb.other ? ` × ${pb.other.id}#${pb.other.index}` : ''}]` : '';
+  const from = pb?.trackFrom ? ` [끌어온 점 ${pb.trackFrom.map((x) => x.toFixed(1)).join(', ')}]` : '';
+  info = m ? `측정: ${m.distance.toFixed(3)} mm (ΔX ${m.dx.toFixed(3)} ΔY ${m.dy.toFixed(3)} ΔZ ${m.dz.toFixed(3)})${snap}${seg}${from}` : '';
   showStatus();
 });
 
