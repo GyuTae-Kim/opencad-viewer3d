@@ -14,7 +14,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { createServer } from 'node:http';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readArgs, slug, USAGE } from './args.mjs';
+import { readArgs, readyWaitMs, slug, USAGE } from './args.mjs';
 import { buildPage } from './build.mjs';
 import { launchChrome } from './chrome.mjs';
 import { classify, countStatuses, exitCode, markdown, valueDiff } from './compare.mjs';
@@ -56,7 +56,7 @@ async function main() {
   /** @type {ReturnType<typeof readArgs>} */
   let args;
   try {
-    args = readArgs(process.argv.slice(2));
+    args = readArgs(process.argv.slice(2), process.env);
   } catch (e) {
     console.error(String(/** @type {Error} */ (e).message));
     console.error(USAGE);
@@ -130,19 +130,23 @@ async function main() {
   /** @type {Map<string, number>} */
   const timing = new Map();
 
+  // 장면·값 묶음 하나의 CDP 한도(--timeout·PIXELS_TIMEOUT, 기본 120초)와 비교 페이지 준비 한도(그 1/4과 30초 가운데 긴 것)
+  const tmo = args.timeoutMs;
+  const readyMs = readyWaitMs(tmo);
+  if (tmo !== 120_000) log(`CDP 한도 ${tmo / 1000}초, 페이지 준비 한도 ${readyMs / 1000}초`);
   try {
     for (let run = 0; run < args.runs; run++)
       for (const side of /** @type {const} */ (['head', 'base'])) {
         const tr = Date.now();
         pageErrors.length = 0;
-        await browser.send('Page.navigate', { url: `http://127.0.0.1:${port}/${side}/page.html?w=${w}&h=${h}` });
+        await browser.send('Page.navigate', { url: `http://127.0.0.1:${port}/${side}/page.html?w=${w}&h=${h}` }, tmo);
         let ready = false;
-        for (let i = 0; i < 300 && !ready; i++) {
+        for (const end = Date.now() + readyMs; !ready && Date.now() < end; ) {
           await new Promise((r) => setTimeout(r, 100));
-          ready = await browser.evaluate('!!(window.pixels && window.pixels.ready)').catch(() => false);
+          ready = await browser.evaluate('!!(window.pixels && window.pixels.ready)', tmo).catch(() => false);
         }
-        if (!ready) throw new Error(`${side} 비교 페이지가 30초 안에 준비되지 않았습니다${pageErrors.length ? `: ${pageErrors.join(' / ')}` : ''}`);
-        const list = await browser.evaluate('({ shots: pixels.shots, values: pixels.values, info: pixels.info() })');
+        if (!ready) throw new Error(`${side} 비교 페이지가 ${readyMs / 1000}초 안에 준비되지 않았습니다${pageErrors.length ? `: ${pageErrors.join(' / ')}` : ''}`);
+        const list = await browser.evaluate('({ shots: pixels.shots, values: pixels.values, info: pixels.info() })', tmo);
         const listKey = JSON.stringify([list.shots, list.values]);
         if (!shotNames || !valueNames) {
           firstListKey = listKey;
@@ -153,7 +157,7 @@ async function main() {
         if (list.info?.renderer === '(WebGL2 없음)') throw new Error('헤드리스 Chrome에서 WebGL2를 만들지 못했습니다(SwiftShader 인자·GPU 흉내를 확인하세요)');
         for (const name of shotNames) {
           const ts = Date.now();
-          const r = await browser.evaluate(`pixels.shot(${JSON.stringify(name)})`);
+          const r = await browser.evaluate(`pixels.shot(${JSON.stringify(name)})`, tmo);
           if (run === 0 && side === 'head') timing.set(name, Date.now() - ts);
           /** @type {Outcome} */
           let o;
@@ -173,7 +177,7 @@ async function main() {
         }
         for (const name of valueNames) {
           const ts = Date.now();
-          const r = await browser.evaluate(`pixels.value(${JSON.stringify(name)})`);
+          const r = await browser.evaluate(`pixels.value(${JSON.stringify(name)})`, tmo);
           if (run === 0 && side === 'head') timing.set(name, Date.now() - ts);
           /** @type {Outcome} */
           let o;
@@ -259,6 +263,7 @@ async function main() {
     size: args.size,
     runs: args.runs,
     only: args.only ? String(args.only) : null,
+    timeoutSeconds: tmo / 1000,
     chrome: browser.version,
     webgl,
     startedAt,
