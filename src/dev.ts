@@ -11,6 +11,7 @@
  * 0.9.0 단추: 추론 붙잡기(붙잡기+에 교차점·수직 발·축 방향까지), 그물 선 색(상자·구의 윤곽선·외곽선 색)
  * 0.10.0 단추: 나란함·잠금(추론 붙잡기에 나란함과 Shift 잠금까지), 잠금(앱 단추 꼴 setMeasureInferenceLock)
  * 0.16.0 단추: 끌어온 축(나란함·잠금에 inference.track까지). 측정 상태 줄에 둘째 점이 놓인 선분(묶음 id#번호)·끌어온 점
+ * 0.17.0: 같은 단추로 끌어온 두 점의 축이 만나는 점·끌어온 축이 모서리와 만나는 점. 상태 줄에 미리 보기의 끌어온 축(둘째 축·놓인 선분)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -46,6 +47,9 @@ let info = '';
 let pickInfo = '';
 let secInfo = '';
 let upInfo = '';
+/** 0.17.0: 측정 미리 보기의 끌어온 축 설명(상태 줄) */
+let hoverInfo = '';
+const pt = (p: readonly number[]): string => `(${p.map((x) => x.toFixed(1)).join(', ')})`;
 /** 나눠 올리기 진행 알림 기록(자동 확인용) */
 const progress: [number, number][] = [];
 let scene: Scene3d = makeScene({ offset, bake });
@@ -60,7 +64,7 @@ const showStatus = (): void => {
   const s = viewer.stats;
   const off = offset ? ` · 이동 ${offset.toExponential(0)}${bake ? '(굽기)' : '(원점)'}` : '';
   const tx = s.textures.count ? ` · 무늬 ${s.textures.ready}/${s.textures.count}` : '';
-  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}  ${upInfo}  ${secInfo}  ${info}  ${pickInfo}`;
+  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
 };
 viewer.onCameraChange(() => {
   showStatus();
@@ -169,7 +173,8 @@ toggle(
         ? { midpoints: true, edges: true, points: demoSnapPoints(), inference: { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true } }
         : null,
     ),
-  '나란함·잠금에 더해, 점(꼭짓점·끝점·중심 등) 위에 0.5초 머물면 그 점을 기억하고(최근 셋) 그 점을 지나는 X·Y·Z 축과 첫 점 축 위에서 그 점과 나란한 자리에도 붙잡기(Esc로 지우기)',
+  '나란함·잠금에 더해, 점(꼭짓점·끝점·중심 등) 위에 0.5초 머물면 그 점을 기억하고(최근 셋) 그 점을 지나는 X·Y·Z 축과 첫 점 축 위에서 그 점과 나란한 자리, ' +
+    '기억한 두 점의 축이 만나는 점, 그 축이 모서리와 만나는 점에도 붙잡기(Esc로 지우기)',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
@@ -356,10 +361,27 @@ viewer.onMeasure((m) => {
   // 0.16.0: 둘째 점이 놓인 선분(묶음 id#원본 번호, 교차점이면 둘째 선분도)과 끌어온 축의 끌어온 점
   const pb = m ? viewer.measurePoints[1] : undefined;
   const seg = pb?.segment ? ` [${pb.segment.id}#${pb.segment.index}${pb.other ? ` × ${pb.other.id}#${pb.other.index}` : ''}]` : '';
-  const from = pb?.trackFrom ? ` [끌어온 점 ${pb.trackFrom.map((x) => x.toFixed(1)).join(', ')}]` : '';
+  // 0.17.0: 끌어온 축끼리의 교차면 둘째 끌어온 점과 그 축
+  const from = pb?.trackFrom ? ` [끌어온 점 ${pt(pb.trackFrom)}${pb.trackOther ? ` × ${pt(pb.trackOther.from)}의 ${pb.trackOther.axis.toUpperCase()}축` : ''}]` : '';
   info = m ? `측정: ${m.distance.toFixed(3)} mm (ΔX ${m.dx.toFixed(3)} ΔY ${m.dy.toFixed(3)} ΔZ ${m.dz.toFixed(3)})${snap}${seg}${from}` : '';
   showStatus();
 });
+/** 0.17.0: 측정 미리 보기의 끌어온 축 — 첫 점 축 위 나란한 자리, 끌어온 점의 축(둘째 축과 만나는 점이면 그 축도, 모서리와 만나는 점이면 그 선분) */
+viewer.canvas.addEventListener('pointermove', () =>
+  requestAnimationFrame(() => {
+    const h = viewer.measureHoverSnap;
+    const ax = (a: string | undefined): string => `${(a ?? '').toUpperCase()}축`;
+    const next = !h?.trackFrom
+      ? ''
+      : h.direction && !h.trackOther && !h.segment
+        ? `미리 보기: 첫 점 ${ax(h.axis)} 위 ${pt(h.trackFrom)}와 나란한 자리`
+        : `미리 보기: ${pt(h.trackFrom)}의 ${ax(h.axis)}${h.trackOther ? ` × ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}` : ''}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}`;
+    if (next !== hoverInfo) {
+      hoverInfo = next;
+      showStatus();
+    }
+  }),
+);
 
 /** 큰 자료 측정: 선분 segs개 + 구(sseg) 장면을 올리고 프레임·BVH·고르기 시간을 잰다 */
 async function bench(o: { segs?: number; sseg?: number; frames?: number; width?: number } = {}): Promise<Record<string, number | string>> {
