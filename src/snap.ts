@@ -10,10 +10,13 @@
  *
  * 0.15.0: 교차점(두 토막 — other)도 넘기고, 꺾은선으로는 후보가 없지만 곡선 위에는 있을 수 있는 "열린 후보"(토막 밖으로 떨어진 수직 발,
  * 허용치보다 조금 떨어져 지나가는 두 토막의 교차)는 앱이 다듬어 준 점으로 후보를 만든다(refineOpen — 호출 한도와 기억 RefineMemo).
+ *
+ * 0.18.0: 축(첫 점 축·끌어온 축)과 선분의 교차('axisEdge')도 그 축 직선(line)과 함께 넘긴다. 앱이 축 직선과 곡선의 교차점을 주면
+ * 그 점을 축 직선 위로 내린 자리를 쓴다(acceptOnLine — 축에서 화면 반 화소 넘게 벗어난 점은 버린다).
  */
 import type { Pick3d, SnapKind } from './types';
-import { type ViewFrame, projectToScreen } from './camera';
-import type { SnapAxis } from './inference';
+import { type ViewFrame, projectToScreen, viewDepth, worldPerPixel } from './camera';
+import { type SnapAxis, unitDir } from './inference';
 import type { V3 } from './math';
 import type { MeasureResult } from './viewer';
 
@@ -68,9 +71,17 @@ export interface SnapSegment {
 /**
  * 다듬을 점의 종류(0.14.0): 'perpendicular' = 첫 점에서 커서 둘레 선분으로 내린 수직 발(추론 붙잡기),
  * 'midpoint' = 코어가 붙잡은 선분 가운데 점(midpoints — 앱 점 pointsFor의 가운데 점은 아니다), 'onEdge' = 붙잡지 않은 선분·윤곽선 위 점.
- * 0.15.0: 'intersection' = 커서 둘레 두 선분의 교차점(추론 붙잡기 — 둘째 선분은 SnapRefineInput.other)
+ * 0.15.0: 'intersection' = 커서 둘레 두 선분의 교차점(추론 붙잡기 — 둘째 선분은 SnapRefineInput.other).
+ * 0.18.0: 'axisEdge' = 축(첫 점 축 — inference.axisEdges, 끌어온 축 — inference.track)이 선분과 만나는 점(그 축 직선은 SnapRefineInput.line)
  */
-export type SnapRefineKind = 'perpendicular' | 'midpoint' | 'onEdge' | 'intersection';
+export type SnapRefineKind = 'perpendicular' | 'midpoint' | 'onEdge' | 'intersection' | 'axisEdge';
+
+/** 다듬을 점이 놓인 축 직선(0.18.0 — 'axisEdge'만): 지나는 점(첫 측정 점이나 끌어온 점), 단위 방향, 축 이름. 모두 복사본 */
+export interface SnapRefineLine {
+  origin: V3;
+  dir: V3;
+  axis: SnapAxis;
+}
 
 /** 다듬기 손잡이(MeasureSnapOptions.refine)가 받는 것(0.14.0 — 모두 복사본, 세계 좌표) */
 export interface SnapRefineInput {
@@ -81,6 +92,11 @@ export interface SnapRefineInput {
   segment: SnapSegment;
   /** 0.15.0: 교차점('intersection')일 때만 — 둘째 선분 */
   other?: SnapSegment;
+  /**
+   * 0.18.0: 축과 선분의 교차('axisEdge')일 때만 — 그 축 직선. 앱은 이 직선이 segment의 곡선과 만나는 점(point 둘레)을 돌려준다.
+   * 만나지 않거나 모르면 null. 결과는 종류·코어 점·토막·축 직선·첫 점으로만 정해져야 한다(뷰어가 커서 광선을 빼고 기억한다 — 0.15.0 열린 후보와 같다)
+   */
+  line?: SnapRefineLine;
   /** 첫 측정 점(찍었으면 — 수직 발의 기준점), 없으면 null */
   first: V3 | null;
   /** 커서 광선(원점은 가까운 면 위, 방향은 단위) — 선분 위 점을 곡선에서 광선에 가장 가까운 점으로 다듬을 때 */
@@ -202,7 +218,28 @@ export function acceptRefined(f: ViewFrame, core: readonly number[], q: readonly
   return Math.hypot(s[0] - c[0], s[1] - c[1]) <= maxPx;
 }
 
+/**
+ * 축과 선분의 교차를 앱이 다듬은 점 q를 받을지(0.18.0, 'axisEdge'): q를 축 직선(origin을 지나는 방향 dir — 길이는 상관없다) 위로 수직으로 내린 자리 p가
+ * q에서 그 깊이의 화면 반 화소(아주 큰 좌표는 좌표 크기의 1e-9배) 안이고, acceptRefined(코어 점 core에서 화면 maxPx 안, 눈 뒤·가까운 면 앞이 아님)면 p.
+ * 아니면 null. 축 직선 위로 내리므로 세계 축이면 지나는 점과 남은 두 좌표가 정확히 같다(찍은 점이 첫 점 축에서 셈 오차만큼도 벗어나지 않게).
+ * 앱이 축과 상관없는 곡선 위 점(모르는 종류를 모서리 위 점처럼 푼 값 등)을 돌려주면 버리고 코어 점을 쓴다
+ */
+export function acceptOnLine(f: ViewFrame, core: readonly number[], q: readonly number[], line: { origin: readonly number[]; dir: readonly number[] }, maxPx: number): V3 | null {
+  const e = unitDir([0, 0, 0], line.dir);
+  const o = line.origin;
+  if (!e || !Number.isFinite(o[0]!) || !Number.isFinite(o[1]!) || !Number.isFinite(o[2]!)) return null;
+  const t = (q[0]! - o[0]!) * e[0] + (q[1]! - o[1]!) * e[1] + (q[2]! - o[2]!) * e[2];
+  const p: V3 = [o[0]! + e[0] * t, o[1]! + e[1] * t, o[2]! + e[2] * t];
+  if (!p.every(Number.isFinite)) return null;
+  const tol = Math.max(0.5 * worldPerPixel(f, viewDepth(f, p)), 1e-9 * (1 + Math.max(Math.abs(p[0]), Math.abs(p[1]), Math.abs(p[2]))));
+  return dist3(q, p) <= tol && acceptRefined(f, core, p, maxPx) ? p : null;
+}
+
 const same3 = (a: readonly number[] | null, b: readonly number[] | null): boolean => (!a || !b ? a === b : a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
+
+/** 같은 축 직선인지(0.18.0 — 지나는 점·방향·축 이름, 둘 다 없으면 같다) */
+const sameLine = (a: SnapRefineLine | undefined, b: SnapRefineLine | undefined): boolean =>
+  !a || !b ? a === b : a.axis === b.axis && same3(a.origin, b.origin) && same3(a.dir, b.dir);
 
 /** 같은 선분 식별자인지(종류·id·번호·끝점, 둘 다 없으면 같다) */
 const sameSeg = (s: SnapSegment | undefined, t: SnapSegment | undefined): boolean =>
@@ -210,7 +247,8 @@ const sameSeg = (s: SnapSegment | undefined, t: SnapSegment | undefined): boolea
 
 /**
  * 같은 다듬기 입력인지(0.14.0 — 같은 자리에서 미리 본 뒤 누르기, 한도가 바뀌어 다시 구하기): 종류·코어 점·선분(종류·id·번호·끝점)·첫 점·커서 광선이 모두 같으면 true.
- * 같으면 뷰어는 앱 함수를 다시 부르지 않고 앞 결과를 쓴다(미리 본 점이 그대로 찍힌다). 0.15.0: 둘째 선분(other)·열린 후보(open)도 견준다
+ * 같으면 뷰어는 앱 함수를 다시 부르지 않고 앞 결과를 쓴다(미리 본 점이 그대로 찍힌다). 0.15.0: 둘째 선분(other)·열린 후보(open)도 견준다.
+ * 0.18.0: 축 직선(line)도 견준다
  */
 export function sameRefineInput(a: SnapRefineInput, b: SnapRefineInput): boolean {
   return (
@@ -218,6 +256,7 @@ export function sameRefineInput(a: SnapRefineInput, b: SnapRefineInput): boolean
     same3(a.point, b.point) &&
     sameSeg(a.segment, b.segment) &&
     sameSeg(a.other, b.other) &&
+    sameLine(a.line, b.line) &&
     !!a.open === !!b.open &&
     same3(a.first, b.first) &&
     same3(a.ray.origin, b.ray.origin) &&
@@ -235,10 +274,12 @@ const segKey = (s: SnapSegment): string => `${s.kind}|${s.id.length}:${s.id}|${s
 
 /**
  * 열린 후보 다듬기 기억의 열쇠(0.15.0): 종류·코어 점·선분(둘째 선분)·첫 점. 커서 광선은 넣지 않는다 —
- * 열린 후보의 코어 점은 토막과 첫 점으로만 정해지므로(커서와 상관없다) 커서가 그 둘레에서 움직이는 동안 같은 열쇠다
+ * 열린 후보의 코어 점은 토막과 첫 점으로만 정해지므로(커서와 상관없다) 커서가 그 둘레에서 움직이는 동안 같은 열쇠다.
+ * 0.18.0: 축과 선분의 교차('axisEdge')도 이 기억을 쓴다 — 축 직선(line)이 있으면 열쇠 끝에 붙는다(없으면 0.15.0 열쇠 그대로)
  */
-export function openRefineKey(c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first'>): string {
-  return `${c.kind}#${c.point.join(',')}#${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}#${c.first ? c.first.join(',') : '-'}`;
+export function openRefineKey(c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line'>): string {
+  const l = c.line;
+  return `${c.kind}#${c.point.join(',')}#${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
 }
 
 /** 열린 후보 다듬기 기억(0.15.0): 열쇠 → 앱이 돌려준 점(받을 수 있는 수 셋의 복사본, 아니면 null). 가장 오래 쓰지 않은 것부터 지운다 */

@@ -52,14 +52,17 @@ import {
   type MeasureSnapPick,
   type SnapCandidate,
   type SnapRefineInput,
+  type SnapRefineLine,
   type SnapSegment,
   OPEN_REFINE_CALLS,
   RefineMemo,
+  acceptOnLine,
   acceptRefined,
   chooseMeasureSnap,
   copySegment,
   finitePoint,
   measureResult,
+  openRefineKey,
   refineOpen,
   refineTarget,
   sameRefineInput,
@@ -68,7 +71,18 @@ import {
   snapSegmentsOf,
   withinSnapLimit,
 } from './snap';
-import { MeasureTracker, type TrackGuide, chooseTrackPoint, sameTrackPoint, trackAlongFirst, trackAxisSnap, trackCrossSnap, trackEdgeSnap, trackPairSnap } from './track';
+import {
+  MeasureTracker,
+  type TrackGuide,
+  axisEdgeSnap,
+  chooseTrackPoint,
+  sameTrackPoint,
+  trackAlongFirst,
+  trackAxisSnap,
+  trackCrossSnap,
+  trackEdgeSnap,
+  trackPairSnap,
+} from './track';
 import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
 import {
   type InferenceLock,
@@ -340,7 +354,9 @@ export interface MeasureSnapOptions {
    * (터치는 머무르기가 없다 — 앱이 setMeasureTrackPoints로 준다), 첫 점 축 위에서 그 점과 나란한 자리와 그 점을 지나는 X·Y·Z 축에도 붙잡는다.
    * 차례는 점 붙잡기 → 첫 점 축 위 나란한 자리 → 첫 점 축·나란함 → 끌어온 축. 두 점째를 찍거나 측정을 지우거나 붙잡기 선택을 다시 주면 잊는다.
    * 0.17.0: 끌어온 두 점의 서로 다른 축이 3D로 만나는 점(trackOther)과 끌어온 축이 커서 둘레 선분·윤곽선과 만나는 점(segment)도 붙잡는다 —
-   * 첫 점 축 위 나란한 자리와 함께 점 후보로 첫 점 축·나란함보다 먼저다(셋 사이는 화면에서 가까운 것, 뒤 차례는 1화소 넘게 가까워야 한다). 첫 점 전에도 된다
+   * 첫 점 축 위 나란한 자리와 함께 점 후보로 첫 점 축·나란함보다 먼저다(셋 사이는 화면에서 가까운 것, 뒤 차례는 1화소 넘게 가까워야 한다). 첫 점 전에도 된다.
+   * 0.18.0(true에 들지 않는다): axisEdges = 첫 점을 지나는 X·Y·Z 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점(snap 'axis'·axis·direction·segment —
+   * 끌어온 점이 없어도 된다). 점 후보로 첫 점 축·나란함보다 먼저고, 끌어온 점 후보 셋 뒤 차례로 함께 견준다. 방향이 있어 Shift로 그 축에 잠근다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -360,7 +376,10 @@ export interface MeasureSnapOptions {
    * "열린 후보"(SnapRefineInput.open — 첫 점에서 내린 발이 토막 밖인 커서 둘레 토막의 수직 발, 허용치보다 조금 떨어져 지나가는 두 토막의 교차점)도
    * 부른다. 앱이 돌려준 점이 커서에서 붙잡기 거리 안이고 보이면(눈 뒤·가까운 면 앞·단면에 잘린 쪽이 아니고 가리지 않음) 그 점으로 붙잡기 후보가 되고,
    * null이면 후보가 없다(refine이 없거나 null만 돌려주면 0.14.0과 같다). 열린 후보는 미리 보기 한 번에 새로 OPEN_REFINE_CALLS(6)번까지 부르고,
-   * 커서 광선을 뺀 입력으로 기억해(setMeasureSnap마다 새로) 같은 둘레에서는 다시 부르지 않는다
+   * 커서 광선을 뺀 입력으로 기억해(setMeasureSnap마다 새로) 같은 둘레에서는 다시 부르지 않는다.
+   * 0.18.0: 축(첫 점 축 — inference.axisEdges, 끌어온 축 — inference.track)이 선분과 만나는 점도 'axisEdge'로 그 축 직선(SnapRefineInput.line)과 함께 넘긴다.
+   * 앱이 축 직선과 그 선분 곡선의 교차점을 주면 축 직선 위로 내린 자리를 쓰고(앱 점에서 화면 반 화소 넘게 축을 벗어나면 버린다), null이면 꺾은선 위 점 그대로다.
+   * 열린 후보처럼 커서 광선을 뺀 입력으로 기억한다
    */
   refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
 }
@@ -386,7 +405,8 @@ export interface MeasureHoverSnap {
   /**
    * 0.16.0: 그 점이 놓인 선분의 식별자(SnapSegment — 0.14.0 다듬기 입력과 같은 꼴, 복사본). 끝점(꺾은선 꼭짓점이면 고르기가 고른 쪽 하나)·가운데 점·
    * 붙잡지 않은 선분·윤곽선 위 점·수직 발·교차점(첫째 선분)과 그 다듬은 점에만 있다. 그물 꼭짓점·면 위 점·점 묶음의 점·앱 점·축·나란함·잠근 선 위 점에는 없다.
-   * 0.17.0: 끌어온 축이 선분·윤곽선과 만나는 점(snap 'axis'·trackFrom)에는 그 선분이 실린다
+   * 0.17.0: 끌어온 축이 선분·윤곽선과 만나는 점(snap 'axis'·trackFrom)에는 그 선분이 실린다.
+   * 0.18.0: 첫 점 축이 선분·윤곽선과 만나는 점(snap 'axis'·direction, trackFrom 없음 — inference.axisEdges)에도 그 선분이 실린다
    */
   segment?: SnapSegment;
   /** 0.16.0: 교차점이면 둘째 선분(복사본) */
@@ -3611,17 +3631,21 @@ export class Viewer3d {
       return out;
     }
     // 끌어온 축(0.16.0 — 켰고 기억한 점이 있을 때만): 점 붙잡기가 하나도 없을 때 첫 점 축 위에서 끌어온 점과 나란한 자리가 첫 점 축보다 먼저다.
-    // 0.17.0: 끌어온 축끼리의 교차·끌어온 축과 선분의 교차도 점 후보로 함께 견준다(화면에서 가까운 것, 뒤 차례는 TRACK_YIELD_PX 넘게 가까워야) — 첫 점 전에도
+    // 0.17.0: 끌어온 축끼리의 교차·끌어온 축과 선분의 교차도 점 후보로 함께 견준다(화면에서 가까운 것, 뒤 차례는 TRACK_YIELD_PX 넘게 가까워야) — 첫 점 전에도.
+    // 0.18.0: 첫 점 축과 선분의 교차(inference.axisEdges — 끌어온 점이 없어도)를 그 셋 뒤 차례로 함께 견준다
     const tracks = this.tracker?.size ? this.tracker.view : null;
     const noPoint = !r || !r.kind;
-    if (tracks && noPoint) {
-      const cross = first ? trackCrossSnap(f, first, tracks, x, y, snapPx) : null;
-      const pair = trackPairSnap(f, tracks, x, y, snapPx, first);
-      const edge = trackEdgeSnap(f, tracks, nearSegs(), x, y, snapPx, first, null, (p, sg) => {
+    const axisEdges = !!(first && inf?.axisEdges);
+    if ((tracks || axisEdges) && noPoint) {
+      const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
         return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
-      });
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge]);
+      };
+      const cross = tracks && first ? trackCrossSnap(f, first, tracks, x, y, snapPx) : null;
+      const pair = tracks ? trackPairSnap(f, tracks, x, y, snapPx, first) : null;
+      const edge = tracks ? trackEdgeSnap(f, tracks, nearSegs(), x, y, snapPx, first, null, vis) : null;
+      const axe = axisEdges ? axisEdgeSnap(f, first!, nearSegs(), x, y, snapPx, null, vis) : null;
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       // 끌어온 점을 지나는 그 축 선이 첫 점도 지나면(끌어온 점이 첫 점 축 위) 첫 점 축 위 점이기도 하다 — 방향을 실어 잠글 수 있게
       const along = (from: V3, axis: SnapAxis): V3 | null => (first ? trackAlongFirst(f, first, from, axis) : null);
@@ -3641,6 +3665,24 @@ export class Viewer3d {
         else {
           const l = first ? this.lineLockAt(f, first, edge.p, [edge.seg.a, edge.seg.b], null) : null;
           if (l) out.lineLock = l;
+        }
+        // 0.18.0 다듬기: 앱이 끌어온 축 직선과 그 선분의 곡선이 만나는 점을 주면 그 점(축 위로 내린 자리). 잠글 방향은 코어 점으로 정했다(0.14.0 규칙)
+        const rp = sg && so.refine ? this.axisEdgeRefined(so, f, x, y, snapPx, edge.p, sg, edge.from, edge.axis, first) : null;
+        if (rp) {
+          out.p = rp;
+          out.refined = true;
+        }
+        return out;
+      }
+      if (t && t === axe) {
+        // 0.18.0 첫 점 축과 선분의 교차: 첫 점 축 위 점이라 그 축 방향(잠글 때), 그 선분 식별자(segment)
+        const out: MeasurePick = { p: axe.p, vertex: true, kind: 'axis', axis: axe.axis, direction: axe.direction };
+        const sg = nearSegmentId(axe.seg);
+        if (sg) out.segment = copySegment(sg);
+        const rp = sg && so.refine ? this.axisEdgeRefined(so, f, x, y, snapPx, axe.p, sg, first!, axe.axis, first) : null;
+        if (rp) {
+          out.p = rp;
+          out.refined = true;
         }
         return out;
       }
@@ -3721,6 +3763,47 @@ export class Viewer3d {
     }
     if (!q || !acceptRefined(f, r.p, q, snapPx) || this.clippedAway(q, t.segment.id) || (t.other && this.clippedAway(q, t.other.id))) return null;
     return [q[0], q[1], q[2]];
+  }
+
+  /**
+   * 축과 선분의 교차 다듬기(0.18.0, 'axisEdge'): 코어 점 core(축과 꺾은선 토막의 교차), 그 토막 sg, 축 직선(origin을 지나는 세계 축 axis)을 앱 refine에 넘겨
+   * 받을 수 있는 점(acceptOnLine — 축 직선 위로 내린 자리가 앱 점에서 화면 반 화소 안, 코어 점에서 화면 붙잡기 거리 안, 그 묶음 단면에서 남는 쪽)이면 그 자리.
+   * 아니면 null(코어 점 그대로). 결과는 커서 광선을 뺀 입력(종류·코어 점·토막·축 직선·첫 점)으로 기억한다(0.15.0 열린 후보의 RefineMemo — 커서가 그 둘레를
+   * 움직이는 동안 다시 부르지 않는다). 가림은 다시 따지지 않는다(0.14.0과 같다 — 코어 점이 보이므로 그 바로 둘레다)
+   */
+  private axisEdgeRefined(
+    so: NonNullable<Viewer3d['snapOpt']>,
+    f: ViewFrame,
+    x: number,
+    y: number,
+    snapPx: number,
+    core: V3,
+    sg: SnapSegment,
+    origin: readonly number[],
+    axis: SnapAxis,
+    first: V3 | null,
+  ): V3 | null {
+    const refine = so.refine;
+    if (!refine) return null;
+    const line: SnapRefineLine = { origin: [origin[0]!, origin[1]!, origin[2]!], dir: axisLock(axis).direction, axis };
+    const ray = screenRay(f, x, y);
+    const input: SnapRefineInput = {
+      kind: 'axisEdge',
+      point: [core[0], core[1], core[2]],
+      segment: copySegment(sg),
+      first: first ? [first[0], first[1], first[2]] : null,
+      ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
+      line: { origin: [...line.origin] as V3, dir: [...line.dir] as V3, axis },
+    };
+    const key = openRefineKey(input);
+    let q = so.openMemo.get(key);
+    if (q === undefined) {
+      q = finitePoint(refine(input));
+      so.openMemo.set(key, q);
+    }
+    if (!q) return null;
+    const p = acceptOnLine(f, core, q, line, snapPx);
+    return p && !this.clippedAway(p, sg.id) ? p : null;
   }
 
   /** 세계 점 p가 묶음 id의 단면 평면(여러 단면이면 그 묶음을 자르는 것, 없는 묶음이면 모든 묶음을 자르는 평면)에 잘린 쪽인지 */

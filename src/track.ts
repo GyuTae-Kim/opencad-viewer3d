@@ -9,8 +9,10 @@
  * - 끌어온 축(trackAxisSnap): 기억한 점 P를 지나는 X·Y·Z 축 위에서 커서 광선에 가장 가까운 점
  * - 끌어온 축끼리의 교차(0.17.0 trackPairSnap): 기억한 두 점 P·Q의 서로 다른 축(P의 X축과 Q의 Y축 등)이 3D로 만나는 점(만나지 않으면 없다)
  * - 끌어온 축과 선분의 교차(0.17.0 trackEdgeSnap): P의 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점
+ * - 첫 점 축과 선분의 교차(0.18.0 axisEdgeSnap): 첫 측정 점 A를 지나는 X·Y·Z 축이 커서 둘레 선분·윤곽선과 3D로 만나는 점(trackEdgeSnap과 같은 허용치·빼는 규칙 —
+ *   끌어온 점이 없어도 된다. 뷰어는 MeasureInference.axisEdges를 켰을 때)
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
- * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
+ * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -260,21 +262,84 @@ export function trackEdgeSnap<S extends TrackSegment>(
   let best: TrackEdgeSnap<S> | null = null;
   for (const P of tracks) {
     if ((skip && sameTrackPoint(P, skip)) || cursorOn(f, P, x, y, snapPx)) continue;
-    for (const [axis, e] of dirs)
-      for (const s of segs) {
-        const g = [s.b[0]! - s.a[0]!, s.b[1]! - s.a[1]!, s.b[2]! - s.a[2]!];
-        const c = closestMid(P, e, s.a, g, true);
-        if (!c) continue;
-        const tol = meetTol(f, c.m, s.wpp);
-        if (!(c.gap <= tol) || dist3(c.m, s.a) <= tol || dist3(c.m, s.b) <= tol || dist3(c.m, P) <= tol || (skip && dist3(c.m, skip) <= tol)) continue;
-        if (s.keep && !s.keep(c.m)) continue;
-        const dist = screenDistance(f, c.m, x, y);
-        if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
-        if (visible && !visible(c.m, s)) continue;
-        best = { p: c.m, axis, from: [P[0]!, P[1]!, P[2]!], distPx: dist, seg: s };
-      }
+    best = crossEdges<S, TrackEdgeSnap<S>>(f, P, dirs, segs, x, y, snapPx, skip, visible, best, (p, axis, _e, s, dist) => ({
+      p,
+      axis,
+      from: [P[0]!, P[1]!, P[2]!],
+      distPx: dist,
+      seg: s,
+    }));
   }
   return best;
+}
+
+/**
+ * 점 P를 지나는 축들(dirs)이 선분들(segs)과 3D로 만나는 점 가운데 커서에 가장 가까운 것(trackEdgeSnap·axisEdgeSnap이 함께 쓴다 — 규칙은 trackEdgeSnap 머리글).
+ * best(지금까지 고른 것)보다 가까운 것만 take로 만들어 돌려주고, 없으면 best 그대로. 축 차례 → 선분 차례, 같으면 앞의 것
+ */
+function crossEdges<S extends TrackSegment, T extends { distPx: number }>(
+  f: ViewFrame,
+  P: readonly number[],
+  dirs: readonly (readonly [SnapAxis, V3])[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  skip: readonly number[] | null | undefined,
+  visible: ((p: V3, seg: S) => boolean) | null | undefined,
+  best: T | null,
+  take: (p: V3, axis: SnapAxis, e: V3, seg: S, distPx: number) => T,
+): T | null {
+  for (const [axis, e] of dirs)
+    for (const s of segs) {
+      const g = [s.b[0]! - s.a[0]!, s.b[1]! - s.a[1]!, s.b[2]! - s.a[2]!];
+      const c = closestMid(P, e, s.a, g, true);
+      if (!c) continue;
+      const tol = meetTol(f, c.m, s.wpp);
+      if (!(c.gap <= tol) || dist3(c.m, s.a) <= tol || dist3(c.m, s.b) <= tol || dist3(c.m, P) <= tol || (skip && dist3(c.m, skip) <= tol)) continue;
+      if (s.keep && !s.keep(c.m)) continue;
+      const dist = screenDistance(f, c.m, x, y);
+      if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
+      if (visible && !visible(c.m, s)) continue;
+      best = take(c.m, axis, e, s, dist);
+    }
+  return best;
+}
+
+/** 첫 점 축과 선분의 교차 결과(0.18.0): 찍을 점, 그 축과 단위 방향(잠글 때 — 세계 축이면 +X·+Y·+Z), 커서와의 화면 거리, 그 점이 놓인 선분(받은 segs의 그 객체) */
+export interface AxisEdgeSnap<S extends TrackSegment = TrackSegment> {
+  p: V3;
+  axis: SnapAxis;
+  direction: V3;
+  distPx: number;
+  seg: S;
+}
+
+/**
+ * 첫 점 축과 선분의 교차(0.18.0): 첫 측정 점 a를 지나는 X·Y·Z 축이 선분 segs(커서 둘레 선분·윤곽선 — 뷰어는 segmentsNear 차례)와 3D로 만나는 점이
+ * 커서에서 snapPx 안이면 후보(가까운 것, 같으면 X·Y·Z → 선분 차례). 규칙은 trackEdgeSnap과 같다 —
+ * 허용치는 선분 쪽 화면 반 화소(0.5 × wpp), 선분 끝점·축과 나란한 선분·a 자리의 교차(a가 그 선분 위)·단면에서 잘린 쪽(seg.keep)은 빼고,
+ * visible(p, seg)는 지금 고른 것보다 가까운 후보에만 묻는다. 커서가 a의 화면 자리 snapPx 안이면(세 축이 모두 지나는 곳 — axisSnap과 같다) 없다.
+ * 결과의 direction은 그 축 단위 방향이라 Shift·setMeasureInferenceLock(true)가 그 축으로 잠근다. axes는 trackCrossSnap과 같다(앱의 그리기 축)
+ */
+export function axisEdgeSnap<S extends TrackSegment>(
+  f: ViewFrame,
+  a: readonly number[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  axes?: TrackAxes | null,
+  visible?: ((p: V3, seg: S) => boolean) | null,
+): AxisEdgeSnap<S> | null {
+  if (!segs.length || cursorOn(f, a, x, y, snapPx)) return null;
+  return crossEdges<S, AxisEdgeSnap<S>>(f, a, axesOf(axes), segs, x, y, snapPx, null, visible, null, (p, axis, e, s, dist) => ({
+    p,
+    axis,
+    direction: [e[0], e[1], e[2]],
+    distPx: dist,
+    seg: s,
+  }));
 }
 
 /**
