@@ -68,7 +68,7 @@ import {
   snapSegmentsOf,
   withinSnapLimit,
 } from './snap';
-import { MeasureTracker, sameTrackPoint, trackAxisSnap, trackCrossSnap } from './track';
+import { MeasureTracker, type TrackGuide, chooseTrackPoint, sameTrackPoint, trackAlongFirst, trackAxisSnap, trackCrossSnap, trackEdgeSnap, trackPairSnap } from './track';
 import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
 import {
   type InferenceLock,
@@ -86,6 +86,7 @@ import {
   lockFromSnap,
   openCandidates,
   lockedSnap,
+  nearSegmentId,
   normalizeInference,
   parallelSnap,
   unitDir,
@@ -337,7 +338,9 @@ export interface MeasureSnapOptions {
    * 자홍 안내선), lock = Shift를 누르고 있는 동안 지금 방향 추론(축·나란함·수직)을 잠근다(Viewer3d.setMeasureInferenceLock은 이 선택과 상관없이 된다)
    * 0.16.0(true에 들지 않는다): track = 다른 점에서 끌어온 축 안내 — 마우스·펜이 점 붙잡기 위에 머문 점(2화소 안에서 dwellMs, 기본 500 ms)을 최근 셋까지 기억하고
    * (터치는 머무르기가 없다 — 앱이 setMeasureTrackPoints로 준다), 첫 점 축 위에서 그 점과 나란한 자리와 그 점을 지나는 X·Y·Z 축에도 붙잡는다.
-   * 차례는 점 붙잡기 → 첫 점 축 위 나란한 자리 → 첫 점 축·나란함 → 끌어온 축. 두 점째를 찍거나 측정을 지우거나 붙잡기 선택을 다시 주면 잊는다
+   * 차례는 점 붙잡기 → 첫 점 축 위 나란한 자리 → 첫 점 축·나란함 → 끌어온 축. 두 점째를 찍거나 측정을 지우거나 붙잡기 선택을 다시 주면 잊는다.
+   * 0.17.0: 끌어온 두 점의 서로 다른 축이 3D로 만나는 점(trackOther)과 끌어온 축이 커서 둘레 선분·윤곽선과 만나는 점(segment)도 붙잡는다 —
+   * 첫 점 축 위 나란한 자리와 함께 점 후보로 첫 점 축·나란함보다 먼저다(셋 사이는 화면에서 가까운 것, 뒤 차례는 1화소 넘게 가까워야 한다). 첫 점 전에도 된다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -382,13 +385,19 @@ export interface MeasureHoverSnap {
   refined?: boolean;
   /**
    * 0.16.0: 그 점이 놓인 선분의 식별자(SnapSegment — 0.14.0 다듬기 입력과 같은 꼴, 복사본). 끝점(꺾은선 꼭짓점이면 고르기가 고른 쪽 하나)·가운데 점·
-   * 붙잡지 않은 선분·윤곽선 위 점·수직 발·교차점(첫째 선분)과 그 다듬은 점에만 있다. 그물 꼭짓점·면 위 점·점 묶음의 점·앱 점·축·나란함·잠근 선 위 점에는 없다
+   * 붙잡지 않은 선분·윤곽선 위 점·수직 발·교차점(첫째 선분)과 그 다듬은 점에만 있다. 그물 꼭짓점·면 위 점·점 묶음의 점·앱 점·축·나란함·잠근 선 위 점에는 없다.
+   * 0.17.0: 끌어온 축이 선분·윤곽선과 만나는 점(snap 'axis'·trackFrom)에는 그 선분이 실린다
    */
   segment?: SnapSegment;
   /** 0.16.0: 교차점이면 둘째 선분(복사본) */
   other?: SnapSegment;
   /** 0.16.0: 끌어온 축(inference.track)이면 그 축을 끌어온 점 P(복사본) — 점선은 P에서 이 점까지 */
   trackFrom?: V3;
+  /**
+   * 0.17.0: 끌어온 축끼리의 교차면 이 점에서 만나는 둘째 끌어온 축(끌어온 점 Q와 그 축 — 복사본). 첫째는 trackFrom과 axis다.
+   * 끌어온 축이 선분·윤곽선과 만나는 점은 이 필드 없이 trackFrom·axis와 segment(그 선분)가 실린다
+   */
+  trackOther?: TrackGuide;
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -412,6 +421,8 @@ export interface MeasurePoint {
   other?: SnapSegment;
   /** 0.16.0: 끌어온 축(inference.track)으로 찍었으면 그 축을 끌어온 점(복사본) */
   trackFrom?: V3;
+  /** 0.17.0: 끌어온 축끼리의 교차로 찍었으면 둘째 끌어온 축(복사본 — MeasureHoverSnap.trackOther와 같은 규칙) */
+  trackOther?: TrackGuide;
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -583,7 +594,8 @@ type Item = { kind: 'mesh'; item: Mesh3d } | { kind: 'line'; item: LineSet3d } |
  * 측정 점 고르기 결과(미리 보기·누르기): 찍을 점·붙잡았는지·종류, 0.9.0 축 붙잡기의 축,
  * 0.10.0 방향 추론의 단위 방향·잠갔는지·기준 선분·잠근 선으로 옮겨 온 점과 그 종류,
  * 0.12.0 점 붙잡기가 놓인 선분 직선이 첫 점을 지날 때 잠글 방향(lineLock — 결과·measureHoverSnap에는 싣지 않는다),
- * 0.14.0 앱이 다듬은 점이면 refined, 0.16.0 그 점이 놓인 선분 식별자(segment·교차점이면 other)와 끌어온 축의 끌어온 점(trackFrom)
+ * 0.14.0 앱이 다듬은 점이면 refined, 0.16.0 그 점이 놓인 선분 식별자(segment·교차점이면 other)와 끌어온 축의 끌어온 점(trackFrom),
+ * 0.17.0 끌어온 축끼리의 교차면 둘째 끌어온 축(trackOther)
  */
 type MeasurePick = {
   p: V3;
@@ -600,6 +612,7 @@ type MeasurePick = {
   segment?: SnapSegment;
   other?: SnapSegment;
   trackFrom?: V3;
+  trackOther?: TrackGuide;
 };
 /** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지, 0.16.0 선분 식별자·끌어온 점 — 있는 것만) */
 const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
@@ -613,8 +626,11 @@ const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
     if (s.other) r.other = s.other;
   }
   if (s.trackFrom) r.trackFrom = s.trackFrom;
+  if (s.trackOther) r.trackOther = s.trackOther;
   return r;
 };
+/** 끌어온 축 하나의 복사본(0.17.0) */
+const copyGuide = (g: TrackGuide): TrackGuide => ({ from: [g.from[0], g.from[1], g.from[2]], axis: g.axis });
 /** 점 붙잡기(머무르기로 끌어올 수 있는 점 — 0.16.0)인지: 꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발이고 잠근 선 위 점이 아님 */
 const dwellPointOf = (h: MeasurePick | null): V3 | null =>
   h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' ? h.p : null;
@@ -2468,6 +2484,7 @@ export class Viewer3d {
       if (h.other) r.other = copySegment(h.other);
     }
     if (h.trackFrom) r.trackFrom = [...h.trackFrom] as V3;
+    if (h.trackOther) r.trackOther = copyGuide(h.trackOther);
     return r;
   }
 
@@ -2616,6 +2633,7 @@ export class Viewer3d {
         if (s.other) r.other = copySegment(s.other);
       }
       if (s?.trackFrom) r.trackFrom = [...s.trackFrom] as V3;
+      if (s?.trackOther) r.trackOther = copyGuide(s.trackOther);
       return r;
     });
   }
@@ -3592,12 +3610,40 @@ export class Viewer3d {
       }
       return out;
     }
-    // 끌어온 축(0.16.0 — 켰고 기억한 점이 있을 때만): 점 붙잡기가 하나도 없을 때 첫 점 축 위에서 끌어온 점과 나란한 자리가 첫 점 축보다 먼저다
+    // 끌어온 축(0.16.0 — 켰고 기억한 점이 있을 때만): 점 붙잡기가 하나도 없을 때 첫 점 축 위에서 끌어온 점과 나란한 자리가 첫 점 축보다 먼저다.
+    // 0.17.0: 끌어온 축끼리의 교차·끌어온 축과 선분의 교차도 점 후보로 함께 견준다(화면에서 가까운 것, 뒤 차례는 TRACK_YIELD_PX 넘게 가까워야) — 첫 점 전에도
     const tracks = this.tracker?.size ? this.tracker.view : null;
     const noPoint = !r || !r.kind;
-    if (tracks && noPoint && first) {
-      const t = trackCrossSnap(f, first, tracks, x, y, snapPx);
-      if (t) return { p: t.p, vertex: true, kind: 'axis', axis: t.axis, direction: t.direction!, trackFrom: t.from };
+    if (tracks && noPoint) {
+      const cross = first ? trackCrossSnap(f, first, tracks, x, y, snapPx) : null;
+      const pair = trackPairSnap(f, tracks, x, y, snapPx, first);
+      const edge = trackEdgeSnap(f, tracks, nearSegs(), x, y, snapPx, first, null, (p, sg) => {
+        const sp = projectToScreen(f, p);
+        return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
+      });
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge]);
+      if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
+      // 끌어온 점을 지나는 그 축 선이 첫 점도 지나면(끌어온 점이 첫 점 축 위) 첫 점 축 위 점이기도 하다 — 방향을 실어 잠글 수 있게
+      const along = (from: V3, axis: SnapAxis): V3 | null => (first ? trackAlongFirst(f, first, from, axis) : null);
+      if (t && t === pair) {
+        const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
+        const dir = along(pair.from, pair.axis);
+        if (dir) out.direction = dir;
+        return out;
+      }
+      if (t && t === edge) {
+        // 그 선분 위 점(segment — 0.16.0 선분 위 점과 같은 식별자). 그 선분 직선이 첫 점을 지나면 0.12.0처럼 그 방향으로 잠글 수 있다
+        const out: MeasurePick = { p: edge.p, vertex: true, kind: 'axis', axis: edge.axis, trackFrom: edge.from };
+        const sg = nearSegmentId(edge.seg);
+        if (sg) out.segment = copySegment(sg);
+        const dir = along(edge.from, edge.axis);
+        if (dir) out.direction = dir;
+        else {
+          const l = first ? this.lineLockAt(f, first, edge.p, [edge.seg.a, edge.seg.b], null) : null;
+          if (l) out.lineLock = l;
+        }
+        return out;
+      }
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
     if (first && noPoint && (inf?.axes || inf?.parallel)) {
@@ -4735,10 +4781,13 @@ export class Viewer3d {
       );
     }
     // 0.16.0 끌어온 축: 끌어온 점에서 붙잡을 점까지 점선(그 선이 축과 나란하면 축 색 — 끌어온 점을 지나는 축은 늘, 첫 점 축 위 나란한 자리는
-    // 두 점이 다른 좌표 하나를 함께 쓸 때), 기억한 점마다 작은 십자(끌어온 점은 크게, 점선 색)
+    // 두 점이 다른 좌표 하나를 함께 쓸 때), 기억한 점마다 작은 십자(끌어온 점은 크게, 점선 색).
+    // 0.17.0 끌어온 축끼리의 교차: 둘째 끌어온 점에서도 그 축 색 점선과 큰 십자
     if (tracks) {
       const tf = hover?.trackFrom ?? null;
+      const to = hover?.trackOther ?? null;
       let col = th.measure;
+      const col2 = to ? axisColor(to.axis) : th.measure;
       if (tf && hover) {
         const u = unitDir(tf, hover.p);
         const ax: SnapAxis | null = !hover.direction ? (hover.axis ?? null) : u && axisAligned(u) ? (Math.abs(u[0]) > 0.5 ? 'x' : Math.abs(u[1]) > 0.5 ? 'y' : 'z') : null;
@@ -4746,15 +4795,22 @@ export class Viewer3d {
         const s0 = P(tf), s1 = P(hover.p);
         line(s0, s1, th.textBg, 3.5, []);
         line(s0, s1, col, 1.5, [4, 3]);
+        if (to) {
+          const s2 = P(to.from);
+          line(s2, s1, th.textBg, 3.5, []);
+          line(s2, s1, col2, 1.5, [4, 3]);
+        }
       }
       for (const q of tracks) {
         const sp = P(q);
         if (!sp) continue;
-        const on = !!tf && sameTrackPoint(q, tf);
+        const on1 = !!tf && sameTrackPoint(q, tf);
+        const on2 = !on1 && !!to && sameTrackPoint(q, to.from);
+        const on = on1 || on2;
         const r = on ? 6 : 4;
         for (const [color, w] of [
           [th.textBg, on ? 4 : 3.5],
-          [on ? col : th.measure, on ? 2 : 1.5],
+          [on1 ? col : on2 ? col2 : th.measure, on ? 2 : 1.5],
         ] as const) {
           ctx.strokeStyle = color;
           ctx.lineWidth = w;

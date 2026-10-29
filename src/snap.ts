@@ -369,6 +369,8 @@ export interface MeasurePointSnap {
   other?: SnapSegment;
   /** 0.16.0: 끌어온 축(inference.track)으로 찍은 점이면 그 축을 끌어온 점 — 측정 결과에는 싣지 않는다 */
   trackFrom?: V3;
+  /** 0.17.0: 끌어온 축끼리의 교차로 찍은 점이면 둘째 끌어온 축 — 측정 결과에는 싣지 않는다 */
+  trackOther?: { from: V3; axis: SnapAxis };
 }
 
 /**
