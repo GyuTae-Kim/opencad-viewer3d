@@ -367,6 +367,8 @@ export interface MeasurePointSnap {
   /** 0.16.0: 그 점이 놓인 선분(snapSegmentsOf)과 교차점의 둘째 선분 — 측정 결과에는 싣지 않는다(measurePoints·measureHoverSnap에만) */
   segment?: SnapSegment;
   other?: SnapSegment;
+  /** 0.16.0: 끌어온 축(inference.track)으로 찍은 점이면 그 축을 끌어온 점 — 측정 결과에는 싣지 않는다 */
+  trackFrom?: V3;
 }
 
 /**
