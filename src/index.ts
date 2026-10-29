@@ -37,8 +37,8 @@ export type {
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
 export type { InferenceLock, InferenceLockInput, InferenceLockKind, MeasureInference, MeasureTrackOptions, NormalizedInference, SnapAxis } from './inference';
-export type { SnapRefineInput, SnapRefineKind, SnapSegment } from './snap';
-export type { DwellStep, TrackEdgeSnap, TrackGuide, TrackSegment, TrackSnap } from './track';
+export type { SnapFace, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
+export type { AxisEdgeSnap, AxisFaceSnap, DwellStep, TrackEdgeSnap, TrackFaceHit, TrackGuide, TrackLine, TrackSegment, TrackSnap } from './track';
 export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';

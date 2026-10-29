@@ -21,9 +21,10 @@ type V = Viewer3d & Record<string, any>;
  * edit·edit-big = base에 상자 윗면 위 높이 격자 그물(96² 마디, 큰 쪽은 520²)을 더한 자료(0.11.0 그물 바꾸기 — 장면마다 새로 만든다. 격자 배열을 제자리에서 고치므로),
  * arc = base에 거친 원 둘(상자 위에 뜬 12토막 원 꺾은선 선분 묶음, 상자 앞 바닥의 12토막 원판 그물 둘레 윤곽선)을 더한 자료(0.14.0 붙잡기 다듬기 — 앱이 정확한 원 위로 옮긴다),
  * arc2 = base에 상자 위에 뜬 12토막 원 꺾은선, 그와 한 점에서 3D로 만나는 세로 원 꺾은선, 원을 가로지르는 곧은 선분, 원 밖 멀리 있는 첫 점 선분을 더한 자료
- * (0.15.0 열린 수직 발·교차점 다듬기)
+ * (0.15.0 열린 수직 발·교차점 다듬기),
+ * post = base에 상자 위에 선 기둥 선분((60, 40, 90) → (60, 40, 120))을 더한 자료(0.18.0 축과 면의 교차 — 기둥 아래 끝의 Z축이 상자 윗면을 뚫는다)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post';
 
 interface Ctx {
   v: V;
@@ -84,6 +85,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
       };
     if (d === 'arc') s = { ...s, lines: [...s.lines, arcRing()], meshes: [...s.meshes, arcDisk()] };
     if (d === 'arc2') s = { ...s, lines: [...s.lines, ...arc2Lines()] };
+    if (d === 'post') s = { ...s, lines: [...s.lines, { id: '기둥', positions: new Float32Array([...POST_FOOT, 60, 40, 120]), color: [0.95, 0.6, 0.95, 1], width: 1.5, group: '기둥' }] };
     scenes.set(d, s);
   }
   return s;
@@ -2450,6 +2452,296 @@ function trackPairValues(d: 'base' | 'off'): ValueSet {
   };
 }
 
+// ───────────── 0.18.0 첫 점 축과 선분의 교차·축과 선분의 교차 다듬기 ─────────────
+/** 0.18.0 첫 점 축과 선분의 교차(inference.axisEdges)가 있는 판인지 — 그 선택이 measureSnap.inference에 남는다(0.17.0은 아무것도 켜지 않은 선택이라 끈다) */
+const v0180axisEdge: Need = (v, c) => {
+  const why = all(v090infer, fn('project', 'setGroupVisible', 'setMeasureInferenceLock'))(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { axisEdges: true } });
+  const ok = !!(v.measureSnap?.inference as any)?.axisEdges;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.18.0 첫 점 축과 선분의 교차(setMeasureSnap({ inference: { axisEdges } }))';
+};
+/** 0.18.0 첫 점(구멍 점 TRACK_P = (90, 50, 40))의 축이 상자 윗모서리와 만나는 네 자리: X축은 오른쪽(EDGE_X)·왼쪽, Y축은 뒤(EDGE_Y)·앞 */
+const AXIS_EDGES: [string, number[], number, number][] = [
+  ['x+', EDGE_X, 1, 3],
+  ['x-', [0, 50, 40], 1, 3],
+  ['y+', EDGE_Y, 3, 1],
+  ['y-', [90, 0, 40], 3, 1],
+];
+/** 구멍 점 P를 첫 점으로 찍고 구멍 점을 숨긴다(P의 X축 위 구멍 점들이 교차 자리 둘레에서 점 붙잡기로 먼저 잡히지 않게) */
+function axisEdgeFirst(c: Ctx, inference: Record<string, unknown>, extra: Record<string, unknown> = {}): void {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', true);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference, ...extra });
+  v.clearMeasure();
+  const p = c.at(c.world(TRACK_P));
+  if (p) c.click(p.x + 1, p.y);
+  v.setGroupVisible('구멍', false);
+}
+const axisEdgeShots: Shot[] = [
+  // 첫 점(구멍 점)의 X축이 상자 오른쪽 윗모서리와 만나는 점 — 첫 점에서 X축 색 안내선, 축 색 동그라미
+  {
+    name: 'base-measure-axis-edge',
+    data: 'base',
+    needs: v0180axisEdge,
+    setup: (c) => {
+      axisEdgeFirst(c, { axes: true, axisEdges: true });
+      const q = c.at(c.world(EDGE_X));
+      if (q) c.hover(q.x + 1, q.y + 3);
+    },
+  },
+];
+SHOTS.push(...axisEdgeShots);
+
+/**
+ * 0.18.0 첫 점 축과 선분의 교차 값(base·off): 구멍 점을 첫 점으로 찍고 그 X·Y축이 상자 윗모서리와 만나는 네 자리를 가리킨 미리 보기(종류·축·점·방향·끌어온 점·선분·다듬었는지)와
+ * 잠글 방향, Shift를 누른 채 같은 자리(잠금 상태·잠근 선 위 점), 오른쪽 모서리 교차를 두 점째로 찍은 결과·찍은 점. 같은 차례를 axisEdges 없이 되풀이한 값
+ * (꺼지면 0.17.0과 같은 첫 점 축 위 커서 자리·모서리 위 점)
+ */
+function axisEdgeValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-measure-axis-edge`,
+    data: d,
+    needs: v0180axisEdge,
+    run: (c) => {
+      const { v } = c;
+      const hoverRow = (name: string, p: readonly number[], dx: number, dy: number, shift = false): unknown[] => {
+        const q = c.at(c.world(p));
+        if (!q) return [name, null];
+        c.hover(q.x + dx, q.y + dy, 'mouse', shift);
+        v.renderNow();
+        const h = v.measureHoverSnap;
+        return [
+          name,
+          h ? [h.snap, h.axis ?? null, r10s(h.point), r10s(h.direction), r10s(h.trackFrom), segRow(h.segment), !!h.refined, !!h.locked] : null,
+          lockState(v.measureHoverLock),
+        ];
+      };
+      const sweep = (on: boolean): unknown[] => {
+        const rows: unknown[] = [];
+        const got: unknown[] = [];
+        const off = v.onMeasure((m: any) => m && got.push([r10s(m.a), r10s(m.b), r10(m.distance), m.snapB ?? null, m.axisB ?? null, r10s(m.directionB), m.lockedB ?? null]));
+        axisEdgeFirst(c, { axes: true, lock: true, ...(on ? { axisEdges: true } : {}) });
+        rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])]);
+        for (const [name, p, dx, dy] of AXIS_EDGES) rows.push(hoverRow(name, p, dx, dy));
+        // Shift를 누른 채 같은 자리 — 지금 미리 보기의 방향(축)으로 잠근다
+        rows.push(hoverRow('x+', EDGE_X, 1, 3), hoverRow('shift', EDGE_X, 1, 3, true), ['lock', lockState(v.measureInferenceLock)]);
+        rows.push(hoverRow('release', EDGE_X, 1, 3, false), ['lock', lockState(v.measureInferenceLock)]);
+        // 오른쪽 모서리 교차를 두 점째로
+        const e = c.at(c.world(EDGE_X));
+        if (e) c.click(e.x + 1, e.y + 3);
+        rows.push(['measure', got.at(-1) ?? null, v.measurePoints.map((q: any) => [q.snap, q.axis ?? null, r10s(q.direction), segRow(q.segment), !!q.refined])]);
+        off();
+        return rows;
+      };
+      return [
+        ['on', sweep(true)],
+        ['off', sweep(false)],
+      ];
+    },
+  };
+}
+
+/**
+ * 0.18.0 축과 선분의 교차 다듬기 값(arc 자료): 원판(바닥 12토막 원판 — 꼭짓점 15° + 30°·k라 0°·90°·180°·270°는 토막 가운데) 중심을 첫 점으로 찍고,
+ * 첫 점 X·Y축이 원판 둘레 윤곽선 토막과 만나는 네 자리를 가리킨다. 앱 refine은 축 직선과 정확한 원의 교차점(origin + dir·t, |… − 중심| = 반지름 — point에 가까운 근)을 준다.
+ * 미리 보기(종류·축·점·다듬었는지·원 위인지·방향·선분), 앱 호출 수(같은 자리 둘레를 두 번 가리켜도 한 번 — 기억), +X 교차를 두 점째로 찍은 거리(반지름과 1e-9 안인지),
+ * 같은 차례를 refine 없이·null·먼 점(지름 너머)·축에서 벗어난 점(곡선 위 다른 점)으로 되풀이한 값이 refine 없이와 같은지, 잠금 중 호출 수
+ */
+const axisEdgeRefineValues: ValueSet = {
+  name: 'arc-measure-axis-edge',
+  data: 'arc',
+  needs: all(v0180axisEdge, v0140refine),
+  run: (c) => {
+    const { v } = c;
+    const K = ARC_DISK;
+    // 원판을 맞춰 본 뒤 2.5배 물러난다(한 mm가 5화소쯤): 토막 끝(현 가운데에서 5.2 mm)은 붙잡기 거리 밖, 현의 처짐(0.68 mm)은 붙잡기 거리 안
+    v.fitItems([K.id], false);
+    const cam = v.getCamera();
+    v.setCamera({ ...cam, distance: cam.distance * 2.5 });
+    v.renderNow();
+    const dist3 =(p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+    const onArc = (p: readonly number[]): boolean => Math.abs(dist3(p, K.c) - K.r) < 1e-9 && Math.abs(p[2]! - K.c[2]!) < 1e-9;
+    /** 축 직선과 원판 원의 교차(원 평면 z = 중심 높이 위 직선만 — 그 밖은 null), point에 가까운 근 */
+    const lineCircle = (i: any): number[] | null => {
+      const o = i.line.origin, d = i.line.dir;
+      if (Math.abs(d[2]) > 1e-12 || Math.abs(o[2] - K.c[2]!) > 1e-9) return null;
+      const wx = o[0] - K.c[0]!, wy = o[1] - K.c[1]!;
+      const b = wx * d[0] + wy * d[1], cc = wx * wx + wy * wy - K.r * K.r, a = d[0] * d[0] + d[1] * d[1];
+      const disc = b * b - a * cc;
+      if (disc < 0) return null;
+      const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0] + d[0] * t, o[1] + d[1] * t, o[2]]);
+      return dist3(ts[0]!, i.point) <= dist3(ts[1]!, i.point) ? ts[0]! : ts[1]!;
+    };
+    const count = { n: 0 };
+    const exact = (i: any): number[] | null => {
+      if (i.kind !== 'axisEdge') return null;
+      count.n++;
+      return i.segment.id === K.id ? lineCircle(i) : null;
+    };
+    /** 첫 점 = 원판 중심(그물 꼭짓점). 축 방향 각 θ의 교차 자리(현 가운데 — 중심에서 r·cos15° 거리) */
+    const crossAt = (deg: number): number[] => {
+      const a = (deg * Math.PI) / 180, l = K.r * Math.cos((15 * Math.PI) / 180);
+      return [K.c[0]! + l * Math.cos(a), K.c[1]! + l * Math.sin(a), K.c[2]!];
+    };
+    const DIRS: [string, number][] = [
+      ['x+', 0],
+      ['y+', 90],
+      ['x-', 180],
+      ['y-', 270],
+    ];
+    const hoverRow = (name: string, p: readonly number[], dx: number, dy: number): unknown[] => {
+      const q = c.at(c.world(p));
+      if (!q) return [name, null];
+      c.hover(q.x + dx, q.y + dy);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, h.axis ?? null, r10s(h.point), !!h.refined, onArc(h.point), r10s(h.direction), segRow(h.segment)] : null];
+    };
+    const sweep = (refine: ((i: any) => number[] | null) | null): unknown[] => {
+      const rows: unknown[] = [];
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ edges: true, inference: { axes: true, lock: true, axisEdges: true }, ...(refine ? { refine } : {}) });
+      v.clearMeasure();
+      const a = c.at(c.world(K.c));
+      if (a) c.click(a.x + 1, a.y);
+      rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])]);
+      for (const [name, deg] of DIRS) {
+        const n0 = count.n;
+        rows.push(hoverRow(name, crossAt(deg), 1, 3), hoverRow(name, crossAt(deg), 3, 1), ['calls', count.n - n0]);
+      }
+      // +X 교차를 두 점째로
+      const e = c.at(c.world(crossAt(0)));
+      if (e) c.click(e.x + 1, e.y + 3);
+      const m = v.measurement();
+      rows.push([
+        'measure',
+        m ? [r10s(m.b), r10(m.distance), m.snapB ?? null, m.axisB ?? null, r10s(m.directionB)] : null,
+        !!m && Math.abs(m.distance - K.r) < 1e-9,
+        v.measurePoints.map((q: any) => [q.snap, !!q.refined, segRow(q.segment)]),
+      ]);
+      return rows;
+    };
+    const out: unknown[] = [];
+    const refined = sweep(exact);
+    out.push(['refined', refined], ['calls', count.n]);
+    const plain = sweep(null);
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+    out.push(['refined-differs', !same(refined, plain)]);
+    out.push(['null-same', same(sweep(() => null), plain)]);
+    // 지름 너머(붙잡기 거리 밖)·축에서 벗어난 원 위 점(원 위 10° 옆)은 버린다
+    out.push(['far-same', same(sweep((i: any) => (i.kind === 'axisEdge' ? [2 * K.c[0]! - i.point[0], 2 * K.c[1]! - i.point[1], i.point[2]] : null)), plain)]);
+    out.push([
+      'off-axis-same',
+      same(
+        sweep((i: any) => {
+          if (i.kind !== 'axisEdge') return null;
+          const t = Math.atan2(i.point[1] - K.c[1]!, i.point[0] - K.c[0]!) + (10 * Math.PI) / 180;
+          return [K.c[0]! + K.r * Math.cos(t), K.c[1]! + K.r * Math.sin(t), K.c[2]!];
+        }),
+        plain,
+      ),
+    ]);
+    // 잠금 중에는 부르지 않는다
+    v.setMeasureSnap({ edges: true, inference: { axes: true, lock: true, axisEdges: true }, refine: exact });
+    v.clearMeasure();
+    const a = c.at(c.world(K.c));
+    if (a) c.click(a.x + 1, a.y);
+    const n0 = count.n;
+    out.push(['lock', v.setMeasureInferenceLock('x'), hoverRow('locked', crossAt(0), 1, 3), count.n - n0]);
+    v.setMeasureInferenceLock(false);
+    return out;
+  },
+};
+
+// ───────────── 0.18.0 축과 면의 교차 ─────────────
+/** post 자료의 기둥 아래 끝(첫 점) — 그 Z축이 상자 윗면을 POST_HIT에서 뚫는다. 끌어온 점 TRACK_UP의 Z축은 TRACK_UP_HIT에서 */
+const POST_FOOT = [60, 40, 90];
+const POST_HIT = [60, 40, 40];
+const TRACK_UP = [20, 60, 70];
+const TRACK_UP_HIT = [20, 60, 40];
+/** 0.18.0 축과 면의 교차(inference.axisFaces)가 있는 판인지 */
+const v0180axisFace: Need = (v, c) => {
+  const why = all(v090infer, fn('project', 'setGroupVisible', 'setMeasureInferenceLock', 'setMeasureTrackPoints'))(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { axisFaces: true } });
+  const ok = !!(v.measureSnap?.inference as any)?.axisFaces;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.18.0 축과 면의 교차(setMeasureSnap({ inference: { axisFaces } }))';
+};
+/** 기둥 아래 끝을 첫 점으로 찍는다(공구 경로·구멍 점은 숨긴다) */
+function axisFaceFirst(c: Ctx, inference: Record<string, unknown>): void {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference });
+  v.clearMeasure();
+  const p = c.at(c.world(POST_FOOT));
+  if (p) c.click(p.x + 1, p.y);
+}
+const axisFaceShots: Shot[] = [
+  // 기둥 아래 끝(첫 점)의 Z축이 상자 윗면을 뚫는 점 — 첫 점에서 Z축 색 안내선, 축 색 동그라미
+  {
+    name: 'post-measure-axis-face',
+    data: 'post',
+    needs: v0180axisFace,
+    setup: (c) => {
+      axisFaceFirst(c, { axes: true, axisFaces: true });
+      const q = c.at(c.world(POST_HIT));
+      if (q) c.hover(q.x + 3, q.y + 1);
+    },
+  },
+];
+SHOTS.push(...axisFaceShots);
+
+/**
+ * 0.18.0 축과 면의 교차 값(post 자료): 기둥 아래 끝을 첫 점으로 찍고 그 Z축이 상자 윗면을 뚫는 자리, 끌어온 점의 Z축이 윗면을 뚫는 자리를 가리킨 미리 보기
+ * (종류·축·점·방향·끌어온 점·면 — 그물 id와 법선)와 잠글 방향, Shift 잠금, 첫 점 Z축 교차를 두 점째로 찍은 결과·찍은 점의 면. 같은 차례를 axisFaces 없이 되풀이한 값
+ */
+const axisFaceValues: ValueSet = {
+  name: 'post-measure-axis-face',
+  data: 'post',
+  needs: v0180axisFace,
+  run: (c) => {
+    const { v } = c;
+    const faceRow = (g: any): unknown[] | null => (g ? [g.id, Number.isInteger(g.index), r10s(g.normal)] : null);
+    const hoverRow = (name: string, p: readonly number[], shift = false): unknown[] => {
+      const q = c.at(c.world(p));
+      if (!q) return [name, null];
+      c.hover(q.x + 3, q.y + 1, 'mouse', shift);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, h.axis ?? null, r10s(h.point), r10s(h.direction), r10s(h.trackFrom), faceRow(h.face), !!h.locked] : null, lockState(v.measureHoverLock)];
+    };
+    const sweep = (on: boolean): unknown[] => {
+      const rows: unknown[] = [];
+      const got: unknown[] = [];
+      const off = v.onMeasure((m: any) => m && got.push([r10s(m.a), r10s(m.b), r10(m.distance), m.snapB ?? null, m.axisB ?? null, r10s(m.directionB)]));
+      axisFaceFirst(c, { axes: true, lock: true, track: true, ...(on ? { axisFaces: true } : {}) });
+      rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])]);
+      rows.push(hoverRow('first-z', POST_HIT));
+      rows.push(['set', v.setMeasureTrackPoints([c.world(TRACK_UP)])], hoverRow('track-z', TRACK_UP_HIT));
+      rows.push(hoverRow('first-z', POST_HIT), hoverRow('shift', POST_HIT, true), ['lock', lockState(v.measureInferenceLock)]);
+      rows.push(hoverRow('release', POST_HIT, false));
+      const e = c.at(c.world(POST_HIT));
+      if (e) c.click(e.x + 3, e.y + 1);
+      rows.push(['measure', got.at(-1) ?? null, v.measurePoints.map((q: any) => [q.snap, q.axis ?? null, r10s(q.direction), faceRow(q.face)])]);
+      off();
+      return rows;
+    };
+    return [
+      ['on', sweep(true)],
+      ['off', sweep(false)],
+    ];
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -2480,6 +2772,10 @@ const VALUES: ValueSet[] = [
   trackValues('off'),
   trackPairValues('base'),
   trackPairValues('off'),
+  axisEdgeValues('base'),
+  axisEdgeValues('off'),
+  axisEdgeRefineValues,
+  axisFaceValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
