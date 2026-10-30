@@ -4559,6 +4559,250 @@ const compactValues: ValueSet = {
   },
 };
 
+// ───────────── 0.27.0 그물 일부 면만 지나 고르기·끌어온 점의 나란함·수직·뷰어 글상자 기본 자리 ─────────────
+/** 0.27.0 그물 일부 면만 지나 고르기(setItemPickThrough)가 있는 판인지 */
+const v0270pickThrough: Need = (v, c) => all(v0240pickOpaque, fn('setItemPickThrough'))(v, c);
+/** 상자 윗면 삼각형(boxMesh 차례: 0·1 바닥, 2·3 윗면, 4~11 옆면) */
+const BOX_TOP = [{ start: 2, count: 2 }];
+
+/**
+ * 0.27.0 그물 일부 면만 지나 고르기 값(base·off — 새 값): 상자를 반투명·판을 불투명으로 두고 상자를 setItemPickOpaque로 켠 뒤 윗면 삼각형만 지나가게 하면
+ * 화면 격자 점마다 throughTranslucent 고르기의 짝(켜기 전 → 뒤 — 상자는 바닥·윗면·옆면으로, 윗면 자리는 상자 안쪽 바닥·옆면이 된다), 그물 면만 고르기와 같은지,
+ * 보통 고르기는 그대로인지, 상자 윗면 위 세 자리의 측정 미리 보기, 누르기 알림과 front, itemLook, 끈 뒤 켜기 전과 같은지
+ */
+function pickThroughRangeValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-pick-through-ranges`,
+    data: d,
+    needs: v0270pickThrough,
+    run: (c) => {
+      const { v } = c;
+      const spots: [number, number][] = [];
+      for (let y = 26; y < c.h; y += 61) for (let x = 24; x < c.w; x += 67) spots.push([x + 0.3, y + 0.4]);
+      const face = (p: any): string => (!p ? '-' : p.id !== '상자' || p.kind !== 'mesh' ? `${p.kind}:${p.id}` : `상자:${p.index < 2 ? '바닥' : p.index < 4 ? '윗면' : '옆면'}`);
+      const picks = (o: object): any[] => spots.map(([x, y]) => v.pick(x, y, o));
+      // 상자 윗면 위 구멍 점·공구 경로는 숨긴다(점·선분 고르기가 먼저라 윗면 자리를 덮는다)
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      v.setItemOpacity('상자', 0.4);
+      v.setItemColor('판', PLATE_OPAQUE);
+      v.setItemPickOpaque('상자', true);
+      v.renderNow();
+      const plain0 = JSON.stringify(picks({})), thru0 = picks({ throughTranslucent: true }), mesh0 = JSON.stringify(picks({ throughTranslucent: true, meshesOnly: true }));
+      v.setItemPickThrough('상자', BOX_TOP);
+      v.renderNow();
+      const look = v.itemLook('상자');
+      const thru1 = picks({ throughTranslucent: true }), mesh1 = picks({ throughTranslucent: true, meshesOnly: true });
+      const pairs = new Map<string, number>();
+      thru0.forEach((a, i) => {
+        const k = `${face(a)}>${face(thru1[i])}`;
+        pairs.set(k, (pairs.get(k) ?? 0) + 1);
+      });
+      const out: unknown[] = [
+        ['look', look ? [look.opacity, look.pickOpaque, look.pickThrough] : null],
+        ['pairs', [...pairs].sort(), spots.length],
+        ['meshes-only-same', mesh1.filter((p, i) => JSON.stringify(p) === JSON.stringify(thru1[i]) || (thru1[i] && thru1[i].kind !== 'mesh')).length],
+        ['plain-same', JSON.stringify(picks({})) === plain0],
+      ];
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ edges: true, throughTranslucent: true });
+      const rows: unknown[] = [];
+      for (const p of [
+        [70, 30, 40],
+        [100, 20, 40],
+        [60, 55, 40],
+      ]) {
+        const q = c.at(c.world(p));
+        if (!q) {
+          rows.push(null);
+          continue;
+        }
+        c.hover(q.x + 0.4, q.y + 0.5);
+        v.renderNow();
+        const h = v.measureHoverSnap;
+        rows.push(h ? [h.snap, r10s(h.point)] : null);
+      }
+      out.push(['measure-through', rows]);
+      v.setMeasureSnap(null);
+      v.setMeasureMode(false);
+      let got: any = undefined;
+      const off = v.onPick((p: any, e: any) => (got = [p ? [face(p), r10s(p.point)] : null, e.front ? face(e.front) : null]), { throughTranslucent: true, front: true });
+      const q = c.at(c.world([60, 40, 40]));
+      if (q) c.click(q.x + 0.3, q.y + 0.4);
+      off();
+      out.push(['onPick', got ?? null]);
+      v.setItemPickThrough('상자', null);
+      v.renderNow();
+      out.push(['off-same', JSON.stringify(picks({ throughTranslucent: true })) === JSON.stringify(thru0) && JSON.stringify(picks({ throughTranslucent: true, meshesOnly: true })) === mesh0]);
+      v.clearItemLooks();
+      v.setGroupVisible('공구 경로', true);
+      v.setGroupVisible('구멍', true);
+      v.renderNow();
+      return out;
+    },
+  };
+}
+
+/** 0.27.0 끌어온 점의 나란함·수직(inference.trackDirs)이 있는 판인지 */
+const v0270trackDirs: Need = (v, c) => {
+  const why = v0160track(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { track: true, trackDirs: true } });
+  const ok = !!(v.measureSnap?.inference as any)?.trackDirs;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.27.0 끌어온 점의 나란함·수직(inference.trackDirs)';
+};
+/** cross 자료의 엇갈린 선분 하나((10, 10) → (110, 70), z 40.5) 위 — 커서가 지나가 나란함 기준이 된다 */
+const DIR_REF = [40, 28, 40.5];
+/** 끌어온 점(구멍 점 자리 (90, 50, 40))에서 기준 선분과 나란한 선 위(15 앞)·수직인 선 위(30 — 기준 선분 반대쪽) */
+const DIR_U = [100 / Math.hypot(100, 60), 60 / Math.hypot(100, 60), 0];
+const DIR_PAR = [90 + 15 * DIR_U[0]!, 50 + 15 * DIR_U[1]!, 40];
+const DIR_PERP = [90 + 30 * DIR_U[1]!, 50 - 30 * DIR_U[0]!, 40];
+
+/** 공구 경로·구멍 점을 숨기고 끌어온 점의 나란함·수직을 켠 붙잡기로 기준 선분을 지나간 뒤 끌어온 점을 주고 target 옆을 가리킨다 */
+function trackDirPreview(c: Ctx, target: number[], dirs = true): void {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference: { axes: true, track: true, ...(dirs ? { trackDirs: true } : {}) } });
+  // 미리 보기는 그릴 때 구하므로 지나가는 자리마다 그린다
+  const r = c.at(c.world(DIR_REF));
+  if (r) c.hover(r.x + 0.4, r.y + 0.3);
+  v.renderNow();
+  v.setMeasureTrackPoints([c.world(TRACK_P)]);
+  const q = c.at(c.world(target));
+  if (q) c.hover(q.x + 2, q.y + 1);
+}
+/** 끌어온 점에서 기준 선분과 나란한 선·수직인 선(추론 색 쇄선, 기준 선분 점선 — 새 장면) */
+const trackDirShots: Shot[] = [
+  { name: 'cross-measure-track-dir', data: 'cross', needs: v0270trackDirs, setup: (c) => trackDirPreview(c, DIR_PAR) },
+  { name: 'cross-measure-track-dir-perp', data: 'cross', needs: v0270trackDirs, setup: (c) => trackDirPreview(c, DIR_PERP) },
+];
+SHOTS.push(...trackDirShots);
+
+/**
+ * 0.27.0 끌어온 점의 나란함·수직 값(cross — 새 값): 첫 점 전 나란한 선·수직인 선 위 미리 보기(종류·점·끌어온 점·기준 선분·잠글 방향 없음), 같은 자리를 trackDirs 없이,
+ * 첫 점을 찍은 뒤 같은 자리와 끌어온 점의 축 위, 잠근 동안(잠근 선 위), 수직인 선 위를 두 점째로 찍은 값
+ */
+const trackDirValues: ValueSet = {
+  name: 'cross-measure-track-dir',
+  data: 'cross',
+  needs: v0270trackDirs,
+  run: (c) => {
+    const { v } = c;
+    const row = (name: string): unknown[] => {
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, h.axis ?? null, r10s(h.point), r10s(h.trackFrom), h.edge ? h.edge.map(r10s) : null, r10s(h.direction)] : null, lockState(v.measureHoverLock)];
+    };
+    const out: unknown[] = [];
+    for (const dirs of [true, false]) {
+      trackDirPreview(c, DIR_PAR, dirs);
+      out.push(row(`par-${dirs}`));
+      trackDirPreview(c, DIR_PERP, dirs);
+      out.push(row(`perp-${dirs}`));
+      v.setMeasureSnap(null);
+      v.clearMeasure();
+    }
+    let got: any = null;
+    const off = v.onMeasure((m: any) => m && (got = [r10s(m.a), r10s(m.b), r10(m.distance), m.snapA ?? null, m.snapB ?? null]));
+    trackDirPreview(c, DIR_PAR);
+    // 첫 점: 상자 윗면 앞 구석
+    const a = c.at(c.world([120, 0, 40]));
+    if (a) c.click(a.x - 1, a.y + 1);
+    v.setMeasureTrackPoints([c.world(TRACK_P)]);
+    const r = c.at(c.world(DIR_REF));
+    if (r) c.hover(r.x + 0.4, r.y + 0.3);
+    out.push(row('ref'));
+    for (const [name, p] of [
+      ['first-par', DIR_PAR],
+      ['first-perp', DIR_PERP],
+      ['first-p-axis-x', [60, 50, 40]],
+    ] as [string, number[]][]) {
+      const q = c.at(c.world(p));
+      if (q) c.hover(q.x + 2, q.y + 1);
+      out.push(row(name));
+    }
+    v.setMeasureInferenceLock('x');
+    const q = c.at(c.world(DIR_PERP));
+    if (q) c.hover(q.x + 2, q.y + 1);
+    out.push(row('locked'));
+    v.setMeasureInferenceLock(false);
+    if (q) {
+      c.hover(q.x + 2, q.y + 1);
+      out.push(row('unlocked'));
+      c.click(q.x + 2, q.y + 1);
+    }
+    out.push(['second', got, v.measurePoints.map((p: any) => [p.snap, r10s(p.point), r10s(p.trackFrom), r10s(p.direction)])]);
+    off();
+    return out;
+  },
+};
+
+/** 0.27.0 뷰어 글상자 기본 자리(setMeasureLabelSpot)가 있는 판인지 */
+const v0270labelSpot: Need = (v, c) => all(fn('setMeasureLabelSpot', 'setAnnotations', 'setGroupVisible', 'project'))(v, c);
+/** 측정 거리 글상자는 아래, 덧그림 글상자는 가운데(화면 덧그림 — 새 장면) */
+const labelSpotShots: Shot[] = [
+  {
+    name: 'base-measure-label-spot',
+    data: 'base',
+    needs: v0270labelSpot,
+    capture: 'overlay',
+    setup: (c) => {
+      c.v.setMeasureLabelSpot({ measure: 'below' });
+      labelPreview(c, LABEL_TARGET);
+    },
+  },
+  {
+    name: 'base-annotation-spot',
+    data: 'base',
+    needs: v0270labelSpot,
+    capture: 'overlay',
+    setup: (c) => {
+      c.v.setMeasureLabelSpot({ annotations: 'center' });
+      overlapSetup(c);
+    },
+  },
+];
+SHOTS.push(...labelSpotShots);
+
+/**
+ * 0.27.0 뷰어 글상자 기본 자리 값(base — 새 값): 측정 거리 글상자·덧그림 글상자의 자리를 기본 자리마다(주지 않음·일곱 이름), 띠를 피할 자리로 준 뒤,
+ * 끈 뒤 처음 자리와 같은지, 그림 저장(renderImage)이 기본 자리를 따르는지(주지 않았을 때와 다른 화소 수)
+ */
+const labelSpotValues: ValueSet = {
+  name: 'base-label-spot',
+  data: 'base',
+  needs: v0270labelSpot,
+  run: (c) => {
+    const { v } = c;
+    overlapSetup(c);
+    v.renderNow();
+    const rect = (r: LabelRect | null): number[] | null => (r ? [r10(r.x), r10(r.y), r10(r.width), r10(r.height)] : null);
+    const now = (): unknown[] => {
+      v.renderNow();
+      return [rect(v.measureLabelRect), (v.annotationLabelRects as (LabelRect | null)[]).map(rect)];
+    };
+    const r0 = JSON.stringify(now());
+    const img0 = v.renderImage({}).data;
+    const out: unknown[] = [['none', JSON.parse(r0)]];
+    for (const s of ['topRight', 'topLeft', 'bottomRight', 'bottomLeft', 'center', 'above', 'below'] as const) {
+      v.setMeasureLabelSpot(s);
+      out.push([s, now(), v.measureLabelSpot]);
+    }
+    v.setMeasureLabelSpot({ measure: 'center', annotations: 'below' });
+    const img1 = v.renderImage({}).data;
+    out.push(['image-diff', rgbaDiff(img0, img1)[0] > 0]);
+    v.setMeasureLabelAvoid([{ x: 0, y: 0, width: c.w, height: 64 }]);
+    out.push(['band', now()]);
+    v.setMeasureLabelAvoid(null);
+    v.setMeasureLabelSpot(null);
+    out.push(['off-same', JSON.stringify(now()) === r0, rgbaDiff(img0, v.renderImage({}).data)[0]]);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -4618,6 +4862,10 @@ const VALUES: ValueSet[] = [
   releasePickValues,
   releaseRestoreValues,
   compactValues,
+  pickThroughRangeValues('base'),
+  pickThroughRangeValues('off'),
+  trackDirValues,
+  labelSpotValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -4665,6 +4913,8 @@ function reset(v: V, d: Data): void {
   call('setMeasureSnap', null);
   // 0.13.0: 측정을 지워도 남으므로 장면마다 끈다(뷰어 하나를 모든 장면이 함께 쓴다)
   call('setMeasureLabelAvoid', null);
+  // 0.27.0: 글상자 기본 자리도 측정을 지워도·장면을 바꿔도 남는다
+  call('setMeasureLabelSpot', null);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
   call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null });
