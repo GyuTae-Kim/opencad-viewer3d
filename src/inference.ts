@@ -84,6 +84,12 @@ export interface MeasureInference {
    * 0.29.0: { meets: true }면 그 선이 첫 점 축·첫 점의 나란함·다른 끌어온 점의 축, 커서 둘레 선분·윤곽선, 커서 아래 그물 면과 만나는 점에도 붙잡는다(기본 꺼짐)
    */
   trackDirs?: boolean | MeasureTrackDirOptions | null;
+  /**
+   * 0.29.0: 0.10.0 나란함(parallel — 첫 점에서)의 기준 선분 거르기(기본 없음 — 0.28.0처럼 지나간 선분이 모두 기준). 함수를 주면 커서가 지나간 선분·윤곽선을
+   * 이 함수에 물어(trackDirs의 edge와 같은 꼴·규칙 — 바로 앞에 물은 선분은 다시 묻지 않고, 던지거나 true가 아니면 받지 않는다) 받은 것만 첫 점 나란함의 기준으로 기억한다
+   * (받지 않으면 앞서 받은 기준이 남는다). 끌어온 점의 기준(trackDirs)과는 따로다 — 같은 함수를 둘 다에 주면 같은 선분은 한 번만 묻는다
+   */
+  parallelEdge?: TrackDirEdgeFilter | null;
 }
 
 /** 끌어온 축 안내 선택(0.16.0, MeasureInference.track) */
@@ -138,6 +144,8 @@ export interface NormalizedInference {
   lockFaces?: true;
   lockTracks?: true;
   trackDirs?: true | NormalizedTrackDirs;
+  /** 0.29.0: 첫 점 나란함의 기준 선분 거르기(함수를 줬을 때만) */
+  parallelEdge?: TrackDirEdgeFilter;
 }
 
 /** 편 끌어온 점의 나란함·수직 객체 꼴(0.28.0 { edge }, 0.29.0 meets) — 준 것만 열쇠가 있다(둘 다 없으면 객체가 아니라 true) */
@@ -193,6 +201,8 @@ export function normalizeInference(o: MeasureInference | boolean | null | undefi
   if (lockTracks) r.lockTracks = true;
   const trackDirs = o === true ? null : normalizeTrackDirs(o.trackDirs);
   if (trackDirs) r.trackDirs = trackDirs;
+  // 0.29.0: 첫 점 나란함 기준 거르기는 함수일 때만(이것만으로는 추론을 켜지 않는다 — parallel과 함께)
+  if (o !== true && typeof o.parallelEdge === 'function') r.parallelEdge = o.parallelEdge;
   return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track || axisEdges || axisFaces || lockEdges || lockFaces || lockTracks || trackDirs ? r : null;
 }
 

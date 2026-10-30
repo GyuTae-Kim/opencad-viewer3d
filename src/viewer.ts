@@ -416,7 +416,8 @@ export interface MeasureSnapOptions {
    * direction 없음 — 잠그지 않는다). 끌어온 축과 화면에서 가까운 것(같으면 끌어온 축)이고 첫 점 축·나란함 뒤 차례다. 끌어온 점에서 추론 색 쇄선을 긋는다.
    * 0.28.0: trackDirs: { edge(seg, item) } = 기준 선분이 될 수 있는 선분만(곡선을 나눈 현 등을 앱이 거른다 — 거른 선분을 지나면 앞 기준이 남는다)
    * 0.29.0: trackDirs: { meets: true } = 그 선이 첫 점 축·첫 점의 나란함·다른 끌어온 점의 축·커서 둘레 선분·커서 아래 면과 만나는 점(끌어온 점 후보 뒤 차례 —
-   * 첫 점 축·나란함보다 먼저). 첫 점 축과 만나면 axis·direction이 실려 Shift가 그 축에 잠근다
+   * 첫 점 축·나란함보다 먼저). 첫 점 축과 만나면 axis·direction이 실려 Shift가 그 축에 잠근다.
+   * 0.29.0: parallelEdge(seg, item) = 0.10.0 나란함(첫 점에서)의 기준 선분이 될 수 있는 선분만(trackDirs edge와 같은 꼴 — 따로 준다, 주지 않으면 0.28.0 그대로)
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -864,6 +865,8 @@ const refineLineOf = (l: OpenRefineLine): SnapRefineLine => (l.axis ? { origin: 
  * 끌어온 점 안내 선이 만나 볼 직선의 꼬리표(0.29.0 trackDirs { meets }): 첫 점을 지나는 축, 첫 점의 나란함(그 단위 방향과 0.10.0 기준 선분), 다른 끌어온 점의 축
  */
 type MeetTag = { kind: 'axis'; axis: SnapAxis } | { kind: 'parallel'; dir: V3; edge: [V3, V3] } | { kind: 'track'; from: V3; axis: SnapAxis };
+/** 기준 선분 거르기에 바로 앞에 물은 선분과 답(0.28.0 trackDirs edge, 0.29.0 parallelEdge — 물은 함수도) */
+type EdgeAsked = { fn: TrackDirEdgeFilter; item: object; kind: string; raw: number; ends: [V3, V3]; ok: boolean };
 /** 끌어온 점 안내 선이 만나는 점(0.29.0): 순수 결과와 그 안내의 기준 선분 */
 type TrackDirMeet = { snap: TrackDirMeetSnap<NearSegment, TrackFaceHit & SnapFace, MeetTag>; ref: [V3, V3] };
 /** 커서 둘레 그물 삼각형(0.22.0 선과 삼각형의 열린 교차): 세계 꼭짓점 셋·커서 쪽 깊이의 화소 세계 길이·남는 쪽 판정과 그 면(그물 id·삼각형 번호·눈 쪽 법선) */
@@ -1075,7 +1078,13 @@ export class Viewer3d {
    * 바로 앞에 물은 선분(같은 선분이면 다시 묻지 않는다 — 묶음 객체·배열 안 번호·끝점이 같을 때)
    */
   private trackDirRef: [V3, V3] | null = null;
-  private trackDirAsked: { item: object; kind: string; raw: number; ends: [V3, V3]; ok: boolean } | null = null;
+  private trackDirAsked: EdgeAsked | null = null;
+  /**
+   * 0.29.0 첫 점 나란함(0.10.0 parallel)의 기준 선분(inference.parallelEdge를 줬을 때만 — 그 함수가 받은 마지막 선분. 없으면 parallelRef = 0.28.0)과
+   * 바로 앞에 물은 선분(trackDirAsked와 같은 꼴 — 같은 함수·같은 선분이면 둘 가운데 어느 기억이든 다시 묻지 않는다)
+   */
+  private parallelOwn: [V3, V3] | null = null;
+  private parallelAsked: EdgeAsked | null = null;
   /**
    * 첫 점을 찍은 뒤 미리 보기에서 마지막으로 본 방향 추론(0.10.0 — setMeasureInferenceLock(true)가 커서가 캔버스를 떠난 뒤에도,
    * 예를 들어 마우스로 앱 단추를 누를 때 쓴다). 점을 찍거나 측정을 지우면 잊는다
@@ -2884,6 +2893,8 @@ export class Viewer3d {
     this.parallelRef = null;
     this.trackDirRef = null;
     this.trackDirAsked = null;
+    this.parallelOwn = null;
+    this.parallelAsked = null;
     // 0.16.0: 끌어온 점도 새로(끄면 상태가 없다)
     this.clearTrack();
     this.tracker = this.snapOpt?.inference?.track ? new MeasureTracker() : null;
@@ -4243,14 +4254,16 @@ export class Viewer3d {
     // 0.29.0 끌어온 점 안내 선이 만나는 점(trackDirs { meets }): 이 고르기가 기준을 바꾸기 전의 기준 선분으로 본다 — 커서가 만나 볼 선분 위에 있으면
     // 그 선분이 곧 새 기준이 되어 안내 선과 나란해지므로. 만나는 점을 고르면 기준을 되돌린다(그 점에 붙은 동안 기준이 바뀌지 않는다)
     const meetsOn = !!(inf?.trackDirs && inf.trackDirs !== true && inf.trackDirs.meets);
-    const refsBefore = meetsOn ? { parallel: this.parallelRef, track: this.trackDirRef } : null;
+    const refsBefore = meetsOn ? { parallel: this.parallelRef, track: this.trackDirRef, own: this.parallelOwn } : null;
     // 나란함(0.10.0): 커서가 지나간 선분·윤곽선을 기준으로 기억한다(첫 점을 찍기 전에도)
     // 0.27.0: 끌어온 점의 나란함·수직(trackDirs)도 같은 기준 선분을 쓴다(parallel을 켜지 않아도 기억한다)
     if ((inf?.parallel || inf?.trackDirs) && d?.ends) {
       this.parallelRef = d.ends;
       // 0.28.0: 앱이 기준 선분을 거르면(trackDirs { edge }) 받은 선분만 끌어온 점의 기준으로(앞 기준이 남는다 — 0.10.0 나란함 기준은 그대로)
       const tdEdge = inf.trackDirs && inf.trackDirs !== true ? inf.trackDirs.edge : null;
-      if (tdEdge && this.trackDirEdgeOk(tdEdge, d)) this.trackDirRef = d.ends;
+      if (tdEdge && this.edgeOk(tdEdge, d, 'track')) this.trackDirRef = d.ends;
+      // 0.29.0: 첫 점 나란함의 기준 거르기(parallelEdge)를 줬으면 받은 선분만 그 기준으로(앞 기준이 남는다)
+      if (inf.parallel && inf.parallelEdge && this.edgeOk(inf.parallelEdge, d, 'parallel')) this.parallelOwn = d.ends;
     }
     // 커서 둘레 선분(0.9.0 교차점·수직 발과 0.12.0 선분 방향 잠금이 함께 쓴다 — 필요할 때 한 번만 구한다)
     let near: NearSegment[] | null = null;
@@ -4433,13 +4446,15 @@ export class Viewer3d {
       if (t && meet && t === meet.snap) {
         this.parallelRef = refsBefore!.parallel;
         this.trackDirRef = refsBefore!.track;
+        this.parallelOwn = refsBefore!.own;
         return this.trackDirMeetPick(so, f, x, y, snapPx, meet, first);
       }
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
     if (first && noPoint && (inf?.axes || inf?.parallel)) {
       const a = inf.axes ? axisSnap(f, first, x, y, snapPx) : null;
-      const ref = inf.parallel ? this.parallelRef : null;
+      // 0.29.0: 첫 점 나란함 기준 거르기를 줬으면 그것이 받은 기준(parallelOwn), 아니면 지나간 선분(0.28.0)
+      const ref = inf.parallel ? (inf.parallelEdge ? this.parallelOwn : this.parallelRef) : null;
       const pr = ref ? parallelSnap(f, first, ref, x, y, snapPx, inf.axes) : null;
       if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
       if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
@@ -4509,7 +4524,7 @@ export class Viewer3d {
    */
   private trackDirMeet(
     inf: NormalizedInference,
-    refs: { parallel: [V3, V3] | null; track: [V3, V3] | null },
+    refs: { parallel: [V3, V3] | null; track: [V3, V3] | null; own: [V3, V3] | null },
     f: ViewFrame,
     x: number,
     y: number,
@@ -4528,7 +4543,8 @@ export class Viewer3d {
     const axes: SnapAxis[] = ['x', 'y', 'z'];
     if (first) {
       for (const axis of axes) lines.push({ from: first, dir: axisLock(axis).direction, tag: { kind: 'axis', axis } });
-      const pr = inf.parallel ? refs.parallel : null;
+      // 0.29.0: 첫 점 나란함 기준 거르기를 줬으면 그것이 받은 기준
+      const pr = inf.parallel ? (inf.parallelEdge ? refs.own : refs.parallel) : null;
       const e = pr ? unitDir(pr[0], pr[1]) : null;
       if (pr && e && !axisAligned(e)) lines.push({ from: first, dir: e, tag: { kind: 'parallel', dir: e, edge: pr } });
     }
@@ -4594,26 +4610,33 @@ export class Viewer3d {
   }
 
   /**
-   * 0.28.0 끌어온 점의 나란함·수직 기준 선분 거르기(inference.trackDirs { edge }): 고른 선분·윤곽선 d를 앱 함수에 물어 true면 받는다.
-   * 바로 앞에 물은 것과 같은 선분(같은 묶음 객체·종류·배열 안 번호·끝점)이면 다시 묻지 않는다. 앱 함수가 던지면 받지 않는다
+   * 기준 선분 거르기(0.28.0 끌어온 점 — inference.trackDirs { edge }, 0.29.0 첫 점 나란함 — inference.parallelEdge): 고른 선분·윤곽선 d를 앱 함수에 물어 true면 받는다.
+   * 바로 앞에 물은 것과 같은 선분(같은 묶음 객체·종류·배열 안 번호·끝점)이면 다시 묻지 않는다 — 기억은 slot마다 하나이고, 다른 slot이 같은 함수로 같은 선분을
+   * 바로 앞에 물었으면 그 답을 쓴다(두 거르기에 같은 함수를 주면 한 번만 묻는다). 앱 함수가 던지면 받지 않는다
    */
-  private trackDirEdgeOk(edge: TrackDirEdgeFilter, d: PickDetail): boolean {
+  private edgeOk(edge: TrackDirEdgeFilter, d: PickDetail, slot: 'track' | 'parallel'): boolean {
     const pk = d.pick;
     const ends = d.ends;
     const it = this.items.get(pk.id);
     const item = it && ((pk.kind === 'line' && it.kind === 'line') || (pk.kind === 'edge' && it.kind === 'mesh')) ? it.item : null;
     if (!ends || !item || (pk.kind !== 'line' && pk.kind !== 'edge')) return false;
     const raw = pk.raw ?? pk.index;
-    const q = this.trackDirAsked;
     const same = (a: readonly number[], b: readonly number[]): boolean => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
-    if (q && q.item === item && q.kind === pk.kind && q.raw === raw && same(q.ends[0], ends[0]) && same(q.ends[1], ends[1])) return q.ok;
+    const hit = (q: EdgeAsked | null): boolean => !!q && q.fn === edge && q.item === item && q.kind === pk.kind && q.raw === raw && same(q.ends[0], ends[0]) && same(q.ends[1], ends[1]);
+    const mine = slot === 'track' ? this.trackDirAsked : this.parallelAsked;
+    const other = slot === 'track' ? this.parallelAsked : this.trackDirAsked;
+    if (hit(mine)) return mine!.ok;
     let ok = false;
-    try {
-      ok = edge(copySegment({ kind: pk.kind, id: pk.id, index: pk.index, raw, ends }), item) === true;
-    } catch {
-      ok = false;
-    }
-    this.trackDirAsked = { item, kind: pk.kind, raw, ends: [[...ends[0]], [...ends[1]]], ok };
+    if (hit(other)) ok = other!.ok;
+    else
+      try {
+        ok = edge(copySegment({ kind: pk.kind, id: pk.id, index: pk.index, raw, ends }), item) === true;
+      } catch {
+        ok = false;
+      }
+    const q: EdgeAsked = { fn: edge, item, kind: pk.kind, raw, ends: [[...ends[0]], [...ends[1]]], ok };
+    if (slot === 'track') this.trackDirAsked = q;
+    else this.parallelAsked = q;
     return ok;
   }
 
