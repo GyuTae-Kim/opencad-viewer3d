@@ -42,7 +42,17 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
-export type { InferenceLock, InferenceLockInput, InferenceLockKind, MeasureInference, MeasureTrackOptions, NormalizedInference, SnapAxis } from './inference';
+export type {
+  InferenceLock,
+  InferenceLockInput,
+  InferenceLockKind,
+  MeasureInference,
+  MeasureTrackDirOptions,
+  MeasureTrackOptions,
+  NormalizedInference,
+  SnapAxis,
+  TrackDirEdgeFilter,
+} from './inference';
 export type { SnapFace, SnapRefineFaceInput, SnapRefineFaceKind, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
 export type {
   AxisEdgeSnap,
