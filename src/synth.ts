@@ -1,6 +1,7 @@
 /**
  * 합성 장면(개발 확인 페이지·시험용): 상자·구 그물, 나선 공구 경로 선분, 점. 선택으로 무늬 상자·원근 무늬 판.
  */
+import { packNormals, packUvs } from './attribs';
 import type { LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
 
 /** 축 나란 상자(정점 8개, 삼각형 12개, 모서리 12개) */
@@ -190,8 +191,11 @@ export function gridPointSet(id: string, x0: number, y0: number, z: number, nx: 
  * 개발 확인용 장면. segments = 나선 선분 수, sphereSeg = 구 경도 칸 수(삼각형 ≈ 2·seg·seg/2).
  * offset을 주면 장면 전체를 그만큼 옮긴다(큰 좌표 확인): 기본은 묶음 원점(origin)에 두고 positions는 그대로,
  * bake면 원점 없이 positions에 더해 넣는다(float32로 반올림되는 예전 방식 — 비교용).
+ * compact(0.26.0)면 그물 법선을 Int8(정점 4값)로, 무늬 좌표를 Int16 + uvTransform으로 줄인다(작은 배열 확인 — packNormals·packUvs)
  */
-export function syntheticScene(opts: { segments?: number; sphereSeg?: number; offset?: readonly number[]; bake?: boolean; textures?: boolean } = {}): Scene3d {
+export function syntheticScene(
+  opts: { segments?: number; sphereSeg?: number; offset?: readonly number[]; bake?: boolean; textures?: boolean; compact?: boolean } = {},
+): Scene3d {
   const scene = baseScene(opts);
   if (opts.textures) {
     const tex: Texture3d = { id: '바둑판', data: checkerBmp(), mime: 'image/bmp', width: 64, height: 64 };
@@ -199,6 +203,7 @@ export function syntheticScene(opts: { segments?: number; sphereSeg?: number; of
     scene.meshes.push(texturedBoxMesh('무늬 상자', [-80, 0, 0], [-20, 60, 50], [0.6, 0.6, 0.65, 1], tex.id, 20, '무늬'));
     scene.meshes.push(projectiveQuadMesh('원근 무늬', [-90, -110, 0], 100, 80, tex.id, '무늬'));
   }
+  if (opts.compact) scene.meshes = scene.meshes.map(compactMesh);
   const o = opts.offset;
   if (!o || (!o[0] && !o[1] && !o[2])) return scene;
   const origin: [number, number, number] = [o[0]!, o[1]!, o[2]!];
@@ -224,6 +229,24 @@ export function syntheticScene(opts: { segments?: number; sphereSeg?: number; of
     return shift(m, m.edges ? [m.edges] : []);
   });
   return { ...scene, meshes, lines: scene.lines.map((l) => shift(l)), points: scene.points?.map((p) => shift(p)) };
+}
+
+/** 그물의 법선·무늬 좌표를 작은 배열로(0.26.0): 법선 Int8 정점 4값, 앞·뒷면 무늬 좌표 Int16 + 축척·이동. 다른 필드·배열은 그대로 함께 쓴다 */
+export function compactMesh(m: Mesh3d): Mesh3d {
+  const nv = Math.floor(m.positions.length / 3);
+  const out: Mesh3d = { ...m };
+  if (m.normals) out.normals = packNormals(m.normals, 'int8', 4);
+  if (m.uvs && !m.uvTransform) {
+    const p = packUvs(m.uvs, nv, 'int16');
+    out.uvs = p.uvs;
+    out.uvTransform = p.transform;
+  }
+  if (m.backUvs && !m.backUvTransform) {
+    const p = packUvs(m.backUvs, nv, 'int16');
+    out.backUvs = p.uvs;
+    out.backUvTransform = p.transform;
+  }
+  return out;
 }
 
 function baseScene(opts: { segments?: number; sphereSeg?: number }): Scene3d {

@@ -12,7 +12,8 @@ export const CHUNK_BYTES = 4 << 20;
 export const CHUNK_MIN_BYTES = 8 << 20;
 
 export type BufferTarget = 'array' | 'element';
-export type UploadArray = Float32Array | Uint32Array;
+/** 올리는 배열: 정점 속성(Float32, 0.26.0부터 작은 법선·무늬 좌표 Int8·Int16·Uint16)과 색인(Uint32) */
+export type UploadArray = Float32Array | Uint32Array | Int8Array | Int16Array | Uint16Array;
 
 /** GPU 버퍼 만들기·채우기(WebGL2: bufferData(size)·bufferSubData(offset, src, srcOffset, length)) */
 export interface BufferSink<B> {

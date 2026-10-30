@@ -6,6 +6,7 @@
  *   &section=z:0.5   처음부터 단면(축:범위 안 위치 0~1, 뒤에 :flip을 붙이면 반대쪽)
  *   &incremental=1   장면을 여러 프레임에 나눠 올린다(진행은 아래 상태 줄)
  *   &tex=1           무늬 상자·원근 무늬 판을 더한다(바둑판 BMP, 맨 위 왼쪽 칸이 빨강)
+ *   &compact=1       0.26.0 작은 배열: 그물 법선을 Int8(정점 4값), 무늬 좌표를 Int16 + uvTransform으로 준다(syntheticScene compact — 상태 줄에 법선·무늬 좌표 바이트)
  * 0.7.0 단추: 숨은 선·단색·무늬 없음 모드, 외곽선·숨은 점선·하늘·해·그림자·안개·걷기·윤곽선 고르기
  * 0.8.0 단추: 붙잡기+(가운데 점·앱 중심 점), 음영 뒤 모서리, 대비 선 색, 중력·부딪힘(걷기)
  * 0.9.0 단추: 추론 붙잡기(붙잡기+에 교차점·수직 발·축 방향까지), 그물 선 색(상자·구의 윤곽선·외곽선 색)
@@ -35,6 +36,8 @@
  *   사본에 남은 배열 MB), 문맥 잃기·되찾기(WEBGL_lose_context — onContextLost·onContextRestore 알림을 상태 줄에, 놓았으면 위치·색으로 먼저 그린다),
  *   앱이 다시 줌(켜 두면 되찾음 알림의 need대로 원본 장면에서 restoreMeshArrays·restoreTexture로 다시 준다 — 끄면 평면 음영·평균색 그대로).
  *   무늬는 &tex=1에서
+ * 0.26.0: 반투명 지나 고르기 단추의 "반투명 너머"는 onPick(cb, { throughTranslucent: true, front: true }) 알림 하나로 받고 같은 누르기의 가장 앞 고르기(e.front)를
+ *   "(앞: …)"으로 함께 보인다. &compact=1이면 작은 법선·무늬 좌표 배열
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -54,6 +57,7 @@ const offset = Number(q.get('offset') ?? 0) || 0;
 const bake = q.get('bake') === '1';
 const incremental = q.get('incremental') === '1';
 const tex = q.get('tex') === '1';
+const compact = q.get('compact') === '1';
 let theme: 'dark' | 'light' = q.get('theme') === 'light' ? 'light' : 'dark';
 document.body.dataset.theme = theme;
 
@@ -64,7 +68,7 @@ const status = document.getElementById('status')!;
 /** offset 하나 → 장면 이동량(세 축 모두 크게 — Z도 확인한다) */
 const offsetVec = (k: number): [number, number, number] => [k, -k / 2, k / 100];
 const makeScene = (o: { offset?: number; bake?: boolean; segs?: number; sseg?: number } = {}): Scene3d =>
-  syntheticScene({ segments: o.segs ?? segs, sphereSeg: o.sseg ?? sseg, offset: offsetVec(o.offset ?? 0), bake: o.bake, textures: tex });
+  syntheticScene({ segments: o.segs ?? segs, sphereSeg: o.sseg ?? sseg, offset: offsetVec(o.offset ?? 0), bake: o.bake, textures: tex, compact });
 
 const viewer = new Viewer3d(view, { theme });
 let info = '';
@@ -79,6 +83,8 @@ let under: { id: string; index: number } | null = null;
 /** 0.23.0: 반투명 그물을 지나 고른 결과도 보일지(반투명 지나 고르기 단추 — onPick throughTranslucent 알림) */
 let through = false;
 let beyond: { id: string; index: number } | null = null;
+/** 0.26.0: 같은 누르기의 가장 앞 고르기(반투명 너머 알림의 e.front) */
+let front: { id: string; index: number } | null = null;
 const pt = (p: readonly number[]): string => `(${p.map((x) => x.toFixed(1)).join(', ')})`;
 /** 나눠 올리기 진행 알림 기록(자동 확인용) */
 const progress: [number, number][] = [];
@@ -94,7 +100,11 @@ const showStatus = (): void => {
   const s = viewer.stats;
   const off = offset ? ` · 이동 ${offset.toExponential(0)}${bake ? '(굽기)' : '(원점)'}` : '';
   const tx = s.textures.count ? ` · 무늬 ${s.textures.ready}/${s.textures.count}${s.textures.missing ? `(다시 받을 것 ${s.textures.missing})` : ''}` : '';
-  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
+  // 0.26.0 &compact=1: 장면의 법선·무늬 좌표 바이트(작은 배열)
+  let nb = 0;
+  if (compact) for (const m of scene.meshes) nb += (m.normals?.byteLength ?? 0) + (m.uvs?.byteLength ?? 0) + (m.backUvs?.byteLength ?? 0);
+  const cp = compact ? ` · 작은 배열(법선·무늬 좌표 ${(nb / 1024).toFixed(1)} KB)` : '';
+  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}${cp}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
 };
 viewer.onCameraChange(() => {
   showStatus();
@@ -569,15 +579,21 @@ play.addEventListener('input', () => setPlay(Number(play.value)));
 const picks: { id: string | null; alt: boolean; shift: boolean; clicks: number }[] = [];
 // 0.22.0: 그물 면만 받는 알림(면 위 선분·점을 눌러도 그 아래 면) — 아래 알림보다 먼저 달아 같은 누르기의 상태 줄에 함께 보인다
 viewer.onPick((p) => (under = p ? { id: p.id, index: p.index } : null), { meshesOnly: true });
-// 0.23.0: 반투명 그물을 지나 고른 알림(반투명 상자 너머 바닥 판)
-viewer.onPick((p) => (beyond = p ? { id: p.id, index: p.index } : null), { throughTranslucent: true });
+// 0.23.0: 반투명 그물을 지나 고른 알림(반투명 상자 너머 바닥 판). 0.26.0: front로 같은 누르기의 가장 앞 고르기도 이 알림 하나에서 받는다
+viewer.onPick(
+  (p, e) => {
+    beyond = p ? { id: p.id, index: p.index } : null;
+    front = e.front ? { id: e.front.id, index: e.front.index } : null;
+  },
+  { throughTranslucent: true, front: true },
+);
 viewer.onPick((p, e) => {
   picks.push({ id: p?.id ?? null, alt: e.altKey, shift: e.shiftKey, clicks: e.clicks });
   viewer.highlight(p ? [p.id] : null);
   const mods = [e.altKey && 'Alt', e.ctrlKey && 'Ctrl', e.shiftKey && 'Shift', e.metaKey && 'Meta', e.clicks > 1 && '두 번'].filter(Boolean).join('+');
   pickInfo = p ? `고름: ${p.kind} "${p.id}" #${p.index}${mods ? ` [${mods}]` : ''} (${p.point.map((v) => v.toFixed(2)).join(', ')})` : '';
   if (meshesOnly) pickInfo += ` · 아래 면: ${under ? `"${under.id}" #${under.index}` : '없음'}`;
-  if (through) pickInfo += ` · 반투명 너머: ${beyond ? `"${beyond.id}" #${beyond.index}` : '없음'}`;
+  if (through) pickInfo += ` · 반투명 너머: ${beyond ? `"${beyond.id}" #${beyond.index}` : '없음'} (앞: ${front ? `"${front.id}" #${front.index}` : '없음'})`;
   showStatus();
 });
 /** 단면 알림 기록(자동 확인용) — 단추·슬라이더도 이 알림으로 맞춘다 */

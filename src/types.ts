@@ -9,6 +9,19 @@
 /** RGBA, 각 0~1 */
 export type Rgba = readonly [number, number, number, number];
 
+/**
+ * 그물 법선 배열 꼴(0.26.0 — Mesh3d.normals): Float32Array, 또는 정규화 정수 Int8Array(값 ÷ 127)·Int16Array(값 ÷ 32767).
+ * 정수 배열은 정점마다 3값, 또는 길이가 정점 수 × 4와 같으면 4값(넷째 값은 읽지 않는다 — 한 정점 4·8바이트로 줄을 맞춘다)
+ */
+export type NormalArray = Float32Array | Int8Array | Int16Array;
+/**
+ * 무늬 좌표 배열 꼴(0.26.0 — Mesh3d.uvs·backUvs): Float32Array, 또는 정규화 정수 Int16Array(값 ÷ 32767, −1~1)·Uint16Array(값 ÷ 65535, 0~1)를
+ * Mesh3d.uvTransform·backUvTransform으로 편다
+ */
+export type UvArray = Float32Array | Int16Array | Uint16Array;
+/** 무늬 좌표 축척·이동 [su, sv, ou, ov](0.26.0): 배열 값(정수면 정규화한 값) (s, t)에서 u = su·s + ou, v = sv·t + ov */
+export type UvTransform = readonly [number, number, number, number];
+
 /** 축에 나란한 상자 */
 export interface Box3 {
   min: [number, number, number];
@@ -23,8 +36,11 @@ export interface Mesh3d {
   name?: string;
   /** 정점 좌표 xyz… */
   positions: Float32Array;
-  /** 정점 법선 xyz…(없으면 뷰어가 면 법선으로 평면 음영) */
-  normals?: Float32Array;
+  /**
+   * 정점 법선 xyz…(없으면 뷰어가 면 법선으로 평면 음영). 0.26.0: 정규화 정수 Int8Array·Int16Array도 받는다(NormalArray — 메모리 ¼·½,
+   * 정점마다 4값이면 넷째 값은 읽지 않는다). 법선은 그리기에만 쓰고 고르기·측정·범위·단면은 쓰지 않는다
+   */
+  normals?: NormalArray;
   /** 삼각형 정점 번호(없으면 positions를 세 개씩 끊어 삼각형으로 본다) */
   indices?: Uint32Array;
   /** 전체 색 */
@@ -61,8 +77,15 @@ export interface Mesh3d {
    * 무늬 좌표(선택). 정점마다 (u, v) 2값, 또는 원근 무늬(사진 맞춤처럼 면 위에서 q가 바뀌는 투영)면 (u·q, v·q, q) 3값 —
    * 길이로 가린다(정점 수 × 3이면 3값). u는 그림 오른쪽, v는 그림 위쪽으로 늘고(0 = 그림 아래 끝) 0~1 밖은 되풀이한다.
    * texture와 함께 둔다(무늬 그림을 아직 풀지 못했거나 찾지 못하면 color로 칠한다).
+   * 0.26.0: 정규화 정수 Int16Array·Uint16Array도 받는다(UvArray — 메모리 ½, 값은 uvTransform으로 편다)
    */
-  uvs?: Float32Array;
+  uvs?: UvArray;
+  /**
+   * 무늬 좌표 축척·이동(0.26.0, 선택 — uvs와 뒷면이 uvs를 함께 쓸 때의 뒷면): [su, sv, ou, ov]. uvs 값(정수 배열이면 정규화한 값 — Int16은 −1~1, Uint16은 0~1)
+   * (s, t)에서 u = su·s + ou, v = sv·t + ov(원근 무늬 3값이면 q로 나눈 뒤의 u·v에 같은 변환). 배열 꼴과 무관하게 있으면 늘 쓴다(없으면 [1, 1, 0, 0]).
+   * 코어는 놓기(release)로 지우지 않는다 — 문맥 복구 때 다시 주는 배열도 이 변환에 맞춘다
+   */
+  uvTransform?: UvTransform;
   /** 무늬 그림 id(Scene3d.textures). 있으면 color·colors의 rgb 대신 무늬 그림을 칠하고, 불투명도는 color(colors) 알파를 따른다 */
   texture?: string;
   /**
@@ -83,8 +106,10 @@ export interface Mesh3d {
   backColor?: Rgba;
   /** 뒷면 무늬 그림 id(Scene3d.textures). 좌표는 backUvs(없으면 uvs) */
   backTexture?: string;
-  /** 뒷면 무늬 좌표(uvs와 같은 꼴 — 정점마다 2값 또는 3값) */
-  backUvs?: Float32Array;
+  /** 뒷면 무늬 좌표(uvs와 같은 꼴 — 정점마다 2값 또는 3값, 0.26.0부터 정규화 정수도) */
+  backUvs?: UvArray;
+  /** 따로 준 뒷면 무늬 좌표(backUvs)의 축척·이동(0.26.0, 선택 — uvTransform과 같은 뜻. 없으면 [1, 1, 0, 0]. 뒷면이 uvs를 함께 쓰면 uvTransform) */
+  backUvTransform?: UvTransform;
 }
 
 /**

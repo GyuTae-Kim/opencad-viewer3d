@@ -5,7 +5,8 @@
  * 방향: 셰이더는 v가 위로 느는(0 = 그림 아래 끝) 무늬 좌표를 쓰므로, 풀 때 위아래를 뒤집어(imageOrientation 'flipY')
  * 첫 줄이 그림 아래 끝이 되게 올린다. ImageBitmap을 올릴 때는 UNPACK_FLIP_Y_WEBGL이 듣지 않아서 여기서 뒤집는다.
  */
-import type { Mesh3d, Texture3d } from './types';
+import { uvAccepted } from './attribs';
+import type { Mesh3d, Texture3d, UvArray } from './types';
 
 /** 무늬 한 장의 긴 변 기본 한도(화소) */
 export const TEXTURE_LIMIT = 2048;
@@ -14,11 +15,13 @@ export const TEXTURE_BUDGET = 256 * 1024 * 1024;
 /** 예산으로 줄여도 이보다 작게는 줄이지 않는다(화소) */
 export const TEXTURE_MIN_SIDE = 64;
 
-/** 그물 무늬 좌표의 정점당 값 수(0 = 무늬 좌표 없음 또는 짧음) */
-export function uvComponents(m: Pick<Mesh3d, 'positions' | 'uvs'>, uvs: Float32Array | undefined = m.uvs): 0 | 2 | 3 {
+/**
+ * 그물 무늬 좌표의 정점당 값 수(0 = 무늬 좌표 없음 또는 짧음). 0.26.0: 받지 않는 배열 꼴(Float32Array·Int16Array·Uint16Array가 아닌 것)도 0
+ */
+export function uvComponents(m: Pick<Mesh3d, 'positions' | 'uvs'>, uvs: UvArray | undefined = m.uvs): 0 | 2 | 3 {
   const nv = Math.floor(m.positions.length / 3);
   const uv = uvs;
-  if (!uv || nv === 0) return 0;
+  if (!uv || nv === 0 || !uvAccepted(uv)) return 0;
   if (uv.length >= nv * 3) return 3;
   if (uv.length >= nv * 2) return 2;
   return 0;

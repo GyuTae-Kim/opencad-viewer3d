@@ -50,6 +50,9 @@ beforeAll(() => {
   };
 });
 afterAll(() => {
+  // 0.26.0: 만든 뷰어를 모두 끝낸다 — 끝내지 않은 뷰어의 BVH 만들기 타이머가 가짜 DOM을 걷은 뒤 불려 window를 찾지 못하던 것(부하가 높을 때만)
+  for (const w of views) w.v.dispose();
+  views.length = 0;
   g.createImageBitmap = savedCib;
   dom.restore();
 });
@@ -97,10 +100,14 @@ interface View {
   gl: FakeGL;
   canvas: FakeElement;
 }
+/** 이 파일이 만든 뷰어(끝에 모두 dispose) */
+const views: View[] = [];
 function view(): View {
   const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false, renderMode: 'shaded' });
   const canvas = v.canvas as unknown as FakeElement;
-  return { v, gl: canvas.gl!, canvas };
+  const w = { v, gl: canvas.gl!, canvas };
+  views.push(w);
+  return w;
 }
 
 /**

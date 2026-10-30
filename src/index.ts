@@ -1,7 +1,8 @@
 /**
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
-export type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, Texture3d } from './types';
+export type { Box3, LineSet3d, Mesh3d, NormalArray, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, Texture3d, UvArray, UvTransform } from './types';
+export { packNormals, packUvs } from './attribs';
 export { SNAPSHOT_MAX_PIXELS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
@@ -53,6 +54,9 @@ export type {
   OpenEdgeSnap,
   OpenFaceCandidate,
   OpenFaceSnap,
+  TrackDirGuide,
+  TrackDirKind,
+  TrackDirSnap,
   TrackEdgeSnap,
   TrackFaceHit,
   TrackGuide,

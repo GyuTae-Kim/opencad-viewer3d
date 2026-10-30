@@ -20,6 +20,8 @@
  * - 뒷면(BACK·BACKTEX, 0.7.0): gl_FrontFacing으로 뒷면이면 Mesh3d.backColor(u_backColor, a < 0이면 앞면 그대로)나 뒷면 무늬(u_tex2, 좌표 a_uv2)를 칠한다.
  * - 무늬(TEX를 정의한 그물 변종): 무늬 좌표 a_uv(정점마다 (u, v) 또는 원근 무늬 (u·q, v·q, q))를 보간해 조각에서 q로 나누고
  *   u_tex(REPEAT·밉맵)를 읽어 rgb를 바꾼다. u_texAlpha가 1이면 그림 알파를 불투명도에 곱한다(반투명 차례). 무늬가 없는 그물은 예전 셰이더 그대로.
+ *   0.26.0: 무늬 좌표 축척·이동 u_uvt(뒷면 u_uvt2) = (su, sv, ou, ov)로 (u·q, v·q, q) → (su·u·q + ou·q, sv·v·q + ov·q, q) — 정수 무늬 좌표(정규화 값)를 편다.
+ *   변환이 없으면 (1, 1, 0, 0)이라 값이 그대로다. 정수 법선(Int8·Int16 정규화)은 속성 꼴로 −1~1로 읽혀 조각에서 길이를 맞추므로 셰이더는 그대로다.
  */
 
 /** 셰이더 원본에 #define들을 넣은 변종 */
@@ -49,6 +51,7 @@ out float v_clip;
 #ifdef TEX
 layout(location=3) in vec3 a_uv;
 uniform float u_uvq;
+uniform vec4 u_uvt;
 out vec3 v_uv;
 #endif
 #ifdef CLIPN
@@ -61,6 +64,7 @@ out vec4 v_spos;
 #ifdef BACKTEX
 layout(location=4) in vec3 a_uv2;
 uniform float u_uvq2;
+uniform vec4 u_uvt2;
 out vec3 v_uv2;
 #endif
 void main() {
@@ -70,7 +74,8 @@ void main() {
   v_spos = u_shadowM * vec4(a_pos, 1.0);
 #endif
 #ifdef BACKTEX
-  v_uv2 = u_uvq2 > 0.5 ? a_uv2 : vec3(a_uv2.xy, 1.0);
+  vec3 b2 = u_uvq2 > 0.5 ? a_uv2 : vec3(a_uv2.xy, 1.0);
+  v_uv2 = vec3(b2.xy * u_uvt2.xy + u_uvt2.zw * b2.z, b2.z);
 #endif
   v_nrm = u_nmat * a_nrm;
   v_col = u_vcol > 0.5 ? a_col : u_color;
@@ -78,7 +83,8 @@ void main() {
   v_clip = dot(u_clip, vec4(a_pos, 1.0));
 #endif
 #ifdef TEX
-  v_uv = u_uvq > 0.5 ? a_uv : vec3(a_uv.xy, 1.0);
+  vec3 b1 = u_uvq > 0.5 ? a_uv : vec3(a_uv.xy, 1.0);
+  v_uv = vec3(b1.xy * u_uvt.xy + u_uvt.zw * b1.z, b1.z);
 #endif
 #ifdef CLIPN
   v_lpos = a_pos;

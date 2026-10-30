@@ -21,13 +21,16 @@ export interface FakeBuffer {
   hash?: { ver: number; h: string };
 }
 
-interface Attrib {
+export interface Attrib {
   buf: FakeBuffer | null;
   size: number;
   stride: number;
   offset: number;
   divisor: number;
   enabled: boolean;
+  /** 0.26.0: 값 꼴 상수 이름(FLOAT·BYTE·SHORT·UNSIGNED_SHORT)과 정규화 — 그리기 기록에는 FLOAT·정규화 아님이 아닐 때만 붙인다(예전 기록과 같게) */
+  type: string;
+  norm: boolean;
 }
 
 interface FakeVao {
@@ -187,8 +190,12 @@ export class FakeGL {
   }
   private attrib(i: number): Attrib {
     let a = this.vao.attribs.get(i);
-    if (!a) this.vao.attribs.set(i, (a = { buf: null, size: 4, stride: 0, offset: 0, divisor: 0, enabled: false }));
+    if (!a) this.vao.attribs.set(i, (a = { buf: null, size: 4, stride: 0, offset: 0, divisor: 0, enabled: false, type: 'FLOAT', norm: false }));
     return a;
+  }
+  /** 0.26.0: VAO의 속성 하나(시험이 속성 꼴을 본다) */
+  attribOf(v: FakeVao, i: number): Attrib | undefined {
+    return v.attribs.get(i);
   }
   enableVertexAttribArray(i: number): void {
     this.attrib(i).enabled = true;
@@ -196,12 +203,14 @@ export class FakeGL {
   disableVertexAttribArray(i: number): void {
     this.attrib(i).enabled = false;
   }
-  vertexAttribPointer(i: number, size: number, _type: number, _norm: boolean, stride: number, offset: number): void {
+  vertexAttribPointer(i: number, size: number, type: number, norm: boolean, stride: number, offset: number): void {
     const a = this.attrib(i);
     a.buf = this.arrayBinding;
     a.size = size;
     a.stride = stride;
     a.offset = offset;
+    a.type = this.nameOf(type) ?? String(type);
+    a.norm = !!norm;
   }
   vertexAttribDivisor(i: number, d: number): void {
     this.attrib(i).divisor = d;
@@ -328,7 +337,7 @@ export class FakeGL {
     if (!this.logDraws) return;
     const attribs: string[] = [];
     for (const [i, a] of [...this.vao.attribs].sort((x, y) => x[0] - y[0]))
-      if (a.enabled) attribs.push(`${i}:${a.size}/${a.stride}/${a.offset}/${a.divisor}:${this.bufHash(a.buf)}`);
+      if (a.enabled) attribs.push(`${i}:${a.size}/${a.stride}/${a.offset}/${a.divisor}${a.type === 'FLOAT' && !a.norm ? '' : `/${a.type}${a.norm ? 'n' : ''}`}:${this.bufHash(a.buf)}`);
     const p = this.prog;
     const uniforms = p ? JSON.stringify([...p.uniforms].sort((x, y) => (x[0] < y[0] ? -1 : 1))) : '';
     const e: DrawEntry = { op, args, prog: p?.key ?? '', attribs, element: this.vao.element ? this.bufHash(this.vao.element) : null, uniforms };

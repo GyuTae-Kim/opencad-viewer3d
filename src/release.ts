@@ -5,6 +5,8 @@
  * 코어는 놓기 선택을 받은 장면의 그물 법선·무늬 좌표와 무늬 원본을 GPU에 올린 뒤 장면 객체에서 지우고, 그 그물마다 올린 꼴만 기억한다.
  * 그래픽 문맥을 잃었다 되찾으면 그 꼴과 지금 가진 배열을 견주어 앱에서 다시 받을 것을 고른다.
  */
+import { normalFormat, uvAccepted } from './attribs';
+import type { NormalArray, UvArray } from './types';
 
 /**
  * 놓아도 되는 것(true인 것만): 그물 법선(Mesh3d.normals), 앞·뒷면 무늬 좌표(uvs·backUvs), 무늬 원본(Texture3d.data·bitmap).
@@ -28,11 +30,11 @@ export interface MeshLayout {
   ownBack: boolean;
 }
 
-/** 앱이 다시 주는 그물 배열(뜻은 Mesh3d의 같은 이름 필드와 같다) */
+/** 앱이 다시 주는 그물 배열(뜻은 Mesh3d의 같은 이름 필드와 같다 — 0.26.0부터 작은 정수 배열도) */
 export interface MeshArrays {
-  normals?: Float32Array;
-  uvs?: Float32Array;
-  backUvs?: Float32Array;
+  normals?: NormalArray;
+  uvs?: UvArray;
+  backUvs?: UvArray;
 }
 
 /** 그물 하나에서 다시 받을 배열: uvs는 앞면 무늬 좌표(뒷면이 uvs를 함께 썼으면 뒷면도), backUvs는 따로 준 뒷면 무늬 좌표 */
@@ -71,9 +73,13 @@ export function layoutMiss(lay: MeshLayout, have: { normals: boolean; uv: boolea
   return miss.normals || miss.uvs || miss.backUvs ? miss : null;
 }
 
-/** 배열이 그 꼴에 맞는지(정점 수 × 값 수 이상 — 법선 3, 무늬 좌표 2 이상) */
-export function fitsLayout(a: Float32Array | undefined | null, lay: Pick<MeshLayout, 'nv'>, per: number): a is Float32Array {
-  return !!a && lay.nv > 0 && a.length >= lay.nv * per;
+/**
+ * 배열이 그 꼴에 맞는지(정점 수 × 값 수 이상 — 법선 3, 무늬 좌표 2 이상). 0.26.0: 받는 배열 꼴이어야 한다
+ * (법선 Float32Array·Int8Array·Int16Array — normalFormat, 무늬 좌표 Float32Array·Int16Array·Uint16Array)
+ */
+export function fitsLayout(a: NormalArray | UvArray | undefined | null, lay: Pick<MeshLayout, 'nv'>, per: 2 | 3): boolean {
+  if (!a || lay.nv <= 0) return false;
+  return per === 3 ? !!normalFormat(a, lay.nv) : uvAccepted(a) && a.length >= lay.nv * per;
 }
 
 /**

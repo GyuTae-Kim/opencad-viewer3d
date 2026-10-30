@@ -23,6 +23,8 @@
  *   지날 만큼 가까우면, 부르는 쪽(뷰어는 앱 refineFace — 'axisFace', open)이 곡면과의 정확한 교차를 줄 때만 그 점을 후보로 받는다
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
  * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
+ * - 0.26.0 끌어온 점에서 나란함·수직 방향(trackDirGuides·trackDirSnap — 순수 계산만, 뷰어는 아직 쓰지 않는다): 기억한 점 P를 지나 기준 선분과 나란한 선,
+ *   기준 선분에 수직인 선(P에서 그 직선으로 내린 수직, 축을 수직 평면에 비친 방향) 위에서 커서 광선에 가장 가까운 점
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -1261,6 +1263,93 @@ export function trackAlongFirst(f: ViewFrame, a: readonly number[], P: readonly 
   const t = wx * e[0] + wy * e[1] + wz * e[2];
   const off = Math.hypot(wx - e[0] * t, wy - e[1] * t, wz - e[2] * t);
   return off <= meetTol(f, a) ? [e[0], e[1], e[2]] : null;
+}
+
+/** 끌어온 점에서의 방향 안내 종류(0.26.0): 'parallel' = 기준 선분과 나란함, 'perpendicular' = 기준 선분에 수직 */
+export type TrackDirKind = 'parallel' | 'perpendicular';
+
+/** 끌어온 점을 지나는 방향 안내 하나(0.26.0): 종류와 단위 방향 */
+export interface TrackDirGuide {
+  kind: TrackDirKind;
+  dir: V3;
+}
+
+/** 끌어온 점에서 방향 안내 위 점(0.26.0 trackDirSnap): 찍을 점, 끌어온 점(복사본), 안내 종류·단위 방향, 커서와의 화면 거리 */
+export interface TrackDirSnap {
+  p: V3;
+  from: V3;
+  kind: TrackDirKind;
+  dir: V3;
+  distPx: number;
+}
+
+/** 두 단위 방향이 같은 선(나란하거나 반대)인지 — 사잇각 약 0.08° 안(axisAligned와 같은 문턱) */
+const sameLine = (a: readonly number[], b: readonly number[]): boolean => Math.abs(a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!) >= 1 - 1e-6;
+
+/**
+ * 끌어온 점 P에서 기준 선분 seg(커서가 앞서 지나간 모서리 — 0.10.0 나란함의 기준과 같다)에 대한 방향 안내(0.26.0, 순수):
+ * - 나란함: 선분 방향 e(첫 끝점 → 둘째 끝점)
+ * - 수직: 수직인 방향은 평면 하나(e에 수직)라 쓸 만한 방향만 — (1) P에서 선분 직선으로 내린 수직(P가 그 직선 위가 아니면),
+ *   (2) 축(세계 X·Y·Z 또는 앱 axes)을 그 평면에 비친 방향(축이 e와 나란하면 뺀다). 평면도에서 기운 벽에 수평으로 수직, 기운 서까래에는 그 세로 평면 안에서 수직
+ * 축과 같은 선인 안내는 뺀다(끌어온 축 trackAxisSnap이 맡는다). 앞 안내와 같은 선이면 뺀다. 차례는 나란함 → 내린 수직 → 비친 축(X·Y·Z).
+ * 선분 길이가 0이거나 수가 아니면 빈 목록
+ */
+export function trackDirGuides(P: readonly number[], seg: readonly [readonly number[], readonly number[]], axes?: TrackAxes | null): TrackDirGuide[] {
+  const e = unitDir(seg[0], seg[1]);
+  if (!e || !finitePoint(P)) return [];
+  const dirs = axesOf(axes);
+  const out: TrackDirGuide[] = [];
+  const isAxis = (d: readonly number[]): boolean => dirs.some(([, a]) => sameLine(a, d));
+  const add = (kind: TrackDirKind, d: V3 | null): void => {
+    if (!d || isAxis(d) || out.some((g) => sameLine(g.dir, d))) return;
+    out.push({ kind, dir: d });
+  };
+  add('parallel', e);
+  // P에서 선분 직선으로 내린 수직(P가 직선 위면 — 선분 길이의 1e-9배 안 — 없다)
+  const a = seg[0];
+  const t = (P[0]! - a[0]!) * e[0] + (P[1]! - a[1]!) * e[1] + (P[2]! - a[2]!) * e[2];
+  const foot: V3 = [a[0]! + e[0] * t, a[1]! + e[1] * t, a[2]! + e[2] * t];
+  const len = Math.hypot(seg[1][0]! - a[0]!, seg[1][1]! - a[1]!, seg[1][2]! - a[2]!);
+  if (dist3(P, foot) > 1e-9 * Math.max(1, len)) add('perpendicular', unitDir(P, foot));
+  // 축을 e에 수직인 평면에 비친 방향
+  for (const [, u] of dirs) {
+    const d = u[0] * e[0] + u[1] * e[1] + u[2] * e[2];
+    if (Math.abs(d) >= 1 - 1e-6) continue;
+    add('perpendicular', unitDir([0, 0, 0], [u[0] - e[0] * d, u[1] - e[1] * d, u[2] - e[2] * d]));
+  }
+  return out;
+}
+
+/**
+ * 끌어온 점에서 나란함·수직 방향 위 점(0.26.0, 순수 — 뷰어는 아직 쓰지 않는다): 기억한 점 P마다 trackDirGuides(P, seg, axes)의 선 위에서 커서 광선에 가장 가까운 점이
+ * 커서에서 snapPx 안이면 후보(가까운 것, 같으면 앞 점 → 안내 차례). trackAxisSnap과 같은 규칙 — 커서가 P의 화면 자리 snapPx 안이면 그 P는 빼고(점 붙잡기가 맡는다),
+ * skip(첫 측정 점)과 같은 P는 뺀다(첫 점의 나란함은 0.10.0 parallel). 선이 커서 광선과 거의 나란하면 그 선은 뺀다. 원근에서 가까운 면보다 앞이면 뺀다.
+ * seg가 없으면 없다
+ */
+export function trackDirSnap(
+  f: ViewFrame,
+  tracks: readonly (readonly number[])[],
+  seg: readonly [readonly number[], readonly number[]] | null | undefined,
+  x: number,
+  y: number,
+  snapPx: number,
+  skip?: readonly number[] | null,
+  axes?: TrackAxes | null,
+): TrackDirSnap | null {
+  if (!tracks.length || !seg) return null;
+  const ray = screenRay(f, x, y);
+  let best: TrackDirSnap | null = null;
+  for (const P of tracks) {
+    if ((skip && sameTrackPoint(P, skip)) || cursorOn(f, P, x, y, snapPx)) continue;
+    for (const g of trackDirGuides(P, seg, axes)) {
+      const q = rayLinePoint(ray.origin, ray.dir, P, g.dir);
+      if (!q) continue;
+      const dist = screenDistance(f, q, x, y);
+      if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
+      best = { p: q, from: [P[0]!, P[1]!, P[2]!], kind: g.kind, dir: [g.dir[0], g.dir[1], g.dir[2]], distPx: dist };
+    }
+  }
+  return best;
 }
 
 /**
