@@ -31,6 +31,10 @@
  * 0.24.0 단추: 상자 고르기 불투명(반투명 지나 고르기를 켠 채 setItemPickOpaque('상자') — 상자 위를 누르면 "반투명 너머"가 상자, 그림은 그대로),
  *   너머 고르기만 바꾸기(setMeasurePickThrough — 잠금·끌어온 점·찍은 점을 둔 채 측정 고르기의 반투명 너머만 켜고 끈다),
  *   글상자 겹침(기준점이 겹치는 덧그림 넷 — 화면에서 뒤 글상자가 앞 글상자를, 측정 거리 글상자가 덧그림 글상자를 비킨다)
+ * 0.25.0 단추: 놓기(장면 얕은 사본을 setScene(…, { release: true })로 다시 준다 — 올린 뒤 코어가 사본의 법선·무늬 좌표·무늬 원본을 지운다. 상태 줄에 "놓음"과
+ *   사본에 남은 배열 MB), 문맥 잃기·되찾기(WEBGL_lose_context — onContextLost·onContextRestore 알림을 상태 줄에, 놓았으면 위치·색으로 먼저 그린다),
+ *   앱이 다시 줌(켜 두면 되찾음 알림의 need대로 원본 장면에서 restoreMeshArrays·restoreTexture로 다시 준다 — 끄면 평면 음영·평균색 그대로).
+ *   무늬는 &tex=1에서
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -89,7 +93,7 @@ function onProgress(d: number, t: number): void {
 const showStatus = (): void => {
   const s = viewer.stats;
   const off = offset ? ` · 이동 ${offset.toExponential(0)}${bake ? '(굽기)' : '(원점)'}` : '';
-  const tx = s.textures.count ? ` · 무늬 ${s.textures.ready}/${s.textures.count}` : '';
+  const tx = s.textures.count ? ` · 무늬 ${s.textures.ready}/${s.textures.count}${s.textures.missing ? `(다시 받을 것 ${s.textures.missing})` : ''}` : '';
   status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
 };
 viewer.onCameraChange(() => {
@@ -366,6 +370,77 @@ toggle(
         : null,
     ),
   '기준점이 겹치는 덧그림 넷을 단다 — 화면에서는 뒤 글상자가 앞 글상자를 비키고(0.24.0), 측정 거리 글상자도 덧그림 글상자를 비킨다. PNG(그림 저장)는 기본 자리',
+);
+// 0.25.0: 놓기(setScene release)·문맥 잃기·되찾기 알림(onContextLost·onContextRestore)·앱이 다시 주기(restoreMeshArrays·restoreTexture)
+/** 놓기를 켰을 때 뷰어에 준 장면 사본(코어가 지우는 것은 사본의 필드 — 원본 scene은 다시 주기·끄기에 쓴다) */
+let released: Scene3d | null = null;
+let regive = false;
+/** 사본에 남은 법선·무늬 좌표·무늬 바이트(MB — 같은 배열은 한 번) */
+const heldMb = (s: Scene3d): string => {
+  const seen = new Set<object>();
+  let n = 0;
+  const add = (a: ArrayBufferView | undefined): void => {
+    if (a && !seen.has(a)) {
+      seen.add(a);
+      n += a.byteLength;
+    }
+  };
+  for (const m of s.meshes) [m.normals, m.uvs, m.backUvs].forEach(add);
+  for (const t of s.textures ?? []) add(t.data);
+  return (n / 1048576).toFixed(2);
+};
+const releaseInfo = (): string => (released ? `놓음(사본에 남은 법선·무늬 좌표·무늬 ${heldMb(released)} MB)` : '');
+toggle(
+  '놓기',
+  (v) => {
+    released = v ? { ...scene, meshes: scene.meshes.map((m) => ({ ...m })), textures: scene.textures?.map((t) => ({ ...t })) } : null;
+    viewer.setScene(released ?? scene, { keepView: true, ...(released ? { release: true } : {}) });
+    hoverInfo = releaseInfo();
+    showStatus();
+    // 무늬는 풀어 올린 뒤 지우므로 잠시 뒤 다시 센다
+    setTimeout(() => {
+      hoverInfo = releaseInfo();
+      showStatus();
+    }, 500);
+  },
+  '장면 얕은 사본을 setScene(…, { release: true })로 다시 준다 — 코어가 올린 뒤 사본의 법선·무늬 좌표·무늬 원본을 지운다(그림·고르기·측정은 그대로). 다른 단추가 장면을 다시 주면 풀린다',
+);
+viewer.onContextLost(() => {
+  hoverInfo = '문맥 잃음';
+  showStatus();
+});
+viewer.onContextRestore((need) => {
+  hoverInfo = `문맥 되찾음 · 다시 줄 것 그물 ${need.meshes.length}·무늬 ${need.textures.length}${regive && released ? ' → 다시 줌' : ''}`;
+  if (regive && released) {
+    for (const m of need.meshes) {
+      const o = scene.meshes.find((x) => x.id === m.id);
+      if (o) viewer.restoreMeshArrays(m.id, { normals: o.normals, uvs: o.uvs, backUvs: o.backUvs });
+    }
+    for (const id of need.textures) {
+      const t = scene.textures?.find((x) => x.id === id);
+      if (t?.data) void viewer.restoreTexture(id, t.data).then(() => showStatus());
+    }
+  }
+  showStatus();
+});
+button(
+  '문맥 잃기·되찾기',
+  () => {
+    const ext = viewer.canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context');
+    if (!ext) {
+      hoverInfo = 'WEBGL_lose_context가 없다';
+      showStatus();
+      return;
+    }
+    ext.loseContext();
+    setTimeout(() => ext.restoreContext(), 300);
+  },
+  'WEBGL_lose_context로 그래픽 문맥을 잃었다 되찾는다 — 상태 줄에 onContextLost·onContextRestore 알림(놓지 않았으면 다시 줄 것 0, 그림은 그대로)',
+);
+toggle(
+  '앱이 다시 줌',
+  (v) => (regive = v),
+  '켜 두면 문맥을 되찾을 때 알림의 need대로 원본 장면에서 restoreMeshArrays·restoreTexture로 다시 준다. 끄면 놓은 그물은 평면 음영, 놓은 무늬는 그물 색 그대로',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);

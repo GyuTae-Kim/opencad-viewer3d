@@ -169,10 +169,11 @@ const node = (m: Mesh3d, i: number, j: number): number[] => {
 const snapshot = (gl: FakeGL): Map<FakeBuffer, string> => new Map(gl.buffers.map((b) => [b, `${b.dataCalls}/${b.subCalls}/${b.deleted}`]));
 /** 전부터 있던 버퍼 가운데 호출이 있었던 것(새로 만든 버퍼는 빼고) */
 const changed = (gl: FakeGL, before: Map<FakeBuffer, string>): FakeBuffer[] => gl.buffers.filter((b) => before.has(b) && before.get(b) !== `${b.dataCalls}/${b.subCalls}/${b.deleted}`);
-/** 렌더러가 그 배열에 쓰는 GPU 버퍼 */
+/** 렌더러가 그 배열에 쓰는 GPU 버퍼(0.25.0부터 버퍼 표는 배열과 무관한 열쇠 — 배열 → 열쇠는 약한 표) */
 const bufOf = (v: Viewer3d, a: ArrayBufferView): FakeBuffer | undefined => {
-  const r = (v as unknown as { renderer: { arrayBufs: Map<unknown, FakeBuffer>; elemBufs: Map<unknown, FakeBuffer> } }).renderer;
-  return r.arrayBufs.get(a) ?? r.elemBufs.get(a);
+  const r = (v as unknown as { renderer: { keys: WeakMap<object, object>; arrayBufs: Map<unknown, FakeBuffer>; elemBufs: Map<unknown, FakeBuffer> } }).renderer;
+  const k = r.keys.get(a);
+  return k === undefined ? undefined : (r.arrayBufs.get(k) ?? r.elemBufs.get(k));
 };
 const meshRecs = (v: Viewer3d): { src: Mesh3d; wire: unknown }[] => (v as unknown as { renderer: { meshes: { src: Mesh3d; wire: unknown }[] } }).renderer.meshes;
 const bytesOf = (a: ArrayBufferView): Uint8Array => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);

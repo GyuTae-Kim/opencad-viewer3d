@@ -147,7 +147,8 @@ import {
   sectionSegments,
 } from './section';
 import { segmentsById } from './segments';
-import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureStats, Renderer3d } from './renderer';
+import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureSource, type TextureStats, Renderer3d } from './renderer';
+import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
 import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
@@ -702,6 +703,29 @@ export interface SetMeshOptions {
   incremental?: boolean | { budgetMs?: number };
 }
 
+/**
+ * setScene의 놓기 선택(0.25.0, release). 켠 것은 코어가 GPU에 올린 뒤 장면 객체에서 지우고(필드를 delete — 푼 그림은 close) 다시 읽지 않는다.
+ * 앱은 그 배열·원본을 따로 쥐지 않으면 메모리가 놓인다. 그래픽 문맥을 잃었다 되찾으면 위치·색으로 먼저 그리고 onContextRestore로 다시 받는다
+ */
+export interface ReleaseOptions {
+  /** 그물 법선(Mesh3d.normals) */
+  normals?: boolean;
+  /** 앞·뒷면 무늬 좌표(Mesh3d.uvs·backUvs) */
+  uvs?: boolean;
+  /**
+   * 무늬 그림 원본(Texture3d.data·bitmap — 그물이 쓰는 무늬를 풀어 올린 뒤). 'bitmap'이면 푼 그림(bitmap)만 놓고 그림 바이트(data)는
+   * 장면에 둔다 — 문맥을 되찾으면 코어가 data를 스스로 다시 풀어 올린다(알림의 need에 들지 않는다). data가 없는 무늬만 need로 다시 받는다.
+   * 'bitmap'은 data가 bitmap과 같은 그림일 때만 쓴다(앱이 색을 바꾸는 등 손질한 bitmap이면 그 무늬의 data를 빼 두어 need로 받는다)
+   */
+  textures?: boolean | 'bitmap';
+}
+
+/**
+ * 문맥 복구 때 다시 줄 것(0.25.0, onContextRestore·restoreNeed): 코어가 놓은 배열·원본 가운데 지금 GPU에 없는 것.
+ * meshes = 그물마다 다시 줄 배열(normals, uvs — 뒷면이 uvs를 함께 썼으면 뒷면도, backUvs — 따로 준 뒷면 무늬 좌표), textures = 무늬 id
+ */
+export type ContextRestoreNeed = RestoreNeed;
+
 /** 두 상자의 여섯 값이 모두 같은지 */
 const sameBox = (a: Box3, b: Box3): boolean =>
   a.min[0] === b.min[0] && a.min[1] === b.min[1] && a.min[2] === b.min[2] && a.max[0] === b.max[0] && a.max[1] === b.max[1] && a.max[2] === b.max[2];
@@ -1061,6 +1085,12 @@ export class Viewer3d {
 
   /** 고르기 알림과 그 알림의 고르기 선택(0.22.0 onPick의 meshesOnly, 0.23.0 throughTranslucent) — 단 차례대로 */
   private pickCbs = new Map<(p: Pick3d | null, e: PickEvent) => void, { meshesOnly: boolean; through: boolean }>();
+  /** 0.25.0 지금 장면의 놓기 선택(setScene의 release — 문맥 복구에서 다시 올릴 때도 쓴다) */
+  private releaseOpt: ReleaseFlags | null = null;
+  /** 0.25.0 문맥 복구 알림(놓은 것을 다시 받는다 — 놓기 선택이 없어도 빈 need로 부른다) */
+  private restoreCbs = new Set<(need: ContextRestoreNeed) => unknown>();
+  /** 0.25.0 문맥 잃음 알림 */
+  private lostCbs = new Set<() => void>();
   private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
@@ -1196,14 +1226,25 @@ export class Viewer3d {
    * 올라간 묶음부터 그리고, onProgress(올린 묶음 수, 전체)를 프레임마다 부른다(끝나면 done = total).
    * 범위·고르기·측정은 처음부터 장면 전체로 한다. 주지 않으면 예전처럼 한 번에 올린다.
    * 그물 하나만 바뀌면 장면 전체 대신 setMesh·removeMesh(0.11.0)를 쓴다.
+   *
+   * 0.25.0 release(true = 셋 모두, 또는 ReleaseOptions): 켠 배열·원본은 GPU에 올린 뒤(나눠 올리면 그 그물 차례에, 무늬는 풀어 올린 뒤)
+   * 코어가 장면 객체에서 지우고(delete — 무늬의 푼 그림은 close, textures: 'bitmap'이면 푼 그림만) 다시 읽지 않는다. 고르기·측정·범위·단면은 위치·색인만 쓰므로 그대로다.
+   * 이 장면에 setMesh로 넣는 그물도 같다. 문맥을 잃었다 되찾으면 위치·색으로 먼저 그리고 onContextRestore로 다시 받는다.
+   * 주지 않으면 0.24.0과 같다(장면 배열을 붙잡고 문맥 복구 때 그대로 다시 올린다)
    */
   setScene(
     scene: Scene3d,
-    opts: { keepView?: boolean; incremental?: boolean | { budgetMs?: number }; onProgress?: (done: number, total: number) => void } = {},
+    opts: {
+      keepView?: boolean;
+      incremental?: boolean | { budgetMs?: number };
+      onProgress?: (done: number, total: number) => void;
+      release?: boolean | ReleaseOptions;
+    } = {},
   ): void {
     if (this.disposed) return;
     const hadSection = !!this.sec;
     this.sceneRef = scene;
+    this.releaseOpt = releaseFlags(opts.release);
     this.rebuildItems();
     this.bbList = scene.meshes.filter((m) => hasBillboard(m));
     this.bbCamKey = '';
@@ -1237,7 +1278,7 @@ export class Viewer3d {
     this.wheelAnchor = null;
     const inc = opts.incremental;
     this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), cb: opts.onProgress ?? null } : null;
-    if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc });
+    if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
     this.allBox = scene.bounds && !boxIsEmpty(scene.bounds) ? scene.bounds : sceneBounds(scene);
     this.visBox = null;
     this.rebuildGrid();
@@ -1261,6 +1302,7 @@ export class Viewer3d {
     this.looks.clear();
     this.lookMoves = 0;
     this.upload = null;
+    this.releaseOpt = null;
     this.sceneRef = null;
     this.items.clear();
     this.bbList = [];
@@ -1308,6 +1350,10 @@ export class Viewer3d {
    * 물려받은 버퍼에 그 구간만 올린다. 색인(indices)·윤곽선(edges)을 바꿨으면 새 배열로 준다.
    * opts.incremental이면 새로 올릴 배열이 8 MB(CHUNK_MIN_BYTES)를 넘을 때 프레임마다 4 MB씩 새 버퍼에 채우고, 다 채울 때까지 앞 그물을 그린다
    * (고르기·측정·범위는 처음부터 새 그물로 한다).
+   * 0.25.0: 장면에 놓기 선택(setScene의 release)이 있으면 이 그물도 올린 뒤 그 배열을 지운다. 코어가 배열을 지운(놓은) 그물을 바꿀 때
+   * 새 그물이 그 배열을 주면 통째로 올리고(vertices 구간은 그 배열에 쓰지 않는다), 주지 않으면 정점 수가 같고 위치 배열이 같거나
+   * vertices를 주었을 때 올려 둔 것을 그대로 쓴다. vertices를 주었는데 놓은 배열이라 그 구간을 올리지 못하면 console.warn으로 알린다
+   * (그 속성은 앞 그대로다 — 바뀌었으면 새 그물에 그 배열을 통째로 준다).
    * 돌려주는 값: 넣었거나 바꿨으면 true. 장면이 없거나(setScene 먼저) 같은 id가 선분·점 묶음이면 false
    */
   setMesh(mesh: Mesh3d, opts: SetMeshOptions = {}): boolean {
@@ -1362,7 +1408,10 @@ export class Viewer3d {
     }
     const inc = opts.incremental;
     if (inc) this.meshBudget = Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8);
-    if (this.gpu) this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc });
+    if (this.gpu) {
+      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc });
+      if (skipped.length) console.warn(`opencad-viewer3d: setMesh('${mesh.id}')의 vertices 구간은 놓은 ${skipped.join('·')}에 올리지 않았습니다(올려 둔 것을 그대로 씁니다 — 바뀌었으면 그 배열을 통째로 주세요)`);
+    }
     this.sceneEdited();
     this.queueBvh(mesh);
     return true;
@@ -1389,6 +1438,68 @@ export class Viewer3d {
     if (this.gpu) this.renderer.removeMesh(id, this.sceneRef);
     this.sceneEdited();
     return true;
+  }
+
+  // ───────────────────────── 0.25.0 놓기·문맥 복구 ─────────────────────────
+
+  /**
+   * 그래픽 문맥을 잃었다 되찾을 때마다 부른다(0.25.0 — 코어가 장면·덧그림·단면 테두리를 다시 올린 뒤).
+   * need는 코어가 놓은 배열·원본(setScene의 release) 가운데 다시 필요한 것이고, 놓기 선택이 없거나 모두 GPU에 있으면 빈 목록이다
+   * (그래도 부른다 — 앱이 안내를 거두거나 라벨 가림 판정을 다시 할 때). 놓은 것이 있으면 코어는 이미 위치·색으로 그리고 있다
+   * (놓은 법선 없이 평면 음영, 놓은 무늬 좌표·원본 없이 그물 color). 앱은 need에 든 것을 restoreMeshArrays·restoreTexture로 주고,
+   * 준 것부터 되돌아온다(비동기로 천천히 주어도 된다 — 다 주지 않은 무늬는 평균색 그대로). 해제 함수를 돌려준다
+   */
+  onContextRestore(cb: (need: ContextRestoreNeed) => void | Promise<unknown>): () => void {
+    this.restoreCbs.add(cb);
+    return () => this.restoreCbs.delete(cb);
+  }
+
+  /**
+   * 그래픽 문맥을 잃었을 때 부른다(0.25.0 — 놓기 선택과 무관). 되찾을 때까지 화면을 다시 그리지 않는다(앱은 안내를 보일 수 있다).
+   * 브라우저가 문맥을 되찾으면 onContextRestore가 온다. 해제 함수를 돌려준다
+   */
+  onContextLost(cb: () => void): () => void {
+    this.lostCbs.add(cb);
+    return () => this.lostCbs.delete(cb);
+  }
+
+  /**
+   * 코어가 놓은 배열·원본 가운데 지금 GPU에 없는 것(0.25.0 — 문맥 복구 뒤 앱이 다 주었는지 볼 때). 없으면 null.
+   * 나눠 올리는 중이면 아직 올리지 않은 그물도 차례가 왔을 때 없을 것으로 셈한다
+   */
+  get restoreNeed(): ContextRestoreNeed | null {
+    if (this.disposed || this.lost) return null;
+    const n = this.renderer.restoreNeed(this.sceneRef);
+    return n.meshes.length || n.textures.length ? n : null;
+  }
+
+  /**
+   * 코어가 놓은 그물 배열을 다시 준다(0.25.0 — 문맥 복구 뒤). 그 그물에 지금 없는 놓은 배열만 받고(길이가 맞을 때) 그 그물 기록만 다시 만든다 —
+   * 다른 속성 버퍼·다른 묶음은 그대로다. 준 배열은 올린 뒤 붙잡지 않는다(그물 객체에도 다시 넣지 않는다).
+   * 나눠 올리는 중이라 아직 올리지 않은 그물이면 차례가 올 때 함께 올린다. 받은 것이 있으면 true
+   */
+  restoreMeshArrays(id: string, arrays: MeshArrays): boolean {
+    if (!this.gpu || !this.sceneRef || !arrays) return false;
+    const ok = this.renderer.restoreMeshArrays(id, arrays);
+    if (ok) this.invalidate();
+    return ok;
+  }
+
+  /**
+   * 코어가 놓은 무늬 원본을 다시 준다(0.25.0 — 문맥 복구 뒤, 그 무늬가 기다리는 동안만). 그림 파일 바이트(Uint8Array), 푼 그림(ImageBitmap — 다 쓰면 닫는다),
+   * 또는 { data, bitmap, mime, width, height }. 처음 올릴 때와 같은 크기 한도로 풀어 올리고 다시 그린다. 원본은 붙잡지 않는다.
+   * 올렸으면 true로 풀리는 약속(기다리는 무늬가 아니거나 풀지 못하면 false — 풀지 못하면 다시 기다린다)
+   */
+  restoreTexture(id: string, src: TextureSource): Promise<boolean> {
+    if (!this.gpu) return Promise.resolve(false);
+    return this.renderer.restoreTexture(id, src);
+  }
+
+  /** 문맥을 되찾아 장면을 다시 올린 뒤: 다시 받을 것(없으면 빈 목록)을 알린다 */
+  private emitRestore(): void {
+    if (!this.restoreCbs.size) return;
+    const need = this.renderer.restoreNeed(this.sceneRef);
+    for (const cb of [...this.restoreCbs]) void cb(need);
   }
 
   /** mesh가 쓰는 정점 속성 배열 가운데 a와 같은 객체가 있는지 */
@@ -1452,6 +1563,9 @@ export class Viewer3d {
     this.upload = null;
     this.measureCbs.clear();
     this.camCbs.clear();
+    this.restoreCbs.clear();
+    this.lostCbs.clear();
+    this.releaseOpt = null;
     if (!this.lost) this.renderer.dispose();
     this.gl.getExtension('WEBGL_lose_context')?.loseContext();
     this.wrap.remove();
@@ -4732,12 +4846,15 @@ export class Viewer3d {
       this.renderer.forget();
       if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
+      // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다)
+      if (!this.disposed) for (const cb of [...this.lostCbs]) cb();
     });
     this.on(cv, 'webglcontextrestored', () => {
       if (this.disposed) return;
       this.lost = false;
       this.renderer.init();
-      if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload });
+      // 0.25.0: 놓기 선택이 있으면 그대로 다시 건다(코어가 지운 배열·원본은 없이 위치·색으로 올리고, 아래 emitRestore로 앱에 알려 다시 받는다)
+      if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload, release: this.releaseOpt });
       if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
       this.uploadAnnotations();
       // 단면 테두리도 GPU 자료라 다시 올린다
@@ -4745,6 +4862,7 @@ export class Viewer3d {
       this.rebuildGrid();
       this.invalidate();
       if (this.sec) this.emitSection();
+      this.emitRestore();
     });
     const cube = this.cube;
     this.on<PointerEvent>(cube, 'pointermove', (e) => {

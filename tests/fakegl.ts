@@ -51,6 +51,18 @@ export interface DrawEntry {
   attribs: string[];
   element: string | null;
   uniforms: string;
+  /** 0.25.0: 묶인 무늬(단위 이름:올린 그림 꼬리표 — logTextures를 켰을 때만) */
+  tex?: string;
+}
+
+/** 0.25.0: 가짜 무늬(texImage2D로 올린 그림의 꼬리표를 든다) */
+export interface FakeTexture {
+  id: number;
+  /** 올린 그림의 tag(없으면 가로x세로), 올리지 않았으면 '' */
+  src: string;
+  /** texImage2D 횟수 */
+  uploads: number;
+  deleted: boolean;
 }
 
 /** FNV-1a 32비트(바이트) */
@@ -77,6 +89,11 @@ export class FakeGL {
   draws: DrawEntry[] = [];
   /** 그리기 기록을 남길지(시험이 견줄 때만 켠다) */
   logDraws = false;
+  /** 0.25.0: 그리기 기록에 묶인 무늬의 그림 꼬리표도 남길지 */
+  logTextures = false;
+  readonly textures: FakeTexture[] = [];
+  private unit: number | null = null;
+  private texUnits = new Map<number, FakeTexture | null>();
   canvas: { width: number; height: number };
   private ids = 0;
   private consts = new Map<string, number>();
@@ -270,8 +287,27 @@ export class FakeGL {
   bindFramebuffer(_t: number, fb: unknown): void {
     this.fb = fb;
   }
-  createTexture(): object {
-    return { id: ++this.ids };
+  createTexture(): FakeTexture {
+    const t: FakeTexture = { id: ++this.ids, src: '', uploads: 0, deleted: false };
+    this.textures.push(t);
+    return t;
+  }
+  deleteTexture(t: FakeTexture | null): void {
+    if (t) t.deleted = true;
+  }
+  activeTexture(u: number): void {
+    this.unit = u;
+  }
+  bindTexture(_target: number, t: FakeTexture | null): void {
+    this.texUnits.set(this.unit ?? this.C('TEXTURE0'), t);
+  }
+  /** 0.25.0: 그림(ImageBitmap 꼴 — 6인자)을 올리면 그 tag(없으면 가로x세로)를 무늬에 적는다. 크기만 잡는 9인자는 'empty' */
+  texImage2D(...a: unknown[]): void {
+    const t = this.texUnits.get(this.unit ?? this.C('TEXTURE0'));
+    if (!t) return;
+    const src = a.length === 6 ? (a[5] as { tag?: string; width?: number; height?: number } | null) : null;
+    t.src = src ? (src.tag ?? `${src.width}x${src.height}`) : 'empty';
+    t.uploads++;
   }
   createFramebuffer(): object {
     return { id: ++this.ids };
@@ -295,7 +331,16 @@ export class FakeGL {
       if (a.enabled) attribs.push(`${i}:${a.size}/${a.stride}/${a.offset}/${a.divisor}:${this.bufHash(a.buf)}`);
     const p = this.prog;
     const uniforms = p ? JSON.stringify([...p.uniforms].sort((x, y) => (x[0] < y[0] ? -1 : 1))) : '';
-    this.draws.push({ op, args, prog: p?.key ?? '', attribs, element: this.vao.element ? this.bufHash(this.vao.element) : null, uniforms });
+    const e: DrawEntry = { op, args, prog: p?.key ?? '', attribs, element: this.vao.element ? this.bufHash(this.vao.element) : null, uniforms };
+    if (this.logTextures) {
+      const name = (u: number): string => [...this.consts].find(([, v]) => v === u)?.[0] ?? String(u);
+      e.tex = [...this.texUnits]
+        .filter(([, t]) => t && !t.deleted)
+        .map(([u, t]) => `${name(u)}:${t!.src}`)
+        .sort()
+        .join(',');
+    }
+    this.draws.push(e);
   }
   drawArrays(mode: number, first: number, count: number): void {
     this.log('drawArrays', [mode, first, count]);
@@ -305,6 +350,15 @@ export class FakeGL {
   }
   drawArraysInstanced(mode: number, first: number, count: number, n: number): void {
     this.log('drawArraysInstanced', [mode, first, count, n]);
+  }
+
+  /**
+   * 0.25.0: 상수 값 → 이름(없으면 null). 상수 값은 문맥마다 처음 쓴 차례로 정해지므로, 부르는 차례가 다른 두 뷰어(문맥 복구 등)의
+   * 그리기 기록을 견줄 때 그리기 꼴(TRIANGLES 등)·색인 꼴을 이름으로 바꿔 견준다
+   */
+  nameOf(v: number): string | null {
+    for (const [k, x] of this.consts) if (x === v) return k;
+    return null;
   }
 
   /** 지우지 않은 버퍼 수 */
