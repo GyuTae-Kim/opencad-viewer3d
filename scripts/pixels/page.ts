@@ -4304,6 +4304,200 @@ const annoOverlapValues: ValueSet = {
   },
 };
 
+// ───────────── 0.25.0 놓기 선택·문맥 복구 ─────────────
+/**
+ * 놓기를 시험할 'tex' 장면의 얕은 사본: 그물·무늬 객체만 새로 만든다(코어가 지우는 것은 사본의 필드라 다른 장면이 쓰는 원본 배열은 그대로).
+ * 놓기를 모르는 판(0.24.0)은 release를 무시하고 예전처럼 그린다
+ */
+function releaseCopy(): Scene3d {
+  const s = sceneOf('tex');
+  return { ...s, meshes: s.meshes.map((m) => ({ ...m })), textures: s.textures?.map((t) => ({ ...t })) };
+}
+
+/**
+ * 뷰어 문맥을 WEBGL_lose_context로 잃었다 되찾는다(되찾음 사건은 뷰어가 먼저 받아 장면을 다시 올린다). 잃음 사건을 다 보낸 뒤에야
+ * Chrome이 되찾기를 허락하므로(뷰어의 preventDefault를 사건을 다 보낸 뒤 읽는다 — 그 안의 마이크로 작업에서 부르면 조용히 무시된다) 한 틱 뒤에 부른다.
+ * 되찾음 사건은 시간 한도 안에 와야 한다
+ */
+async function loseRestore(v: V): Promise<void> {
+  const cv = v.canvas as HTMLCanvasElement;
+  const ext = (cv.getContext('webgl2') as WebGL2RenderingContext | null)?.getExtension('WEBGL_lose_context');
+  if (!ext) throw new Error('WEBGL_lose_context가 없습니다');
+  const once = (type: string): Promise<void> =>
+    new Promise((ok, fail) => {
+      const t = setTimeout(() => fail(new Error(`${type} 사건이 60초 안에 오지 않았습니다`)), 60_000);
+      cv.addEventListener(type, () => (clearTimeout(t), ok()), { once: true });
+    });
+  const lost = once('webglcontextlost');
+  ext.loseContext();
+  await lost;
+  await new Promise((r) => setTimeout(r, 20));
+  const back = once('webglcontextrestored');
+  ext.restoreContext();
+  await back;
+}
+
+/** 앱 길: 문맥 복구 알림을 받으면 놓은 배열·무늬 원본을 원본 장면(sceneOf('tex'))에서 다시 준다(그 API가 없는 판은 아무것도 하지 않는다) */
+function restoreFromSource(v: V): () => void {
+  if (typeof v.onContextRestore !== 'function') return () => undefined;
+  const src = sceneOf('tex');
+  return v.onContextRestore((need: { meshes: { id: string }[]; textures: string[] }) => {
+    for (const m of need.meshes) {
+      const o = src.meshes.find((x) => x.id === m.id)!;
+      v.restoreMeshArrays(m.id, { normals: o.normals, uvs: o.uvs, backUvs: o.backUvs });
+    }
+    for (const id of need.textures) void v.restoreTexture(id, src.textures!.find((t) => t.id === id)!.data!);
+  });
+}
+
+/**
+ * 다시 받을 것이 없고 앱이 다시 준 무늬도 다 풀어 올릴 때까지(그 API가 없는 판은 바로) — 시간으로 기다린다.
+ * restoreNeed는 아직 주지 않은 것만 들고, 준 무늬를 푸는 동안은 stats.textures.missing에 남는다(찍기 전 texturesReady는 missing을 기다리지 않는다)
+ */
+async function restoredAll(v: V): Promise<void> {
+  const end = performance.now() + 10_000;
+  while (v.restoreNeed || (v.stats?.textures?.missing ?? 0) > 0) {
+    if (performance.now() > end) throw new Error('문맥 복구 뒤 다시 받을 것이 10초 안에 다 올라오지 않았습니다');
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/**
+ * 0.25.0 장면: 놓기만(문맥 그대로), 놓지 않고 문맥 잃기·되찾기, 놓고 문맥 잃기·되찾기 + 앱이 원본에서 다시 줌 — 셋 모두 0.24.0과 화소까지 같아야 한다
+ * (0.24.0은 release를 모르고, 문맥 복구 때 장면 배열을 그대로 다시 올린다). 앱이 아무것도 주지 않은 문맥 복구(위치·색 — 평면 음영·평균색)는 새 장면.
+ * 장면을 바꿔 올렸으므로 다음 장면은 자료를 다시 올린다(loaded = null)
+ */
+const releaseShots: Shot[] = [
+  {
+    name: 'tex-release',
+    data: 'tex',
+    setup: async ({ v }) => {
+      v.setScene(releaseCopy(), { keepView: true, release: true });
+      loaded = null;
+    },
+  },
+  {
+    name: 'tex-restore',
+    data: 'tex',
+    setup: async ({ v }) => {
+      await texturesReady(v);
+      await loseRestore(v);
+      loaded = null;
+    },
+  },
+  {
+    name: 'tex-release-restore',
+    data: 'tex',
+    setup: async ({ v }) => {
+      v.setScene(releaseCopy(), { keepView: true, release: true });
+      loaded = null;
+      await texturesReady(v);
+      const off = restoreFromSource(v);
+      try {
+        await loseRestore(v);
+        await restoredAll(v);
+      } finally {
+        off();
+      }
+    },
+  },
+  {
+    name: 'tex-release-restore-flat',
+    data: 'tex',
+    needs: fn('onContextRestore', 'restoreMeshArrays', 'restoreTexture'),
+    setup: async ({ v }) => {
+      v.setScene(releaseCopy(), { keepView: true, release: true });
+      loaded = null;
+      await texturesReady(v);
+      await loseRestore(v);
+    },
+  },
+];
+SHOTS.push(...releaseShots);
+
+/** 화면 격자 고르기(칸 가운데에서 조금 비켜 — 경계를 정확히 가리키지 않게)와 축 범위 */
+function releasePicks(c: Ctx): unknown[] {
+  const { v } = c;
+  const rows: unknown[] = [];
+  for (let y = 20; y < c.h; y += 37)
+    for (let x = 20; x < c.w; x += 41) {
+      const p = v.pick(x + 0.3, y + 0.4);
+      rows.push(p ? [p.kind, p.id, p.index, r10s(p.point), r10s(p.normal)] : null);
+    }
+  const range = (['x', 'y', 'z'] as const).map((a) => {
+    const r = typeof v.sectionRange === 'function' ? v.sectionRange(a) : null;
+    return r ? [r10(r.min), r10(r.max)] : null;
+  });
+  return [['picks', rows], ['range', range]];
+}
+
+/**
+ * 0.25.0 놓아도 고르기·범위가 같은지(base와 견준다 — 0.24.0은 release를 무시): 놓은 장면의 화면 격자 고르기·축 범위,
+ * 그 뒤 문맥을 잃었다 되찾고 앱이 다시 준 뒤에도 같은 값인지
+ */
+const releasePickValues: ValueSet = {
+  name: 'tex-release-picks',
+  data: 'tex',
+  run: async (c) => {
+    const { v } = c;
+    v.setScene(releaseCopy(), { keepView: true, release: true });
+    loaded = null;
+    await texturesReady(v);
+    const a = releasePicks(c);
+    const off = restoreFromSource(v);
+    try {
+      await loseRestore(v);
+      await restoredAll(v);
+    } finally {
+      off();
+    }
+    const b = releasePicks(c);
+    return [['release', a], ['restored-same', JSON.stringify(a) === JSON.stringify(b)]];
+  },
+};
+
+/**
+ * 0.25.0 놓기·문맥 복구 값(새 값 — 0.24.0에는 없는 API): 놓은 뒤 장면 객체에 남은 배열·무늬 원본, 문맥 복구 알림의 need, 다시 주기 전 무늬 상태,
+ * 법선만 준 뒤 남은 것, 다 준 뒤(무늬 포함) 남은 것과 무늬 상태, 문맥 복구 전·후 고르기가 같은지
+ */
+const releaseRestoreValues: ValueSet = {
+  name: 'tex-release-restore',
+  data: 'tex',
+  needs: fn('onContextRestore', 'restoreMeshArrays', 'restoreTexture'),
+  run: async (c) => {
+    const { v } = c;
+    const s = releaseCopy();
+    v.setScene(s, { keepView: true, release: true });
+    loaded = null;
+    await texturesReady(v);
+    const left = s.meshes.map((m) => [m.id, !!m.normals, !!m.uvs, !!m.backUvs]);
+    const texLeft = (s.textures ?? []).map((t) => [t.id, !!t.data, !!t.bitmap]);
+    const p0 = releasePicks(c);
+    const needs: unknown[] = [];
+    const off = v.onContextRestore((need: unknown) => void needs.push(need));
+    await loseRestore(v);
+    off();
+    const t0 = { ...v.stats.textures, bytes: 0 };
+    const p1 = releasePicks(c);
+    const src = sceneOf('tex');
+    const sp = src.meshes.find((m) => m.id === '구')!;
+    const tookNormals = v.restoreMeshArrays('구', { normals: sp.normals });
+    const afterNormals = v.restoreNeed;
+    for (const m of src.meshes) v.restoreMeshArrays(m.id, { normals: m.normals, uvs: m.uvs, backUvs: m.backUvs });
+    const tex = await Promise.all((src.textures ?? []).map((t) => v.restoreTexture(t.id, t.data!)));
+    await restoredAll(v);
+    const t1 = { ...v.stats.textures, bytes: 0 };
+    return [
+      ['left', left, texLeft],
+      ['need', needs],
+      ['textures-before', t0],
+      ['picks-same', JSON.stringify(p0) === JSON.stringify(p1)],
+      ['normals', tookNormals, afterNormals],
+      ['textures', tex, t1, v.restoreNeed],
+    ];
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -4360,6 +4554,8 @@ const VALUES: ValueSet[] = [
   pickOpaqueValues('off'),
   pickThroughSwitchValues,
   annoOverlapValues,
+  releasePickValues,
+  releaseRestoreValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -4474,7 +4670,8 @@ function makeCtx(d: Data): Ctx {
 async function texturesReady(v: V): Promise<void> {
   for (let i = 0; i < 200; i++) {
     const t = v.stats?.textures;
-    if (!t || t.ready >= t.count) return;
+    // 0.25.0: 코어가 원본을 놓아 앱이 다시 주기를 기다리는 무늬(missing)는 기다리지 않는다(없는 판은 0)
+    if (!t || t.ready + (t.missing ?? 0) >= t.count) return;
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error('무늬가 5초 안에 풀리지 않았습니다');
