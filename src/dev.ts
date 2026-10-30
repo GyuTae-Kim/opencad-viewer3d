@@ -38,6 +38,9 @@
  *   무늬는 &tex=1에서
  * 0.26.0: 반투명 지나 고르기 단추의 "반투명 너머"는 onPick(cb, { throughTranslucent: true, front: true }) 알림 하나로 받고 같은 누르기의 가장 앞 고르기(e.front)를
  *   "(앞: …)"으로 함께 보인다. &compact=1이면 작은 법선·무늬 좌표 배열
+ * 0.27.0 단추: 상자 뚜껑 지나기(반투명 지나 고르기·상자 고르기 불투명과 함께 setItemPickThrough('상자', 윗면 삼각형) — 윗면을 누르면 "반투명 너머"가 상자 안쪽 면),
+ *   끌어온 점 나란함·수직(inference.trackDirs — 모서리를 지나간 뒤 끌어온 점에서 그 모서리와 나란한 선·수직인 선, 상태 줄 "(…)에서 모서리와 나란함"),
+ *   글상자 기본 자리(setMeasureLabelSpot — 측정 거리 글상자는 아래, 덧그림 글상자는 가운데부터)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -452,6 +455,35 @@ toggle(
   (v) => (regive = v),
   '켜 두면 문맥을 되찾을 때 알림의 need대로 원본 장면에서 restoreMeshArrays·restoreTexture로 다시 준다. 끄면 놓은 그물은 평면 음영, 놓은 무늬는 그물 색 그대로',
 );
+// 0.27.0: 그물 일부 면만 지나 고르기(setItemPickThrough), 끌어온 점의 나란함·수직(inference.trackDirs), 뷰어 글상자 기본 자리(setMeasureLabelSpot)
+toggle(
+  '상자 뚜껑 지나기',
+  (v) => viewer.setItemPickThrough('상자', v ? [{ start: 2, count: 2 }] : null),
+  '반투명 지나 고르기·상자 고르기 불투명을 켠 채로 상자 윗면 삼각형(2·3)만 지나가게 한다(setItemPickThrough — 그림·윤곽선은 그대로). ' +
+    '상자 윗면을 누르면 "반투명 너머"가 상자 안쪽 바닥·벽, 측정도 그 면 위',
+);
+toggle(
+  '끌어온 점 나란함·수직',
+  (v) => {
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, trackDirs: true },
+          }
+        : null,
+    );
+  },
+  '끌어온 축에 더해, 커서가 앞서 지나간 모서리와 나란한 선·수직인 선을 끌어온 점(0.5초 머문 점)에서 긋는다(inference.trackDirs — 추론 색 쇄선, 잠그지 않는다). ' +
+    '모서리 위를 지나간 뒤 끌어온 점 둘레에서 그 모서리 방향·수직으로 가리킨다',
+);
+toggle(
+  '글상자 기본 자리',
+  (v) => viewer.setMeasureLabelSpot(v ? { measure: 'below', annotations: 'center' } : null),
+  '측정 거리 글상자는 두 점 가운데 바로 아래, 덧그림 글상자는 기준점 가운데부터 놓는다(setMeasureLabelSpot — 피할 자리와 겹치면 같은 차례로 비킨다)',
+);
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -665,7 +697,11 @@ viewer.canvas.addEventListener('pointermove', () =>
     const ax = (a: string | undefined): string => `${(a ?? '').toUpperCase()}축`;
     const face = h?.face ? ` · ${h.face.id} 면` : '';
     const lockLine = `잠근 ${h?.axis ? ax(h.axis) : '선'}`;
-    const next = h?.locked && h.trackOther
+    // 0.27.0: 끌어온 점에서 기준 선분과 나란함·수직인 선 위(잠그지 않은 'parallel'·'perpendicular'에 끌어온 점)
+    const dirOf = h && !h.locked && h.trackFrom && (h.snap === 'parallel' || h.snap === 'perpendicular') ? h.snap : null;
+    const next = dirOf && h?.trackFrom
+      ? `미리 보기: ${pt(h.trackFrom)}에서 모서리와 ${dirOf === 'parallel' ? '나란함' : '수직'}`
+      : h?.locked && h.trackOther
       ? `미리 보기: ${lockLine} · ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}과 만나는 점`
       : h?.locked && h.trackFrom
         ? `미리 보기: ${lockLine} 위 ${pt(h.trackFrom)}와 나란한 자리`
