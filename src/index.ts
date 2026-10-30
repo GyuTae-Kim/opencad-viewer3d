@@ -16,6 +16,7 @@ export type {
   MeasureFormat,
   MeasureHoverSnap,
   MeasureInferenceLock,
+  LabelFallback,
   LabelSpotName,
   MeasureLabelAvoid,
   MeasureLabelRect,
@@ -50,6 +51,7 @@ export type {
   MeasureTrackDirOptions,
   MeasureTrackOptions,
   NormalizedInference,
+  NormalizedTrackDirs,
   SnapAxis,
   TrackDirEdgeFilter,
 } from './inference';

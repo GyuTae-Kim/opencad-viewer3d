@@ -4929,6 +4929,282 @@ const bufferStatsValues: ValueSet = {
   },
 };
 
+// ───────────── 0.29.0 끌어온 점 안내 선이 만나는 점·뷰어 글상자 fallback·되찾은 뒤 끝 알림·첫 점 나란함 기준 거르기 ─────────────
+/** 0.29.0 만나는 점(inference.trackDirs { meets })이 있는 판인지 — 편 선택에 meets가 남는다 */
+const v0290meets: Need = (v, c) => {
+  const why = v0270trackDirs(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { track: true, trackDirs: { meets: true } } });
+  const ok = (v.measureSnap?.inference as any)?.trackDirs?.meets === true;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.29.0 만나는 점(inference.trackDirs { meets })';
+};
+/**
+ * 첫 점(구멍 점 TRACK_P2 = (30, 30, 40))의 X축과 끌어온 점 TRACK_P = (90, 50, 40)에서 기준(엇갈린 선분 0)과 나란한 선이 만나는 자리, 수직인 선(수평)이 만나는 자리,
+ * 나란한 선이 상자 오른쪽 윗모서리(x 120, z 40)와 만나는 자리
+ */
+const MEET_X = [90 - (20 / DIR_U[1]!) * DIR_U[0]!, 30, 40];
+const MEET_PERP = [90 + (20 / DIR_U[0]!) * DIR_U[1]!, 30, 40];
+const MEET_EDGE = [120, 50 + (30 / DIR_U[0]!) * DIR_U[1]!, 40];
+
+/**
+ * 공구 경로를 숨기고 만나는 점을 켠(또는 끈) 붙잡기로 첫 점(구멍 점 TRACK_P2)을 찍고 구멍 점을 숨긴 뒤 끌어온 점 TRACK_P를 주고 기준 선분을 지나간다.
+ * 첫 점을 찍는 동안은 엇갈린 선분을 숨긴다(등각 보기에서 선분 0이 그 구멍 점 바로 옆을 지나 선분 위 점을 찍는다 — 묶음 숨김은 reset이 되돌리지 않으므로 바로 다시 켠다)
+ */
+function meetSetup(c: Ctx, meets: boolean): void {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference: { axes: true, parallel: true, track: true, trackDirs: meets ? { meets: true } : true } });
+  v.setItemVisible('엇갈림', false);
+  const a = c.at(c.world(TRACK_P2));
+  if (a) c.click(a.x + 1, a.y);
+  v.setItemVisible('엇갈림', true);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureTrackPoints([c.world(TRACK_P)]);
+  const r = c.at(c.world(DIR_REF));
+  if (r) c.hover(r.x + 0.4, r.y + 0.3);
+  v.renderNow();
+}
+/** 끌어온 점 안내 선이 첫 점 X축·상자 윗모서리와 만나는 점(추론 색 ×, 첫 점에서 축 색 선 — 새 장면) */
+const meetShots: Shot[] = [
+  {
+    name: 'cross-measure-track-dir-meet',
+    data: 'cross',
+    needs: v0290meets,
+    setup: (c) => {
+      meetSetup(c, true);
+      const q = c.at(c.world(MEET_X));
+      if (q) c.hover(q.x + 2, q.y + 1);
+    },
+  },
+  {
+    name: 'cross-measure-track-dir-meet-edge',
+    data: 'cross',
+    needs: v0290meets,
+    setup: (c) => {
+      meetSetup(c, true);
+      const q = c.at(c.world(MEET_EDGE));
+      if (q) c.hover(q.x + 2, q.y + 1);
+    },
+  },
+];
+SHOTS.push(...meetShots);
+
+/**
+ * 0.29.0 만나는 점 값(cross — 새 값): 만나는 점을 끈 뒤·켠 뒤 같은 차례로 첫 점 X축과 나란한 선·수직인 선이 만나는 자리, 상자 윗모서리와 만나는 자리(그 뒤 기준이 그대로인지 —
+ * 나란한 선 위), Shift 잠금 단추(setMeasureInferenceLock(true))가 잠근 것, 두 점째로 찍은 값, 첫 점 없이 끌어온 점 둘(다른 끌어온 점의 축과 만나는 자리)
+ */
+const meetValues: ValueSet = {
+  name: 'cross-measure-track-dir-meet',
+  data: 'cross',
+  needs: v0290meets,
+  run: (c) => {
+    const { v } = c;
+    const row = (name: string): unknown[] => {
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [
+        name,
+        h
+          ? [
+              h.snap,
+              h.axis ?? null,
+              r10s(h.point),
+              r10s(h.trackFrom),
+              h.edge ? h.edge.map(r10s) : null,
+              r10s(h.direction),
+              h.segment ? [h.segment.kind, h.segment.id, h.segment.index] : null,
+              h.trackOther ? [r10s(h.trackOther.from), h.trackOther.axis] : null,
+            ]
+          : null,
+        lockState(v.measureHoverLock),
+      ];
+    };
+    const go = (p: number[], dx = 2, dy = 1): void => {
+      const q = c.at(c.world(p));
+      if (q) c.hover(q.x + dx, q.y + dy);
+      v.renderNow();
+    };
+    const out: unknown[] = [];
+    for (const meets of [false, true]) {
+      meetSetup(c, meets);
+      go(MEET_X);
+      out.push(row(`x-${meets}`));
+      go(MEET_PERP);
+      out.push(row(`perp-${meets}`));
+      go(MEET_EDGE);
+      out.push(row(`edge-${meets}`));
+      go(DIR_PAR);
+      out.push(row(`par-after-edge-${meets}`));
+      go(MEET_X);
+      out.push([`lock-${meets}`, v.setMeasureInferenceLock(true), lockState(v.measureInferenceLock)]);
+      v.setMeasureInferenceLock(false);
+      const q = c.at(c.world(MEET_X));
+      if (q) c.click(q.x + 2, q.y + 1);
+      out.push([`second-${meets}`, v.measurePoints.map((p: any) => [p.snap, r10s(p.point), p.axis ?? null, r10s(p.trackFrom), r10s(p.direction)])]);
+      v.clearMeasure();
+      v.setMeasureTrackPoints([c.world(TRACK_P), c.world(TRACK_P2)]);
+      go(DIR_REF, 0.4, 0.3);
+      go(MEET_X);
+      out.push(row(`other-${meets}`));
+      v.setMeasureSnap(null);
+      v.clearMeasure();
+      v.setMeasureMode(false);
+      v.setGroupVisible('공구 경로', true);
+      v.setGroupVisible('구멍', true);
+    }
+    return out;
+  },
+};
+
+/** 0.29.0 첫 점 나란함 기준 거르기(inference.parallelEdge)가 있는 판인지 */
+const v0290parallelEdge: Need = (v, c) => {
+  const why = v090infer(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { parallel: true, parallelEdge: () => true } });
+  const ok = typeof (v.measureSnap?.inference as any)?.parallelEdge === 'function';
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.29.0 첫 점 나란함 기준 거르기(inference.parallelEdge)';
+};
+
+/**
+ * 0.29.0 첫 점 나란함 기준 거르기 값(cross — 새 값): 첫 점(상자 윗면 앞 구석) 뒤 엇갈린 선분 0을 지나고 선분 1을 지난 뒤 첫 점에서 선분 1과 나란한 자리·선분 0과 나란한 자리 —
+ * 거르지 않으면(0.28.0) 기준이 선분 1, 선분 1을 거르면 선분 0이 남는다. 앱 함수가 받은 선분
+ */
+const parallelEdgeValues: ValueSet = {
+  name: 'cross-measure-parallel-edge',
+  data: 'cross',
+  needs: v0290parallelEdge,
+  run: (c) => {
+    const { v } = c;
+    const row = (name: string): unknown[] => {
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, r10s(h.point), h.edge ? h.edge.map(r10s) : null, r10s(h.direction)] : null];
+    };
+    const go = (p: number[], dx = 0.4, dy = 0.3): void => {
+      const q = c.at(c.world(p));
+      if (q) c.hover(q.x + dx, q.y + dy);
+      v.renderNow();
+    };
+    const out: unknown[] = [];
+    const asked: unknown[] = [];
+    const edge = (s: any): boolean => {
+      asked.push([s.kind, s.id, s.index, s.raw]);
+      return !(s.id === '엇갈림' && s.raw === 1);
+    };
+    const u0 = DIR_U[0]!, u1 = DIR_U[1]!;
+    for (const filter of [false, true]) {
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ edges: true, inference: { axes: true, parallel: true, ...(filter ? { parallelEdge: edge } : {}) } });
+      const a = c.at(c.world([120, 0, 40]));
+      if (a) c.click(a.x - 1, a.y + 1);
+      go(DIR_REF);
+      go(DIR_OTHER);
+      go([120 - 20 * u0, 20 * u1, 40], 2, 1);
+      out.push(row(`along-1-${filter}`));
+      go([120 - 20 * u0, -20 * u1, 40], 2, 1);
+      out.push(row(`along-0-${filter}`));
+      v.setMeasureSnap(null);
+      v.clearMeasure();
+      v.setMeasureMode(false);
+    }
+    out.push(['asked', asked]);
+    return out;
+  },
+};
+
+/** 0.29.0 뷰어 글상자 fallback(setMeasureLabelSpot의 fallback)이 있는 판인지 */
+const v0290labelFallback: Need = (v, c) => {
+  const why = v0270labelSpot(v, c);
+  if (why) return why;
+  v.setMeasureLabelSpot({ measure: 'center', fallback: 'topRight' });
+  const ok = v.measureLabelSpot?.fallback === 'topRight';
+  v.setMeasureLabelSpot(null);
+  return ok ? null : '이 판에 없는 선택: 0.29.0 뷰어 글상자 fallback';
+};
+
+/**
+ * 0.29.0 뷰어 글상자 fallback 값(base — 새 값): 측정 거리 글상자와 덧그림 글상자의 기본 자리를 가운데로 두고, 측정 거리 글상자 가운데 자리를 덮는 가로 띠를 피할 자리로 준 뒤
+ * fallback 없음·'first'·'topRight'의 자리(없음과 'first'는 같아야 한다), 띠를 거둔 뒤 기본 자리
+ */
+const labelFallbackValues: ValueSet = {
+  name: 'base-label-spot-fallback',
+  data: 'base',
+  needs: v0290labelFallback,
+  run: (c) => {
+    const { v } = c;
+    overlapSetup(c);
+    const rect = (r: LabelRect | null): number[] | null => (r ? [r10(r.x), r10(r.y), r10(r.width), r10(r.height)] : null);
+    const now = (): unknown[] => {
+      v.renderNow();
+      return [rect(v.measureLabelRect), (v.annotationLabelRects as (LabelRect | null)[]).map(rect)];
+    };
+    v.setMeasureLabelSpot({ measure: 'center', annotations: 'center' });
+    v.renderNow();
+    const m = v.measureLabelRect as LabelRect | null;
+    const out: unknown[] = [['center', now()]];
+    if (m) v.setMeasureLabelAvoid([{ x: 0, y: m.y - 34, width: c.w, height: m.height + 68 }]);
+    const rows: string[] = [];
+    for (const fallback of [undefined, 'first', 'topRight'] as const) {
+      v.setMeasureLabelSpot({ measure: 'center', annotations: 'center', ...(fallback ? { fallback } : {}) });
+      const r = now();
+      rows.push(JSON.stringify(r));
+      out.push([`band-${fallback ?? 'none'}`, r, v.measureLabelSpot]);
+    }
+    out.push(['first-same', rows[0] === rows[1], rows[0] !== rows[2]]);
+    v.setMeasureLabelAvoid(null);
+    out.push(['off', now()]);
+    return out;
+  },
+};
+
+/**
+ * 0.29.0 되찾은 뒤 끝 알림 값(tex — 새 값): 놓기 'bitmap'(코어가 바이트를 다시 푼다)·release: true(앱이 원본 장면에서 다시 준다)마다 잃음·되찾음·끝 알림의 차례와
+ * 그때 restorePending·무늬 상태, 끝 알림 때 다시 받을 것이 없는지
+ */
+const restoreDoneValues: ValueSet = {
+  name: 'tex-restore-done',
+  data: 'tex',
+  needs: fn('onContextRestoreDone', 'onContextRestore', 'restoreMeshArrays', 'restoreTexture'),
+  run: async (c) => {
+    const { v } = c;
+    const out: unknown[] = [];
+    for (const release of [{ textures: 'bitmap' }, true] as const) {
+      v.setScene(releaseCopy(), { keepView: true, release });
+      loaded = null;
+      await texturesReady(v);
+      const order: unknown[] = [];
+      let done = false;
+      const offs = [
+        v.onContextLost(() => order.push(['lost', v.restorePending])),
+        v.onContextRestore((need: { meshes: unknown[]; textures: unknown[] }) => void order.push(['restore', v.restorePending, need.meshes.length, need.textures.length])),
+        v.onContextRestoreDone(() => {
+          const t = v.stats.textures;
+          order.push(['done', v.restorePending, t.ready === t.count, v.restoreNeed]);
+          done = true;
+        }),
+        release === true ? restoreFromSource(v) : () => undefined,
+      ];
+      try {
+        await loseRestore(v);
+        const end = performance.now() + 10_000;
+        while (!done) {
+          if (performance.now() > end) throw new Error('되찾은 뒤 끝 알림이 10초 안에 오지 않았습니다');
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      } finally {
+        for (const off of offs) off();
+      }
+      out.push([JSON.stringify(release), order, v.restorePending]);
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -4994,6 +5270,10 @@ const VALUES: ValueSet[] = [
   labelSpotValues,
   trackDirEdgeValues,
   bufferStatsValues,
+  meetValues,
+  parallelEdgeValues,
+  labelFallbackValues,
+  restoreDoneValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

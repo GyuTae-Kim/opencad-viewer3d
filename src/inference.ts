@@ -80,9 +80,16 @@ export interface MeasureInference {
    * 차례: 점 붙잡기 → 끌어온 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차 등) → 첫 점 축·나란함 → 끌어온 축과 이것(화면에서 가까운 것, 같으면 끌어온 축).
    * 그 점은 snap 'parallel'·'perpendicular'에 trackFrom(끌어온 점)과 edge(기준 선분)가 실리고 direction은 없다 — 첫 점을 지나는 선이 아니라 Shift·잠금 단추로 잠그지 않는다.
    * 잠근 동안에는 보지 않는다(lockTracks는 끌어온 점의 축만). 첫 점 전에도 된다(opencad-viewer3d/track trackDirSnap).
-   * 0.28.0: 객체 꼴 { edge }(MeasureTrackDirOptions)면 앱이 기준 선분이 될 수 없는 선분(곡선을 나눈 현 등)을 거른다 — 객체는 true와 같이 켜고, edge가 없으면 true와 같다
+   * 0.28.0: 객체 꼴 { edge }(MeasureTrackDirOptions)면 앱이 기준 선분이 될 수 없는 선분(곡선을 나눈 현 등)을 거른다 — 객체는 true와 같이 켜고, edge가 없으면 true와 같다.
+   * 0.29.0: { meets: true }면 그 선이 첫 점 축·첫 점의 나란함·다른 끌어온 점의 축, 커서 둘레 선분·윤곽선, 커서 아래 그물 면과 만나는 점에도 붙잡는다(기본 꺼짐)
    */
   trackDirs?: boolean | MeasureTrackDirOptions | null;
+  /**
+   * 0.29.0: 0.10.0 나란함(parallel — 첫 점에서)의 기준 선분 거르기(기본 없음 — 0.28.0처럼 지나간 선분이 모두 기준). 함수를 주면 커서가 지나간 선분·윤곽선을
+   * 이 함수에 물어(trackDirs의 edge와 같은 꼴·규칙 — 바로 앞에 물은 선분은 다시 묻지 않고, 던지거나 true가 아니면 받지 않는다) 받은 것만 첫 점 나란함의 기준으로 기억한다
+   * (받지 않으면 앞서 받은 기준이 남는다). 끌어온 점의 기준(trackDirs)과는 따로다 — 같은 함수를 둘 다에 주면 같은 선분은 한 번만 묻는다
+   */
+  parallelEdge?: TrackDirEdgeFilter | null;
 }
 
 /** 끌어온 축 안내 선택(0.16.0, MeasureInference.track) */
@@ -105,6 +112,14 @@ export interface MeasureTrackDirOptions {
    * 0.10.0 나란함(parallel — 첫 점에서)의 기준 선분은 거르지 않는다(따로 기억한다). 순수 trackDirGuides·trackDirSnap은 기준 선분을 바로 받으므로 거르기가 없다
    */
   edge?: TrackDirEdgeFilter | null;
+  /**
+   * 0.29.0: 끌어온 점의 나란함·수직 선이 다른 것과 만나는 점(기본 꺼짐 — true일 때만). 만나 보는 것은 첫 점을 지나는 X·Y·Z 축, 첫 점의 나란함(parallel을 켰을 때 —
+   * 0.10.0 기준 선분과 나란한 선), 다른 끌어온 점의 X·Y·Z 축, 커서 둘레 선분·윤곽선, 커서 아래 보이는 그물 면이다(순수 trackDirMeetSnap — 직선끼리는 3D로 만날 때만).
+   * 점 후보로 끌어온 점 후보(첫 점 축 위 나란한 자리·축끼리·선분·첫 점 축과 선분·면·열린 교차) 뒤 차례이고, 첫 점 축·나란함·그 선 위 점보다 먼저다.
+   * 값은 snap 'parallel'·'perpendicular'·trackFrom·edge(기준 선분)에 만난 것이 실린다 — 첫 점 축이면 axis·direction(Shift가 그 축에 잠근다), 첫 점의 나란함이면 direction,
+   * 다른 끌어온 점의 축이면 trackOther, 선분이면 segment, 면이면 face. 선분·면과 만나는 점은 앱 refine('axisEdge')·refineFace('axisFace')가 그 선(SnapRefineLine — 축 이름 없음)으로 다듬는다
+   */
+  meets?: boolean;
 }
 
 /** 끌어온 축: 점 붙잡기 위에 머물러야 하는 시간 기본값(ms, 0.16.0) */
@@ -114,7 +129,7 @@ export const TRACK_DWELL_MS = 500;
  * 편 inference 선택(Viewer3d.measureSnap.inference): 0.9.0·0.10.0 다섯 값, 0.16.0 끌어온 축은 켰을 때만 track이,
  * 0.18.0 첫 점 축과 선분의 교차·축과 면의 교차는 켰을 때만 axisEdges·axisFaces가, 0.19.0 잠근 선과 선분·면의 교차는 켰을 때만 lockEdges·lockFaces가,
  * 0.21.0 잠근 선과 끌어온 축의 교차는 켰을 때만 lockTracks가, 0.27.0 끌어온 점의 나란함·수직은 켰을 때만 trackDirs가 있다
- * (0.28.0: 기준 선분 거르기 edge 함수를 줬으면 { edge }, 아니면 true)
+ * (0.28.0: 기준 선분 거르기 edge 함수를 줬으면 { edge }, 아니면 true. 0.29.0: 만나는 점을 켰으면 meets: true도 — 둘 다 없으면 true)
  */
 export interface NormalizedInference {
   intersections: boolean;
@@ -128,13 +143,28 @@ export interface NormalizedInference {
   lockEdges?: true;
   lockFaces?: true;
   lockTracks?: true;
-  trackDirs?: true | { edge: TrackDirEdgeFilter };
+  trackDirs?: true | NormalizedTrackDirs;
+  /** 0.29.0: 첫 점 나란함의 기준 선분 거르기(함수를 줬을 때만) */
+  parallelEdge?: TrackDirEdgeFilter;
 }
 
-/** 끌어온 점의 나란함·수직 선택을 편다(0.28.0): 꺼짐이면 null, 켰고 edge가 함수면 { edge }, 아니면 true(0.27.0과 같은 꼴) */
-export function normalizeTrackDirs(o: boolean | MeasureTrackDirOptions | null | undefined): true | { edge: TrackDirEdgeFilter } | null {
+/** 편 끌어온 점의 나란함·수직 객체 꼴(0.28.0 { edge }, 0.29.0 meets) — 준 것만 열쇠가 있다(둘 다 없으면 객체가 아니라 true) */
+export interface NormalizedTrackDirs {
+  edge?: TrackDirEdgeFilter;
+  meets?: true;
+}
+
+/**
+ * 끌어온 점의 나란함·수직 선택을 편다(0.28.0): 꺼짐이면 null, 켰고 edge가 함수면 { edge }, 아니면 true(0.27.0과 같은 꼴).
+ * 0.29.0: meets가 true면 그 열쇠도(edge 없이 { meets: true } — 0.28.0과 같은 것만 줬으면 꼴도 같다)
+ */
+export function normalizeTrackDirs(o: boolean | MeasureTrackDirOptions | null | undefined): true | NormalizedTrackDirs | null {
   if (!o) return null;
-  return typeof o === 'object' && typeof o.edge === 'function' ? { edge: o.edge } : true;
+  if (typeof o !== 'object') return true;
+  const r: NormalizedTrackDirs = {};
+  if (typeof o.edge === 'function') r.edge = o.edge;
+  if (o.meets === true) r.meets = true;
+  return r.edge || r.meets ? r : true;
 }
 
 /** 끌어온 축 선택을 편다(0.16.0): 꺼짐(없음·false·null)이면 null, true·객체면 { dwellMs }(수가 아니거나 음수면 기본값) */
@@ -171,6 +201,8 @@ export function normalizeInference(o: MeasureInference | boolean | null | undefi
   if (lockTracks) r.lockTracks = true;
   const trackDirs = o === true ? null : normalizeTrackDirs(o.trackDirs);
   if (trackDirs) r.trackDirs = trackDirs;
+  // 0.29.0: 첫 점 나란함 기준 거르기는 함수일 때만(이것만으로는 추론을 켜지 않는다 — parallel과 함께)
+  if (o !== true && typeof o.parallelEdge === 'function') r.parallelEdge = o.parallelEdge;
   return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track || axisEdges || axisFaces || lockEdges || lockFaces || lockTracks || trackDirs ? r : null;
 }
 

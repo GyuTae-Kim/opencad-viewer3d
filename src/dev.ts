@@ -43,6 +43,9 @@
  *   글상자 기본 자리(setMeasureLabelSpot — 측정 거리 글상자는 아래, 덧그림 글상자는 가운데부터)
  * 0.28.0 단추: 기준 현 거르기(끌어온 점 나란함·수직에서 곡선을 나눈 현 — 공구 경로 나선·시연 원 — 은 기준 선분이 되지 않는다, inference.trackDirs { edge }).
  *   상태 줄에 GPU 버퍼 바이트(stats.buffers — 합·위치·법선·무늬 좌표·색인·선분)
+ * 0.29.0 단추: 안내 선 만나는 점(inference.trackDirs { edge, meets } — 끌어온 점의 나란함·수직 선이 첫 점 축·다른 끌어온 점의 축·모서리·면과 만나는 점,
+ *   상태 줄 "(…)에서 모서리와 나란함 · 첫 점 X축과 만나는 점", 첫 점 나란함도 곡선 현을 거른다 — parallelEdge), 글상자 막히면 예전 차례(setMeasureLabelSpot fallback).
+ *   문맥 잃기·되찾기 뒤 상태 줄에 "다시 올리기 끝"(onContextRestoreDone)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -515,6 +518,35 @@ toggle(
   (v) => viewer.setMeasureLabelSpot(v ? { measure: 'below', annotations: 'center' } : null),
   '측정 거리 글상자는 두 점 가운데 바로 아래, 덧그림 글상자는 기준점 가운데부터 놓는다(setMeasureLabelSpot — 피할 자리와 겹치면 같은 차례로 비킨다)',
 );
+// 0.29.0: 끌어온 점 안내 선이 만나는 점(trackDirs { meets })·첫 점 나란함 기준 거르기(parallelEdge), 뷰어 글상자 fallback, 되찾은 뒤 끝 알림(onContextRestoreDone)
+/** 공구 경로 나선·시연 원을 나눈 현은 기준이 되지 않는다(0.28.0 trackDirs edge·0.29.0 parallelEdge에 함께 준다) */
+const notCurve = (_s: unknown, item: { id: string }): boolean => item.id !== '공구 경로' && item.id !== '시연 원';
+toggle(
+  '안내 선 만나는 점',
+  (v) => {
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, trackDirs: { edge: notCurve, meets: true }, parallelEdge: notCurve },
+          }
+        : null,
+    );
+  },
+  '기준 현 거르기에 더해 끌어온 점의 나란함·수직 선이 첫 점 축·첫 점의 나란함·다른 끌어온 점의 축·모서리·면과 만나는 점에 붙는다(inference.trackDirs { meets } — 추론 색 ×, ' +
+    '첫 점 축과 만나면 Shift로 그 축에 잠근다). 첫 점의 나란함도 곡선 현을 기준으로 받지 않는다(inference.parallelEdge)',
+);
+toggle(
+  '글상자 막히면 예전 차례',
+  (v) => viewer.setMeasureLabelSpot(v ? { measure: 'center', annotations: 'center', fallback: 'topRight' } : null),
+  '측정 거리 글상자·덧그림 글상자를 가운데부터 놓고, 막히면 0.25.0 차례(오른쪽 위부터)로 고른다(setMeasureLabelSpot fallback — 글상자 비키기와 함께 본다)',
+);
+viewer.onContextRestoreDone(() => {
+  hoverInfo = `${hoverInfo ? `${hoverInfo} · ` : ''}다시 올리기 끝(onContextRestoreDone)`;
+  showStatus();
+});
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -730,8 +762,22 @@ viewer.canvas.addEventListener('pointermove', () =>
     const lockLine = `잠근 ${h?.axis ? ax(h.axis) : '선'}`;
     // 0.27.0: 끌어온 점에서 기준 선분과 나란함·수직인 선 위(잠그지 않은 'parallel'·'perpendicular'에 끌어온 점)
     const dirOf = h && !h.locked && h.trackFrom && (h.snap === 'parallel' || h.snap === 'perpendicular') ? h.snap : null;
+    // 0.29.0: 그 선이 만나는 것(첫 점 축·첫 점의 나란함·다른 끌어온 점의 축·모서리·면)
+    const meet = !dirOf || !h
+      ? ''
+      : h.axis
+        ? ` · 첫 점 ${ax(h.axis)}과 만나는 점`
+        : h.direction
+          ? ' · 첫 점의 나란함과 만나는 점'
+          : h.trackOther
+            ? ` · ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}과 만나는 점`
+            : h.segment
+              ? ` · ${h.segment.id}#${h.segment.index}과 만나는 점${h.refined ? '(다듬음)' : ''}`
+              : h.face
+                ? ` · ${h.face.id} 면과 만나는 점${h.refined ? '(다듬음)' : ''}`
+                : '';
     const next = dirOf && h?.trackFrom
-      ? `미리 보기: ${pt(h.trackFrom)}에서 모서리와 ${dirOf === 'parallel' ? '나란함' : '수직'}`
+      ? `미리 보기: ${pt(h.trackFrom)}에서 모서리와 ${dirOf === 'parallel' ? '나란함' : '수직'}${meet}`
       : h?.locked && h.trackOther
       ? `미리 보기: ${lockLine} · ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}과 만나는 점`
       : h?.locked && h.trackFrom
