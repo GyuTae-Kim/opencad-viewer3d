@@ -430,6 +430,8 @@ export interface MeasureSnapOptions {
    * 그 삼각형 위 곡면 조각 자리(삼각형 평면에 내린 발이 삼각형 안, 평면에서 0.1 × 가장 긴 변 안)이고 커서에서 붙잡기 거리 안이며 가리지 않으면 받는다.
    * 호출 한도는 0.15.0·0.20.0 열린 후보와 함께 쓴다(그 둘이 먼저). null이면 후보가 없다(0.21.0과 같다)
    * 0.23.0: 선에서 그 삼각형 위 곡면 조각 자리인 조각이 커서에서 붙잡기 거리 밖이면 그 열린 후보는 부르지 않는다(받을 수 없는 자리 — 받는 규칙은 그대로)
+   * 0.24.0: 선이 그 삼각형 위 곡면 조각을 두 번 지날 수 있으면(곡면이 선과 나란해지는 자리가 그 삼각형을 지난다 — 볼록한 곡면을 아주 얕게 스칠 때) point를 선에서 그 조각
+   * 자리인 조각의 두 끝으로 바꿔 한 번씩 더 부른다(0.22.0 refine 열린 교차의 둘째 힌트와 같은 틀 — 호출 한도·기억 열쇠·받는 규칙이 같다). 앱이 point 둘레 교차 하나를 주면 두 교차가 따로 온다
    */
   refineFace?: ((c: SnapRefineFaceInput) => readonly number[] | null | undefined) | null;
   /**
@@ -4362,19 +4364,34 @@ export class Viewer3d {
         if (!k || k.kind !== 'mesh' || k.section || k.id !== t.id || !k.normal || !d!.corners) return false;
         return hiddenByOwnPatch(t.corners, { corners: d!.corners, point: k.point, normal: k.normal }, p, 2 * t.wpp);
       },
+      // 0.24.0 둘째 힌트를 둘지 볼 이웃: 커서 둘레 삼각형(붙잡기 거리 안)에 없을 수 있어 그 삼각형 세 변 가운데의 화면 자리에서 모은다(같은 그물만)
+      (t) => this.edgeNeighbors(f, t),
     );
     return r ? { snap: r, line: near[r.line]! } : null;
   }
 
+  /** 삼각형 t의 세 변 가운데 화면 자리에서 1화소 안의 같은 그물 삼각형(0.24.0 면의 열린 교차 둘째 힌트 — 변을 함께 쓰는 이웃 찾기, 자리마다 6개까지) */
+  private edgeNeighbors(f: ViewFrame, t: NearTriangle): NearTriangle[] {
+    const out: NearTriangle[] = [];
+    const c = t.corners;
+    for (let k = 0; k < 3; k++) {
+      const a = c[k]!, b = c[(k + 1) % 3]!;
+      const s = projectToScreen(f, [(a[0]! + b[0]!) / 2, (a[1]! + b[1]!) / 2, (a[2]! + b[2]!) / 2]);
+      if (!s) continue;
+      for (const n of this.trianglesAround(f, s[0], s[1], 1, 6)) if (n.id === t.id && n.index !== t.index) out.push(n);
+    }
+    return out;
+  }
+
   /** 커서 tolPx 안의 보이는 그물 삼각형(0.22.0 선과 삼각형의 열린 교차 — scenepick.ts trianglesNear)과 그 깊이의 화소 세계 길이 */
-  private trianglesAround(f: ViewFrame, x: number, y: number, tolPx: number): NearTriangle[] {
+  private trianglesAround(f: ViewFrame, x: number, y: number, tolPx: number, max?: number): NearTriangle[] {
     const hits = trianglesNear(f, x, y, this.visibleItems(), {
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
-    }, tolPx);
+    }, tolPx, max);
     return hits.map((h) => {
       const t: NearTriangle = { corners: h.corners, wpp: worldPerPixel(f, h.depth), id: h.id, index: h.index, normal: h.normal };
       if (h.keep) t.keep = h.keep;
