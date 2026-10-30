@@ -28,6 +28,9 @@
  * 0.23.0 단추: 반투명 지나 고르기(상자를 반투명·바닥 판을 불투명으로 두고 누르기 알림·측정 고르기에 throughTranslucent — 상자 너머 판을 고르고 상태 줄 고름 뒤에
  *   "반투명 너머"), 글상자 비키기(뷰 큐브 자리(viewCubeRect)와 위쪽 띠를 setMeasureLabelAvoid로 넘기고 덧그림 넷을 단다 — 측정 거리 글상자와 덧그림 글상자가
  *   둘을 비켜 그린다, 띠는 점선 상자로 보인다)
+ * 0.24.0 단추: 상자 고르기 불투명(반투명 지나 고르기를 켠 채 setItemPickOpaque('상자') — 상자 위를 누르면 "반투명 너머"가 상자, 그림은 그대로),
+ *   너머 고르기만 바꾸기(setMeasurePickThrough — 잠금·끌어온 점·찍은 점을 둔 채 측정 고르기의 반투명 너머만 켜고 끈다),
+ *   글상자 겹침(기준점이 겹치는 덧그림 넷 — 화면에서 뒤 글상자가 앞 글상자를, 측정 거리 글상자가 덧그림 글상자를 비킨다)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -331,6 +334,38 @@ toggle(
     );
   },
   '위쪽 띠와 뷰 큐브 자리(viewCubeRect)를 setMeasureLabelAvoid로 넘기고 덧그림 넷을 단다 — 덧그림 글상자(0.23.0)와 측정 거리 글상자가 둘을 비켜 그린다',
+);
+// 0.24.0: 그물마다 고르기 불투명(setItemPickOpaque), 반투명 너머 고르기만 바꾸기(setMeasurePickThrough), 덧그림 글상자끼리·측정 거리 글상자와 비키기
+toggle(
+  '상자 고르기 불투명',
+  (v) => viewer.setItemPickOpaque('상자', v),
+  '반투명 지나 고르기를 켠 채로 상자를 고르기에서 불투명으로 본다(setItemPickOpaque — 그림은 그대로). 상자 위를 누르면 "반투명 너머"가 판 대신 상자, 측정도 상자 위',
+);
+button(
+  '너머 고르기만 바꾸기',
+  () => {
+    const on = !viewer.measureSnap?.throughTranslucent;
+    hoverInfo = viewer.setMeasurePickThrough(on)
+      ? `측정 고르기 반투명 너머 ${on ? '켬' : '끔'}(잠금·끌어온 점·찍은 점 그대로)`
+      : '붙잡기가 꺼져 있다(setMeasureSnap으로 켠다)';
+    showStatus();
+  },
+  '측정 붙잡기의 throughTranslucent만 켜고 끈다(setMeasurePickThrough) — Shift·잠금 단추 잠금, 끌어온 점, 찍은 첫 점, 다듬기 기억을 둔 채 다음 미리 보기부터',
+);
+toggle(
+  '글상자 겹침',
+  (v) =>
+    viewer.setAnnotations(
+      v
+        ? [
+            { kind: 'distance', a: [0, 0, 40], b: [120, 0, 40] },
+            { kind: 'point', a: [60, 0, 40], label: '앞 가운데' },
+            { kind: 'point', a: [62, 2, 40], label: '옆' },
+            { kind: 'point', a: [190, 40, 70], label: '구 위' },
+          ]
+        : null,
+    ),
+  '기준점이 겹치는 덧그림 넷을 단다 — 화면에서는 뒤 글상자가 앞 글상자를 비키고(0.24.0), 측정 거리 글상자도 덧그림 글상자를 비킨다. PNG(그림 저장)는 기본 자리',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
