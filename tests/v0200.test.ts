@@ -146,7 +146,14 @@ describe('openEdgeCandidates·openEdgeSnap(선과 꺾은선 토막의 열린 교
     const under = [{ from: [-50, 28.5, 0], dir: [1, 0, 0] }];
     const [ux, uy] = at([0, 28.5, 0]);
     expect(openEdgeCandidates(f, under, [ring[1]!, S2, ring[3]!], ux, uy + 1, SNAP).filter((c) => c.seg === S2)).toEqual([]);
-    expect(openEdgeCandidates(f, under, [S2], ux, uy + 1, SNAP).map((c) => c.p)).toEqual([[0, 28.5, 0]]);
+    // 0.20.0 후보(나란하면 현 가운데의 발)는 그대로다. 0.22.0부터 나란한 선은 두 끝의 발을 둘째 힌트(twin)로 더한다(같은 평면 — 활꼴을 두 번 지날 수 있다)
+    const only = openEdgeCandidates(f, under, [S2], ux, uy + 1, SNAP);
+    expect(only.filter((c) => !c.twin).map((c) => c.p)).toEqual([[0, 28.5, 0]]);
+    const twins = only.filter((c) => c.twin).sort((a, b) => a.p[0] - b.p[0]);
+    expect(twins).toHaveLength(2);
+    expect(twins[0]!.p[0]).toBeCloseTo(vtx(3)[0], 12);
+    expect(twins[1]!.p[0]).toBeCloseTo(vtx(2)[0], 12);
+    expect(twins.every((c) => c.p[1] === 28.5 && c.p[2] === 0 && c.seg === S2)).toBe(true);
   });
 
   it('토막 끝 밖에서 가장 가까운데 그 끝을 함께 쓰는 이웃 토막을 지나는 선은 빼고, 이웃 토막이 목록에 없어도 이웃 곡선 위 점(토막 범위 밖)은 받지 않는다', () => {

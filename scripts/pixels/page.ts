@@ -3538,6 +3538,358 @@ const onFaceValues: ValueSet = {
   },
 };
 
+// ───────────── 0.22.0 면의 열린 교차·한 토막 활꼴의 두 교차·누르기 알림의 그물 면만 고르기 ─────────────
+/**
+ * globe 자료의 구(GLOBE_C·GLOBE_R — 경도 48칸)를 적도 둘레 경도 3.75°(칸 가운데)에서 스치는 Z축의 첫 점 FO_UP(앱 붙잡기 점). 적도 칸의 현은 중심에서 R·cos3.75° = 34.925에 있고
+ * 그 바깥 FO_RHO = 34.96을 지나는 Z축은 그물 삼각형을 비켜 가며 구를 중심 높이 ± FO_DZ(1.67)에서 뚫는다(현과는 0.035 떨어진다 — FO_DIST 거리에서 한 화소 0.03)
+ */
+const FO_RHO = 34.96;
+const FO_AZ = (3.75 * Math.PI) / 180;
+const FO_DZ = Math.sqrt(GLOBE_R * GLOBE_R - FO_RHO * FO_RHO);
+const FO_UP = [GLOBE_C[0]! + FO_RHO * Math.cos(FO_AZ), GLOBE_C[1]! + FO_RHO * Math.sin(FO_AZ), 95];
+const FO_HI = [FO_UP[0]!, FO_UP[1]!, GLOBE_C[2]! + FO_DZ];
+const FO_LO = [FO_UP[0]!, FO_UP[1]!, GLOBE_C[2]! - FO_DZ];
+const FO_DIST = 25;
+/** FO_UP을 첫 점으로 찍고(seIso로 맞춰 본 장면에서) 구를 스치는 자리 둘레로 다가간다 — 경도 23.75° 쪽 14° 위에서 FO_DIST 거리 */
+function faceOpenFirst(c: Ctx): void {
+  const { v } = c;
+  v.setView('seIso', false);
+  v.fit(false);
+  v.renderNow();
+  v.clearMeasure();
+  const a = c.at(c.world(FO_UP));
+  if (a) c.click(a.x + 1, a.y);
+  const az = (23.75 * Math.PI) / 180, el = (14 * Math.PI) / 180;
+  const dir = [Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el)];
+  // 카메라 각(yaw·pitch)은 판마다 뜻이 같다 — 대상점에서 눈 쪽 방향으로 맞춘다(setView·fit 없이)
+  const cam = v.getCamera();
+  const yaw = Math.atan2(dir[0]!, -dir[1]!), pitch = Math.asin(dir[2]!);
+  v.setCamera({ ...cam, yaw, pitch, target: c.world([FO_HI[0]!, FO_HI[1]!, GLOBE_C[2]!]) as [number, number, number], distance: FO_DIST, projection: 'perspective' });
+  v.renderNow();
+}
+/** 0.22.0 면의 열린 교차(refineFace — 'axisFace', open)가 있는 판인지 — FO_UP을 첫 점으로 찍고 FO_HI를 가리켜 앱 함수가 open으로 불리는지 본다 */
+const v0220faceOpen: Need = (v, c) => {
+  const why = all(v0190refineFace, fn('getCamera', 'setCamera'))(v, c);
+  if (why) return why;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  let open = false;
+  v.setMeasureSnap({ points: [{ point: c.world(FO_UP), kind: 'point' }], inference: { axes: true, axisFaces: true }, refineFace: (i: any) => ((open ||= i.kind === 'axisFace' && !!i.open), null) });
+  faceOpenFirst(c);
+  const t = c.at(c.world(FO_HI));
+  if (t) c.hover(t.x + 1, t.y + 3);
+  v.renderNow();
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setGroupVisible('공구 경로', true);
+  v.setGroupVisible('구멍', true);
+  v.setView('seIso', false);
+  v.fit(false);
+  return open ? null : '이 판에 없는 동작: 0.22.0 면의 열린 교차(refineFace — axisFace, open)';
+};
+
+/**
+ * 0.22.0 면의 열린 교차 값(globe 자료): FO_UP을 첫 점으로 찍고 그 Z축이 구를 스치는 위·아래 자리(FO_HI·FO_LO — 축은 그물 삼각형을 비켜 간다, 0.21.0은 첫 점 Z축 위 커서 자리)를
+ * 가리킨 미리 보기(종류·축·점·다듬었는지·구 위인지·방향·면·잠금), 앱 호출 수(열린 후보 — 같은 자리 둘레를 두 번 가리켜도 늘지 않는다, Shift로 잠가도 0번), 두 점째로 찍은 거리
+ * (95 − FO_HI 높이와 1e-9 안인지)와 찍은 점, 같은 차례를 refineFace 없이·null·열린 후보를 거르는 앱·먼 근·축에서 벗어난 구 위 점으로 되풀이한 값이 refineFace 없이와 같은지
+ */
+const faceOpenValues: ValueSet = {
+  name: 'globe-measure-face-open',
+  data: 'globe',
+  needs: v0220faceOpen,
+  run: (c) => {
+    const { v } = c;
+    const dist3 = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+    const onSphere = (p: readonly number[]): boolean => Math.abs(dist3(p, c.world(GLOBE_C)) - GLOBE_R) < 1e-9;
+    const lineSphere = (o: number[], d: number[], near: readonly number[], far = false): number[] | null => {
+      const C = c.world(GLOBE_C);
+      const w = [o[0]! - C[0]!, o[1]! - C[1]!, o[2]! - C[2]!];
+      const a = d[0]! * d[0]! + d[1]! * d[1]! + d[2]! * d[2]!, b = w[0]! * d[0]! + w[1]! * d[1]! + w[2]! * d[2]!, k = w[0]! * w[0]! + w[1]! * w[1]! + w[2]! * w[2]! - GLOBE_R * GLOBE_R;
+      const disc = b * b - a * k;
+      if (disc < 0) return null;
+      const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0]! + d[0]! * t, o[1]! + d[1]! * t, o[2]! + d[2]! * t]);
+      const i = dist3(ts[0]!, near) <= dist3(ts[1]!, near) ? 0 : 1;
+      return ts[far ? 1 - i : i]!;
+    };
+    const count = { open: 0, face: 0 };
+    const exact = (i: any): number[] | null => {
+      if (i.kind !== 'axisFace') return null;
+      count.face++;
+      if (i.open) count.open++;
+      return i.face.id === '구' ? lineSphere(i.line.origin, i.line.dir, i.point) : null;
+    };
+    const row = (name: string, p: readonly number[], dx: number, dy: number, shift = false): unknown[] => {
+      const r = lockHoverRow(c, name, p, dx, dy, shift);
+      const h = v.measureHoverSnap;
+      return [...r, h ? onSphere(h.point) : null];
+    };
+    const sweep = (refineFace: ((i: any) => number[] | null) | null): unknown[] => {
+      const rows: unknown[] = [];
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ points: [{ point: c.world(FO_UP), kind: 'point' }], inference: { axes: true, lock: true, axisFaces: true, lockFaces: true }, ...(refineFace ? { refineFace } : {}) });
+      faceOpenFirst(c);
+      rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])]);
+      const n0 = count.open;
+      rows.push(row('hi', FO_HI, 1, 3), row('hi', FO_HI, 3, 1), ['calls', count.open - n0]);
+      const n1 = count.open;
+      rows.push(row('lo', FO_LO, 1, 3), row('lo', FO_LO, 3, -1), ['calls', count.open - n1]);
+      const n2 = count.open;
+      rows.push(row('shift', FO_HI, 3, 1, true), ['lock', lockState(v.measureInferenceLock)], ['calls', count.open - n2]);
+      const e = c.at(c.world(FO_HI));
+      if (e) c.click(e.x + 3, e.y + 1, 'mouse', true);
+      c.hover(e ? e.x + 3 : 0, e ? e.y + 1 : 0, 'mouse', false);
+      const m = v.measurement();
+      rows.push([
+        'measure',
+        m ? [r10s(m.b), r10(m.distance), m.snapB ?? null, m.axisB ?? null, m.lockedB ?? null] : null,
+        !!m && Math.abs(m.distance - (FO_UP[2]! - FO_HI[2]!)) < 1e-9,
+        v.measurePoints.map((q: any) => [q.snap, !!q.refined, !!q.locked, q.face?.id ?? null]),
+      ]);
+      return rows;
+    };
+    const out: unknown[] = [];
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+    const refined = sweep(exact);
+    out.push(['refined', refined], ['calls', { ...count }]);
+    const plain = sweep(null);
+    out.push(['refined-differs', !same(refined, plain)]);
+    out.push(['null-same', same(sweep(() => null), plain)]);
+    out.push(['open-filter-same', same(sweep((i: any) => (i.open ? null : exact(i))), plain)]);
+    out.push(['far-same', same(sweep((i: any) => (i.kind === 'axisFace' ? lineSphere(i.line.origin, i.line.dir, i.point, true) : null)), plain)]);
+    out.push([
+      'off-axis-same',
+      same(
+        sweep((i: any) => {
+          if (i.kind !== 'axisFace') return null;
+          const p = lineSphere(i.line.origin, i.line.dir, i.point);
+          return p ? [p[0]! + 0.3, p[1]!, p[2]!] : null;
+        }),
+        plain,
+      ),
+    ]);
+    return out;
+  },
+};
+
+/**
+ * arc 자료의 원판(ARC_DISK — 12토막, 15° + 30°·k 꼭짓점) 토막 2(75°–105°)의 현은 X축과 나란하다(y = c.y + r·sin75°). 그 위 활꼴 안 TW_Y(현과 원 꼭대기의 가운데)를 지나는
+ * X축의 첫 점 TW_A(앱 붙잡기 점)는 원과 두 자리 TW_PLUS·TW_MINUS에서 만난다(현과는 만나지 않는다 — 0.20.0은 현 가운데 힌트 하나로 같은 거리의 두 교차 가운데 하나)
+ */
+const TW_Y = ARC_DISK.c[1]! + ARC_DISK.r * (1 + Math.sin((75 * Math.PI) / 180)) / 2;
+const TW_DX = Math.sqrt(ARC_DISK.r * ARC_DISK.r - (TW_Y - ARC_DISK.c[1]!) ** 2);
+const TW_A = [ARC_DISK.c[0]! - 35, TW_Y, ARC_DISK.c[2]!];
+const TW_PLUS = [ARC_DISK.c[0]! + TW_DX, TW_Y, ARC_DISK.c[2]!];
+const TW_MINUS = [ARC_DISK.c[0]! - TW_DX, TW_Y, ARC_DISK.c[2]!];
+/** 원판을 맞춰 본 뒤 조금 다가간다(한 mm가 12화소쯤 — 교차에서 현 끝 꼭짓점까지 1.5 mm가 붙잡기 거리보다 멀다) */
+function twiceCamera(v: V): void {
+  v.setView('seIso', false);
+  v.fitItems([ARC_DISK.id], false);
+  const cam = v.getCamera();
+  v.setCamera({ ...cam, distance: cam.distance * 0.7 });
+  v.renderNow();
+}
+/** 0.22.0 한 토막 활꼴의 두 교차(둘째 힌트)가 있는 판인지 — TW_A를 첫 점으로 찍고 TW_PLUS를 가리켜 현 끝의 발이 힌트로 오는지 본다 */
+const v0220twice: Need = (v, c) => {
+  const why = all(v0200open, fn('fitItems', 'getCamera', 'setCamera'))(v, c);
+  if (why) return why;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  twiceCamera(v);
+  v.setMeasureMode(true);
+  const endX = ARC_DISK.c[0]! + ARC_DISK.r * Math.cos((75 * Math.PI) / 180);
+  let twin = false;
+  v.setMeasureSnap({
+    edges: true,
+    points: [{ point: c.world(TW_A), kind: 'point' }],
+    inference: { axisEdges: true },
+    // 윤곽선 끝점은 float32라 1e-4 안이면 그 끝의 발이다(현 가운데 힌트는 5 mm 떨어져 있다)
+    refine: (i: any) => ((twin ||= i.kind === 'axisEdge' && !!i.open && Math.abs(i.point[0] - c.world([endX, 0, 0])[0]!) < 1e-4), null),
+  });
+  const a = c.at(c.world(TW_A));
+  const t = c.at(c.world(TW_PLUS));
+  if (a && t) {
+    c.click(a.x + 1, a.y);
+    c.hover(t.x + 1, t.y + 3);
+    v.renderNow();
+  }
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setGroupVisible('공구 경로', true);
+  v.setGroupVisible('구멍', true);
+  v.setView('seIso', false);
+  v.fit(false);
+  return twin ? null : '이 판에 없는 동작: 0.22.0 한 토막 활꼴의 두 교차(refine — axisEdge, open의 둘째 힌트)';
+};
+
+/**
+ * 0.22.0 한 토막 활꼴의 두 교차 값(arc 자료): TW_A를 첫 점으로 찍고 그 X축이 원판 원과 만나는 두 자리(TW_PLUS·TW_MINUS)를 가리킨 미리 보기(원 위인지·선분), 앱 호출 수와 힌트 자리
+ * (현 가운데·현 두 끝의 발 — 같은 둘레를 다시 가리켜도 늘지 않는다, Shift로 잠가도 0번), 조금 기운 방향 잠금(현과 나란하지 않은 같은 평면 선 — 가까운 끝·다른 끝의 발)의 두 자리,
+ * 두 점째로 찍은 거리, 같은 차례를 refine 없이·null·선에서 벗어난 점·이웃 토막 곡선 위 점으로 되풀이한 값이 refine 없이와 같은지
+ */
+const twiceValues: ValueSet = {
+  name: 'arc-measure-axis-twice',
+  data: 'arc',
+  needs: v0220twice,
+  run: (c) => {
+    const { v } = c;
+    const K = ARC_DISK;
+    const KC = c.world(K.c);
+    const dist3 = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+    const onArc = (p: readonly number[]): boolean => Math.abs(Math.hypot(p[0]! - KC[0]!, p[1]! - KC[1]!) - K.r) < 1e-9 && Math.abs(p[2]! - KC[2]!) < 1e-9;
+    const hints: number[] = [];
+    let calls = 0;
+    /** 원판 평면 위 직선과 원의 교차 가운데 point에 가까운 근 */
+    const lineCircle = (i: any): number[] | null => {
+      const o = i.line.origin, d = i.line.dir;
+      if (Math.abs(d[2]) > 1e-12 || Math.abs(o[2] - KC[2]!) > 1e-9) return null;
+      const wx = o[0] - KC[0]!, wy = o[1] - KC[1]!;
+      const b = wx * d[0] + wy * d[1], cc = wx * wx + wy * wy - K.r * K.r, a = d[0] * d[0] + d[1] * d[1];
+      const disc = b * b - a * cc;
+      if (disc < 0) return null;
+      const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0] + d[0] * t, o[1] + d[1] * t, o[2]]);
+      return dist3(ts[0]!, i.point) <= dist3(ts[1]!, i.point) ? ts[0]! : ts[1]!;
+    };
+    const exact = (i: any): number[] | null => {
+      if (i.kind !== 'axisEdge' || !i.line) return null;
+      if (i.open) {
+        calls++;
+        if (i.segment.id === K.id && i.segment.index === 2) hints.push(r10(i.point[0] - KC[0]!));
+      }
+      return i.segment.id === K.id ? lineCircle(i) : null;
+    };
+    const row = (name: string, p: readonly number[], dx: number, dy: number, shift = false): unknown[] => {
+      const r = lockHoverRow(c, name, p, dx, dy, shift);
+      const h = v.measureHoverSnap;
+      return [...r, h ? onArc(h.point) : null];
+    };
+    const sweep = (refine: ((i: any) => number[] | null) | null): unknown[] => {
+      const rows: unknown[] = [];
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      twiceCamera(v);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ edges: true, points: [{ point: c.world(TW_A), kind: 'point' }], inference: { axes: true, lock: true, axisEdges: true, lockEdges: true }, ...(refine ? { refine } : {}) });
+      v.clearMeasure();
+      const a = c.at(c.world(TW_A));
+      if (a) c.click(a.x + 1, a.y);
+      rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])]);
+      const n0 = calls;
+      rows.push(row('plus', TW_PLUS, 1, 3), row('minus', TW_MINUS, 1, 3), row('plus', TW_PLUS, 3, 1), ['calls', calls - n0]);
+      const n1 = calls;
+      rows.push(row('shift', TW_PLUS, 3, 1, true), row('shift', TW_MINUS, 3, 1, true), ['calls', calls - n1]);
+      // 조금 기운 방향(1, 0.004, 0)으로 잠근 선 — 현의 직선과 같은 평면에서 105° 끝 밖 멀리 만난다
+      v.setMeasureInferenceLock({ direction: [1, 0.004, 0] });
+      const tilt = (sgn: number): number[] => {
+        // 잠근 선 y = TW_Y + 0.004·(x − TW_A.x)와 원의 교차(가까운 쪽)
+        const s = 0.004, y0 = TW_Y - s * TW_A[0]! - K.c[1]!;
+        const A = 1 + s * s, B = 2 * (s * y0 - K.c[0]!), C = K.c[0]! * K.c[0]! + y0 * y0 - K.r * K.r;
+        const x = (-B + sgn * Math.sqrt(B * B - 4 * A * C)) / (2 * A);
+        return [x, K.c[1]! + y0 + s * x, K.c[2]!];
+      };
+      rows.push(row('tilt', tilt(1), 1, 3), row('tilt', tilt(-1), 1, 3));
+      v.setMeasureInferenceLock(false);
+      const e = c.at(c.world(TW_PLUS));
+      if (e) c.click(e.x + 1, e.y + 3);
+      const m = v.measurement();
+      rows.push(['measure', m ? [r10s(m.b), r10(m.distance), m.snapB ?? null, m.axisB ?? null] : null, !!m && Math.abs(m.distance - (TW_PLUS[0]! - TW_A[0]!)) < 1e-9]);
+      return rows;
+    };
+    const out: unknown[] = [];
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+    const refined = sweep(exact);
+    out.push(['refined', refined], ['calls', calls], ['hints', [...new Set(hints)].sort((p, q) => p - q)]);
+    const plain = sweep(null);
+    out.push(['refined-differs', !same(refined, plain)]);
+    out.push(['null-same', same(sweep(() => null), plain)]);
+    out.push(['off-line-same', same(sweep((i: any) => (i.kind === 'axisEdge' && i.line ? [i.point[0], i.point[1] + 0.4, i.point[2]] : null)), plain)]);
+    out.push([
+      'neighbor-same',
+      same(
+        sweep((i: any) => {
+          // 원 위 40° 옆(이웃 토막 곡선 위 — 이 토막 범위 밖)
+          if (i.kind !== 'axisEdge' || !i.line) return null;
+          const p = lineCircle(i);
+          if (!p) return null;
+          const t = Math.atan2(p[1]! - KC[1]!, p[0]! - KC[0]!) + (40 * Math.PI) / 180;
+          return [KC[0]! + K.r * Math.cos(t), KC[1]! + K.r * Math.sin(t), KC[2]!];
+        }),
+        plain,
+      ),
+    ]);
+    return out;
+  },
+};
+
+/** 0.22.0 누르기 알림의 그물 면만 고르기(onPick(cb, { meshesOnly }))가 있는 판인지 — 상자 앞 윗모서리(윤곽선 고르기)를 눌러 그 알림이 그물 면을 받는지 본다 */
+const v0220onPickMeshes: Need = (v, c) => {
+  const why = fn('project', 'setPickEdges', 'onPick')(v, c);
+  if (why) return why;
+  v.setPickEdges(true);
+  let got: any;
+  const off = v.onPick((p: any) => (got = p), { meshesOnly: true });
+  const q = c.at(c.world([30, 0, 40]));
+  if (q) c.click(q.x, q.y + 0.5);
+  off();
+  v.setPickEdges(false);
+  return got && got.kind === 'mesh' ? null : '이 판에 없는 선택: 0.22.0 누르기 알림의 그물 면만 고르기(onPick meshesOnly)';
+};
+
+/**
+ * 0.22.0 누르기 알림의 그물 면만 고르기 값(base·off): 윤곽선 고르기를 켜고 화면 격자 점마다 눌러, 선택 없이 단 알림과 meshesOnly로 단 알림이 받은 종류 짝 수,
+ * 앞 알림이 pick(x, y)와, 뒤 알림이 pick(x, y, { meshesOnly: true })와 같은지(다른 자리 수), 상자 윗모서리·공구 경로 위 몇 자리의 두 알림 값
+ */
+function onPickMeshesValues(d: 'base' | 'off'): ValueSet {
+  return {
+    name: `${d}-pick-on-meshes-only`,
+    data: d,
+    needs: v0220onPickMeshes,
+    run: (c) => {
+      const { v } = c;
+      v.setPickEdges(true);
+      let plain: any = undefined, faces: any = undefined;
+      const off1 = v.onPick((p: any) => (plain = p));
+      const off2 = v.onPick((p: any) => (faces = p), { meshesOnly: true });
+      const kinds = new Map<string, number>();
+      let plainDiff = 0, facesDiff = 0, total = 0;
+      for (let y = 26; y < c.h; y += 61)
+        for (let x = 24; x < c.w; x += 67) {
+          plain = faces = undefined;
+          c.click(x + 0.3, y + 0.4);
+          const key = `${plain?.kind ?? '-'}>${faces?.kind ?? '-'}`;
+          kinds.set(key, (kinds.get(key) ?? 0) + 1);
+          if (JSON.stringify(plain) !== JSON.stringify(v.pick(x + 0.3, y + 0.4))) plainDiff++;
+          if (JSON.stringify(faces) !== JSON.stringify(v.pick(x + 0.3, y + 0.4, { meshesOnly: true }))) facesDiff++;
+          total++;
+        }
+      const spots: unknown[] = [];
+      for (const p of [
+        [30, 0, 40],
+        [100, 40, 40],
+        [60, 40, 110],
+      ]) {
+        const q = c.at(c.world(p));
+        if (!q) {
+          spots.push(null);
+          continue;
+        }
+        plain = faces = undefined;
+        c.click(q.x + 0.4, q.y + 0.5);
+        const row = (k: any): unknown[] | null => (k ? [k.kind, k.id, Number.isInteger(k.index), r10s(k.normal)] : null);
+        spots.push([row(plain), row(faces)]);
+      }
+      off1();
+      off2();
+      v.setPickEdges(false);
+      return [['kinds', [...kinds].sort()], ['same', total, plainDiff, facesDiff], ['spots', spots]];
+    },
+  };
+}
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -3583,6 +3935,10 @@ const VALUES: ValueSet[] = [
   lockTrackValues('off'),
   clearRefineValues,
   onFaceValues,
+  faceOpenValues,
+  twiceValues,
+  onPickMeshesValues('base'),
+  onPickMeshesValues('off'),
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

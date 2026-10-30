@@ -8,10 +8,23 @@
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, SnapKind } from './types';
 import { itemBounds } from './bounds';
-import { type Bvh, type PrimKind, countRayHits, rayBoxEntry, safeInv } from './bvh';
+import { type Bvh, type PrimKind, countRayHits, queryCone, rayBoxEntry, safeInv } from './bvh';
 import { type ViewFrame, projectToScreen, screenRay, shiftFrame, viewDepth, worldPerPixel } from './camera';
 import { type V3, mat4Invert, modelMatrix, normalize, transformDir, transformPoint, translation } from './math';
-import { TIE_PX, chooseNearest, pickMeshRay, pickPointSet, pickSegments, pointCandidates, segmentCandidates, snapToNearest, snapToNearestKind } from './pick';
+import {
+  TIE_PX,
+  chooseNearest,
+  normBound3,
+  pickCone,
+  pickMeshRay,
+  pickPointSet,
+  pickSegments,
+  pointCandidates,
+  segmentCandidates,
+  segmentScreenPick,
+  snapToNearest,
+  snapToNearestKind,
+} from './pick';
 import { SNAP_PX } from './pointer';
 import { type Plane4, planeShift, planeValue, rayKeptInterval, rayKeptIntervalN } from './section';
 
@@ -367,6 +380,115 @@ export function segmentsNear(
       const pl = planesOf(m);
       add('edge', m.id, E, undefined, model, pl, segmentCandidates(f, E, o.bvh('segment', E, undefined), model, x, y, tolPx, { clips: pl.length ? pl : null, skip: o.edgeHidden?.(m) }));
     }
+  out.sort((p, q) => p.distPx - q.distPx);
+  if (out.length > max) out.length = max;
+  return out;
+}
+
+/**
+ * 커서 둘레 그물 삼각형 하나(0.22.0 trianglesNear): 세계 꼭짓점 셋(묶음 origin·행렬을 거친 값), 그물 id, 삼각형 번호(Pick3d.index와 같은 뜻),
+ * 세계 단위 법선(눈 쪽), 그 그물의 남는 쪽 판정, 커서와 화면 거리(화면에 그린 삼각형 안이면 0), 커서 쪽 점 깊이
+ */
+export interface NearTriangleHit {
+  corners: [V3, V3, V3];
+  id: string;
+  index: number;
+  normal: V3;
+  keep: ((p: readonly number[]) => boolean) | undefined;
+  distPx: number;
+  depth: number;
+}
+
+/**
+ * 커서 tolPx 안의 그물 삼각형(0.22.0 — 측정의 선과 삼각형의 열린 교차): 보이는 그물(숨긴 구간 빼고)에서 화면에 그린 삼각형이 커서에서 tolPx 안인 것.
+ * 꼭짓점 하나라도 눈 뒤인 삼각형과 한 단면 평면의 잘린 쪽에 모두 있는 삼각형은 뺀다(일부만 잘린 삼각형은 남는다 — 받는 점마다 keep으로 따진다).
+ * 가림은 따지지 않는다(후보 점마다 따로 묻는다). 화면 거리 차례로 max개까지. segmentsNear와 같은 원뿔 질의(BVH)를 쓴다
+ */
+export function trianglesNear(
+  f: ViewFrame,
+  x: number,
+  y: number,
+  items: ScenePickItems,
+  o: Pick<ScenePickOptions, 'bvh' | 'bounds' | 'model' | 'clip' | 'clips' | 'hidden'>,
+  tolPx: number,
+  max = 24,
+): NearTriangleHit[] {
+  const bounds = o.bounds ?? itemBounds;
+  const clip = o.clip ?? null;
+  const NONE: readonly Readonly<Plane4>[] = [];
+  const out: NearTriangleHit[] = [];
+  const ray = screenRay(f, x, y);
+  const eye = f.projection === 'perspective' ? f.eye : null;
+  for (const m of items.meshes) {
+    if (!nearBox(f, bounds(m), x, y, tolPx)) continue;
+    const P = m.positions, I = m.indices;
+    const n = I ? Math.floor(I.length / 3) : Math.floor(P.length / 9);
+    if (!n) continue;
+    const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
+    const pl = o.clips ? (o.clips(m) ?? NONE) : clip ? [clip] : NONE;
+    const keep = pl.length ? (p: readonly number[]): boolean => pl.every((c) => planeValue(c, p[0]!, p[1]!, p[2]!) <= 1e-9 * (Math.abs(c[3]) + 1)) : undefined;
+    const hid = o.hidden?.(m);
+    const test = (tri: number): void => {
+      if (tri >= n || (hid && hid(tri))) return;
+      const cs = [0, 1, 2].map((k) => {
+        const i = (I ? I[tri * 3 + k]! : tri * 3 + k) * 3;
+        const p: V3 = [P[i]!, P[i + 1]!, P[i + 2]!];
+        return model ? transformPoint(model, p) : p;
+      }) as [V3, V3, V3];
+      if (pl.some((c) => cs.every((p) => planeValue(c, p[0], p[1], p[2]) > 1e-9 * (Math.abs(c[3]) + 1)))) return;
+      const s = cs.map((p) => projectToScreen(f, p));
+      const s0 = s[0], s1 = s[1], s2 = s[2];
+      if (!s0 || !s1 || !s2) return;
+      const u: V3 = [cs[1][0] - cs[0][0], cs[1][1] - cs[0][1], cs[1][2] - cs[0][2]], w: V3 = [cs[2][0] - cs[0][0], cs[2][1] - cs[0][1], cs[2][2] - cs[0][2]];
+      let nrm: V3 = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+      const nl = Math.hypot(nrm[0], nrm[1], nrm[2]);
+      if (!(nl > 0)) return;
+      nrm = [nrm[0] / nl, nrm[1] / nl, nrm[2] / nl];
+      const toEye: readonly number[] = eye ? [eye[0] - cs[0][0], eye[1] - cs[0][1], eye[2] - cs[0][2]] : f.basis.back;
+      if (nrm[0] * toEye[0]! + nrm[1] * toEye[1]! + nrm[2] * toEye[2]! < 0) nrm = [-nrm[0], -nrm[1], -nrm[2]];
+      // 화면에 그린 삼각형 안이면 거리 0(깊이는 커서 광선이 그 평면을 맞는 자리), 밖이면 가장 가까운 변
+      const side = (a: V3, b: V3): number => (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+      const e0 = side(s0, s1), e1 = side(s1, s2), e2 = side(s2, s0);
+      let distPx = Infinity, depth = Infinity;
+      const den = nrm[0] * ray.dir[0] + nrm[1] * ray.dir[1] + nrm[2] * ray.dir[2];
+      if (((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0)) && Math.abs(den) > 1e-12) {
+        const t = (nrm[0] * (cs[0][0] - ray.origin[0]) + nrm[1] * (cs[0][1] - ray.origin[1]) + nrm[2] * (cs[0][2] - ray.origin[2])) / den;
+        distPx = 0;
+        depth = viewDepth(f, [ray.origin[0] + ray.dir[0] * t, ray.origin[1] + ray.dir[1] * t, ray.origin[2] + ray.dir[2] * t]);
+      } else
+        for (let k = 0; k < 3; k++) {
+          const a = cs[k]!, b = cs[(k + 1) % 3]!;
+          const h = segmentScreenPick(f, a[0], a[1], a[2], b[0], b[1], b[2], x, y);
+          if (h && h.distPx < distPx) {
+            distPx = h.distPx;
+            depth = h.depth;
+          }
+        }
+      if (!(distPx <= tolPx) || !Number.isFinite(depth)) return;
+      out.push({ corners: cs, id: m.id, index: tri, normal: nrm, keep, distPx, depth });
+    };
+    const bvh = o.bvh('triangle', P, I);
+    if (bvh) {
+      const c = pickCone(f, ray.origin, tolPx);
+      let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k;
+      if (model) {
+        const inv = mat4Invert(model);
+        if (!inv) continue;
+        const sc = normBound3(inv);
+        lo = transformPoint(inv, ray.origin);
+        const d = transformDir(inv, ray.dir);
+        const l = Math.hypot(d[0], d[1], d[2]);
+        if (!(l > 0)) continue;
+        // 로컬 단위 방향의 매개변수 τ = l·t, 로컬 반지름 ≤ sc·(r0 + k·t) — segmentCandidates와 같다
+        ld = [d[0] / l, d[1] / l, d[2] / l];
+        r0 = c.r0 * sc;
+        k = (c.k * sc) / l;
+      }
+      queryCone(bvh, lo, ld, r0, k, Infinity, (i) => {
+        test(i);
+      });
+    } else for (let i = 0; i < n; i++) test(i);
+  }
   out.sort((p, q) => p.distPx - q.distPx);
   if (out.length > max) out.length = max;
   return out;

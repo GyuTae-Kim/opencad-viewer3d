@@ -46,7 +46,7 @@ import {
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
-import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear } from './scenepick';
+import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear, trianglesNear } from './scenepick';
 import {
   type MeasurePointSnap,
   type MeasureSnapPick,
@@ -77,9 +77,11 @@ import {
 import {
   MeasureTracker,
   type OpenEdgeSnap,
+  type OpenFaceSnap,
   type TrackFaceHit,
   type TrackGuide,
   type TrackLine,
+  type TrackTriangle,
   axisEdgeSnap,
   axisFaceSnap,
   chooseTrackPoint,
@@ -87,6 +89,7 @@ import {
   lockFaceSnap,
   lockTrackSnap,
   openEdgeSnap,
+  openFaceSnap,
   sameTrackPoint,
   trackAlongFirst,
   trackAxisSnap,
@@ -114,6 +117,7 @@ import {
   nearSegmentId,
   normalizeInference,
   parallelSnap,
+  rayLinePoint,
   unitDir,
 } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
@@ -402,6 +406,9 @@ export interface MeasureSnapOptions {
    * 잠근 선 — lockEdges)이 커서 둘레 토막과 3D로 만나지 않지만 그 활꼴(현과 곡선 사이)을 지날 만큼 가까이 지나가면 열린 후보로 부른다('axisEdge', open = true,
    * point = 선 위에서 토막에 가장 가까운 점). 앱이 곡선과의 교차를 주면 그 점(선 위로 내린 자리)이 붙잡기 후보가 되고, null이면 후보가 없다(0.19.0과 같다).
    * 호출 한도는 0.15.0 열린 후보와 함께 쓴다(미리 보기 한 번에 OPEN_REFINE_CALLS)
+   * 0.22.0: 열린 후보의 선이 현의 직선과 같은 평면에서 토막 밖에서 만나거나 나란하고 현 가운데에서 활꼴 높이 한도(0.1 × 토막 길이) 안을 지나면(곡선에 거의 닿듯 —
+   * 활꼴을 두 번 지날 수 있다) point를 현의 다른 끝(나란하면 각 끝)에서 그 선에 내린 발로 바꿔 한 번 더 부른다. 앱이 point 둘레 교차 하나를 주면 두 교차가 따로 온다.
+   * 그 선·토막의 앱 점은 코어 점 거리 대신 토막 범위(현에 내린 자리가 범위 안·현에서 0.1 × 토막 길이 안)로 받는다
    */
   refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
   /**
@@ -415,6 +422,11 @@ export interface MeasureSnapOptions {
    * 앱이 그 광선과 정확한 곡면의 교차(point 둘레)를 주면 광선 위로 내린 자리를 쓴다 — 앱 점에서 화면 반 화소 넘게 광선을 벗어나거나, 코어 점에서 맞은 삼각형의
    * 가장 긴 변 × ON_FACE_CHORD(0.1)보다 멀거나, 눈 뒤·가까운 면 앞·그 그물 단면에 잘린 쪽이면 버린다. 잠근 동안은 부르지 않는다(0.14.0 'onEdge'와 같다).
    * 기억은 바로 앞 입력 하나뿐이다(커서마다 다른 광선 — 같은 자리 미리 보기 뒤 누르기에서만 다시 쓴다)
+   * 0.22.0: 축(첫 점 축·끌어온 축 — inference.axisFaces, 잠근 선 — inference.lockFaces)이 커서 둘레(붙잡기 거리 안) 그물 삼각형을 뚫지 않지만 그 삼각형과 곡면 사이를
+   * 지날 만큼 가까우면(삼각형과의 거리가 반 화소보다 멀고 min(0.1 × 가장 긴 변, 붙잡기 거리의 세계 길이) 안 — 곡면이 삼각형 밖으로 볼록해 축이 곡면만 뚫는 자리) 'axisFace'를
+   * open = true로 넘긴다(point = 선 위에서 그 삼각형 무게중심에 가장 가까운 점, face = 그 삼각형). 커서가 그물 면 위가 아니어도(실루엣 바깥) 본다. 앱 점은 그 선 위로 내린 자리가
+   * 그 삼각형 위 곡면 조각 자리(삼각형 평면에 내린 발이 삼각형 안, 평면에서 0.1 × 가장 긴 변 안)이고 커서에서 붙잡기 거리 안이며 가리지 않으면 받는다.
+   * 호출 한도는 0.15.0·0.20.0 열린 후보와 함께 쓴다(그 둘이 먼저). null이면 후보가 없다(0.21.0과 같다)
    */
   refineFace?: ((c: SnapRefineFaceInput) => readonly number[] | null | undefined) | null;
 }
@@ -459,7 +471,8 @@ export interface MeasureHoverSnap {
   trackOther?: TrackGuide;
   /**
    * 0.18.0: 축(첫 점 축·끌어온 축)이 커서 아래 보이는 그물 면을 뚫는 점(inference.axisFaces)이면 그 면(그물 id·삼각형 번호·세계 단위 법선 — 복사본).
-   * snap 'axis'·axis와 함께, 첫 점 축이면 direction, 끌어온 축이면 trackFrom이 실린다
+   * snap 'axis'·axis와 함께, 첫 점 축이면 direction, 끌어온 축이면 trackFrom이 실린다.
+   * 0.22.0: 면의 열린 교차(축이 삼각형을 비켜 가며 곡면만 뚫는 자리 — refineFace가 준 점, refined)면 그 곡면 조각 아래 삼각형이다
    */
   face?: SnapFace;
 }
@@ -631,6 +644,15 @@ export interface PickOptions {
   meshesOnly?: boolean;
 }
 
+/** onPick 둘째 인자(0.22.0) */
+export interface OnPickOptions {
+  /**
+   * 그 알림에는 누른 자리의 그물 면만 고른 결과를 준다(PickOptions.meshesOnly와 같은 고르기 — 포인터 종류는 그 누르기의 것, 윤곽선 선택은 무시).
+   * 그물 면이 없으면 null. 주지 않거나 false면 0.21.0 그대로(선분·점·윤곽선이 먼저)
+   */
+  meshesOnly?: boolean;
+}
+
 /** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
 export interface AnnotationOptions {
   /** 가려진 부분(선·점·글자)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 그리지 않는다) */
@@ -718,6 +740,27 @@ const axisRefineLine = (origin: readonly number[], axis: SnapAxis): SnapRefineLi
 type OpenRefineLine = { from: V3; dir: V3; axis?: SnapAxis; track: boolean };
 /** 열린 교차·잠근 선의 선 → 다듬기에 넘기는 직선(복사하지 않는다 — 넘길 때 copyLine) */
 const refineLineOf = (l: OpenRefineLine): SnapRefineLine => (l.axis ? { origin: l.from, dir: l.dir, axis: l.axis } : { origin: l.from, dir: l.dir });
+/** 커서 둘레 그물 삼각형(0.22.0 선과 삼각형의 열린 교차): 세계 꼭짓점 셋·커서 쪽 깊이의 화소 세계 길이·남는 쪽 판정과 그 면(그물 id·삼각형 번호·눈 쪽 법선) */
+type NearTriangle = TrackTriangle & SnapFace & { corners: [V3, V3, V3] };
+/**
+ * 점 from을 지나는 방향 dir의 3D 직선을 화면에 그린 직선이 커서(x, y)에서 px 안을 지날 수 있는지(0.22.0 — 면의 열린 교차에서 삼각형 모으기를 건너뛸 때).
+ * 원근 투영은 직선을 직선으로 옮기므로 눈 앞 두 점(커서 광선에 가장 가까운 점과 그 깊이만큼 떨어진 점)의 화면 자리를 지나는 2D 직선까지 거리가 그 아래 한계다.
+ * 두 점을 화면에 그릴 수 없거나 한 점으로 겹치면(시선과 나란하다) 판정하지 않고 true
+ */
+function lineNearCursor(f: ViewFrame, ray: { origin: V3; dir: V3 }, from: readonly number[], dir: readonly number[], x: number, y: number, px: number): boolean {
+  const e = unitDir([0, 0, 0], dir);
+  if (!e) return false;
+  const q1 = rayLinePoint(ray.origin, ray.dir, from, e) ?? [from[0]!, from[1]!, from[2]!];
+  const L = Math.max(viewDepth(f, q1), f.near, 1e-9);
+  let s1 = projectToScreen(f, q1), s2 = projectToScreen(f, [q1[0] + e[0] * L, q1[1] + e[1] * L, q1[2] + e[2] * L]);
+  if (!s2) s2 = projectToScreen(f, [q1[0] - e[0] * L, q1[1] - e[1] * L, q1[2] - e[2] * L]);
+  if (!s1 || !s2) return true;
+  if (f.projection === 'perspective' && (s1[2] < f.near * 0.999 || s2[2] < f.near * 0.999)) return true;
+  const dx = s2[0] - s1[0], dy = s2[1] - s1[1];
+  const l = Math.hypot(dx, dy);
+  if (!(l > 1e-9) || !Number.isFinite(l)) return true;
+  return Math.abs(dx * (y - s1[1]) - dy * (x - s1[0])) / l <= px;
+}
 /**
  * 그물 면 고르기 결과 → 축과 면의 교차가 보는 면 맞음(0.18.0): 광선 맞은 점, 단위 법선, 평면 위 점은 맞은 삼각형의 첫 꼭짓점(광선 맞은 점의 셈 오차 없이 —
  * 축과 수직인 면이면 교차의 그 좌표가 꼭짓점 좌표 그대로), 그물 id·삼각형 번호. 그물 면(잘린 면 아님)이 아니면 null
@@ -984,7 +1027,8 @@ export class Viewer3d {
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
-  private pickCbs = new Set<(p: Pick3d | null, e: PickEvent) => void>();
+  /** 고르기 알림과 그 알림이 그물 면만 받는지(0.22.0 onPick의 meshesOnly) — 단 차례대로 */
+  private pickCbs = new Map<(p: Pick3d | null, e: PickEvent) => void, boolean>();
   private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
@@ -2409,9 +2453,13 @@ export class Viewer3d {
 
   // ───────────────────────── 고르기·측정 ─────────────────────────
 
-  /** 고르기 알림(빈 곳을 누르면 null). 돌려준 함수로 끊는다 */
-  onPick(cb: (p: Pick3d | null, e: PickEvent) => void): () => void {
-    this.pickCbs.add(cb);
+  /**
+   * 고르기 알림(빈 곳을 누르면 null). 돌려준 함수로 끊는다.
+   * 0.22.0: 둘째 인자 { meshesOnly: true }면 그 알림에는 누른 자리의 그물 면만 고르기(pick(x, y, { meshesOnly: true })와 같은 고르기 — 선분·점·윤곽선은 고르지도 않고
+   * 면을 가리지도 않는다, 그물 면이 없으면 null)를 준다. 같은 누르기의 다른 알림(선택 없이 단 것)은 그대로다. 같은 함수를 다시 달면 마지막 선택을 따른다
+   */
+  onPick(cb: (p: Pick3d | null, e: PickEvent) => void, opts?: OnPickOptions): () => void {
+    this.pickCbs.set(cb, !!opts?.meshesOnly);
     return () => this.pickCbs.delete(cb);
   }
 
@@ -3770,7 +3818,9 @@ export class Viewer3d {
     const noPoint = !r || !r.kind;
     const axisEdges = !!(first && inf?.axisEdges);
     const under = inf?.axisFaces && (first || tracks) ? faceHitOf(d) : null;
-    if ((tracks || axisEdges || under) && noPoint) {
+    // 0.22.0 면의 열린 교차: refineFace가 있으면 커서가 그물 면 위가 아니어도(실루엣 바깥) 축이 삼각형을 비켜 가며 곡면만 뚫는 자리를 본다
+    const openFaces = !!(so.refineFace && inf?.axisFaces && (first || tracks));
+    if ((tracks || axisEdges || under || openFaces) && noPoint) {
       const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
         return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
@@ -3803,7 +3853,17 @@ export class Viewer3d {
         if (axisEdges) for (const axis of axes) if (!ls.some((l) => l.axis === axis && along(l.from, axis))) ls.push({ from: first!, dir: axisLock(axis).direction, axis, track: false });
         openE = this.openLineEdge(so, f, x, y, snapPx, ls, first, nearSegs(), budget, vis);
       }
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap]);
+      // 0.22.0 면의 열린 교차: 첫 점 축·끌어온 축(axisFaces)이 커서 둘레 삼각형을 뚫지 않지만 그 삼각형과 곡면 사이를 지날 만큼 가까우면 앱 refineFace('axisFace', open)가 준
+      // 곡면 위 교차(받을 수 있는 것만 — 다듬은 점으로 견준다). 선은 열린 교차와 같이 끌어온 축 → 첫 점 축(같은 직선이면 한 번). 여섯 후보 뒤 차례
+      let openF: { snap: OpenFaceSnap<NearTriangle>; line: OpenRefineLine } | null = null;
+      if (openFaces) {
+        const ls: OpenRefineLine[] = [];
+        const axes: SnapAxis[] = ['x', 'y', 'z'];
+        if (tracks) for (const P of tracks) if (!first || !sameTrackPoint(P, first)) for (const axis of axes) ls.push({ from: P, dir: axisLock(axis).direction, axis, track: true });
+        if (first) for (const axis of axes) if (!ls.some((l) => l.axis === axis && along(l.from, axis))) ls.push({ from: first, dir: axisLock(axis).direction, axis, track: false });
+        openF = this.openLineFace(so, f, x, y, snapPx, ls, first, budget);
+      }
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       if (t && t === pair) {
         const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
@@ -3866,6 +3926,18 @@ export class Viewer3d {
         const out: MeasurePick = { p: o.p, vertex: true, kind: 'axis', axis: l.axis! };
         const sg = nearSegmentId(o.seg);
         if (sg) out.segment = copySegment(sg);
+        if (l.track) {
+          out.trackFrom = [l.from[0], l.from[1], l.from[2]];
+          const dir = along(l.from, l.axis!);
+          if (dir) out.direction = dir;
+        } else out.direction = [l.dir[0], l.dir[1], l.dir[2]];
+        out.refined = true;
+        return out;
+      }
+      if (t && openF && t === openF.snap) {
+        // 0.22.0 면의 열린 교차: 앱이 준 곡면 위 교차(축 위로 내린 자리 — 다듬은 점)와 그 삼각형(face — 0.18.0 축과 면의 교차와 같은 꼴). 방향·끌어온 점은 열린 교차와 같다
+        const { snap: o, line: l } = openF;
+        const out: MeasurePick = { p: o.p, vertex: true, kind: 'axis', axis: l.axis!, face: copyFace(o.tri) };
         if (l.track) {
           out.trackFrom = [l.from[0], l.from[1], l.from[2]];
           const dir = along(l.from, l.axis!);
@@ -4128,6 +4200,82 @@ export class Viewer3d {
   }
 
   /**
+   * 선과 삼각형의 열린 교차(0.22.0, track.ts openFaceSnap): 선 lines(끌어온 축·첫 점 축·잠근 선)가 커서 둘레 그물 삼각형(trianglesAround — 붙잡기 거리 안)을 뚫지 않지만
+   * 그 삼각형과 곡면 사이를 지날 만큼 가까우면 앱 refineFace를 'axisFace'·open = true로 불러(point = 선 위에서 삼각형에 가장 가까운 점, face = 그 삼각형, line = 그 선)
+   * 곡면과의 교차를 받는다. 받는 규칙은 openFaceSnap(그 선 위로 내린 자리, 코어 점·커서에서 붙잡기 거리 안, 그 삼각형 위 곡면 조각 자리, 단면에서 남는 쪽, 가리지 않음).
+   * 앱 함수는 미리 보기 한 번에 budget.calls(0.15.0·0.20.0 열린 후보와 함께 쓰는 OPEN_REFINE_CALLS — 그 둘이 먼저 쓴다)번까지만 새로 부르고, 결과는 커서 광선을 뺀 입력으로
+   * 기억한다(0.19.0 'axisFace'와 같은 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다). 받은 것이 없으면 null
+   */
+  private openLineFace(
+    so: NonNullable<Viewer3d['snapOpt']>,
+    f: ViewFrame,
+    x: number,
+    y: number,
+    snapPx: number,
+    lines: readonly OpenRefineLine[],
+    first: V3 | null,
+    budget: { calls: number },
+  ): { snap: OpenFaceSnap<NearTriangle>; line: OpenRefineLine } | null {
+    const refine = so.refineFace;
+    if (!refine) return null;
+    const ray = screenRay(f, x, y);
+    // 화면에 그린 선이 커서에서 붙잡기 거리 안을 지나는 선만(받는 점은 선 위·커서에서 붙잡기 거리 안이다) — 대부분의 미리 보기에서 삼각형 모으기를 건너뛴다
+    const near = lines.filter((l) => lineNearCursor(f, ray, l.from, l.dir, x, y, snapPx));
+    if (!near.length) return null;
+    const tris = this.trianglesAround(f, x, y, snapPx);
+    if (!tris.length) return null;
+    const r = openFaceSnap(
+      f,
+      near,
+      tris,
+      x,
+      y,
+      snapPx,
+      (c) => {
+        const input: SnapRefineFaceInput = {
+          kind: 'axisFace',
+          point: [c.p[0], c.p[1], c.p[2]],
+          face: copyFace(c.tri),
+          line: copyLine(refineLineOf(near[c.line]!)),
+          first: first ? [first[0], first[1], first[2]] : null,
+          ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
+          open: true,
+        };
+        const key = openRefineKey(input);
+        let q = so.openMemo.get(key);
+        if (q === undefined) {
+          if (budget.calls <= 0) return null;
+          budget.calls--;
+          q = finitePoint(refine(input));
+          so.openMemo.set(key, q);
+        }
+        return q;
+      },
+      (p, t) => {
+        const sp = projectToScreen(f, p);
+        return !!sp && this.snapVisible(f, p, sp[0], sp[1], t.id);
+      },
+    );
+    return r ? { snap: r, line: near[r.line]! } : null;
+  }
+
+  /** 커서 tolPx 안의 보이는 그물 삼각형(0.22.0 선과 삼각형의 열린 교차 — scenepick.ts trianglesNear)과 그 깊이의 화소 세계 길이 */
+  private trianglesAround(f: ViewFrame, x: number, y: number, tolPx: number): NearTriangle[] {
+    const hits = trianglesNear(f, x, y, this.visibleItems(), {
+      bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
+      bounds: (it) => this.boundsOf(it),
+      model: (m) => this.modelOf(m),
+      ...this.clipOpts(),
+      hidden: (it) => this.rangeSel.get(it.id)?.test,
+    }, tolPx);
+    return hits.map((h) => {
+      const t: NearTriangle = { corners: h.corners, wpp: worldPerPixel(f, h.depth), id: h.id, index: h.index, normal: h.normal };
+      if (h.keep) t.keep = h.keep;
+      return t;
+    });
+  }
+
+  /**
    * 잠근 선 위의 교차(0.19.0 — inference.lockEdges·lockFaces, 잠근 동안 커서 아래 점 붙잡기가 없을 때): 첫 점을 지나는 잠근 선이 커서 둘레 선분과 3D로 만나는 점
    * (lockEdgeSnap — 0.18.0 axisEdgeSnap과 같은 허용치·빼는 규칙·가림)과 커서 아래 보이는 그물 면을 뚫는 점(lockFaceSnap — axisFaceSnap과 같다)을 견줘
    * (선분 → 면 차례, chooseTrackPoint — 뒤 차례는 TRACK_YIELD_PX 넘게 가까워야) 잠근 선 위 점(lockOut)에 그 선분(segment)·면(face)을 싣는다.
@@ -4135,7 +4283,8 @@ export class Viewer3d {
    * 앱이 정한 방향으로 잠근 선(축이 아닌 직선 — SnapRefineLine.axis 없음)도 다듬고, refine이 있으면 잠근 선이 토막과 3D로 만나지 않고 활꼴만 지나는 열린 교차
    * (openLineEdge — 면 뒤 차례)도 본다. 0.21.0: tracks(inference.lockTracks를 켜고 끌어온 점이 있을 때)면 잠근 선이 끌어온 축과 만나는 점
    * (lockTrackSnap — 축으로 잠갔으면 잠근 축 위 끌어온 점과 나란한 자리)을 그 셋보다 먼저 견준다(만나는 끌어온 축은 trackOther, 나란한 자리뿐이면 trackFrom —
-   * 다듬지 않는다, 축 위 점이다). 넷 다 없으면 null
+   * 다듬지 않는다, 축 위 점이다). 0.22.0: lockFaces와 refineFace가 있으면 잠근 선이 커서 둘레 삼각형을 비켜 가며 곡면만 뚫는 자리(openLineFace — 열린 교차 뒤 차례,
+   * 그 삼각형 face·refined)도 본다. 다 없으면 null
    */
   private lockedMeet(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -4165,7 +4314,9 @@ export class Viewer3d {
       : null;
     const line: OpenRefineLine = { from: first, dir: lock.direction, ...(lock.axis ? { axis: lock.axis } : {}), track: false };
     const open = inf.lockEdges && so.refine ? this.openLineEdge(so, f, x, y, snapPx, [line], first, nearSegs(), budget, vis) : null;
-    const t = chooseTrackPoint<{ distPx: number }>([trk, edge, face, open?.snap]);
+    // 0.22.0 면의 열린 교차(lockFaces와 refineFace가 있을 때): 잠근 선이 커서 둘레 삼각형을 비켜 가며 곡면만 뚫는 자리 — 열린 교차 뒤 차례
+    const openF = inf.lockFaces && so.refineFace ? this.openLineFace(so, f, x, y, snapPx, [line], first, budget) : null;
+    const t = chooseTrackPoint<{ distPx: number }>([trk, edge, face, open?.snap, openF?.snap]);
     if (!t) return null;
     if (t === trk) {
       const out = lockOut(trk.p);
@@ -4185,10 +4336,14 @@ export class Viewer3d {
       out = lockOut(face.p);
       out.face = { id: h.id, index: h.index, normal: h.normal };
       if (so.refineFace) rp = this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first);
-    } else {
-      out = lockOut(open!.snap.p);
-      const sg = nearSegmentId(open!.snap.seg);
+    } else if (open && t === open.snap) {
+      out = lockOut(open.snap.p);
+      const sg = nearSegmentId(open.snap.seg);
       if (sg) out.segment = copySegment(sg);
+      out.refined = true;
+    } else {
+      out = lockOut(openF!.snap.p);
+      out.face = copyFace(openF!.snap.tri);
       out.refined = true;
     }
     if (rp) {
@@ -4389,7 +4544,15 @@ export class Viewer3d {
       button: e?.button ?? 0,
       pointerType: type,
     };
-    for (const cb of this.pickCbs) cb(d ? d.pick : null, ev);
+    // 0.22.0: 그물 면만 받는 알림이 있으면 그 고르기를 한 번만 구해 함께 쓴다
+    let dm: PickDetail | null | undefined;
+    for (const [cb, meshesOnly] of this.pickCbs) {
+      if (!meshesOnly) cb(d ? d.pick : null, ev);
+      else {
+        if (dm === undefined) dm = this.pickDetail(x, y, true, type, false, false, true);
+        cb(dm ? dm.pick : null, ev);
+      }
+    }
   }
 
   // ───────────────────────── 내부: 입력 ─────────────────────────
