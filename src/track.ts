@@ -23,8 +23,9 @@
  *   지날 만큼 가까우면, 부르는 쪽(뷰어는 앱 refineFace — 'axisFace', open)이 곡면과의 정확한 교차를 줄 때만 그 점을 후보로 받는다
  * 모두 화면 붙잡기 거리 안일 때만이고, 가까운 것이 이기며 같으면 새 점 → X·Y·Z 차례다.
  * 점 후보(첫 점 축 위 나란한 자리·축끼리 교차·선분 교차·첫 점 축과 선분의 교차) 사이는 chooseTrackPoint(뒤 차례는 TRACK_YIELD_PX 넘게 가까워야 이긴다).
- * - 0.26.0 끌어온 점에서 나란함·수직 방향(trackDirGuides·trackDirSnap — 순수 계산만, 뷰어는 아직 쓰지 않는다): 기억한 점 P를 지나 기준 선분과 나란한 선,
+ * - 0.26.0 끌어온 점에서 나란함·수직 방향(trackDirGuides·trackDirSnap): 기억한 점 P를 지나 기준 선분과 나란한 선,
  *   기준 선분에 수직인 선(P에서 그 직선으로 내린 수직, 축을 수직 평면에 비친 방향) 위에서 커서 광선에 가장 가까운 점
+ *   (0.27.0부터 뷰어는 MeasureInference.trackDirs를 켰을 때 끌어온 축과 함께 견준다 — 세계 축)
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -1321,7 +1322,7 @@ export function trackDirGuides(P: readonly number[], seg: readonly [readonly num
 }
 
 /**
- * 끌어온 점에서 나란함·수직 방향 위 점(0.26.0, 순수 — 뷰어는 아직 쓰지 않는다): 기억한 점 P마다 trackDirGuides(P, seg, axes)의 선 위에서 커서 광선에 가장 가까운 점이
+ * 끌어온 점에서 나란함·수직 방향 위 점(0.26.0, 순수 — 0.27.0부터 뷰어 MeasureInference.trackDirs도 쓴다): 기억한 점 P마다 trackDirGuides(P, seg, axes)의 선 위에서 커서 광선에 가장 가까운 점이
  * 커서에서 snapPx 안이면 후보(가까운 것, 같으면 앞 점 → 안내 차례). trackAxisSnap과 같은 규칙 — 커서가 P의 화면 자리 snapPx 안이면 그 P는 빼고(점 붙잡기가 맡는다),
  * skip(첫 측정 점)과 같은 P는 뺀다(첫 점의 나란함은 0.10.0 parallel). 선이 커서 광선과 거의 나란하면 그 선은 뺀다. 원근에서 가까운 면보다 앞이면 뺀다.
  * seg가 없으면 없다

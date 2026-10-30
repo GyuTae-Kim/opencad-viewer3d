@@ -95,6 +95,7 @@ import {
   trackAlongFirst,
   trackAxisSnap,
   trackCrossSnap,
+  trackDirSnap,
   trackEdgeSnap,
   trackPairSnap,
 } from './track';
@@ -384,6 +385,8 @@ export interface MeasureSnapOptions {
    * 0.19.0(true에 들지 않는다): lockEdges·lockFaces = 잠근 동안(Shift·setMeasureInferenceLock) 커서 아래 점 붙잡기가 없으면 잠근 선이 커서 둘레 선분·윤곽선과
    * 3D로 만나는 점(segment)·커서 아래 보이는 그물 면을 뚫는 점(face)을 잠근 선 위 커서에 가까운 점보다 먼저 찍는다(axisEdges·axisFaces와 같은 허용치·빼는 규칙,
    * 선분 → 면 차례 — 뒤 차례는 1화소 넘게 가까워야 한다). 값은 잠근 선 위 점 그대로(종류·방향·locked)에 segment나 face가 더해진다
+   * 0.27.0(true에 들지 않는다): trackDirs = 끌어온 점(track)에서 커서가 앞서 지나간 선분과 나란한 선·수직인 선 위의 점(snap 'parallel'·'perpendicular'·trackFrom·edge,
+   * direction 없음 — 잠그지 않는다). 끌어온 축과 화면에서 가까운 것(같으면 끌어온 축)이고 첫 점 축·나란함 뒤 차례다. 끌어온 점에서 추론 색 쇄선을 긋는다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -478,7 +481,8 @@ export interface MeasureHoverSnap {
   other?: SnapSegment;
   /**
    * 0.16.0: 끌어온 축(inference.track)이면 그 축을 끌어온 점 P(복사본) — 점선은 P에서 이 점까지.
-   * 0.21.0: 잠근 축 위에서 끌어온 점과 나란한 자리(inference.lockTracks — locked와 함께, P의 축과 만나지 않을 때)에도 그 점 P가 실린다
+   * 0.21.0: 잠근 축 위에서 끌어온 점과 나란한 자리(inference.lockTracks — locked와 함께, P의 축과 만나지 않을 때)에도 그 점 P가 실린다.
+   * 0.27.0: 끌어온 점에서 기준 선분과 나란함·수직인 선 위 점(inference.trackDirs — snap 'parallel'·'perpendicular', locked 없음)에도 그 점 P가 실리고 edge는 기준 선분이다
    */
   trackFrom?: V3;
   /**
@@ -514,7 +518,7 @@ export interface MeasurePoint {
   segment?: SnapSegment;
   /** 0.16.0: 교차점이면 둘째 선분(복사본) */
   other?: SnapSegment;
-  /** 0.16.0: 끌어온 축(inference.track)으로 찍었으면 그 축을 끌어온 점(복사본) */
+  /** 0.16.0: 끌어온 축(inference.track)으로 찍었으면 그 축을 끌어온 점(복사본). 0.27.0: 끌어온 점의 나란함·수직(inference.trackDirs)으로 찍었어도 그 점 */
   trackFrom?: V3;
   /** 0.17.0: 끌어온 축끼리의 교차로 찍었으면 둘째 끌어온 축(복사본 — MeasureHoverSnap.trackOther와 같은 규칙) */
   trackOther?: TrackGuide;
@@ -840,7 +844,8 @@ const faceHitOf = (d: PickDetail | null): (TrackFaceHit & SnapFace) | null => {
 };
 /** 점 붙잡기(머무르기로 끌어올 수 있는 점 — 0.16.0)인지: 꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발이고 잠근 선 위 점이 아님 */
 const dwellPointOf = (h: MeasurePick | null): V3 | null =>
-  h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' ? h.p : null;
+  // 0.27.0: 끌어온 점의 나란함·수직 선 위 점('perpendicular'에 trackFrom)은 선 위 점이라 기억하지 않는다(끌어온 점이 실린 것은 모두 선 위 점이다)
+  h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' && !h.trackFrom ? h.p : null;
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
 
 /** 묶음 하나의 구간 상태(숨김·강조, 합친 것)와 그로부터 만든 것 */
@@ -4051,7 +4056,8 @@ export class Viewer3d {
     const inf = so.inference;
     const first = this.measurePts.length === 1 ? this.measurePts[0]! : null;
     // 나란함(0.10.0): 커서가 지나간 선분·윤곽선을 기준으로 기억한다(첫 점을 찍기 전에도)
-    if (inf?.parallel && d?.ends) this.parallelRef = d.ends;
+    // 0.27.0: 끌어온 점의 나란함·수직(trackDirs)도 같은 기준 선분을 쓴다(parallel을 켜지 않아도 기억한다)
+    if ((inf?.parallel || inf?.trackDirs) && d?.ends) this.parallelRef = d.ends;
     // 커서 둘레 선분(0.9.0 교차점·수직 발과 0.12.0 선분 방향 잠금이 함께 쓴다 — 필요할 때 한 번만 구한다)
     let near: NearSegment[] | null = null;
     const nearSegs = (): NearSegment[] => (near ??= this.segmentsAround(f, x, y, snapPx, edges));
@@ -4240,6 +4246,10 @@ export class Viewer3d {
     // 끌어온 점을 지나는 축(0.16.0): 첫 점 축·나란함 다음(첫 점 전에도). 첫 점 축이 아니므로 방향(잠글 것)이 없다
     if (tracks && noPoint) {
       const t = trackAxisSnap(f, tracks, x, y, snapPx, first);
+      // 0.27.0 끌어온 점에서 기준 선분과 나란함·수직(inference.trackDirs): 끌어온 축과 화면에서 가까운 것(같으면 끌어온 축). 첫 점을 지나지 않아 방향(잠글 것)이 없다
+      const ref = inf?.trackDirs ? this.parallelRef : null;
+      const g = ref ? trackDirSnap(f, tracks, ref, x, y, snapPx, first) : null;
+      if (g && (!t || g.distPx < t.distPx)) return { p: g.p, vertex: true, kind: g.kind, trackFrom: g.from, edge: ref! };
       if (t) return { p: t.p, vertex: true, kind: 'axis', axis: t.axis, trackFrom: t.from };
     }
     // 그 점이 놓인 선분 식별자(0.16.0): 아래 점 붙잡기·선분 위 점에 싣는다(다듬은 점도 같은 선분)
@@ -5733,6 +5743,8 @@ export class Viewer3d {
       lines.forEach((s, i) => ctx.fillText(s, x + 7, y + 5 + i * 16));
     };
     ctx.save();
+    // 0.27.0: 끌어온 점에서 기준 선분과 나란함·수직인 선 위 점(inference.trackDirs — 잠그지 않은 'parallel'·'perpendicular'에 끌어온 점)
+    const trackDir = !!(hover?.trackFrom && !hover.locked && (hover.kind === 'parallel' || hover.kind === 'perpendicular'));
     const a = pts[0], b = pts[1] ?? (hover ? hover.p : undefined);
     if (a && b) {
       const sa = P(a), sb = P(b);
@@ -5745,7 +5757,8 @@ export class Viewer3d {
       }
       // 0.9.0 축 붙잡기 미리 보기: 첫 점에서 그 축 색 안내선.
       // 0.10.0: 나란함·잠근 수직은 추론 색(자홍) 안내선과 기준 선분 점선, 잠금은 바탕 테 위 굵은 실선, 잠근 선으로 옮겨 온 점에서 가는 점선
-      const hk = pts.length === 1 ? hover : null;
+      // 0.27.0: 끌어온 점의 나란함·수직은 첫 점을 지나는 선이 아니므로 첫 점에서 그은 선은 보통 측정 색(기준 선분은 아래 끌어온 점 그리기에서)
+      const hk = pts.length === 1 && !trackDir ? hover : null;
       // 0.16.0: 끌어온 점을 지나는 축(방향 없음)은 첫 점 축이 아니므로 첫 점에서 그은 선은 보통 측정 색
       const guide =
         hk?.kind === 'axis' && hk.axis && !(hk.trackFrom && !hk.direction)
@@ -5785,7 +5798,18 @@ export class Viewer3d {
       const to = hover?.trackOther ?? null;
       let col = th.measure;
       const col2 = to ? axisColor(to.axis) : th.measure;
-      if (tf && hover) {
+      if (tf && hover && trackDir) {
+        // 0.27.0 끌어온 점의 나란함·수직: 기준 선분(추론 색 점선 — 0.10.0 나란함과 같다)과 끌어온 점에서 추론 색 쇄선(끌어온 축의 [4, 3] 점선과 구별)
+        col = inferColor;
+        if (hover.edge) {
+          const e0 = P(hover.edge[0]), e1 = P(hover.edge[1]);
+          line(e0, e1, th.textBg, 5, []);
+          line(e0, e1, inferColor, 2.5, [5, 3]);
+        }
+        const s0 = P(tf), s1 = P(hover.p);
+        line(s0, s1, th.textBg, 3.5, []);
+        line(s0, s1, col, 1.5, [8, 3, 2, 3]);
+      } else if (tf && hover) {
         const u = unitDir(tf, hover.p);
         const ax: SnapAxis | null = !hover.direction ? (hover.axis ?? null) : u && axisAligned(u) ? (Math.abs(u[0]) > 0.5 ? 'x' : Math.abs(u[1]) > 0.5 ? 'y' : 'z') : null;
         if (ax) col = axisColor(ax);
@@ -5829,7 +5853,49 @@ export class Viewer3d {
     if (hover) {
       const k = hover.kind;
       // 0.7.2의 두 모양(꼭짓점·끝점 네모, 붙잡지 않음 동그라미) 그대로, 0.8.0 붙잡기 종류만 새 모양
-      if (k === 'midpoint' || k === 'center' || k === 'point' || k === 'intersection' || k === 'perpendicular') snapMarkAt(P(hover.p), k);
+      if (trackDir && k === 'perpendicular') {
+        // 0.27.0 끌어온 점에서 수직인 선 위: 추론 색 동그라미와 오른쪽 위에 기준 선분 화면 방향의 ⊥(밑줄이 기준 선분 방향)
+        const sp = P(hover.p);
+        if (sp) {
+          ctx.fillStyle = inferColor;
+          ctx.strokeStyle = th.textBg;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sp[0], sp[1], 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          const e0 = hover.edge ? P(hover.edge[0]) : null, e1 = hover.edge ? P(hover.edge[1]) : null;
+          let ux = e0 && e1 ? e1[0] - e0[0] : 1, uy = e0 && e1 ? e1[1] - e0[1] : 0;
+          const ul = Math.hypot(ux, uy);
+          if (ul > 1e-6) {
+            ux /= ul;
+            uy /= ul;
+          } else {
+            ux = 1;
+            uy = 0;
+          }
+          // 줄기는 화면 위쪽을 향하게
+          let nx = -uy, ny = ux;
+          if (ny > 0) {
+            nx = -nx;
+            ny = -ny;
+          }
+          const cx = sp[0] + 12, cy = sp[1] - 8;
+          for (const [color, w] of [
+            [th.textBg, 4],
+            [inferColor, 1.8],
+          ] as const) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = w;
+            ctx.beginPath();
+            ctx.moveTo(cx - ux * 5.5, cy - uy * 5.5);
+            ctx.lineTo(cx + ux * 5.5, cy + uy * 5.5);
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + nx * 8, cy + ny * 8);
+            ctx.stroke();
+          }
+        }
+      } else if (k === 'midpoint' || k === 'center' || k === 'point' || k === 'intersection' || k === 'perpendicular') snapMarkAt(P(hover.p), k);
       else if (k === 'axis' && hover.axis) {
         // 축 위 점: 축 색 동그라미
         const sp = P(hover.p);
