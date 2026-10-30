@@ -4803,6 +4803,132 @@ const labelSpotValues: ValueSet = {
   },
 };
 
+// ───────────── 0.28.0 끌어온 점의 나란함·수직 기준 선분 거르기·GPU 버퍼 성분별 바이트 ─────────────
+/** 0.28.0 기준 선분 거르기(inference.trackDirs { edge })가 있는 판인지 — 편 선택에 edge 함수가 남는다 */
+const v0280trackDirEdge: Need = (v, c) => {
+  const why = v0270trackDirs(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { track: true, trackDirs: { edge: () => true } } });
+  const ok = typeof (v.measureSnap?.inference as any)?.trackDirs?.edge === 'function';
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.28.0 기준 선분 거르기(inference.trackDirs { edge })';
+};
+/** cross 자료의 다른 엇갈린 선분((10, 70) → (110, 10), z 40.5 — 배열 안 번호 1) 위 */
+const DIR_OTHER = [30, 58, 40.5];
+
+/**
+ * 0.28.0 기준 선분 거르기 값(cross — 새 값): 엇갈린 선분 0(DIR_REF)을 지난 뒤 다른 엇갈린 선분 1을 지나고 끌어온 점에서 선분 0과 나란한 자리를 가리킨 미리 보기 —
+ * 거르지 않으면(0.27.0) 기준이 선분 1로 바뀌고, 선분 1을 거르면 선분 0이 남는다. 앱 함수가 받은 선분(종류·id·번호·배열 안 번호)과 물은 수,
+ * 첫 점의 나란함(0.10.0)은 거르지 않는지(첫 점 뒤 선분 1을 지나 그와 나란한 자리)
+ */
+const trackDirEdgeValues: ValueSet = {
+  name: 'cross-measure-track-dir-edge',
+  data: 'cross',
+  needs: v0280trackDirEdge,
+  run: (c) => {
+    const { v } = c;
+    const row = (name: string): unknown[] => {
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, r10s(h.point), r10s(h.trackFrom), h.edge ? h.edge.map(r10s) : null, r10s(h.direction)] : null];
+    };
+    const go = (p: number[], dx = 0.4, dy = 0.3): void => {
+      const q = c.at(c.world(p));
+      if (q) c.hover(q.x + dx, q.y + dy);
+      v.renderNow();
+    };
+    const out: unknown[] = [];
+    const asked: unknown[] = [];
+    const edge = (s: any): boolean => {
+      asked.push([s.kind, s.id, s.index, s.raw]);
+      return !(s.id === '엇갈림' && s.raw === 1);
+    };
+    for (const filter of [false, true]) {
+      v.setGroupVisible('공구 경로', false);
+      v.setGroupVisible('구멍', false);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ edges: true, inference: { axes: true, parallel: true, track: true, trackDirs: filter ? { edge } : true } });
+      go(DIR_REF);
+      v.setMeasureTrackPoints([c.world(TRACK_P)]);
+      go(DIR_OTHER);
+      out.push(row(`other-${filter}`));
+      go(DIR_PAR, 2, 1);
+      out.push(row(`par-${filter}`));
+      // 첫 점(상자 윗면 앞 구석) 뒤: 선분 1과 나란한 첫 점의 선(0.10.0 — 거르지 않는다)과 끌어온 점에서 선분 0과 나란한 자리
+      const a = c.at(c.world([120, 0, 40]));
+      if (a) c.click(a.x - 1, a.y + 1);
+      v.setMeasureTrackPoints([c.world(TRACK_P)]);
+      go(DIR_REF);
+      go(DIR_OTHER);
+      const u = [-100 / Math.hypot(100, 60), 60 / Math.hypot(100, 60), 0];
+      go([120 + 20 * u[0]!, 0 + 20 * u[1]!, 40], 2, 1);
+      out.push(row(`first-par-${filter}`));
+      go(DIR_PAR, 2, 1);
+      out.push(row(`first-track-par-${filter}`));
+      v.setMeasureSnap(null);
+      v.clearMeasure();
+      v.setMeasureMode(false);
+    }
+    out.push(['asked', asked]);
+    return out;
+  },
+};
+
+/** 0.28.0 GPU 버퍼 성분별 바이트(stats.buffers)가 있는 판인지 */
+const v0280buffers: Need = (v) => (v.stats?.buffers && typeof v.stats.buffers.positions === 'number' ? null : '이 판에 없는 값: 0.28.0 stats.buffers');
+
+/**
+ * 0.28.0 GPU 버퍼 성분별 바이트 값(base — 새 값): 장면을 다시 준 뒤 성분별 바이트(덧그림은 앞 장면이 남긴 표식에 따라 달라 뺀다)와 장면 배열 합과 같은지,
+ * 와이어프레임·구간 숨김·강조 뒤 코어가 만든 것(wireframe·ranges), 강조 선분의 덧그림 늘어남, 놓기(release — 장면 사본)가 같은지
+ */
+const bufferStatsValues: ValueSet = {
+  name: 'base-buffer-stats',
+  data: 'base',
+  needs: v0280buffers,
+  run: (c) => {
+    const { v } = c;
+    const scene = sceneOf('base');
+    const parts = ['positions', 'normals', 'colors', 'uvs', 'backUvs', 'indices', 'edges', 'lines', 'lineColors', 'points', 'wireframe', 'ranges'];
+    const now = (): any => {
+      v.renderNow();
+      return v.stats.buffers;
+    };
+    const pick = (s: any): number[] => parts.map((p) => s[p]);
+    // 장면 배열 합(같은 배열은 한 번 — 렌더러와 같은 조건 가운데 이 장면에 있는 것: 그물 위치·법선·색·색인·윤곽선, 선분 위치·색, 점)
+    const seen = new Set<unknown>();
+    const sum = (a: ArrayBufferView | undefined): number => (!a || seen.has(a) ? 0 : (seen.add(a), a.byteLength));
+    let want = 0;
+    for (const m of scene.meshes) {
+      const nv = m.positions.length / 3;
+      want += sum(m.positions) + (m.normals && m.normals.length >= nv * 3 ? sum(m.normals) : 0) + (m.colors && m.colors.length >= nv * 4 ? sum(m.colors) : 0) + sum(m.indices);
+      want += m.edges && m.edges.length >= 6 ? sum(m.edges) : 0;
+    }
+    for (const l of scene.lines) want += sum(l.positions) + (l.colors && l.colors.length >= (l.positions.length / 6) * 8 ? sum(l.colors) : 0);
+    for (const p of scene.points ?? []) want += sum(p.positions);
+    v.setScene(scene);
+    const s0 = now();
+    const out: unknown[] = [['shaded', pick(s0), pick(s0).reduce((n, x) => n + x, 0) === want]];
+    v.setRenderMode('wireframe');
+    out.push(['wireframe', pick(now())]);
+    rangesDemo(c);
+    out.push(['ranges', pick(now())]);
+    const o1 = now().overlay;
+    v.setHighlightSegments(new Float32Array([0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 50, 0]));
+    out.push(['highlight-overlay', now().overlay - o1]);
+    v.setHighlightSegments(null);
+    v.clearHiddenRanges();
+    v.highlightRanges(null);
+    v.setRenderMode('shaded');
+    out.push(['cleared', pick(now()), now().overlay === o1]);
+    // 놓기: 그물 객체 사본을 놓는다(자료 장면의 배열은 그대로) — GPU 버퍼는 지우지 않는다
+    v.setScene({ ...scene, meshes: scene.meshes.map((m) => ({ ...m })) }, { release: true });
+    out.push(['release', pick(now())]);
+    v.setScene(scene);
+    out.push(['again-same', JSON.stringify(pick(now())) === JSON.stringify(pick(s0))]);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -4866,6 +4992,8 @@ const VALUES: ValueSet[] = [
   pickThroughRangeValues('off'),
   trackDirValues,
   labelSpotValues,
+  trackDirEdgeValues,
+  bufferStatsValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
