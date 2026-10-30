@@ -160,7 +160,18 @@ import {
   sectionSegments,
 } from './section';
 import { segmentsById } from './segments';
-import { type DrawRange, type ItemParts, type RenderColors, type RenderMode, type RenderState, type RenderStats, type TextureSource, type TextureStats, Renderer3d } from './renderer';
+import {
+  type DrawRange,
+  type GpuBufferStats,
+  type ItemParts,
+  type RenderColors,
+  type RenderMode,
+  type RenderState,
+  type RenderStats,
+  type TextureSource,
+  type TextureStats,
+  Renderer3d,
+} from './renderer';
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
@@ -730,7 +741,11 @@ export interface AnnotationOptions {
   width?: number;
 }
 
-export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats };
+/**
+ * 뷰어 통계(stats). 0.28.0 buffers: GPU 버퍼 바이트(bufferData로 잡은 크기, 살아 있는 버퍼만) — 성분별(위치·법선·정점 색·무늬 좌표·뒷면 무늬 좌표·색인·윤곽선·
+ * 선분 위치·선분 색·점·와이어프레임 색인·구간 모음·덧그림)과 합(bytes)·버퍼 수(count). 같은 배열은 처음 올린 성분으로 한 번만 센다(GpuBufferStats)
+ */
+export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats; buffers: GpuBufferStats };
 
 /** Viewer3d.setMesh 선택(0.11.0) */
 export interface SetMeshOptions {
@@ -3748,7 +3763,15 @@ export class Viewer3d {
   }
 
   get stats(): Viewer3dStats {
-    return { ...this.renderer.stats, frameMs: this.frameMs, width: this.canvas.width, height: this.canvas.height, dpr: this.dpr, textures: this.renderer.textureStats };
+    return {
+      ...this.renderer.stats,
+      frameMs: this.frameMs,
+      width: this.canvas.width,
+      height: this.canvas.height,
+      dpr: this.dpr,
+      textures: this.renderer.textureStats,
+      buffers: this.renderer.bufferStats,
+    };
   }
 
   // ───────────────────────── 내부: 상태 ─────────────────────────

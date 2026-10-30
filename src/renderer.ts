@@ -21,6 +21,9 @@
  * 0.26.0 작은 법선·무늬 좌표: 법선 Int8·Int16, 무늬 좌표 Int16·Uint16 배열을 그대로 버퍼에 올리고 정점 속성 꼴(BYTE·SHORT·UNSIGNED_SHORT, normalized)로 읽는다
  * (꼴 판정은 attribs.ts). 그물 기록이 속성 꼴을 기억해 다시 묶을 때도 배열을 보지 않는다. 무늬 좌표 축척·이동(uvTransform)은 그물마다 균일 변수 u_uvt·u_uvt2.
  * Float32 배열은 0.25.0과 같은 속성 꼴로 올린다(변환이 없으면 u_uvt = (1, 1, 0, 0) — 곱하고 더해도 값이 그대로다)
+ *
+ * 0.28.0 GPU 버퍼 바이트: 버퍼는 모두 newBuffer로 만들고 dropBuffer로 지워 살아 있는 버퍼마다 성분(GpuBufferPart)과 bufferData로 잡은 크기를 적는다
+ * (bufferStats — 나눠 올리기는 크기를 잡을 때 적고 그 배열의 성분으로 바꾼다, 문맥을 잃으면 비운다). GL 부르는 차례는 예전과 같다
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
@@ -309,6 +312,39 @@ export interface TextureStats {
   missing: number;
 }
 
+/**
+ * GPU 버퍼 성분(0.28.0, GpuBufferStats): 장면 그물의 위치·법선·정점 색·앞면 무늬 좌표·따로 준 뒷면 무늬 좌표(backUvs)·색인·윤곽선(Mesh3d.edges),
+ * 선분 묶음의 위치·정점 색, 점 묶음 위치, 코어가 만든 와이어프레임 색인(삼각형 변)·구간 숨김·강조의 모은 자료(ranges),
+ * 장면 밖 덧그림(격자·표시 그물·강조 선분·단면 테두리·앱 측정 덧그림 선·공용 사각형·잘린 면 다각형 — overlay)
+ */
+export type GpuBufferPart =
+  | 'positions'
+  | 'normals'
+  | 'colors'
+  | 'uvs'
+  | 'backUvs'
+  | 'indices'
+  | 'edges'
+  | 'lines'
+  | 'lineColors'
+  | 'points'
+  | 'wireframe'
+  | 'ranges'
+  | 'overlay';
+
+const GPU_BUFFER_PARTS: readonly GpuBufferPart[] = ['positions', 'normals', 'colors', 'uvs', 'backUvs', 'indices', 'edges', 'lines', 'lineColors', 'points', 'wireframe', 'ranges', 'overlay'];
+
+/**
+ * GPU 버퍼 바이트(0.28.0, Viewer3d.stats.buffers): 지금 살아 있는 버퍼마다 bufferData로 잡은 크기를 성분별로 더한 값(바이트)과 그 합(bytes)·버퍼 수(count).
+ * 같은 배열은 한 번만 올리므로(같은 배열을 여러 그물·자리가 쓰면) 처음 올린 성분으로 한 번만 센다 — 뒷면이 uvs를 함께 쓰면 uvs에만 든다.
+ * 놓기(release)는 GPU 버퍼를 지우지 않으므로 그대로이고, 작은 정수 배열은 그 바이트(Int8 법선 4값 = 정점마다 4바이트), 나눠 올리기는 크기를 잡는 순간부터 센다.
+ * 문맥을 잃으면 0(덧그림 포함)이고 되찾으면 다시 올린 것만 센다. 무늬 그림은 textures.bytes(어림)
+ */
+export interface GpuBufferStats extends Record<GpuBufferPart, number> {
+  bytes: number;
+  count: number;
+}
+
 /** 한 번에 풀어 두는 무늬 수(풀린 그림이 한꺼번에 메모리에 쌓이지 않게) */
 const TEXTURE_DECODES = 4;
 
@@ -342,6 +378,15 @@ interface Slot {
 
 /** 그물 기록의 버퍼 자리 차례(uploadArrays와 같다): 위치 0·법선 1·색 2·무늬 좌표 3·뒷면 무늬 좌표 4·색인 5·윤곽선 6 */
 const SLOT_NORMALS = 1, SLOT_UV = 3, SLOT_BUV = 4;
+/** 묶음 하나가 올리는 배열 하나(uploadArrays): 배열·대상·0.28.0 성분 */
+interface UploadEntry {
+  data: UploadArray;
+  target: BufferTarget;
+  part: GpuBufferPart;
+}
+
+/** 0.28.0 그물 버퍼 자리(SLOT 차례)의 GPU 버퍼 성분 */
+const SLOT_PARTS: readonly GpuBufferPart[] = ['positions', 'normals', 'colors', 'uvs', 'backUvs', 'indices', 'edges'];
 
 /** 그물 정점 속성 버퍼(0.25.0): 기록이 기억해 두고 배열을 다시 보지 않고 VAO를 묶는다 */
 interface MeshAttribs {
@@ -548,6 +593,9 @@ export class Renderer3d {
   /** 0.25.0 나눠 올리는 장면에서 아직 차례가 오지 않은 그물에 앱이 다시 준 배열(차례가 오면 쓴다) */
   private restoreQ = new Map<string, MeshArrays>();
   private vaos = new Set<WebGLVertexArrayObject>();
+  /** 0.28.0 살아 있는 GPU 버퍼마다 성분과 bufferData로 잡은 크기(문맥을 잃으면 비운다)와 성분별 합(stats.buffers) */
+  private bufLedger = new Map<WebGLBuffer, { part: GpuBufferPart; bytes: number }>();
+  private bufTotals = new Map<GpuBufferPart, number>();
   meshes: MeshRec[] = [];
   lines: (LineRec & { src: LineSet3d })[] = [];
   points: PointRec[] = [];
@@ -609,15 +657,9 @@ export class Renderer3d {
     this.skyP = null;
     const an = gl.getExtension('EXT_texture_filter_anisotropic');
     this.aniso = an ? { ext: an, max: Number(gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 1 } : null;
-    this.quadWide = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
-    this.quadPoint = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadPoint);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    this.capBuf = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.capBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, this.capData.byteLength, gl.DYNAMIC_DRAW);
+    this.quadWide = this.newBuffer(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW, 'overlay');
+    this.quadPoint = this.newBuffer(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW, 'overlay');
+    this.capBuf = this.newBuffer(gl.ARRAY_BUFFER, this.capData.byteLength, gl.DYNAMIC_DRAW, 'overlay');
     this.capVao = gl.createVertexArray()!;
     gl.bindVertexArray(this.capVao);
     gl.enableVertexAttribArray(0);
@@ -635,6 +677,9 @@ export class Renderer3d {
     this.arrayBufs.clear();
     this.elemBufs.clear();
     this.refs.clear();
+    // 0.28.0: 잃은 버퍼는 GPU에 없다(성분별 바이트도 0에서 다시)
+    this.bufLedger.clear();
+    this.bufTotals.clear();
     this.restoreQ.clear();
     this.jobs.clear();
     this.vaos.clear();
@@ -946,6 +991,57 @@ export class Renderer3d {
     return l;
   }
 
+  /**
+   * 0.28.0 GPU 버퍼 하나를 만들어 묶고 bufferData로 채우거나(배열) 크기만 잡는다(수) — 예전 createBuffer·bindBuffer·bufferData와 같은 차례.
+   * 성분별 바이트(stats.buffers)에 센다
+   */
+  private newBuffer(target: number, src: ArrayBufferView | number, usage: number, part: GpuBufferPart): WebGLBuffer {
+    const gl = this.gl;
+    const b = gl.createBuffer()!;
+    gl.bindBuffer(target, b);
+    if (typeof src === 'number') gl.bufferData(target, src, usage);
+    else gl.bufferData(target, src, usage);
+    this.ledgerSet(b, part, typeof src === 'number' ? src : src.byteLength);
+    return b;
+  }
+
+  /** 0.28.0 GPU 버퍼를 지우고 성분별 바이트에서 뺀다 */
+  private dropBuffer(b: WebGLBuffer | null | undefined): void {
+    if (!b) return;
+    this.gl.deleteBuffer(b);
+    const e = this.bufLedger.get(b);
+    if (!e) return;
+    this.bufLedger.delete(b);
+    this.bufTotals.set(e.part, (this.bufTotals.get(e.part) ?? 0) - e.bytes);
+  }
+
+  /** 0.28.0 버퍼의 성분·크기를 적는다(이미 적힌 버퍼면 바꾼다 — 나눠 올리기는 크기를 잡은 뒤 성분을 정한다) */
+  private ledgerSet(b: WebGLBuffer, part: GpuBufferPart, bytes: number): void {
+    const e = this.bufLedger.get(b);
+    if (e) this.bufTotals.set(e.part, (this.bufTotals.get(e.part) ?? 0) - e.bytes);
+    this.bufLedger.set(b, { part, bytes });
+    this.bufTotals.set(part, (this.bufTotals.get(part) ?? 0) + bytes);
+  }
+
+  /** 0.28.0 적힌 버퍼의 성분만 바꾼다(표시 그물 — meshRec이 장면 성분으로 적은 것) */
+  private retag(b: WebGLBuffer | null, part: GpuBufferPart): void {
+    const e = b ? this.bufLedger.get(b) : undefined;
+    if (b && e && e.part !== part) this.ledgerSet(b, part, e.bytes);
+  }
+
+  /**
+   * 0.28.0 GPU 버퍼 바이트(bufferData로 잡은 크기, 살아 있는 버퍼만): 성분별·합·버퍼 수(복사본). 같은 배열은 처음 올린 성분으로 한 번만 센다
+   */
+  get bufferStats(): GpuBufferStats {
+    const out = { bytes: 0, count: this.bufLedger.size } as GpuBufferStats;
+    for (const p of GPU_BUFFER_PARTS) {
+      const n = this.bufTotals.get(p) ?? 0;
+      out[p] = n;
+      out.bytes += n;
+    }
+    return out;
+  }
+
   /** 배열의 버퍼 열쇠(0.25.0 — 처음 보는 배열이면 만든다. 같은 배열은 같은 열쇠) */
   private keyOf(data: UploadArray): BufKey {
     let k = this.keys.get(data);
@@ -959,26 +1055,23 @@ export class Renderer3d {
     return !!k && (target === 'element' ? this.elemBufs : this.arrayBufs).has(k);
   }
 
-  private arrayBuf(data: VertexArray): WebGLBuffer {
+  /** 배열의 GPU 버퍼(이미 올린 배열이면 그 버퍼). part = 처음 올릴 때 셀 성분(0.28.0) */
+  private arrayBuf(data: VertexArray, part: GpuBufferPart): WebGLBuffer {
     const k = this.keyOf(data);
     let b = this.arrayBufs.get(k);
     if (b) return b;
     const gl = this.gl;
-    b = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, b);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    b = this.newBuffer(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW, part);
     this.arrayBufs.set(k, b);
     return b;
   }
 
-  private elemBuf(data: Uint32Array): WebGLBuffer {
+  private elemBuf(data: Uint32Array, part: GpuBufferPart): WebGLBuffer {
     const k = this.keyOf(data);
     let b = this.elemBufs.get(k);
     if (b) return b;
     const gl = this.gl;
-    b = gl.createBuffer()!;
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    b = this.newBuffer(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW, part);
     this.elemBufs.set(k, b);
     return b;
   }
@@ -1074,34 +1167,46 @@ export class Renderer3d {
   }
 
   /** 새로 올릴 배열이 CHUNK_MIN_BYTES를 넘으면 조각 올리기(버퍼는 잡는 대로 배열 표에 넣는다), 아니면 null */
-  private chunkFor(list: readonly ({ data: UploadArray; target: BufferTarget } | null)[]): ChunkedUpload<WebGLBuffer> | null {
+  private chunkFor(list: readonly (UploadEntry | null)[]): ChunkedUpload<WebGLBuffer> | null {
     const arrays = newArrays(list, (d) => this.hasBuf(d, d instanceof Uint32Array ? 'element' : 'array'));
     const bytes = arrays.reduce((n, a) => n + a.data.byteLength, 0);
-    return bytes > CHUNK_MIN_BYTES ? new ChunkedUpload(arrays, this.bufferSink(), (d, t, b) => (t === 'element' ? this.elemBufs : this.arrayBufs).set(this.keyOf(d), b), CHUNK_BYTES) : null;
+    if (bytes <= CHUNK_MIN_BYTES) return null;
+    // 0.28.0: 잡은 버퍼를 그 배열의 성분으로 센다(같은 배열은 앞 자리 성분 — arrayBuf와 같다)
+    const parts = new Map<UploadArray, GpuBufferPart>();
+    for (const a of list) if (a && !parts.has(a.data)) parts.set(a.data, a.part);
+    return new ChunkedUpload(
+      arrays,
+      this.bufferSink(),
+      (d, t, b) => {
+        (t === 'element' ? this.elemBufs : this.arrayBufs).set(this.keyOf(d), b);
+        this.retag(b, parts.get(d) ?? 'overlay');
+      },
+      CHUNK_BYTES,
+    );
   }
 
   /**
    * 묶음 하나가 GPU에 올리는 배열(meshRec·lineRec·pointRec가 arrayBuf·elemBuf로 올리는 것과 같은 조건 — 나눠 올리기에서 미리 채운다)
    */
-  private uploadArrays(kind: 'mesh' | 'line' | 'point', item: Mesh3d | LineSet3d | PointSet3d): ({ data: UploadArray; target: BufferTarget } | null)[] {
-    const A = (data: VertexArray | undefined | false | null): { data: UploadArray; target: BufferTarget } | null => (data ? { data, target: 'array' } : null);
-    if (kind === 'point') return [A(item.positions)];
+  private uploadArrays(kind: 'mesh' | 'line' | 'point', item: Mesh3d | LineSet3d | PointSet3d): (UploadEntry | null)[] {
+    const A = (data: VertexArray | undefined | false | null, part: GpuBufferPart): UploadEntry | null => (data ? { data, target: 'array', part } : null);
+    if (kind === 'point') return [A(item.positions, 'points')];
     if (kind === 'line') {
       const l = item as LineSet3d;
       const n = Math.floor(l.positions.length / 6);
-      return [A(l.positions), A(l.colors && l.colors.length >= n * 8 && l.colors)];
+      return [A(l.positions, 'lines'), A(l.colors && l.colors.length >= n * 8 && l.colors, 'lineColors')];
     }
     const m = item as Mesh3d;
     const nv = Math.floor(m.positions.length / 3);
     const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
     return [
-      A(m.positions),
-      A(!!m.normals && !!normalFormat(m.normals, nv) && m.normals),
-      A(!!m.colors && m.colors.length >= nv * 4 && m.colors),
-      A(!!uvComponents(m) && !!m.texture && m.uvs),
-      A(!!buvs && !!uvComponents(m, buvs) && buvs),
-      m.indices ? { data: m.indices, target: 'element' } : null,
-      A(hasMeshEdges(m) && m.edges),
+      A(m.positions, 'positions'),
+      A(!!m.normals && !!normalFormat(m.normals, nv) && m.normals, 'normals'),
+      A(!!m.colors && m.colors.length >= nv * 4 && m.colors, 'colors'),
+      A(!!uvComponents(m) && !!m.texture && m.uvs, 'uvs'),
+      A(!!buvs && !!uvComponents(m, buvs) && buvs, 'backUvs'),
+      m.indices ? { data: m.indices, target: 'element', part: 'indices' } : null,
+      A(hasMeshEdges(m) && m.edges, 'edges'),
     ];
   }
 
@@ -1110,12 +1215,8 @@ export class Renderer3d {
     const gl = this.gl;
     const T = (t: BufferTarget): number => (t === 'element' ? gl.ELEMENT_ARRAY_BUFFER : gl.ARRAY_BUFFER);
     return {
-      alloc: (t, bytes) => {
-        const b = gl.createBuffer()!;
-        gl.bindBuffer(T(t), b);
-        gl.bufferData(T(t), bytes, gl.STATIC_DRAW);
-        return b;
-      },
+      // 0.28.0: 성분은 잡은 뒤(chunkFor의 onAlloc) 그 배열의 것으로 바꾼다
+      alloc: (t, bytes) => this.newBuffer(T(t), bytes, gl.STATIC_DRAW, 'overlay'),
       write: (b, t, off, src, srcOffset, length) => {
         gl.bindBuffer(T(t), b);
         gl.bufferSubData(T(t), off, src, srcOffset, length);
@@ -1124,7 +1225,7 @@ export class Renderer3d {
   }
 
   private sceneLineRec(l: LineSet3d): LineRec & { src: LineSet3d } {
-    const r = this.lineRec(l.id, l.group, l.positions, l.colors);
+    const r = this.lineRec(l.id, l.group, l.positions, l.colors, 'lines');
     if (hasOrigin(l.origin)) r.model = translation(l.origin);
     this.retain(this.slotsOf(this.uploadArrays('line', l)));
     return { ...r, src: l };
@@ -1183,7 +1284,7 @@ export class Renderer3d {
     const map = target === 'element' ? this.elemBufs : this.arrayBufs;
     const b = map.get(key);
     if (!b) return;
-    this.gl.deleteBuffer(b);
+    this.dropBuffer(b);
     map.delete(key);
   }
 
@@ -1536,7 +1637,7 @@ export class Renderer3d {
     const slots: (Slot | null)[] = [null, null, null, null, null, null, null];
     const put = (s: number, data: VertexArray, stride: number): WebGLBuffer => {
       slots[s] = { key: this.keyOf(data), target: 'array', stride };
-      return this.arrayBuf(data);
+      return this.arrayBuf(data, SLOT_PARTS[s]!);
     };
     const pos = put(0, m.positions, 3);
     let nrm: WebGLBuffer | null = null;
@@ -1622,7 +1723,7 @@ export class Renderer3d {
     let count: number;
     const indexed = !!m.indices;
     if (m.indices) {
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.elemBuf(m.indices));
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.elemBuf(m.indices, 'indices'));
       slots[5] = { key: this.keyOf(m.indices), target: 'element', stride: 0 };
       count = m.indices.length - (m.indices.length % 3);
     } else count = nv - (nv % 3);
@@ -1639,7 +1740,7 @@ export class Renderer3d {
           break;
         }
     }
-    const edges = hasMeshEdges(m) ? this.lineRec(m.id, m.group, m.edges!, undefined) : null;
+    const edges = hasMeshEdges(m) ? this.lineRec(m.id, m.group, m.edges!, undefined, 'edges') : null;
     if (edges) slots[6] = { key: this.keyOf(m.edges!), target: 'array', stride: 0 };
     const box = meshBounds(m);
     // 뒷면 색·무늬(없으면 null — 예전 그대로)
@@ -1676,11 +1777,12 @@ export class Renderer3d {
     };
   }
 
-  private lineRec(id: string, group: string | undefined, positions: Float32Array, colors: Float32Array | undefined): LineRec {
+  /** 선분 묶음·그물 윤곽선 기록. part = 위치 배열의 성분(0.28.0 — 선분 묶음 'lines'·윤곽선 'edges', 색은 'lineColors') */
+  private lineRec(id: string, group: string | undefined, positions: Float32Array, colors: Float32Array | undefined, part: GpuBufferPart): LineRec {
     const gl = this.gl;
     const n = Math.floor(positions.length / 6);
-    const pos = this.arrayBuf(positions);
-    const col = colors && colors.length >= n * 8 ? this.arrayBuf(colors) : null;
+    const pos = this.arrayBuf(positions, part);
+    const col = colors && colors.length >= n * 8 ? this.arrayBuf(colors, 'lineColors') : null;
     const wide = this.vao();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
     gl.enableVertexAttribArray(0);
@@ -1727,7 +1829,7 @@ export class Renderer3d {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadPoint);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(p.positions));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.arrayBuf(p.positions, 'points'));
     gl.enableVertexAttribArray(1);
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 12, 0);
     gl.vertexAttribDivisor(1, 1);
@@ -1738,9 +1840,7 @@ export class Renderer3d {
   private thinRec(data: Float32Array): ThinRec | null {
     if (data.length < 6) return null;
     const gl = this.gl;
-    const buf = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    const buf = this.newBuffer(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW, 'overlay');
     const vao = this.vao();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.enableVertexAttribArray(0);
@@ -1751,28 +1851,22 @@ export class Renderer3d {
 
   private deleteThin(r: ThinRec | null): void {
     if (!r) return;
-    this.gl.deleteBuffer(r.buf);
+    this.dropBuffer(r.buf);
     this.gl.deleteVertexArray(r.vao);
     this.vaos.delete(r.vao);
   }
 
   /**
    * 따로 두는 선분(강조·단면 테두리·구간 모음): 버퍼와 VAO를 새로 만든다(버퍼 캐시·VAO 목록 밖 — 지우는 쪽이 지운다).
-   * origin이 있으면 positions는 그 점 기준. colors(정점마다 rgba)는 선택
+   * origin이 있으면 positions는 그 점 기준. colors(정점마다 rgba)는 선택. part = 셀 성분(0.28.0 — 덧그림 'overlay', 구간 모음 'ranges')
    */
-  private dynLines(id: string, positions: Float32Array | null, origin?: readonly number[] | null, colors?: Float32Array | null): LineRec | null {
+  private dynLines(id: string, positions: Float32Array | null, origin?: readonly number[] | null, colors?: Float32Array | null, part: GpuBufferPart = 'overlay'): LineRec | null {
     const gl = this.gl;
     const n = positions ? Math.floor(positions.length / 6) : 0;
     if (!positions || !n) return null;
-    const pos = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, pos);
-    gl.bufferData(gl.ARRAY_BUFFER, positions.subarray(0, n * 6), gl.DYNAMIC_DRAW);
+    const pos = this.newBuffer(gl.ARRAY_BUFFER, positions.subarray(0, n * 6), gl.DYNAMIC_DRAW, part);
     let col: WebGLBuffer | null = null;
-    if (colors && colors.length >= n * 8) {
-      col = gl.createBuffer()!;
-      gl.bindBuffer(gl.ARRAY_BUFFER, col);
-      gl.bufferData(gl.ARRAY_BUFFER, colors.subarray(0, n * 8), gl.STATIC_DRAW);
-    }
+    if (colors && colors.length >= n * 8) col = this.newBuffer(gl.ARRAY_BUFFER, colors.subarray(0, n * 8), gl.STATIC_DRAW, part);
     const wide = gl.createVertexArray()!;
     gl.bindVertexArray(wide);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
@@ -1796,8 +1890,8 @@ export class Renderer3d {
   private deleteDyn(r: LineRec | null): void {
     if (!r) return;
     const gl = this.gl;
-    gl.deleteBuffer(r.pos);
-    if (r.col) gl.deleteBuffer(r.col);
+    this.dropBuffer(r.pos);
+    this.dropBuffer(r.col);
     gl.deleteVertexArray(r.wide);
     gl.deleteVertexArray(r.thin);
   }
@@ -1861,10 +1955,10 @@ export class Renderer3d {
       }
     for (const [k, b] of this.arrayBufs)
       if (!markerBufs.has(b)) {
-        gl.deleteBuffer(b);
+        this.dropBuffer(b);
         this.arrayBufs.delete(k);
       }
-    for (const b of this.elemBufs.values()) gl.deleteBuffer(b);
+    for (const b of this.elemBufs.values()) this.dropBuffer(b);
     this.elemBufs.clear();
     this.refs.clear();
     this.jobs.clear();
@@ -1881,13 +1975,13 @@ export class Renderer3d {
     this.setAnnotationLines(null, null);
     const gl = this.gl;
     for (const v of this.vaos) gl.deleteVertexArray(v);
-    for (const b of this.arrayBufs.values()) gl.deleteBuffer(b);
+    for (const b of this.arrayBufs.values()) this.dropBuffer(b);
     this.vaos.clear();
     this.arrayBufs.clear();
     this.markers.clear();
-    gl.deleteBuffer(this.quadWide);
-    gl.deleteBuffer(this.quadPoint);
-    gl.deleteBuffer(this.capBuf);
+    this.dropBuffer(this.quadWide);
+    this.dropBuffer(this.quadPoint);
+    this.dropBuffer(this.capBuf);
     gl.deleteVertexArray(this.capVao);
     for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC, this.profileP, this.skyP, ...this.variants.values()]) if (p) gl.deleteProgram(p.p);
     this.variants.clear();
@@ -1926,7 +2020,7 @@ export class Renderer3d {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.attrs.pos);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.elemBuf(idx));
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.elemBuf(idx, 'wireframe'));
     gl.bindVertexArray(null);
     r.wire = { vao, count: idx.length, idx };
     return r.wire;
@@ -1937,9 +2031,11 @@ export class Renderer3d {
     if (r) return r;
     const g = markerMesh(kind);
     r = this.meshRec({ id: `__marker_${kind}`, positions: g.positions, normals: g.normals, color: [1, 1, 1, 1] });
-    // 표시 그물은 장면이 아니다(놓기 선택과 무관)
+    // 표시 그물은 장면이 아니다(놓기 선택과 무관). 0.28.0: GPU 버퍼 바이트는 덧그림(overlay)으로 센다
     r.lay = null;
     r.miss = null;
+    this.retag(r.attrs.pos, 'overlay');
+    this.retag(r.attrs.nrm, 'overlay');
     this.markers.set(kind, r);
     return r;
   }
@@ -2219,7 +2315,7 @@ export class Renderer3d {
     if (!c) return;
     const gl = this.gl;
     for (const v of c.vaos) gl.deleteVertexArray(v);
-    for (const b of c.bufs) gl.deleteBuffer(b);
+    for (const b of c.bufs) this.dropBuffer(b);
     rec.parts = undefined;
   }
 
@@ -2249,9 +2345,7 @@ export class Renderer3d {
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
       } else this.bindAttribs(r.attrs);
-      const buf = gl.createBuffer()!;
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+      const buf = this.newBuffer(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW, 'ranges');
       gl.bindVertexArray(null);
       c.vaos.push(vao);
       c.bufs.push(buf);
@@ -2271,7 +2365,7 @@ export class Renderer3d {
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (runs.length > RUN_LIMIT && total > 0) {
-      const cr = this.dynLines(`${rec.id}__part`, compactStride(positions, runs, 6), null, rec.col && colors ? compactStride(colors, runs, 8) : null);
+      const cr = this.dynLines(`${rec.id}__part`, compactStride(positions, runs, 6), null, rec.col && colors ? compactStride(colors, runs, 8) : null, 'ranges');
       if (cr) {
         c.vaos.push(cr.wide, cr.thin);
         c.bufs.push(cr.pos);
@@ -2294,9 +2388,7 @@ export class Renderer3d {
     let compact: DrawList['compact'] = null;
     if (total > 0) {
       const gl = this.gl;
-      const buf = gl.createBuffer()!;
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      gl.bufferData(gl.ARRAY_BUFFER, compactStride(r.src.positions, runs, 3), gl.STATIC_DRAW);
+      const buf = this.newBuffer(gl.ARRAY_BUFFER, compactStride(r.src.positions, runs, 3), gl.STATIC_DRAW, 'ranges');
       const vao = gl.createVertexArray()!;
       gl.bindVertexArray(vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.quadPoint);
