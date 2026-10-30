@@ -436,6 +436,7 @@ export interface MeasureSnapOptions {
    * 0.23.0: 측정 점 고르기가 반투명 그물(투명도 < 1 — 그물 색 알파·setItemOpacity·setItemColor)의 면을 지나 그 뒤 불투명 그물 면을 고른다(PickOptions.throughTranslucent와 같은 고르기).
    * 커서 아래 면 위 점·꼭짓점, 축이 면을 뚫는 점(axisFaces·lockFaces), 'onFace' 다듬기, pointsFor에 넘기는 고르기가 모두 그 면을 본다. 반투명 면만 맞으면 예전처럼 그 면이다.
    * 선분·점·윤곽선, 앱 점의 가림(원래 불투명 면만 가린다), 면의 열린 교차가 보는 커서 둘레 삼각형은 그대로다. 주지 않거나 false면 0.22.0과 같다(이것만 줘도 붙잡기가 켜진다)
+   * 0.24.0: setItemPickOpaque로 켠 그물에서는 멈춘다. 잠금·끌어온 점·찍은 점·다듬기 기억을 두고 이것만 바꾸려면 setMeasurePickThrough
    */
   throughTranslucent?: boolean;
 }
@@ -576,6 +577,8 @@ export interface ItemLookState {
   edgeColor?: Rgba;
   /** 0.9.0: 외곽선 색(setItemProfileColor) */
   profileColor?: Rgba;
+  /** 0.24.0: 반투명 그물 너머 고르기(throughTranslucent)가 이 그물 면에서 멈춘다(setItemPickOpaque — 켰을 때만 true) */
+  pickOpaque?: boolean;
 }
 
 interface LookState {
@@ -585,6 +588,7 @@ interface LookState {
   matrix?: Float64Array;
   edgeColor?: Rgba;
   profileColor?: Rgba;
+  pickOpaque?: boolean;
 }
 
 /** setLighting 선택 */
@@ -654,7 +658,8 @@ export interface PickOptions {
   /**
    * 0.23.0: 반투명 그물(투명도 < 1 — 그물 색 알파·setItemOpacity·setItemColor)의 면을 지나 고른다. 광선이 그 뒤에서 불투명 그물 면(단면의 잘린 면 채움 포함)을 맞으면
    * 가장 앞의 불투명 면을, 반투명 면만 맞으면 예전처럼 가장 앞의 반투명 면을 고른다. 선분·점·윤곽선 고르기와 가림은 그대로다(반투명 면은 원래 선분·점을 가리지 않는다).
-   * meshesOnly와 함께 줄 수 있다. 주지 않거나 false면 0.22.0 그대로
+   * meshesOnly와 함께 줄 수 있다. 주지 않거나 false면 0.22.0 그대로.
+   * 0.24.0: setItemPickOpaque로 켠 그물은 반투명이어도 지나가지 않고 그 면에서 멈춘다
    */
   throughTranslucent?: boolean;
 }
@@ -2642,6 +2647,26 @@ export class Viewer3d {
     return n;
   }
 
+  /**
+   * 측정 점 고르기의 반투명 그물 너머 고르기만 바꾼다(0.24.0 — setMeasureSnap의 throughTranslucent와 같은 값). 측정 중 반투명 보기를 켜고 끌 때
+   * setMeasureSnap을 다시 주면 Shift·앱 단추 잠금, 끌어온 점, 나란함 기준 선분이 풀리므로 그 대신 쓴다. 찍은 점·미리 보기 잠금·끌어온 점·나란함 기준·
+   * 다듬기 기억(refine·refineFace — 입력에 면이 들어 있어 고른 면이 바뀌면 열쇠가 다르다)·pointsFor 기억·붙잡기 한도·다른 붙잡기 선택은 그대로 두고,
+   * 측정 미리 보기가 보이면 그 자리에서 다시 구한다(다음 미리 보기부터 새 값). measureSnap.throughTranslucent도 따라 바뀐다(끄면 그 필드를 뺀다).
+   * 끄더라도 붙잡기는 켜진 채다(이것만 줘서 켠 붙잡기도 — 끄려면 setMeasureSnap(null)). 붙잡기가 꺼져 있으면 아무것도 하지 않고 false를 돌려준다
+   * (그때는 setMeasureSnap({ throughTranslucent: true })로 켠다). 붙잡기가 켜져 있으면 true
+   */
+  setMeasurePickThrough(on: boolean): boolean {
+    const so = this.snapOpt;
+    if (!so) return false;
+    const next = !!on;
+    if (so.through === next) return true;
+    so.through = next;
+    if (next) so.src.throughTranslucent = true;
+    else delete so.src.throughTranslucent;
+    this.rehover();
+    return true;
+  }
+
   /** 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때) */
   private rehover(): void {
     if (this.measuring && this.measureHover && this.lastHoverAt && !this.drag) {
@@ -3117,6 +3142,21 @@ export class Viewer3d {
     this.setLook(id, l, false);
   }
 
+  /**
+   * 고르기에서 불투명으로 볼 그물(0.24.0): on이면 반투명 그물 너머 고르기(pick·onPick·측정 붙잡기의 throughTranslucent)가 이 그물 면을 지나가지 않고
+   * 불투명 면처럼 그 면에서 멈춘다 — 판 안 포켓·홈처럼 반투명으로 그리지만 판 너머로 재고 싶은 벽. 그림·투명도·가림(반투명 면은 뒤 선분·점을 가리지 않는다)과
+   * throughTranslucent를 주지 않은 고르기는 그대로다. false면 되돌린다(그물 색·겉모습 투명도로 가른다). 다른 겉모습처럼 장면을 바꾸면(setScene) 비우고,
+   * setMesh로 바꿔도 남는다. 선분·점 묶음 id는 받지만 쓰이지 않는다(면이 없다)
+   */
+  setItemPickOpaque(id: string, on: boolean): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if ((l.pickOpaque === true) === !!on) return;
+    if (on) l.pickOpaque = true;
+    else delete l.pickOpaque;
+    this.setLook(id, l, false);
+  }
+
   /** 묶음 겉모습(바꾼 것만, 없으면 null) */
   itemLook(id: string): ItemLookState | null {
     const l = this.looks.get(id);
@@ -3127,6 +3167,7 @@ export class Viewer3d {
     if (l.matrix) out.matrix = new Float64Array(l.matrix);
     if (l.edgeColor) out.edgeColor = l.edgeColor;
     if (l.profileColor) out.profileColor = l.profileColor;
+    if (l.pickOpaque) out.pickOpaque = true;
     return out;
   }
 
@@ -3140,7 +3181,7 @@ export class Viewer3d {
 
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
-    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor) this.looks.delete(id);
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor && !l.pickOpaque) this.looks.delete(id);
     else this.looks.set(id, l);
     this.lookChanged(moved);
   }
@@ -3772,7 +3813,7 @@ export class Viewer3d {
   /**
    * 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도.
    * meshesOnly면 그물 면만(0.18.0 축과 면의 교차가 다시 맞춰 볼 때 — 면 위에 그린 선분·점이 그 면을 가리지 않게).
-   * through면 반투명 그물의 면을 지나 고른다(0.23.0 throughTranslucent — 불투명 판정은 겉모습 반영 meshOpaque)
+   * through면 반투명 그물의 면을 지나 고른다(0.23.0 throughTranslucent — 불투명 판정은 겉모습 반영 meshOpaque, 0.24.0 setItemPickOpaque 그물에서는 멈춘다)
    */
   private pickDetail(
     x: number,
@@ -3799,7 +3840,7 @@ export class Viewer3d {
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
-      ...(through ? { throughTranslucent: true, opaque: (m: Mesh3d) => this.meshOpaque(m) } : {}),
+      ...(through ? { throughTranslucent: true, opaque: (m: Mesh3d) => this.meshOpaque(m), pickOpaque: (m: Mesh3d) => this.looks.get(m.id)?.pickOpaque === true } : {}),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
   }
