@@ -25,9 +25,11 @@ type V = Viewer3d & Record<string, any>;
  * (0.15.0 열린 수직 발·교차점 다듬기),
  * post = base에 상자 위에 선 기둥 선분((60, 40, 90) → (60, 40, 120))을 더한 자료(0.18.0 축과 면의 교차 — 기둥 아래 끝의 Z축이 상자 윗면을 뚫는다),
  * globe = base에 구 위에 선 기둥 선분((200, 28, 95) → (200, 28, 120))과 바닥의 12토막 원판(arc의 원판)을 더한 자료
- * (0.19.0 축이 곡면을 뚫는 점 다듬기 — 기둥 아래 끝의 Z축이 구를 뚫는다, 잠근 축과 원판 둘레의 교차 다듬기)
+ * (0.19.0 축이 곡면을 뚫는 점 다듬기 — 기둥 아래 끝의 Z축이 구를 뚫는다, 잠근 축과 원판 둘레의 교차 다듬기),
+ * compact = tex와 같은 장면을 작은 배열(법선 Int8 정점 4값, 무늬 좌표 Int16 + uvTransform — syntheticScene compact)로 준 자료(0.26.0.
+ * 그 선택이 없는 판의 syntheticScene은 Float32 그대로라 compactNeed로 건너뛴다)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact';
 
 interface Ctx {
   v: V;
@@ -77,7 +79,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   let s = scenes.get(d);
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
-    s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : base);
+    s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
     if (d === 'cross')
       s = {
         ...s,
@@ -4498,6 +4500,65 @@ const releaseRestoreValues: ValueSet = {
   },
 };
 
+// ───────────── 0.26.0 작은 법선·무늬 좌표 ─────────────
+/** 작은 배열 장면을 받는 판인지 — 그 선택이 없는 syntheticScene은 Float32 법선 그대로다 */
+const compactNeed: Need = () =>
+  sceneOf('compact').meshes.some((m) => m.normals instanceof Int8Array) ? null : '이 판에 없는 선택: 0.26.0 작은 법선·무늬 좌표(syntheticScene compact)';
+
+/** 작은 배열 장면(새 장면): tex-shaded·base-sun-shadows와 같은 자리 — 정규화 오차로 생기는 음영 차이는 값 묶음 compact-vs-float가 센다 */
+const compactShots: Shot[] = [
+  { name: 'compact-shaded', data: 'compact', needs: compactNeed, setup: () => undefined },
+  { name: 'compact-sun-shadows', data: 'compact', needs: compactNeed, setup: ({ v }) => v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true }) },
+];
+SHOTS.push(...compactShots);
+
+/** 두 RGBA의 다른 화소 수·채널 차가 8 넘는 화소 수·가장 큰 채널 차 */
+function rgbaDiff(a: Uint8ClampedArray, b: Uint8ClampedArray): [number, number, number] {
+  let diff = 0, over = 0, max = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    const d = Math.max(Math.abs(a[i]! - b[i]!), Math.abs(a[i + 1]! - b[i + 1]!), Math.abs(a[i + 2]! - b[i + 2]!), Math.abs(a[i + 3]! - b[i + 3]!));
+    if (d > 0) diff++;
+    if (d > 8) over++;
+    max = Math.max(max, d);
+  }
+  return [diff, over, max];
+}
+
+/**
+ * 0.26.0 작은 배열과 Float32의 차이(같은 판 안에서 — 새 값): 같은 자리에서 그린 그림의 다른 화소 수·채널 차 8 넘는 화소 수·가장 큰 차(음영·해 그림자),
+ * 화면 격자 고르기·축 범위가 같은지, 작은 배열 장면의 GPU 버퍼 바이트(법선·무늬 좌표만)
+ */
+const compactValues: ValueSet = {
+  name: 'compact-vs-float',
+  data: 'compact',
+  needs: compactNeed,
+  run: async (c) => {
+    const shoot = async (d: Data, sun: boolean): Promise<{ img: Uint8ClampedArray; picks: unknown[] }> => {
+      const k = makeCtx(d);
+      if (sun) k.v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true });
+      await texturesReady(k.v);
+      k.v.renderNow();
+      return { img: k.v.renderImage({}).data, picks: releasePicks(k) };
+    };
+    const out: unknown[] = [];
+    for (const sun of [false, true]) {
+      const a = await shoot('compact', sun);
+      const b = await shoot('tex', sun);
+      out.push([sun ? 'sun' : 'shaded', c.w * c.h, ...rgbaDiff(a.img, b.img), JSON.stringify(a.picks) === JSON.stringify(b.picks)]);
+    }
+    const bytes = (d: Data): number[] => {
+      let n = 0, u = 0;
+      for (const m of sceneOf(d).meshes) {
+        n += m.normals?.byteLength ?? 0;
+        u += (m.uvs?.byteLength ?? 0) + (m.backUvs?.byteLength ?? 0);
+      }
+      return [n, u];
+    };
+    out.push(['bytes', bytes('compact'), bytes('tex')]);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -4556,6 +4617,7 @@ const VALUES: ValueSet[] = [
   annoOverlapValues,
   releasePickValues,
   releaseRestoreValues,
+  compactValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
