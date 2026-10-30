@@ -41,6 +41,8 @@
  * 0.27.0 단추: 상자 뚜껑 지나기(반투명 지나 고르기·상자 고르기 불투명과 함께 setItemPickThrough('상자', 윗면 삼각형) — 윗면을 누르면 "반투명 너머"가 상자 안쪽 면),
  *   끌어온 점 나란함·수직(inference.trackDirs — 모서리를 지나간 뒤 끌어온 점에서 그 모서리와 나란한 선·수직인 선, 상태 줄 "(…)에서 모서리와 나란함"),
  *   글상자 기본 자리(setMeasureLabelSpot — 측정 거리 글상자는 아래, 덧그림 글상자는 가운데부터)
+ * 0.28.0 단추: 기준 현 거르기(끌어온 점 나란함·수직에서 곡선을 나눈 현 — 공구 경로 나선·시연 원 — 은 기준 선분이 되지 않는다, inference.trackDirs { edge }).
+ *   상태 줄에 GPU 버퍼 바이트(stats.buffers — 합·위치·법선·무늬 좌표·색인·선분)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -107,7 +109,11 @@ const showStatus = (): void => {
   let nb = 0;
   if (compact) for (const m of scene.meshes) nb += (m.normals?.byteLength ?? 0) + (m.uvs?.byteLength ?? 0) + (m.backUvs?.byteLength ?? 0);
   const cp = compact ? ` · 작은 배열(법선·무늬 좌표 ${(nb / 1024).toFixed(1)} KB)` : '';
-  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}${cp}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
+  // 0.28.0: GPU 버퍼 바이트(stats.buffers — 합과 큰 성분)
+  const b = s.buffers;
+  const mb = (n: number): string => (n / 1048576).toFixed(1);
+  const gb = ` · GPU 버퍼 ${mb(b.bytes)} MB(위치 ${mb(b.positions)} · 법선 ${mb(b.normals)} · 무늬 좌표 ${mb(b.uvs + b.backUvs)} · 색인 ${mb(b.indices)} · 선분 ${mb(b.lines + b.lineColors)})`;
+  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}${cp}${gb}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
 };
 viewer.onCameraChange(() => {
   showStatus();
@@ -478,6 +484,31 @@ toggle(
   },
   '끌어온 축에 더해, 커서가 앞서 지나간 모서리와 나란한 선·수직인 선을 끌어온 점(0.5초 머문 점)에서 긋는다(inference.trackDirs — 추론 색 쇄선, 잠그지 않는다). ' +
     '모서리 위를 지나간 뒤 끌어온 점 둘레에서 그 모서리 방향·수직으로 가리킨다',
+);
+// 0.28.0: 끌어온 점 나란함·수직의 기준 선분 거르기(trackDirs { edge }) — 곡선을 나눈 현(공구 경로 나선·시연 원)은 기준이 되지 않는다
+toggle(
+  '기준 현 거르기',
+  (v) => {
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: {
+              intersections: true,
+              axes: true,
+              parallel: true,
+              lock: true,
+              track: true,
+              trackDirs: { edge: (_s, item) => item.id !== '공구 경로' && item.id !== '시연 원' },
+            },
+          }
+        : null,
+    );
+  },
+  '끌어온 점 나란함·수직과 같지만 곡선을 나눈 현(공구 경로 나선·시연 원)을 지나도 끌어온 점의 기준 선분이 바뀌지 않는다(inference.trackDirs { edge }). ' +
+    '상자 모서리를 지나간 뒤 나선 위를 지나도 끌어온 점에서 상자 모서리와 나란한 선이 남는다(첫 점의 나란함은 0.10.0 그대로 나선 토막을 따른다)',
 );
 toggle(
   '글상자 기본 자리',

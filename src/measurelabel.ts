@@ -3,6 +3,7 @@
  * (손가락 위 십자선·커서 옆 툴팁)이나 커서 둘레와 겹치면, 정해진 차례로 겹치지 않는 첫 자리를 고른다. 순수 계산이라 뷰어 밖에서도 쓴다.
  * 0.24.0: 글상자 여러 개를 차례로 놓을 때 먼저 놓인 글상자도 비킨다(placeLabelAmong — 앱 측정 덧그림 글상자끼리, 덧그림 글상자와 측정 거리 글상자).
  * 0.26.0: 앱이 정한 기본 자리(가운데·네 귀·위·아래, 또는 앱이 구한 왼쪽 위 자리)를 받는다(LabelPlaceOptions.first — 주지 않으면 0.25.0과 같은 오른쪽 위).
+ * 0.28.0: 기본 자리가 막히면 0.25.0 차례 그대로 고르는 선택(LabelPlaceOptions.fallback 'topRight' — 주지 않으면 0.27.0과 같다).
  */
 
 /** 화면 사각형: 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -57,6 +58,12 @@ export function labelSpotName(v: unknown): LabelSpotName | null {
   return typeof v === 'string' && SPOT_NAMES.includes(v) ? (v as LabelSpotName) : null;
 }
 
+/**
+ * 기본 자리가 막혔을 때 고르는 차례(0.28.0, LabelPlaceOptions.fallback): 'first' = 0.26.0(기본 자리부터 이어서 — 기준점 네 귀(기본 자리와 같은 귀는 빼고) →
+ * 선분 위 → 피할 영역 위·아래, 가로는 기본 자리 → 오른쪽 위 → 왼쪽 위), 'topRight' = 0.25.0 차례 그대로(기본 자리를 주지 않은 고르기 — 그것도 막히면 기본 자리)
+ */
+export type LabelFallback = 'first' | 'topRight';
+
 /** placeMeasureLabel·placeLabelAmong 선택(0.26.0) */
 export interface LabelPlaceOptions {
   /**
@@ -64,6 +71,15 @@ export interface LabelPlaceOptions {
    * 피할 영역 위·아래 — 위·아래 자리의 가로는 기본 자리 → 오른쪽 위 → 왼쪽 위). 없으면 'topRight'(0.25.0과 같은 자리·차례)
    */
   first?: LabelSpot;
+  /**
+   * 0.28.0: 기본 자리가 막혔을 때 고르는 차례(없거나 모르는 값이면 'first' — 0.27.0과 같다). 'topRight'면 기본 자리가 막혔을 때 first를 주지 않은 고르기
+   * (0.25.0 차례 — 오른쪽 위부터)의 자리를 받고, 그 자리도 막혔으면 기본 자리다. 막힘·받는 규칙:
+   * - placeMeasureLabel: 기본 자리가 피할 영역(rects·circles)과 겹치면 막힘. 0.25.0 자리가 피할 영역과 겹치지 않으면 받는다
+   * - placeLabelAmong: 기본 자리가 피할 영역 또는 먼저 놓인 글상자와 겹치면 막힘. 기본 자리가 피할 영역과 겹쳤으면 0.25.0 자리(placeLabelAmong 그대로)가
+   *   피할 영역만 비키면 받고(먼저 놓인 글상자와 겹쳐도), 먼저 놓인 글상자와만 겹쳤으면 0.25.0 자리가 피할 영역·먼저 놓인 글상자 모두와 겹치지 않을 때만 받는다
+   * 기본 자리를 가운데로 두고 막히면 예전 차례로 비키던 앱 코드(SketchUp 결과 글)와 같은 자리를 낸다
+   */
+  fallback?: LabelFallback;
 }
 
 /** 두 사각형이 겹치는지(변이 맞닿기만 하면 겹치지 않는다) */
@@ -139,6 +155,11 @@ export function placeMeasureLabel(
   const w = size.width, h = size.height, vw = view.width, vh = view.height;
   const { r: first, corner } = spotRect(opts?.first, at[0]!, at[1]!, w, h, vw, vh);
   if (!avoid || (!avoid.rects?.length && !avoid.circles?.length) || !hitsAvoid(first, avoid)) return first;
+  // 0.28.0 fallback 'topRight': 막히면 0.25.0 차례의 자리, 그것도 막혔으면 기본 자리
+  if (opts?.fallback === 'topRight') {
+    const r = placeMeasureLabel(at, size, view, avoid, segment);
+    return hitsAvoid(r, avoid) ? first : r;
+  }
   const cands: MeasureLabelRect[] = [];
   for (let k = 0; k < 4; k++) if (k !== corner) cands.push(cornerRect(at[0]!, at[1]!, w, h, vw, vh, k));
   if (segment) {
@@ -224,6 +245,7 @@ export function placeLabelAmong(
   soft?: readonly LabelCircle[] | null,
   opts?: LabelPlaceOptions | null,
 ): MeasureLabelRect {
+  if (opts?.fallback === 'topRight') return amongFallback(at, size, view, avoid, placed, segment, soft, opts.first);
   const base = placeMeasureLabel(at, size, view, avoid, segment, opts);
   if (!placed.length || !placed.some((r) => rectsOverlap(base, r))) return base;
   const w = size.width, h = size.height;
@@ -241,6 +263,30 @@ export function placeLabelAmong(
   const s = avoid?.soft?.length ? avoid.soft : (soft ?? []);
   const r = placeMeasureLabel(at, size, view, { ...hard, soft: s }, segment, opts);
   return hitsAvoid(r, hard) ? base : r;
+}
+
+/**
+ * placeLabelAmong의 fallback 'topRight'(0.28.0): 기본 자리(first)가 피할 영역·먼저 놓인 글상자와 겹치지 않으면 그 자리. 막히면 기본 자리를 주지 않은
+ * placeLabelAmong(0.25.0 차례)의 자리를 받는데, 기본 자리가 피할 영역과 겹쳤으면 그 자리가 피할 영역만 비키면 되고, 먼저 놓인 글상자와만 겹쳤으면
+ * 그 자리가 먼저 놓인 글상자도 비켜야 한다(아니면 기본 자리)
+ */
+function amongFallback(
+  at: readonly number[],
+  size: { width: number; height: number },
+  view: { width: number; height: number },
+  avoid: LabelAvoidAreas | null | undefined,
+  placed: readonly MeasureLabelRect[],
+  segment: readonly [readonly number[], readonly number[]] | null | undefined,
+  soft: readonly LabelCircle[] | null | undefined,
+  spot: LabelSpot | undefined,
+): MeasureLabelRect {
+  const first = spotRect(spot, at[0]!, at[1]!, size.width, size.height, view.width, view.height).r;
+  const hard = !!avoid && (!!avoid.rects?.length || !!avoid.circles?.length);
+  const hit = hard && hitsAvoid(first, avoid!);
+  if (!hit && !placed.some((p) => rectsOverlap(first, p))) return first;
+  const r = placeLabelAmong(at, size, view, avoid, placed, segment, soft);
+  if ((hard && hitsAvoid(r, avoid!)) || (!hit && placed.some((p) => rectsOverlap(r, p)))) return first;
+  return r;
 }
 
 /** 앱이 준 사각형 하나를 고른다(수가 아니거나 너비·높이가 0 이하면 null). 복사본 */

@@ -26,6 +26,8 @@
  * - 0.26.0 끌어온 점에서 나란함·수직 방향(trackDirGuides·trackDirSnap): 기억한 점 P를 지나 기준 선분과 나란한 선,
  *   기준 선분에 수직인 선(P에서 그 직선으로 내린 수직, 축을 수직 평면에 비친 방향) 위에서 커서 광선에 가장 가까운 점
  *   (0.27.0부터 뷰어는 MeasureInference.trackDirs를 켰을 때 끌어온 축과 함께 견준다 — 세계 축)
+ * - 0.28.0 그 선이 다른 것과 만나는 점(trackDirMeetSnap — 순수 계산만, 뷰어는 아직 쓰지 않는다): 부르는 쪽이 준 직선(첫 점 축·첫 점의 나란함·다른 끌어온 점의 축)과의
+ *   3D 교차(trackPairSnap과 같은 허용치), 선분과의 교차(trackEdgeSnap 규칙), 커서 아래 면을 뚫는 점(axisFaceSnap 규칙)
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -1348,6 +1350,99 @@ export function trackDirSnap(
       const dist = screenDistance(f, q, x, y);
       if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
       best = { p: q, from: [P[0]!, P[1]!, P[2]!], kind: g.kind, dir: [g.dir[0], g.dir[1], g.dir[2]], distPx: dist };
+    }
+  }
+  return best;
+}
+
+/** 끌어온 점의 나란함·수직 선과 만나 볼 다른 직선(0.28.0 trackDirMeetSnap): 지나는 점, 방향(길이는 상관없다), 부르는 쪽 꼬리표(결과에 그대로) */
+export interface TrackDirOtherLine<T = unknown> {
+  from: readonly number[];
+  dir: readonly number[];
+  tag?: T;
+}
+
+/**
+ * 끌어온 점의 나란함·수직 선이 다른 것과 만나는 점(0.28.0 trackDirMeetSnap): TrackDirSnap(찍을 점 — 그 선 위, 끌어온 점, 안내 종류·방향, 화면 거리)에
+ * 만난 것(meet): 'line' = 받은 lines의 번호와 꼬리표, 'edge' = 받은 segs의 그 선분, 'face' = 면 맞음(hitAt이 돌려준 그 객체)
+ */
+export type TrackDirMeetSnap<S extends TrackSegment = TrackSegment, H extends TrackFaceHit = TrackFaceHit, T = unknown> = TrackDirSnap & {
+  meet: { kind: 'line'; line: number; tag?: T } | { kind: 'edge'; seg: S } | { kind: 'face'; hit: H };
+};
+
+/** trackDirMeetSnap 선택(0.28.0) */
+export interface TrackDirMeetOptions<S extends TrackSegment, H extends TrackFaceHit, T> {
+  /** 첫 측정 점(그 점과 같은 끌어온 점은 뺀다 — trackDirSnap과 같다) */
+  skip?: readonly number[] | null;
+  /** 앱의 그리기 축(trackDirGuides — 없으면 세계 X·Y·Z) */
+  axes?: TrackAxes | null;
+  /** 만나 볼 다른 직선(부르는 쪽이 고른다 — 첫 점 축·첫 점의 나란함, 다른 끌어온 점의 축) */
+  lines?: readonly TrackDirOtherLine<T>[] | null;
+  /** 만나 볼 선분(커서 둘레 선분·윤곽선 — trackEdgeSnap과 같은 꼴·규칙) */
+  segs?: readonly S[] | null;
+  /** 선분 교차를 지금 고른 것보다 가까운 후보에만 물어 false면 뺀다(trackEdgeSnap과 같다) */
+  visible?: ((p: V3, seg: S) => boolean) | null;
+  /** 커서 아래 면 맞음과 화면 점에서 맨 앞에 보이는 면 맞음(axisFaceSnap과 같다 — 둘 다 있어야 면을 본다) */
+  under?: H | null;
+  hitAt?: ((sx: number, sy: number) => H | null | undefined) | null;
+  steps?: number;
+}
+
+/**
+ * 끌어온 점의 나란함·수직 선이 다른 것과 만나는 점(0.28.0, 순수 — 뷰어 측정 붙잡기에는 아직 넣지 않았다): 기억한 점 P마다 trackDirGuides(P, seg, axes)의 선이
+ * - 다른 직선(lines — 첫 점 축·첫 점의 나란함·다른 끌어온 점의 축 등, 부르는 쪽이 준다)과 3D로 만나는 점(두 직선 사이 가장 가까운 자리가 그 깊이에서 화면 반 화소 안 —
+ *   0.17.0 trackPairSnap과 같은 허용치. 나란한 직선, 교차가 P 자리거나 그 직선이 지나는 점 자리인 것은 뺀다)
+ * - 선분(segs)과 3D로 만나는 점(0.17.0 trackEdgeSnap과 같은 규칙 — 선분 쪽 허용치, 선분 끝점·P 자리·첫 점 자리·잘린 쪽은 빼고 visible로 가림을 묻는다)
+ * - 커서 아래 보이는 면(under·hitAt)을 뚫는 점(0.18.0 axisFaceSnap과 같은 규칙 — 다시 맞춰 같은 자리면 받는다)
+ * 가운데 커서에서 snapPx 안이고 가장 가까운 것(같으면 앞 점 → 안내 차례 → 직선 → 선분 → 면). 빼는 것은 trackDirSnap과 같다(skip과 같은 P, 커서가 P의 화면 자리 snapPx 안인 P).
+ * 세계 축과 만나면 찍는 점의 그 축에 수직인 좌표는 그 축 직선의 값 그대로다(closestMid — 셈 오차 없이). seg가 없으면 없다
+ */
+export function trackDirMeetSnap<S extends TrackSegment = TrackSegment, H extends TrackFaceHit = TrackFaceHit, T = unknown>(
+  f: ViewFrame,
+  tracks: readonly (readonly number[])[],
+  seg: readonly [readonly number[], readonly number[]] | null | undefined,
+  x: number,
+  y: number,
+  snapPx: number,
+  opts: TrackDirMeetOptions<S, H, T> = {},
+): TrackDirMeetSnap<S, H, T> | null {
+  if (!tracks.length || !seg) return null;
+  const { skip = null, axes = null, lines = null, segs = null, visible = null, under = null, hitAt = null } = opts;
+  const steps = opts.steps ?? AXIS_FACE_STEPS;
+  // 안쪽 함수(take)가 바꾸므로 좁히지 않게 단언으로 둔다
+  let best = null as TrackDirMeetSnap<S, H, T> | null;
+  for (const P of tracks) {
+    if (!P.every(Number.isFinite) || (skip && sameTrackPoint(P, skip)) || cursorOn(f, P, x, y, snapPx)) continue;
+    const from: V3 = [P[0]!, P[1]!, P[2]!];
+    for (const g of trackDirGuides(P, seg, axes)) {
+      const dir: V3 = [g.dir[0], g.dir[1], g.dir[2]];
+      const take = (p: V3, distPx: number, meet: TrackDirMeetSnap<S, H, T>['meet']): void => {
+        best = { p, from: [from[0], from[1], from[2]], kind: g.kind, dir: [dir[0], dir[1], dir[2]], distPx, meet };
+      };
+      // 다른 직선
+      if (lines)
+        for (let li = 0; li < lines.length; li++) {
+          const L = lines[li]!;
+          const u = unitDir([0, 0, 0], L.dir);
+          if (!u || !L.from.every(Number.isFinite)) continue;
+          const c = closestMid(P, g.dir, L.from, u, false);
+          if (!c) continue;
+          const tol = meetTol(f, c.m);
+          if (!(c.gap <= tol) || dist3(c.m, P) <= tol || dist3(c.m, L.from) <= tol || (skip && dist3(c.m, skip) <= tol)) continue;
+          const dist = screenDistance(f, c.m, x, y);
+          if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
+          take(c.m, dist, L.tag === undefined ? { kind: 'line', line: li } : { kind: 'line', line: li, tag: L.tag });
+        }
+      // 선분(trackEdgeSnap과 같은 셈 — 이 안내 선 하나)
+      if (segs && segs.length) {
+        const r = crossEdges<S, { p: V3; distPx: number; seg: S }, null>(f, P, [[null, dir]], segs, x, y, snapPx, skip, visible, best ? { p: best.p, distPx: best.distPx, seg: null as unknown as S } : null, (p, _a, _e, s, dist) => ({ p, distPx: dist, seg: s }));
+        if (r && r.seg) take(r.p, r.distPx, { kind: 'edge', seg: r.seg });
+      }
+      // 면
+      if (under && hitAt) {
+        const r = faceMeet<H>(f, P, dir, x, y, snapPx, under, hitAt, steps, best ? best.distPx : Infinity);
+        if (r) take(r.p, r.distPx, { kind: 'face', hit: r.hit });
+      }
     }
   }
   return best;

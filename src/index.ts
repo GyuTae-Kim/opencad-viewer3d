@@ -42,7 +42,17 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
-export type { InferenceLock, InferenceLockInput, InferenceLockKind, MeasureInference, MeasureTrackOptions, NormalizedInference, SnapAxis } from './inference';
+export type {
+  InferenceLock,
+  InferenceLockInput,
+  InferenceLockKind,
+  MeasureInference,
+  MeasureTrackDirOptions,
+  MeasureTrackOptions,
+  NormalizedInference,
+  SnapAxis,
+  TrackDirEdgeFilter,
+} from './inference';
 export type { SnapFace, SnapRefineFaceInput, SnapRefineFaceKind, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
 export type {
   AxisEdgeSnap,
@@ -58,6 +68,9 @@ export type {
   OpenFaceSnap,
   TrackDirGuide,
   TrackDirKind,
+  TrackDirMeetOptions,
+  TrackDirMeetSnap,
+  TrackDirOtherLine,
   TrackDirSnap,
   TrackEdgeSnap,
   TrackFaceHit,
@@ -74,7 +87,7 @@ export { type ClosestResult, closestBetween } from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
-export type { RenderMode, TextureSource, TextureStats } from './renderer';
+export type { GpuBufferPart, GpuBufferStats, RenderMode, TextureSource, TextureStats } from './renderer';
 export type { MeshArrays } from './release';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';
