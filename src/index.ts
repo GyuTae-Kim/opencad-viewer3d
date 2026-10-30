@@ -16,6 +16,7 @@ export type {
   MeasureFormat,
   MeasureHoverSnap,
   MeasureInferenceLock,
+  LabelFallback,
   LabelSpotName,
   MeasureLabelAvoid,
   MeasureLabelRect,

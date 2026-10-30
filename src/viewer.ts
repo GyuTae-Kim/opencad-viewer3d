@@ -106,6 +106,7 @@ import {
   LABEL_POINT_R,
   type LabelAvoidAreas,
   type LabelCircle,
+  type LabelFallback,
   type LabelPlaceOptions,
   type LabelSpotName,
   type MeasureLabelRect,
@@ -558,7 +559,7 @@ export interface MeasurePoint {
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
-export type { MeasureLabelRect, LabelSpotName };
+export type { MeasureLabelRect, LabelSpotName, LabelFallback };
 
 /**
  * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리)
@@ -579,6 +580,11 @@ export interface MeasureLabelSpot {
   measure?: LabelSpotName;
   /** 앱 측정 덧그림(setAnnotations) 글상자(기준점 = 덧그림의 글자 상자 자리) */
   annotations?: LabelSpotName;
+  /**
+   * 0.29.0: 기본 자리가 막혔을 때 고르는 차례(순수 placeMeasureLabel·placeLabelAmong의 0.28.0 fallback과 같은 규칙 — 준 기본 자리 둘 모두에).
+   * 'first'(없을 때와 같다 — 0.27.0 차례: 기본 자리부터 이어서), 'topRight'(막히면 기본 자리를 주지 않은 고르기, 곧 0.26.0 오른쪽 위부터의 자리 — 그것도 막혔으면 기본 자리)
+   */
+  fallback?: LabelFallback;
 }
 
 export interface GroupInfo {
@@ -3216,7 +3222,9 @@ export class Viewer3d {
    * 순수 placeMeasureLabel·placeLabelAmong의 first와 같은 뜻('topRight'·'topLeft'·'bottomRight'·'bottomLeft'·'center'·'above'·'below' — 캔버스 안으로 당긴다).
    * 문자열 하나면 둘 모두, 객체면 준 것만. 피할 자리(setMeasureLabelAvoid)·먼저 놓인 글상자와 겹치면 0.26.0 first와 같은 차례(기본 자리 → 기준점 네 귀 → 선분 위 →
    * 피할 영역 위·아래)로 비키고, 모두 막히면 그 기본 자리다. 그림 저장(toBlob·renderImage)도 이 자리에 그린다(비키지는 않는다).
-   * 모르는 값·앱 자리 { x, y }는 그 글상자에 주지 않은 것으로 본다. null·빈 객체면 끈다(0.26.0과 같은 오른쪽 위). 장면을 바꿔도·측정을 지워도 남는다
+   * 모르는 값·앱 자리 { x, y }는 그 글상자에 주지 않은 것으로 본다. null·빈 객체면 끈다(0.26.0과 같은 오른쪽 위). 장면을 바꿔도·측정을 지워도 남는다.
+   * 0.29.0: 객체 꼴에 fallback('first' | 'topRight' — 순수 0.28.0 LabelPlaceOptions.fallback과 같은 규칙)을 주면 준 기본 자리 둘 모두 그 차례로 고른다
+   * (화면 덧그림만 — 그림 저장은 비키지 않으므로 기본 자리 그대로). 모르는 값·기본 자리 없이 준 fallback은 뺀다. 주지 않으면 0.28.0과 같다
    */
   setMeasureLabelSpot(spot: LabelSpotName | MeasureLabelSpot | null): void {
     let next: MeasureLabelSpot | null = null;
@@ -3229,23 +3237,26 @@ export class Viewer3d {
         next = {};
         if (m) next.measure = m;
         if (a) next.annotations = a;
+        if (spot.fallback === 'first' || spot.fallback === 'topRight') next.fallback = spot.fallback;
       }
     }
     const prev = this.labelSpot;
     this.labelSpot = next;
-    if (prev?.measure === next?.measure && prev?.annotations === next?.annotations) return;
+    if (prev?.measure === next?.measure && prev?.annotations === next?.annotations && prev?.fallback === next?.fallback) return;
     if ((this.measuring && this.measurePts.length) || this.annos) this.invalidate();
   }
 
-  /** 지금 뷰어 글상자의 기본 자리(0.27.0 — 준 것만의 복사본, 없으면 null) */
+  /** 지금 뷰어 글상자의 기본 자리(0.27.0 — 준 것만의 복사본, 없으면 null. 0.29.0: 준 fallback도) */
   get measureLabelSpot(): MeasureLabelSpot | null {
     return this.labelSpot ? { ...this.labelSpot } : null;
   }
 
-  /** 0.27.0 그 글상자의 기본 자리 선택(없으면 undefined — 0.26.0과 같은 부르기) */
+  /** 0.27.0 그 글상자의 기본 자리 선택(없으면 undefined — 0.26.0과 같은 부르기). 0.29.0: 준 fallback도 넘긴다(없으면 0.27.0과 같은 { first }) */
   private spotOpts(which: 'measure' | 'annotations'): LabelPlaceOptions | undefined {
     const s = this.labelSpot?.[which];
-    return s ? { first: s } : undefined;
+    if (!s) return undefined;
+    const fb = this.labelSpot!.fallback;
+    return fb ? { first: s, fallback: fb } : { first: s };
   }
 
   /**
