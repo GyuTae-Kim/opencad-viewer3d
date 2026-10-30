@@ -1,6 +1,7 @@
 /**
  * 측정 거리 글상자 자리(0.13.0): 기본 자리(두 점 화면 가운데에서 오른쪽 10·위 8, 캔버스 안으로 당김)가 앱이 알려 준 영역
  * (손가락 위 십자선·커서 옆 툴팁)이나 커서 둘레와 겹치면, 정해진 차례로 겹치지 않는 첫 자리를 고른다. 순수 계산이라 뷰어 밖에서도 쓴다.
+ * 0.24.0: 글상자 여러 개를 차례로 놓을 때 먼저 놓인 글상자도 비킨다(placeLabelAmong — 앱 측정 덧그림 글상자끼리, 덧그림 글상자와 측정 거리 글상자).
  */
 
 /** 화면 사각형: 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -111,6 +112,73 @@ export function placeMeasureLabel(
   const free = cands.filter((r) => !hitsAvoid(r, avoid));
   const soft = avoid.soft?.length ? { circles: avoid.soft } : null;
   return (soft && free.find((r) => !hitsAvoid(r, soft))) || free[0] || first;
+}
+
+/** 0.24.0: 먼저 놓인 글상자 가운데 피할 사각형에 더할 것의 수 한도(0.23.0 자리에 가까운 것부터 — 덧그림이 아주 많아도 한 글상자의 비용을 묶는다) */
+export const LABEL_PLACED_MAX = 24;
+
+/**
+ * 글상자 자리 후보(placeMeasureLabel의 차례 — 기준점 네 귀, 선분 위 자리의 네 귀, 피할 자리 위·아래)가 놓일 수 있는 가로 범위 [x0, x1].
+ * 위·아래 자리는 기본 자리·왼쪽 위의 가로 자리라 기준점 네 귀 안에 든다
+ */
+function labelReachX(
+  at: readonly number[],
+  w: number,
+  h: number,
+  vw: number,
+  vh: number,
+  segment?: readonly [readonly number[], readonly number[]] | null,
+): [number, number] {
+  let x0 = Infinity, x1 = -Infinity;
+  const take = (sx: number, sy: number): void => {
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
+    for (let k = 0; k < 4; k++) {
+      const r = cornerRect(sx, sy, w, h, vw, vh, k);
+      x0 = Math.min(x0, r.x);
+      x1 = Math.max(x1, r.x + w);
+    }
+  };
+  take(at[0]!, at[1]!);
+  if (segment) {
+    const [a, b] = segment;
+    for (const t of LABEL_ALONG) take(a[0]! + (b[0]! - a[0]!) * t, a[1]! + (b[1]! - a[1]!) * t);
+  }
+  return [x0, x1];
+}
+
+/**
+ * 글상자 하나를 먼저 놓인 글상자들(placed — 놓은 차례)과 겹치지 않게 놓는다(0.24.0 — 앱 측정 덧그림 글상자끼리, 덧그림 글상자와 측정 거리 글상자).
+ * 먼저 placeMeasureLabel(at, size, view, avoid, segment)의 자리(0.23.0 자리 — 앱 영역만 비킨다)를 구해, 그것이 먼저 놓인 글상자와 겹치지 않으면 그 자리다
+ * (피할 것이 없거나 겹치지 않으면 0.23.0과 같은 자리). 겹치면 먼저 놓인 글상자를 피할 사각형에 더해(앱 사각형 뒤에) 같은 차례로 다시 고른다 —
+ * 옮길 때 될 수 있으면 가리지 않을 것은 avoid.soft, 그것이 없으면 soft(그 글상자의 점 표식). 그래도 모두 막히면 0.23.0 자리다.
+ * 더하는 것은 이 글상자의 후보가 닿을 수 있는 가로 범위와 겹치는 먼저 놓인 글상자 가운데 0.23.0 자리 가운데에 가까운 LABEL_PLACED_MAX개
+ * (거리가 같으면 먼저 놓인 것부터)다. 같은 입력이면 같은 자리다
+ */
+export function placeLabelAmong(
+  at: readonly number[],
+  size: { width: number; height: number },
+  view: { width: number; height: number },
+  avoid: LabelAvoidAreas | null | undefined,
+  placed: readonly MeasureLabelRect[],
+  segment?: readonly [readonly number[], readonly number[]] | null,
+  soft?: readonly LabelCircle[] | null,
+): MeasureLabelRect {
+  const base = placeMeasureLabel(at, size, view, avoid, segment);
+  if (!placed.length || !placed.some((r) => rectsOverlap(base, r))) return base;
+  const w = size.width, h = size.height;
+  const [x0, x1] = labelReachX(at, w, h, view.width, view.height, segment);
+  const cx = base.x + w / 2, cy = base.y + h / 2;
+  const near = placed
+    .map((r, i) => ({ r, i, d: Math.hypot(r.x + r.width / 2 - cx, r.y + r.height / 2 - cy) }))
+    .filter((e) => e.r.x < x1 && x0 < e.r.x + e.r.width)
+    .sort((p, q) => p.d - q.d || p.i - q.i)
+    .slice(0, LABEL_PLACED_MAX)
+    .sort((p, q) => p.i - q.i)
+    .map((e) => e.r);
+  const hard: LabelAvoidAreas = { rects: [...(avoid?.rects ?? []), ...near], circles: avoid?.circles ?? [] };
+  const s = avoid?.soft?.length ? avoid.soft : (soft ?? []);
+  const r = placeMeasureLabel(at, size, view, { ...hard, soft: s }, segment);
+  return hitsAvoid(r, hard) ? base : r;
 }
 
 /** 앱이 준 사각형 하나를 고른다(수가 아니거나 너비·높이가 0 이하면 null). 복사본 */
