@@ -1106,6 +1106,16 @@ export class Renderer3d {
     return !!this.pending || this.jobs.size > 0;
   }
 
+  /**
+   * 아직 올리는 중인 것이 있는지(0.29.0 — 문맥을 되찾은 뒤 끝 알림): 나눠 올리기(uploading) 또는 무늬를 푸는 중(줄 선 것·푸는 중·앱이 다시 준 원본을 푸는 중).
+   * 앱이 다시 줄 때까지 기다리는 무늬('missing')·풀지 못한 무늬는 들지 않는다(앞은 restoreNeed가 센다)
+   */
+  get uploadBusy(): boolean {
+    if (this.uploading) return true;
+    for (const r of this.textures.values()) if (r.state === 'queued' || r.state === 'decoding' || r.state === 'restoring') return true;
+    return false;
+  }
+
   /** 나눠 올리기 진행: 올린 묶음 수 / 전체 묶음 수(올리는 중이 아니면 null) */
   get uploadProgress(): { done: number; total: number } | null {
     const p = this.pending;

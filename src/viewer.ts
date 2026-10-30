@@ -1181,6 +1181,12 @@ export class Viewer3d {
   private restoreCbs = new Set<(need: ContextRestoreNeed) => unknown>();
   /** 0.25.0 문맥 잃음 알림 */
   private lostCbs = new Set<() => void>();
+  /** 0.29.0 되찾은 뒤 다시 올리기가 다 끝났을 때 알림 */
+  private restoreDoneCbs = new Set<() => void>();
+  /** 0.29.0 문맥을 잃은 뒤 다시 올리기가 아직 끝나지 않았는지(잃는 순간부터 끝 알림까지 — restorePending) */
+  private restoreWait = false;
+  /** 0.29.0 문맥 복구 알림을 부르는 동안(그 사이 앱이 다시 준 것으로 끝 알림이 먼저 가지 않게) */
+  private restoreEmitting = false;
   private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
@@ -1274,7 +1280,11 @@ export class Viewer3d {
     renderer.textureLimit = this.opts.textureLimit;
     renderer.textureBudget = this.opts.textureBudget;
     // 무늬를 다 풀어 올릴 때마다 다시 그린다
-    renderer.onTexture = () => this.invalidate();
+    renderer.onTexture = () => {
+      this.invalidate();
+      // 0.29.0: 무늬를 다 풀어 올렸으면 되찾은 뒤 끝 알림
+      this.checkRestoreDone();
+    };
     this.applyTheme();
 
     const r = host.getBoundingClientRect();
@@ -1382,6 +1392,8 @@ export class Viewer3d {
     // 단면이 꺼졌거나(새 장면) 장면 범위가 바뀌어 위치(t)가 달라졌으면 알린다
     if (hadSection || this.sec) this.emitSection();
     this.invalidate();
+    // 0.29.0: 되찾은 뒤 다시 올리는 중에 새 장면을 주면 그 장면을 다 올렸을 때 끝 알림
+    this.checkRestoreDone();
   }
 
   /** 장면 비우기(단면도 끈다) */
@@ -1425,6 +1437,7 @@ export class Viewer3d {
     this.rebuildGrid();
     if (hadSection) this.emitSection();
     this.invalidate();
+    this.checkRestoreDone();
   }
 
   /**
@@ -1510,6 +1523,8 @@ export class Viewer3d {
     }
     this.sceneEdited();
     this.queueBvh(mesh);
+    // 0.29.0: 다시 받을 그물을 새 배열로 바꿨으면 되찾은 뒤 끝일 수 있다
+    this.checkRestoreDone();
     return true;
   }
 
@@ -1533,6 +1548,8 @@ export class Viewer3d {
     }
     if (this.gpu) this.renderer.removeMesh(id, this.sceneRef);
     this.sceneEdited();
+    // 0.29.0: 다시 받을 그물을 뺐으면 되찾은 뒤 끝일 수 있다
+    this.checkRestoreDone();
     return true;
   }
 
@@ -1577,7 +1594,10 @@ export class Viewer3d {
   restoreMeshArrays(id: string, arrays: MeshArrays): boolean {
     if (!this.gpu || !this.sceneRef || !arrays) return false;
     const ok = this.renderer.restoreMeshArrays(id, arrays);
-    if (ok) this.invalidate();
+    if (ok) {
+      this.invalidate();
+      this.checkRestoreDone();
+    }
     return ok;
   }
 
@@ -1595,7 +1615,41 @@ export class Viewer3d {
   private emitRestore(): void {
     if (!this.restoreCbs.size) return;
     const need = this.renderer.restoreNeed(this.sceneRef);
-    for (const cb of [...this.restoreCbs]) void cb(need);
+    this.restoreEmitting = true;
+    try {
+      for (const cb of [...this.restoreCbs]) void cb(need);
+    } finally {
+      this.restoreEmitting = false;
+    }
+  }
+
+  /**
+   * 되찾은 뒤 다시 올리기가 다 끝났을 때 부른다(0.29.0 — 문맥을 되찾을 때마다 한 번, onContextRestore 알림들 뒤). 끝은 셋이 모두일 때다:
+   * 나눠 올리기를 마쳤다(장면·그물 바꾸기), 다시 받을 것이 없다(restoreNeed가 null — 앱이 restoreMeshArrays·restoreTexture로 다 줬다),
+   * 무늬를 다 풀어 올렸다(코어가 장면의 그림 바이트를 다시 푸는 것·앱이 준 원본을 푸는 것 — 풀지 못한 무늬는 끝난 것으로 본다).
+   * 놓기 선택이 없고 무늬도 없으면 onContextRestore 알림들 바로 뒤에 같은 차례로 온다. 앱이 주지 않은 것이 남으면 오지 않는다(restoreNeed로 본다).
+   * 끝나기 전에 다시 잃으면 그 되찾기의 알림은 없고 다음 되찾기가 끝날 때 온다. 그 사이 setScene으로 새 장면을 주면 그 장면을 다 올렸을 때다. 해제 함수를 돌려준다
+   */
+  onContextRestoreDone(cb: () => void): () => void {
+    this.restoreDoneCbs.add(cb);
+    return () => this.restoreDoneCbs.delete(cb);
+  }
+
+  /**
+   * 문맥을 잃은 뒤 다시 올리기가 아직 끝나지 않았는지(0.29.0 — 잃는 순간 true, onContextRestoreDone을 부르기 직전에 false). 잃은 적이 없거나 없앤 뒤면 false
+   */
+  get restorePending(): boolean {
+    return this.restoreWait && !this.disposed;
+  }
+
+  /** 0.29.0: 되찾은 뒤 다시 올리기가 다 끝났으면 끝 알림(잃은 동안·복구 알림을 부르는 동안·끝난 뒤에는 아무것도 하지 않는다) */
+  private checkRestoreDone(): void {
+    if (!this.restoreWait || this.lost || this.disposed || this.restoreEmitting) return;
+    if (this.renderer.uploadBusy) return;
+    const n = this.renderer.restoreNeed(this.sceneRef);
+    if (n.meshes.length || n.textures.length) return;
+    this.restoreWait = false;
+    for (const cb of [...this.restoreDoneCbs]) cb();
   }
 
   /** mesh가 쓰는 정점 속성 배열 가운데 a와 같은 객체가 있는지 */
@@ -1661,6 +1715,8 @@ export class Viewer3d {
     this.camCbs.clear();
     this.restoreCbs.clear();
     this.lostCbs.clear();
+    this.restoreDoneCbs.clear();
+    this.restoreWait = false;
     this.releaseOpt = null;
     if (!this.lost) this.renderer.dispose();
     this.gl.getExtension('WEBGL_lose_context')?.loseContext();
@@ -2571,6 +2627,8 @@ export class Viewer3d {
       } else cb?.(p.done, p.total);
     }
     if (!done) this.invalidate();
+    // 0.29.0: 나눠 올리기를 마쳤으면 되찾은 뒤 끝 알림(다시 받을 것·풀 무늬가 남았으면 그것을 기다린다)
+    else this.checkRestoreDone();
   }
 
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
@@ -5192,6 +5250,8 @@ export class Viewer3d {
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
+      // 0.29.0: 되찾은 뒤 다시 올리기가 끝날 때까지(onContextRestoreDone·restorePending)
+      if (!this.disposed) this.restoreWait = true;
       this.renderer.forget();
       if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
@@ -5212,6 +5272,8 @@ export class Viewer3d {
       this.invalidate();
       if (this.sec) this.emitSection();
       this.emitRestore();
+      // 0.29.0: 다시 받을 것·풀 무늬·나눠 올릴 것이 없으면(또는 복구 알림에서 앱이 다 줬으면) 바로 끝 알림
+      this.checkRestoreDone();
     });
     const cube = this.cube;
     this.on<PointerEvent>(cube, 'pointermove', (e) => {
