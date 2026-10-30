@@ -6,6 +6,7 @@ export { SNAPSHOT_MAX_PIXELS, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
   BackgroundOptions,
+  ContextRestoreNeed,
   FogOptions,
   GroupInfo,
   ItemLookState,
@@ -25,6 +26,7 @@ export type {
   PickOptions,
   ProjectedPoint,
   RangeSelection,
+  ReleaseOptions,
   SectionCaps,
   SectionHandle,
   SectionOptions,
@@ -66,7 +68,8 @@ export { type ClosestResult, closestBetween } from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
-export type { RenderMode, TextureStats } from './renderer';
+export type { RenderMode, TextureSource, TextureStats } from './renderer';
+export type { MeshArrays } from './release';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';
 export type { GridZ } from './grid';
