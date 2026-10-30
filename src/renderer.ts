@@ -1944,15 +1944,19 @@ export class Renderer3d {
     this.pumpTextures();
   }
 
-  /** 0.25.0 놓기: 올린 무늬의 원본(그림 바이트·푼 그림 — 푼 그림은 닫는다)을 무늬 객체에서 지우고 기억한다 */
-  private stripTexture(t: Texture3d): void {
+  /**
+   * 0.25.0 놓기: 올린 무늬의 원본(그림 바이트·푼 그림 — 푼 그림은 닫는다)을 무늬 객체에서 지우고 기억한다.
+   * bitmapOnly('bitmap' 선택)면 푼 그림만 지우고 그림 바이트는 둔다(문맥을 되찾으면 syncTextures가 그 바이트를 다시 푼다 — 바이트도 없으면 앱에서 받는다)
+   */
+  private stripTexture(t: Texture3d, bitmapOnly: boolean): void {
+    if (bitmapOnly && !t.bitmap) return;
     this.texLaid.add(t);
     try {
       if (t.bitmap) {
         t.bitmap.close();
         delete t.bitmap;
       }
-      if (t.data !== undefined) delete t.data;
+      if (!bitmapOnly && t.data !== undefined) delete t.data;
     } catch {
       // 얼린 무늬 객체: 지우지 못해도 코어는 다시 읽지 않는다
     }
@@ -1979,7 +1983,7 @@ export class Renderer3d {
       return Promise.resolve(false);
     }
     const s = rec.src;
-    const t: Texture3d ={ id, data: o.data, bitmap: o.bitmap, mime: o.mime ?? s.mime, width: o.width ?? s.width, height: o.height ?? s.height, alpha: s.alpha };
+    const t: Texture3d = { id, data: o.data, bitmap: o.bitmap, mime: o.mime ?? s.mime, width: o.width ?? s.width, height: o.height ?? s.height, alpha: s.alpha };
     const gen = this.texGen;
     rec.state = 'restoring';
     // 늦게 끝났거나 풀지 못했으면 다시 기다린다(앱이 다시 줄 수 있게)
@@ -2032,8 +2036,8 @@ export class Renderer3d {
           try {
             this.uploadTexture(rec, bmp);
             rec.state = 'ready';
-            // 0.25.0 놓기: 올렸으면 원본을 지운다(문맥을 잃으면 앱이 restoreTexture로 다시 준다)
-            if (this.rel?.textures) this.stripTexture(rec.src);
+            // 0.25.0 놓기: 올렸으면 원본을 지운다(문맥을 잃으면 앱이 restoreTexture로 다시 준다 — 'bitmap'이면 푼 그림만, 바이트는 코어가 다시 푼다)
+            if (this.rel?.textures) this.stripTexture(rec.src, this.rel.textures === 'bitmap');
           } catch {
             rec.state = 'failed';
           } finally {

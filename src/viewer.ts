@@ -712,8 +712,12 @@ export interface ReleaseOptions {
   normals?: boolean;
   /** 앞·뒷면 무늬 좌표(Mesh3d.uvs·backUvs) */
   uvs?: boolean;
-  /** 무늬 그림 원본(Texture3d.data·bitmap — 그물이 쓰는 무늬를 풀어 올린 뒤) */
-  textures?: boolean;
+  /**
+   * 무늬 그림 원본(Texture3d.data·bitmap — 그물이 쓰는 무늬를 풀어 올린 뒤). 'bitmap'이면 푼 그림(bitmap)만 놓고 그림 바이트(data)는
+   * 장면에 둔다 — 문맥을 되찾으면 코어가 data를 스스로 다시 풀어 올린다(알림의 need에 들지 않는다). data가 없는 무늬만 need로 다시 받는다.
+   * 'bitmap'은 data가 bitmap과 같은 그림일 때만 쓴다(앱이 색을 바꾸는 등 손질한 bitmap이면 그 무늬의 data를 빼 두어 need로 받는다)
+   */
+  textures?: boolean | 'bitmap';
 }
 
 /**
@@ -1083,8 +1087,10 @@ export class Viewer3d {
   private pickCbs = new Map<(p: Pick3d | null, e: PickEvent) => void, { meshesOnly: boolean; through: boolean }>();
   /** 0.25.0 지금 장면의 놓기 선택(setScene의 release — 문맥 복구에서 다시 올릴 때도 쓴다) */
   private releaseOpt: ReleaseFlags | null = null;
-  /** 0.25.0 문맥 복구 알림(놓은 것을 다시 받는다) */
+  /** 0.25.0 문맥 복구 알림(놓은 것을 다시 받는다 — 놓기 선택이 없어도 빈 need로 부른다) */
   private restoreCbs = new Set<(need: ContextRestoreNeed) => unknown>();
+  /** 0.25.0 문맥 잃음 알림 */
+  private lostCbs = new Set<() => void>();
   private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
@@ -1222,7 +1228,7 @@ export class Viewer3d {
    * 그물 하나만 바뀌면 장면 전체 대신 setMesh·removeMesh(0.11.0)를 쓴다.
    *
    * 0.25.0 release(true = 셋 모두, 또는 ReleaseOptions): 켠 배열·원본은 GPU에 올린 뒤(나눠 올리면 그 그물 차례에, 무늬는 풀어 올린 뒤)
-   * 코어가 장면 객체에서 지우고(delete — 무늬의 푼 그림은 close) 다시 읽지 않는다. 고르기·측정·범위·단면은 위치·색인만 쓰므로 그대로다.
+   * 코어가 장면 객체에서 지우고(delete — 무늬의 푼 그림은 close, textures: 'bitmap'이면 푼 그림만) 다시 읽지 않는다. 고르기·측정·범위·단면은 위치·색인만 쓰므로 그대로다.
    * 이 장면에 setMesh로 넣는 그물도 같다. 문맥을 잃었다 되찾으면 위치·색으로 먼저 그리고 onContextRestore로 다시 받는다.
    * 주지 않으면 0.24.0과 같다(장면 배열을 붙잡고 문맥 복구 때 그대로 다시 올린다)
    */
@@ -1437,14 +1443,24 @@ export class Viewer3d {
   // ───────────────────────── 0.25.0 놓기·문맥 복구 ─────────────────────────
 
   /**
-   * 그래픽 문맥을 잃었다 되찾은 뒤 코어가 놓은 배열·원본(setScene의 release)이 다시 필요하면 부른다(0.25.0).
-   * 그때 코어는 이미 장면을 다시 올려 위치·색으로 그리고 있다(놓은 법선 없이 평면 음영, 놓은 무늬 좌표·원본 없이 그물 color).
-   * 앱은 need에 든 것을 restoreMeshArrays·restoreTexture로 주고, 준 것부터 되돌아온다(비동기로 천천히 주어도 된다 — 다 주지 않은 무늬는 평균색 그대로).
-   * 놓은 것이 없거나 모두 GPU에 있으면 부르지 않는다. 해제 함수를 돌려준다
+   * 그래픽 문맥을 잃었다 되찾을 때마다 부른다(0.25.0 — 코어가 장면·덧그림·단면 테두리를 다시 올린 뒤).
+   * need는 코어가 놓은 배열·원본(setScene의 release) 가운데 다시 필요한 것이고, 놓기 선택이 없거나 모두 GPU에 있으면 빈 목록이다
+   * (그래도 부른다 — 앱이 안내를 거두거나 라벨 가림 판정을 다시 할 때). 놓은 것이 있으면 코어는 이미 위치·색으로 그리고 있다
+   * (놓은 법선 없이 평면 음영, 놓은 무늬 좌표·원본 없이 그물 color). 앱은 need에 든 것을 restoreMeshArrays·restoreTexture로 주고,
+   * 준 것부터 되돌아온다(비동기로 천천히 주어도 된다 — 다 주지 않은 무늬는 평균색 그대로). 해제 함수를 돌려준다
    */
   onContextRestore(cb: (need: ContextRestoreNeed) => void | Promise<unknown>): () => void {
     this.restoreCbs.add(cb);
     return () => this.restoreCbs.delete(cb);
+  }
+
+  /**
+   * 그래픽 문맥을 잃었을 때 부른다(0.25.0 — 놓기 선택과 무관). 되찾을 때까지 화면을 다시 그리지 않는다(앱은 안내를 보일 수 있다).
+   * 브라우저가 문맥을 되찾으면 onContextRestore가 온다. 해제 함수를 돌려준다
+   */
+  onContextLost(cb: () => void): () => void {
+    this.lostCbs.add(cb);
+    return () => this.lostCbs.delete(cb);
   }
 
   /**
@@ -1479,11 +1495,10 @@ export class Viewer3d {
     return this.renderer.restoreTexture(id, src);
   }
 
-  /** 문맥을 되찾아 장면을 다시 올린 뒤: 놓은 것이 GPU에 없으면 알린다 */
+  /** 문맥을 되찾아 장면을 다시 올린 뒤: 다시 받을 것(없으면 빈 목록)을 알린다 */
   private emitRestore(): void {
     if (!this.restoreCbs.size) return;
-    const need = this.restoreNeed;
-    if (!need) return;
+    const need = this.renderer.restoreNeed(this.sceneRef);
     for (const cb of [...this.restoreCbs]) void cb(need);
   }
 
@@ -1549,6 +1564,7 @@ export class Viewer3d {
     this.measureCbs.clear();
     this.camCbs.clear();
     this.restoreCbs.clear();
+    this.lostCbs.clear();
     this.releaseOpt = null;
     if (!this.lost) this.renderer.dispose();
     this.gl.getExtension('WEBGL_lose_context')?.loseContext();
@@ -4830,12 +4846,14 @@ export class Viewer3d {
       this.renderer.forget();
       if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
+      // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다)
+      if (!this.disposed) for (const cb of [...this.lostCbs]) cb();
     });
     this.on(cv, 'webglcontextrestored', () => {
       if (this.disposed) return;
       this.lost = false;
       this.renderer.init();
-      // 0.25.0: 놓기 선택이 있으면 그대로 다시 건다(코어가 지운 배열·원본은 없이 위치·색으로 올리고, 아래 emitRestore로 앱에서 다시 받는다)
+      // 0.25.0: 놓기 선택이 있으면 그대로 다시 건다(코어가 지운 배열·원본은 없이 위치·색으로 올리고, 아래 emitRestore로 앱에 알려 다시 받는다)
       if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload, release: this.releaseOpt });
       if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
       this.uploadAnnotations();

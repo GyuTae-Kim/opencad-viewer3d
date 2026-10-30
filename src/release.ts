@@ -6,11 +6,14 @@
  * 그래픽 문맥을 잃었다 되찾으면 그 꼴과 지금 가진 배열을 견주어 앱에서 다시 받을 것을 고른다.
  */
 
-/** 놓아도 되는 것(true인 것만): 그물 법선(Mesh3d.normals), 앞·뒷면 무늬 좌표(uvs·backUvs), 무늬 원본(Texture3d.data·bitmap) */
+/**
+ * 놓아도 되는 것(true인 것만): 그물 법선(Mesh3d.normals), 앞·뒷면 무늬 좌표(uvs·backUvs), 무늬 원본(Texture3d.data·bitmap).
+ * textures가 'bitmap'이면 푼 그림(bitmap)만 놓고 그림 바이트(data)는 장면에 둔다 — 문맥을 되찾으면 코어가 data를 다시 푼다
+ */
 export interface ReleaseFlags {
   normals: boolean;
   uvs: boolean;
-  textures: boolean;
+  textures: boolean | 'bitmap';
 }
 
 /**
@@ -45,10 +48,13 @@ export interface RestoreNeed {
   textures: string[];
 }
 
-/** setScene의 release 선택 → 놓을 것(true = 셋 모두, 객체는 true인 필드만). 놓을 것이 없으면 null */
+/** setScene의 release 선택 → 놓을 것(true = 셋 모두, 객체는 true인 필드만 — textures는 'bitmap'도). 놓을 것이 없으면 null */
 export function releaseFlags(opt: boolean | Partial<ReleaseFlags> | null | undefined): ReleaseFlags | null {
+  const tex = !!opt && opt !== true ? opt.textures : undefined;
   const f: ReleaseFlags =
-    opt === true ? { normals: true, uvs: true, textures: true } : { normals: !!opt && opt.normals === true, uvs: !!opt && opt.uvs === true, textures: !!opt && opt.textures === true };
+    opt === true
+      ? { normals: true, uvs: true, textures: true }
+      : { normals: !!opt && opt.normals === true, uvs: !!opt && opt.uvs === true, textures: tex === true || tex === 'bitmap' ? tex : false };
   return f.normals || f.uvs || f.textures ? f : null;
 }
 

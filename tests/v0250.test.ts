@@ -193,6 +193,8 @@ describe('release.ts 순수 계산', () => {
     expect(releaseFlags(false)).toBeNull();
     expect(releaseFlags(undefined)).toBeNull();
     expect(releaseFlags({ normals: 1 as unknown as boolean })).toBeNull();
+    expect(releaseFlags({ textures: 'bitmap' })).toEqual({ normals: false, uvs: false, textures: 'bitmap' });
+    expect(releaseFlags({ normals: true, textures: 'data' as unknown as boolean })).toEqual({ normals: true, uvs: false, textures: false });
   });
 
   it('layoutMiss: 뒷면이 uvs를 함께 썼으면 뒷면이 없을 때 uvs를, 따로 준 backUvs면 backUvs를 다시 받는다', () => {
@@ -378,19 +380,90 @@ describe('0.25.0 놓기(setScene release)', () => {
 
 // ───────────── 문맥 복구 ─────────────
 describe('0.25.0 문맥을 잃었다 되찾기', () => {
-  it('놓지 않은 앱: 장면 배열을 그대로 다시 올려 그림이 같고 알림은 없다(0.24.0과 같다)', async () => {
+  it('놓지 않은 앱: 장면 배열을 그대로 다시 올려 그림이 같고(0.24.0과 같다), 잃음·되찾음 알림은 빈 need로 온다', async () => {
     const s = makeScene();
     const A = view();
     A.v.setScene(s);
     await texturesReady(A);
     const before = frame(A);
-    const cb = vi.fn();
-    A.v.onContextRestore(cb);
+    const order: string[] = [];
+    const needs: ContextRestoreNeed[] = [];
+    A.v.onContextLost(() => void order.push('lost'));
+    A.v.onContextRestore((n) => {
+      order.push('restore');
+      needs.push(n);
+    });
     loseAndRestore(A);
     await texturesReady(A);
     expect(frame(A)).toEqual(before);
-    expect(cb).not.toHaveBeenCalled();
+    expect(order).toEqual(['lost', 'restore']);
+    expect(needs).toEqual([{ meshes: [], textures: [] }]);
     expect(A.v.restoreNeed).toBeNull();
+    expect(s.meshes.find((m) => m.id === '구')!.normals).toBeInstanceOf(Float32Array);
+  });
+
+  it('알림 해제와 없앤 뒤: 해제한 알림은 부르지 않고, dispose가 일으킨 문맥 잃음은 알리지 않는다', () => {
+    const A = view();
+    A.v.setScene(makeScene());
+    const lost = vi.fn(), back = vi.fn();
+    const off1 = A.v.onContextLost(lost), off2 = A.v.onContextRestore(back);
+    off1();
+    off2();
+    loseAndRestore(A);
+    expect(lost).not.toHaveBeenCalled();
+    expect(back).not.toHaveBeenCalled();
+    const l2 = vi.fn();
+    A.v.onContextLost(l2);
+    A.v.dispose();
+    A.canvas.fire('webglcontextlost', {});
+    expect(l2).not.toHaveBeenCalled();
+  });
+
+  it("textures: 'bitmap'이면 푼 그림만 놓고 그림 바이트는 둔다 — 되찾으면 코어가 바이트를 다시 풀고, 바이트가 없는 무늬만 need로 받는다", async () => {
+    // 격자에 같은 그림의 바이트도 준 장면(A·B)과 격자가 푼 그림뿐인 장면(C)
+    const sa = makeScene();
+    const gridBytes = new Uint8Array([7, 7, 7, 7, 1, 2, 3]);
+    sa.textures![1]!.data = gridBytes;
+    const sb = copyScene(sa);
+    const grid = sa.textures![1]!.bitmap as unknown as FakeBitmap;
+    const A = view(), B = view();
+    A.v.setScene(sa, { release: { textures: 'bitmap' } });
+    B.v.setScene(sb);
+    await texturesReady(A, B);
+    expect(grid.closed).toBe(true);
+    expect(sa.textures![1]!.bitmap).toBeUndefined();
+    expect(sa.textures![1]!.data).toBe(gridBytes);
+    expect(sa.textures![0]!.data).toBeInstanceOf(Uint8Array);
+    // 법선·무늬 좌표는 놓지 않는다
+    expect(sa.meshes.find((m) => m.id === '구')!.normals).toBeInstanceOf(Float32Array);
+    expect(sa.meshes.find((m) => m.id === '원근 무늬')!.backUvs).toBeInstanceOf(Float32Array);
+    expect(frame(A)).toEqual(frame(B));
+    const needs: ContextRestoreNeed[] = [];
+    A.v.onContextRestore((n) => void needs.push(n));
+    loseAndRestore(A);
+    expect(needs).toEqual([{ meshes: [], textures: [] }]);
+    await texturesReady(A);
+    expect(A.v.stats.textures).toMatchObject({ count: 2, ready: 2, missing: 0 });
+    // 격자는 바이트를 다시 푼 그림으로 올라간다(앱이 준 푼 그림이 아니라)
+    const texA = frame(A).map((d) => d.tex ?? '').join(';');
+    expect(texA).toContain(`bytes:${fnv(gridBytes)}`);
+    expect(texA).not.toContain('bmp:격자');
+    // 바이트가 없는 푼 그림 무늬는 need로 받는다(바이트만 준 바둑판은 코어가 다시 푼다)
+    const sc = makeScene();
+    const C = view();
+    C.v.setScene(sc, { release: { textures: 'bitmap' } });
+    await texturesReady(C);
+    expect(sc.textures![0]!.data).toBeInstanceOf(Uint8Array);
+    expect(sc.textures![1]!.bitmap).toBeUndefined();
+    const cn: ContextRestoreNeed[] = [];
+    C.v.onContextRestore((n) => void cn.push(n));
+    loseAndRestore(C);
+    expect(cn).toEqual([{ meshes: [], textures: ['격자'] }]);
+    await until(() => C.v.stats.textures.ready === 1);
+    expect(C.v.stats.textures).toMatchObject({ count: 2, ready: 1, missing: 1 });
+    expect(await C.v.restoreTexture('격자', fakeBitmap('격자', 16, 16) as unknown as ImageBitmap)).toBe(true);
+    expect(C.v.restoreNeed).toBeNull();
+    expect(frame(C)).toEqual(frame(B));
   });
 
   it('놓은 앱: 위치·색으로 먼저 그리고, 알림의 need를 앱이 주는 대로 되돌려 처음 그림과 같아진다', async () => {
