@@ -17,8 +17,13 @@
  * 버퍼 표·쓰는 기록 수는 배열과 무관한 열쇠(BufKey)로 두고, 배열 → 열쇠는 약한 표(같은 배열은 한 번만 올리되 배열을 붙잡지 않는다).
  * 놓기(release): 켠 배열·무늬 원본은 올린 뒤 장면 객체에서 지운다(strip). 문맥을 잃었다 되찾으면 지운 것 없이 위치·색으로 다시 올리고,
  * 앱이 restoreMeshArrays·restoreTexture로 다시 준 것부터 되돌린다(restoreNeed — 계산은 release.ts)
+ *
+ * 0.26.0 작은 법선·무늬 좌표: 법선 Int8·Int16, 무늬 좌표 Int16·Uint16 배열을 그대로 버퍼에 올리고 정점 속성 꼴(BYTE·SHORT·UNSIGNED_SHORT, normalized)로 읽는다
+ * (꼴 판정은 attribs.ts). 그물 기록이 속성 꼴을 기억해 다시 묶을 때도 배열을 보지 않는다. 무늬 좌표 축척·이동(uvTransform)은 그물마다 균일 변수 u_uvt·u_uvt2.
+ * Float32 배열은 0.25.0과 같은 속성 꼴로 올린다(변환이 없으면 u_uvt = (1, 1, 0, 0) — 곱하고 더해도 값이 그대로다)
  */
-import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
+import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
+import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
 import { type ViewFrame, viewMatrix } from './camera';
 import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
@@ -349,6 +354,10 @@ interface MeshAttribs {
   /** 뒷면 무늬 좌표(backUvs, 없으면 uvs — Mesh3d.backTexture가 있을 때만)와 정점당 값 수 */
   buv: WebGLBuffer | null;
   buvN: 0 | 2 | 3;
+  /** 0.26.0 법선·앞·뒷면 무늬 좌표의 속성 꼴(그 버퍼가 없으면 null — Float32면 0.25.0과 같은 FLOAT 꼴) */
+  nrmF: AttribFormat | null;
+  uvF: AttribFormat | null;
+  buvF: AttribFormat | null;
 }
 
 /** 음영 계열 뒤 모서리 점선(0.8.0)을 눈 쪽으로 당기는 깊이 치우침(클립 z에서 w에 곱한다 — 반올림 차이만 덮는 크기) */
@@ -426,9 +435,11 @@ interface MeshRec {
   tex: string | null;
   /** 무늬 그림의 알파를 불투명도에 곱하는지(Texture3d.alpha — 반투명 차례에 그린다) */
   texAlpha: boolean;
+  /** 0.26.0 무늬 좌표 축척·이동(Mesh3d.uvTransform — 없으면 null = (1, 1, 0, 0)) */
+  uvT: UvTransform | null;
   transparent: boolean;
-  /** 뒷면(Mesh3d.backColor·backTexture): 색(없으면 null)·뒷면 무늬 id·좌표 값 수·무늬 알파 */
-  back: { color: Rgba | null; tex: string | null; uv: 0 | 2 | 3; texAlpha: boolean } | null;
+  /** 뒷면(Mesh3d.backColor·backTexture): 색(없으면 null)·뒷면 무늬 id·좌표 값 수·무늬 알파·0.26.0 좌표 축척·이동(따로 준 backUvs면 backUvTransform, uvs를 함께 쓰면 uvTransform) */
+  back: { color: Rgba | null; tex: string | null; uv: 0 | 2 | 3; texAlpha: boolean; uvT: UvTransform | null } | null;
   /** 로컬 → 세계 = matrix · T(origin)(원점이 없으면 matrix 그대로, 둘 다 없으면 undefined) */
   model: ArrayLike<number> | undefined;
   /** 세계 범위(행렬·원점 반영) */
@@ -948,7 +959,7 @@ export class Renderer3d {
     return !!k && (target === 'element' ? this.elemBufs : this.arrayBufs).has(k);
   }
 
-  private arrayBuf(data: Float32Array): WebGLBuffer {
+  private arrayBuf(data: VertexArray): WebGLBuffer {
     const k = this.keyOf(data);
     let b = this.arrayBufs.get(k);
     if (b) return b;
@@ -1073,7 +1084,7 @@ export class Renderer3d {
    * 묶음 하나가 GPU에 올리는 배열(meshRec·lineRec·pointRec가 arrayBuf·elemBuf로 올리는 것과 같은 조건 — 나눠 올리기에서 미리 채운다)
    */
   private uploadArrays(kind: 'mesh' | 'line' | 'point', item: Mesh3d | LineSet3d | PointSet3d): ({ data: UploadArray; target: BufferTarget } | null)[] {
-    const A = (data: Float32Array | undefined | false | null): { data: UploadArray; target: BufferTarget } | null => (data ? { data, target: 'array' } : null);
+    const A = (data: VertexArray | undefined | false | null): { data: UploadArray; target: BufferTarget } | null => (data ? { data, target: 'array' } : null);
     if (kind === 'point') return [A(item.positions)];
     if (kind === 'line') {
       const l = item as LineSet3d;
@@ -1085,7 +1096,7 @@ export class Renderer3d {
     const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
     return [
       A(m.positions),
-      A(!!m.normals && m.normals.length >= nv * 3 && m.normals),
+      A(!!m.normals && !!normalFormat(m.normals, nv) && m.normals),
       A(!!m.colors && m.colors.length >= nv * 4 && m.colors),
       A(!!uvComponents(m) && !!m.texture && m.uvs),
       A(!!buvs && !!uvComponents(m, buvs) && buvs),
@@ -1265,9 +1276,9 @@ export class Renderer3d {
     const lay = old.lay;
     if (!lay) return [];
     const nv = Math.floor(m.positions.length / 3);
-    const has = (a: Float32Array | undefined, n: number): boolean => !!a && n > 0 && a.length >= nv * n;
+    const has = (a: VertexArray | undefined, n: number): boolean => !!a && n > 0 && a.length >= nv * n;
     const out: string[] = [];
-    if (lay.normals && !has(m.normals, 3)) out.push('normals');
+    if (lay.normals && !(m.normals && normalFormat(m.normals, nv))) out.push('normals');
     if (lay.uv && !has(m.uvs, lay.uv)) out.push('uvs');
     if (lay.buv && lay.ownBack && !has(m.backUvs, lay.buv)) out.push('backUvs');
     return out;
@@ -1365,16 +1376,17 @@ export class Renderer3d {
   }
 
   /**
-   * 그물의 정점 속성 배열(올리는 것만): 배열·정점당 값 수. uploadArrays와 같은 조건이다
+   * 그물의 정점 속성 배열(올리는 것만): 배열·정점당 값 수(0.26.0: 정수 법선은 3 또는 4). uploadArrays와 같은 조건이다
    */
-  private vertexArrays(m: Mesh3d): ({ data: Float32Array; stride: number } | null)[] {
+  private vertexArrays(m: Mesh3d): ({ data: VertexArray; stride: number } | null)[] {
     const nv = Math.floor(m.positions.length / 3);
     const uv = m.texture ? uvComponents(m) : 0;
     const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
     const buv = buvs ? uvComponents(m, buvs) : 0;
+    const nf = m.normals ? normalFormat(m.normals, nv) : null;
     return [
       { data: m.positions, stride: 3 },
-      m.normals && m.normals.length >= nv * 3 ? { data: m.normals, stride: 3 } : null,
+      nf ? { data: m.normals!, stride: nf.per } : null,
       m.colors && m.colors.length >= nv * 4 ? { data: m.colors, stride: 4 } : null,
       uv ? { data: m.uvs!, stride: uv } : null,
       buv ? { data: buvs!, stride: buv } : null,
@@ -1394,14 +1406,15 @@ export class Renderer3d {
     return !!lay && ((s === SLOT_NORMALS && lay.normals) || (s === SLOT_UV && lay.uv > 0) || (s === SLOT_BUV && lay.buv > 0));
   }
 
-  /** 정점 구간들만 버퍼에 채운다(구간은 정점 번호, stride = 정점당 값 수) */
-  private writeRanges(buf: WebGLBuffer, data: Float32Array, stride: number, ranges: readonly IndexRange[]): void {
+  /** 정점 구간들만 버퍼에 채운다(구간은 정점 번호, stride = 정점당 값 수 — 바이트 자리는 배열 값 크기로, 0.26.0) */
+  private writeRanges(buf: WebGLBuffer, data: VertexArray, stride: number, ranges: readonly IndexRange[]): void {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     const nv = Math.floor(data.length / stride);
+    const bpe = data.BYTES_PER_ELEMENT;
     for (const r of ranges) {
       const s = Math.max(0, Math.floor(r.start)), e = Math.min(nv, s + Math.floor(r.count));
-      if (e > s) gl.bufferSubData(gl.ARRAY_BUFFER, s * stride * 4, data, s * stride, (e - s) * stride);
+      if (e > s) gl.bufferSubData(gl.ARRAY_BUFFER, s * stride * bpe, data, s * stride, (e - s) * stride);
     }
   }
 
@@ -1461,16 +1474,27 @@ export class Renderer3d {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
-  /** 지금 묶인 VAO에 그물 정점 속성(위치·법선·색·무늬 좌표)을 건다(0.25.0 — 기록이 기억한 버퍼로, 배열을 보지 않고) */
+  /** 속성 꼴 → GL 값 꼴(0.26.0) */
+  private glType(f: AttribFormat): number {
+    const gl = this.gl;
+    return f.type === 'byte' ? gl.BYTE : f.type === 'short' ? gl.SHORT : f.type === 'ushort' ? gl.UNSIGNED_SHORT : gl.FLOAT;
+  }
+
+  /**
+   * 지금 묶인 VAO에 그물 정점 속성(위치·법선·색·무늬 좌표)을 건다(0.25.0 — 기록이 기억한 버퍼로, 배열을 보지 않고).
+   * 0.26.0: 법선·무늬 좌표는 기록이 기억한 속성 꼴(정수면 normalized)로 건다 — Float32면 0.25.0과 같은 호출이다
+   */
   private bindAttribs(a: MeshAttribs): void {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, a.pos);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
     if (a.nrm) {
+      const f = a.nrmF;
       gl.bindBuffer(gl.ARRAY_BUFFER, a.nrm);
       gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 12, 0);
+      if (f) gl.vertexAttribPointer(1, 3, this.glType(f), f.normalized, f.stride, 0);
+      else gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 12, 0);
     }
     if (a.col) {
       gl.bindBuffer(gl.ARRAY_BUFFER, a.col);
@@ -1478,15 +1502,19 @@ export class Renderer3d {
       gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 16, 0);
     }
     if (a.uv) {
+      const f = a.uvF;
       gl.bindBuffer(gl.ARRAY_BUFFER, a.uv);
       gl.enableVertexAttribArray(3);
-      gl.vertexAttribPointer(3, a.uvN, gl.FLOAT, false, a.uvN * 4, 0);
+      if (f) gl.vertexAttribPointer(3, a.uvN, this.glType(f), f.normalized, f.stride, 0);
+      else gl.vertexAttribPointer(3, a.uvN, gl.FLOAT, false, a.uvN * 4, 0);
     }
     // 뒷면 무늬 좌표(backUvs, 없으면 uvs)
     if (a.buv) {
+      const f = a.buvF;
       gl.bindBuffer(gl.ARRAY_BUFFER, a.buv);
       gl.enableVertexAttribArray(4);
-      gl.vertexAttribPointer(4, a.buvN, gl.FLOAT, false, a.buvN * 4, 0);
+      if (f) gl.vertexAttribPointer(4, a.buvN, this.glType(f), f.normalized, f.stride, 0);
+      else gl.vertexAttribPointer(4, a.buvN, gl.FLOAT, false, a.buvN * 4, 0);
     }
   }
 
@@ -1497,43 +1525,53 @@ export class Renderer3d {
    * - from(바꾸는 앞 기록)이 놓은 배열을 새 그물이 주지 않으면(없거나 길이 0), 정점 수가 같고 위치 배열이 같거나 keep(vertices를 주어 구간 밖이 같다고 함)일 때
    *   앞 기록의 버퍼를 물려받는다
    * - 코어가 전에 지운 그물 객체(laid)의 뒷면은 따로 준 backUvs였으면 uvs로 대신하지 않는다
+   * 0.26.0: 법선·무늬 좌표의 속성 꼴(정수 배열이면 정규화)을 함께 정한다(물려받은 버퍼는 앞 기록의 꼴)
    */
   private meshAttribs(m: Mesh3d, nv: number, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null }): { attrs: MeshAttribs; slots: (Slot | null)[]; ownBack: boolean } {
     const give = o.give ?? null;
     const from = o.from ?? null;
     const fl = from?.lay ?? null;
     const inherit = !!from && !!fl && fl.nv === nv && (from.src.positions === m.positions || !!o.keep);
-    const absent = (a: Float32Array | undefined): boolean => !a || a.length === 0;
+    const absent = (a: VertexArray | undefined): boolean => !a || a.length === 0;
     const slots: (Slot | null)[] = [null, null, null, null, null, null, null];
-    const put = (s: number, data: Float32Array, stride: number): WebGLBuffer => {
+    const put = (s: number, data: VertexArray, stride: number): WebGLBuffer => {
       slots[s] = { key: this.keyOf(data), target: 'array', stride };
       return this.arrayBuf(data);
     };
     const pos = put(0, m.positions, 3);
     let nrm: WebGLBuffer | null = null;
+    let nrmF: AttribFormat | null = null;
     const na = give?.normals ?? m.normals;
-    if (na && na.length >= nv * 3) nrm = put(SLOT_NORMALS, na, 3);
-    else if (inherit && fl!.normals && from!.attrs.nrm && absent(na)) {
+    const naF = na ? normalFormat(na, nv) : null;
+    if (na && naF) {
+      nrm = put(SLOT_NORMALS, na, naF.per);
+      nrmF = naF;
+    } else if (inherit && fl!.normals && from!.attrs.nrm && absent(na)) {
       nrm = from!.attrs.nrm;
+      nrmF = from!.attrs.nrmF;
       slots[SLOT_NORMALS] = from!.slots[SLOT_NORMALS]!;
     }
     const col = m.colors && m.colors.length >= nv * 4 ? put(2, m.colors, 4) : null;
     let uv: WebGLBuffer | null = null;
     let uvN: 0 | 2 | 3 = 0;
+    let uvF: AttribFormat | null = null;
     if (m.texture) {
       const ua = give?.uvs ?? m.uvs;
       const n = uvComponents(m, ua);
       if (n) {
         uv = put(SLOT_UV, ua!, n);
         uvN = n;
+        uvF = uvFormat(ua, n);
       } else if (inherit && fl!.uv && from!.attrs.uv && absent(ua)) {
         uv = from!.attrs.uv;
         uvN = from!.attrs.uvN;
+        uvF = from!.attrs.uvF;
         slots[SLOT_UV] = from!.slots[SLOT_UV]!;
       }
     }
     let buv: WebGLBuffer | null = null;
     let buvN: 0 | 2 | 3 = 0;
+    let buvF: AttribFormat | null = null;
     let ownBack = false;
     if (m.backTexture) {
       const own = give?.backUvs ?? m.backUvs;
@@ -1542,15 +1580,17 @@ export class Renderer3d {
       if (n) {
         buv = put(SLOT_BUV, ba!, n);
         buvN = n;
+        buvF = uvFormat(ba, n);
         ownBack = ba === own;
       } else if (inherit && fl!.buv && from!.attrs.buv && absent(ba)) {
         buv = from!.attrs.buv;
         buvN = from!.attrs.buvN;
+        buvF = from!.attrs.buvF;
         slots[SLOT_BUV] = from!.slots[SLOT_BUV]!;
         ownBack = fl!.ownBack;
       } else ownBack = !!this.laid.get(m)?.ownBack;
     }
-    return { attrs: { pos, nrm, col, uv, uvN, buv, buvN }, slots, ownBack };
+    return { attrs: { pos, nrm, col, uv, uvN, buv, buvN, nrmF, uvF, buvF }, slots, ownBack };
   }
 
   /**
@@ -1605,7 +1645,9 @@ export class Renderer3d {
     // 뒷면 색·무늬(없으면 null — 예전 그대로)
     const buv = m.backTexture && this.texSrc.has(m.backTexture) ? attrs.buvN : 0;
     const bcol = m.backColor && m.backColor.length >= 3 ? m.backColor : null;
-    const back = bcol || buv ? { color: bcol, tex: buv ? m.backTexture! : null, uv: buv, texAlpha: buv > 0 && this.texSrc.get(m.backTexture!)!.alpha === true } : null;
+    // 0.26.0 뒷면 무늬 좌표 축척·이동: 따로 준 backUvs면 backUvTransform, uvs를 함께 쓰면 uvTransform
+    const buvT = buv ? uvTransformOf(ownBack ? m.backUvTransform : m.uvTransform) : null;
+    const back = bcol || buv ? { color: bcol, tex: buv ? m.backTexture! : null, uv: buv, texAlpha: buv > 0 && this.texSrc.get(m.backTexture!)!.alpha === true, uvT: buvT } : null;
     if (back?.texAlpha) transparent = true;
     const lay = this.layoutOf(m, nv, attrs, ownBack);
     const miss = lay ? layoutMiss(lay, { normals: !!attrs.nrm, uv: !!attrs.uv, buv: !!attrs.buv }) : null;
@@ -1620,6 +1662,7 @@ export class Renderer3d {
       uv,
       tex: uv ? m.texture! : null,
       texAlpha,
+      uvT: uv ? uvTransformOf(m.uvTransform) : null,
       transparent,
       model: modelMatrix(m.matrix, m.origin),
       box,
@@ -2505,6 +2548,9 @@ export class Renderer3d {
         }
         gl.uniform1f(this.loc(p, 'u_uvq'), r.uv === 3 ? 1 : 0);
         gl.uniform1f(this.loc(p, 'u_texAlpha'), r.texAlpha ? 1 : 0);
+        // 0.26.0 무늬 좌표 축척·이동(없으면 (1, 1, 0, 0) — 값이 그대로다)
+        const ut = r.uvT;
+        gl.uniform4f(this.loc(p, 'u_uvt'), ut ? ut[0] : 1, ut ? ut[1] : 1, ut ? ut[2] : 0, ut ? ut[3] : 0);
       }
       if (p.back) {
         const bc = r.back?.color;
@@ -2521,6 +2567,8 @@ export class Renderer3d {
           gl.uniform1i(this.loc(p, 'u_tex2'), 3);
           gl.uniform1f(this.loc(p, 'u_uvq2'), r.back?.uv === 3 ? 1 : 0);
           gl.uniform1f(this.loc(p, 'u_tex2Alpha'), r.back?.texAlpha ? 1 : 0);
+          const bt = r.back?.uvT;
+          gl.uniform4f(this.loc(p, 'u_uvt2'), bt ? bt[0] : 1, bt ? bt[1] : 1, bt ? bt[2] : 0, bt ? bt[3] : 0);
         }
       }
       const m = matrix ?? null;

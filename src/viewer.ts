@@ -1517,7 +1517,7 @@ export class Viewer3d {
   }
 
   /** mesh가 쓰는 정점 속성 배열 가운데 a와 같은 객체가 있는지 */
-  private sameArrayIn(mesh: Mesh3d, a: Float32Array): boolean {
+  private sameArrayIn(mesh: Mesh3d, a: ArrayBufferView): boolean {
     return a === mesh.positions || a === mesh.normals || a === mesh.colors || a === mesh.uvs || a === mesh.backUvs;
   }
 
