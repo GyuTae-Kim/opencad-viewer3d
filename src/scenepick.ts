@@ -98,9 +98,19 @@ export interface ScenePickOptions {
    * 가장 앞의 불투명 면을 고르고, 반투명 면만 맞으면 예전처럼 가장 앞의 반투명 면이다. 선분·점·윤곽선과 가림(occlude — 원래 불투명 면만 가린다)은 그대로다
    */
   throughTranslucent?: boolean;
+  /**
+   * 0.24.0: throughTranslucent가 지나가지 않을 그물(true면 반투명이어도 불투명 면처럼 그 면에서 멈춘다 — 판 안 포켓처럼 반투명으로 그리지만 고르기에서는 벽으로 볼 그물).
+   * throughTranslucent일 때만 본다. 가림(occlude)·잘린 면 판정은 그대로 opaque를 따른다(그림이 바뀌지 않으므로 뒤 선분·점을 가리지 않는다)
+   */
+  pickOpaque?: (m: Mesh3d) => boolean;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
+
+/** throughTranslucent가 이 그물 면에서 멈추는지: 불투명(opaque)이거나 앱이 고르기에서 불투명으로 보라고 한 그물(0.24.0 pickOpaque) */
+function stopsThrough(o: ScenePickOptions, m: Mesh3d, opaque: boolean): boolean {
+  return opaque || (!!o.pickOpaque && o.pickOpaque(m));
+}
 
 /** 화면 점(x, y)에서 고르기 */
 export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickItems, o: ScenePickOptions): PickDetail | null {
@@ -196,7 +206,7 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       if (!h) continue;
       if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
       const opaque = o.opaque ? o.opaque(m) : m.color[3] >= 0.999;
-      if (o.throughTranslucent && opaque && (!solid || h.depth < solid.h.depth)) solid = { m, h };
+      if (o.throughTranslucent && stopsThrough(o, m, opaque) && (!solid || h.depth < solid.h.depth)) solid = { m, h };
       if (o.occlude && opaque) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
     }
     if (solid) mesh = solid;
@@ -574,7 +584,7 @@ function pickMeshesMulti(
     if (!h) continue;
     if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
     const opaque = o.opaque ? o.opaque(m) : m.color[3] >= 0.999;
-    if (o.throughTranslucent && opaque && (!solid || h.depth < solid.h.depth)) solid = { m, h };
+    if (o.throughTranslucent && stopsThrough(o, m, opaque) && (!solid || h.depth < solid.h.depth)) solid = { m, h };
     if (o.occlude && opaque) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
   }
   // 0.23.0 throughTranslucent: 가장 앞의 불투명 면이 있으면 그것(잘린 면 채움과는 그 면으로 견준다)

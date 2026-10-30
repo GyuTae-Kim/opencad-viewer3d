@@ -98,7 +98,7 @@ import {
   trackEdgeSnap,
   trackPairSnap,
 } from './track';
-import { LABEL_POINT_R, type LabelAvoidAreas, type MeasureLabelRect, avoidRect, placeMeasureLabel } from './measurelabel';
+import { LABEL_POINT_R, type LabelAvoidAreas, type LabelCircle, type MeasureLabelRect, avoidRect, placeLabelAmong, placeMeasureLabel } from './measurelabel';
 import {
   type InferenceLock,
   type InferenceLockInput,
@@ -430,12 +430,15 @@ export interface MeasureSnapOptions {
    * 그 삼각형 위 곡면 조각 자리(삼각형 평면에 내린 발이 삼각형 안, 평면에서 0.1 × 가장 긴 변 안)이고 커서에서 붙잡기 거리 안이며 가리지 않으면 받는다.
    * 호출 한도는 0.15.0·0.20.0 열린 후보와 함께 쓴다(그 둘이 먼저). null이면 후보가 없다(0.21.0과 같다)
    * 0.23.0: 선에서 그 삼각형 위 곡면 조각 자리인 조각이 커서에서 붙잡기 거리 밖이면 그 열린 후보는 부르지 않는다(받을 수 없는 자리 — 받는 규칙은 그대로)
+   * 0.24.0: 선이 그 삼각형 위 곡면 조각을 두 번 지날 수 있으면(곡면이 선과 나란해지는 자리가 그 삼각형을 지난다 — 볼록한 곡면을 아주 얕게 스칠 때) point를 선에서 그 조각
+   * 자리인 조각의 두 끝으로 바꿔 한 번씩 더 부른다(0.22.0 refine 열린 교차의 둘째 힌트와 같은 틀 — 호출 한도·기억 열쇠·받는 규칙이 같다). 앱이 point 둘레 교차 하나를 주면 두 교차가 따로 온다
    */
   refineFace?: ((c: SnapRefineFaceInput) => readonly number[] | null | undefined) | null;
   /**
    * 0.23.0: 측정 점 고르기가 반투명 그물(투명도 < 1 — 그물 색 알파·setItemOpacity·setItemColor)의 면을 지나 그 뒤 불투명 그물 면을 고른다(PickOptions.throughTranslucent와 같은 고르기).
    * 커서 아래 면 위 점·꼭짓점, 축이 면을 뚫는 점(axisFaces·lockFaces), 'onFace' 다듬기, pointsFor에 넘기는 고르기가 모두 그 면을 본다. 반투명 면만 맞으면 예전처럼 그 면이다.
    * 선분·점·윤곽선, 앱 점의 가림(원래 불투명 면만 가린다), 면의 열린 교차가 보는 커서 둘레 삼각형은 그대로다. 주지 않거나 false면 0.22.0과 같다(이것만 줘도 붙잡기가 켜진다)
+   * 0.24.0: setItemPickOpaque로 켠 그물에서는 멈춘다. 잠금·끌어온 점·찍은 점·다듬기 기억을 두고 이것만 바꾸려면 setMeasurePickThrough
    */
   throughTranslucent?: boolean;
 }
@@ -576,6 +579,8 @@ export interface ItemLookState {
   edgeColor?: Rgba;
   /** 0.9.0: 외곽선 색(setItemProfileColor) */
   profileColor?: Rgba;
+  /** 0.24.0: 반투명 그물 너머 고르기(throughTranslucent)가 이 그물 면에서 멈춘다(setItemPickOpaque — 켰을 때만 true) */
+  pickOpaque?: boolean;
 }
 
 interface LookState {
@@ -585,6 +590,7 @@ interface LookState {
   matrix?: Float64Array;
   edgeColor?: Rgba;
   profileColor?: Rgba;
+  pickOpaque?: boolean;
 }
 
 /** setLighting 선택 */
@@ -654,7 +660,8 @@ export interface PickOptions {
   /**
    * 0.23.0: 반투명 그물(투명도 < 1 — 그물 색 알파·setItemOpacity·setItemColor)의 면을 지나 고른다. 광선이 그 뒤에서 불투명 그물 면(단면의 잘린 면 채움 포함)을 맞으면
    * 가장 앞의 불투명 면을, 반투명 면만 맞으면 예전처럼 가장 앞의 반투명 면을 고른다. 선분·점·윤곽선 고르기와 가림은 그대로다(반투명 면은 원래 선분·점을 가리지 않는다).
-   * meshesOnly와 함께 줄 수 있다. 주지 않거나 false면 0.22.0 그대로
+   * meshesOnly와 함께 줄 수 있다. 주지 않거나 false면 0.22.0 그대로.
+   * 0.24.0: setItemPickOpaque로 켠 그물은 반투명이어도 지나가지 않고 그 면에서 멈춘다
    */
   throughTranslucent?: boolean;
 }
@@ -1013,6 +1020,8 @@ export class Viewer3d {
   private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number } | null = null;
   /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
   private annoLabels: (MeasureLabelRect | null)[] = [];
+  /** 마지막 화면 덧그림에서 기본 자리가 아닌 곳에 그린 글상자가 있는지(0.24.0 — 그림 저장이 화면 덧그림을 그대로 쓰지 않고 기본 자리로 다시 그린다) */
+  private labelsShifted = false;
   /** 마주 보는 그물(Mesh3d.billboard)과 그 돌림을 마지막으로 맞춘 카메라 */
   private bbList: Mesh3d[] = [];
   private bbCamKey = '';
@@ -2642,6 +2651,26 @@ export class Viewer3d {
     return n;
   }
 
+  /**
+   * 측정 점 고르기의 반투명 그물 너머 고르기만 바꾼다(0.24.0 — setMeasureSnap의 throughTranslucent와 같은 값). 측정 중 반투명 보기를 켜고 끌 때
+   * setMeasureSnap을 다시 주면 Shift·앱 단추 잠금, 끌어온 점, 나란함 기준 선분이 풀리므로 그 대신 쓴다. 찍은 점·미리 보기 잠금·끌어온 점·나란함 기준·
+   * 다듬기 기억(refine·refineFace — 입력에 면이 들어 있어 고른 면이 바뀌면 열쇠가 다르다)·pointsFor 기억·붙잡기 한도·다른 붙잡기 선택은 그대로 두고,
+   * 측정 미리 보기가 보이면 그 자리에서 다시 구한다(다음 미리 보기부터 새 값). measureSnap.throughTranslucent도 따라 바뀐다(끄면 그 필드를 뺀다).
+   * 끄더라도 붙잡기는 켜진 채다(이것만 줘서 켠 붙잡기도 — 끄려면 setMeasureSnap(null)). 붙잡기가 꺼져 있으면 아무것도 하지 않고 false를 돌려준다
+   * (그때는 setMeasureSnap({ throughTranslucent: true })로 켠다). 붙잡기가 켜져 있으면 true
+   */
+  setMeasurePickThrough(on: boolean): boolean {
+    const so = this.snapOpt;
+    if (!so) return false;
+    const next = !!on;
+    if (so.through === next) return true;
+    so.through = next;
+    if (next) so.src.throughTranslucent = true;
+    else delete so.src.throughTranslucent;
+    this.rehover();
+    return true;
+  }
+
   /** 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때) */
   private rehover(): void {
     if (this.measuring && this.measureHover && this.lastHoverAt && !this.drag) {
@@ -2897,7 +2926,7 @@ export class Viewer3d {
    * 측정 거리 글상자의 화면 자리(0.12.0 — 캔버스 왼쪽 위 기준 CSS 화소, 복사본): 첫 점과 미리 보기(또는 두 점째) 사이 거리 글을 마지막으로 그린 자리.
    * 앱이 커서 옆에 제 툴팁을 띄울 때 이 상자와 겹치지 않게 옮긴다. 그리지 않았으면(측정 중이 아님, 첫 점이나 미리 보기가 없음) null.
    * 그리기는 requestAnimationFrame에서 하므로 상태를 바꾼 직후 읽으려면 renderNow() 뒤에 읽는다. 그림 저장(toBlob·renderImage)의 덧그림은 바꾸지 않는다.
-   * 0.13.0: setMeasureLabelAvoid로 비켜 그렸으면 옮긴 자리
+   * 0.13.0: setMeasureLabelAvoid로 비켜 그렸으면 옮긴 자리. 0.24.0: 앱 측정 덧그림 글상자(annotationLabelRects)와 겹치면 그것을 비킨 자리
    */
   get measureLabelRect(): MeasureLabelRect | null {
     const r = this.measureLabel;
@@ -2913,7 +2942,8 @@ export class Viewer3d {
    * 화면 덧그림에만 쓰고 그림 저장(toBlob·renderImage)은 기본 자리에 그린다. 사각형은 캔버스 왼쪽 위 기준 CSS 화소이고, 앱의 십자선·툴팁이
    * 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). null·빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지워도 남는다.
    * 0.23.0: 앱 측정 덧그림(setAnnotations)의 글상자도 이 사각형을 같은 차례로 비켜 그린다(커서 둘레는 보지 않는다 — annotationLabelRects).
-   * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다
+   * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다.
+   * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
@@ -2944,6 +2974,7 @@ export class Viewer3d {
   /**
    * 앱 측정 덧그림(setAnnotations)의 글상자를 마지막으로 화면에 그린 자리(0.23.0 — 덧그림 차례대로, 캔버스 왼쪽 위 기준 CSS 화소, 복사본).
    * 글자 상자가 없거나(빈 label), 기준점이 화면 밖이거나, 가려서 그리지 않은 것은 null. setMeasureLabelAvoid의 사각형이 있으면 그것을 비켜 그린 자리다.
+   * 0.24.0: 덧그림 차례로 놓아 앞 차례 글상자와 겹치면 뒤 글상자가 같은 차례(placeLabelAmong)로 비킨 자리다(겹치지 않으면 0.23.0 자리).
    * 그리기는 requestAnimationFrame에서 하므로 바꾼 직후 읽으려면 renderNow() 뒤에 읽는다
    */
   get annotationLabelRects(): (MeasureLabelRect | null)[] {
@@ -3117,6 +3148,21 @@ export class Viewer3d {
     this.setLook(id, l, false);
   }
 
+  /**
+   * 고르기에서 불투명으로 볼 그물(0.24.0): on이면 반투명 그물 너머 고르기(pick·onPick·측정 붙잡기의 throughTranslucent)가 이 그물 면을 지나가지 않고
+   * 불투명 면처럼 그 면에서 멈춘다 — 판 안 포켓·홈처럼 반투명으로 그리지만 판 너머로 재고 싶은 벽. 그림·투명도·가림(반투명 면은 뒤 선분·점을 가리지 않는다)과
+   * throughTranslucent를 주지 않은 고르기는 그대로다. false면 되돌린다(그물 색·겉모습 투명도로 가른다). 다른 겉모습처럼 장면을 바꾸면(setScene) 비우고,
+   * setMesh로 바꿔도 남는다. 선분·점 묶음 id는 받지만 쓰이지 않는다(면이 없다)
+   */
+  setItemPickOpaque(id: string, on: boolean): void {
+    if (this.disposed) return;
+    const l = this.looks.get(id) ?? {};
+    if ((l.pickOpaque === true) === !!on) return;
+    if (on) l.pickOpaque = true;
+    else delete l.pickOpaque;
+    this.setLook(id, l, false);
+  }
+
   /** 묶음 겉모습(바꾼 것만, 없으면 null) */
   itemLook(id: string): ItemLookState | null {
     const l = this.looks.get(id);
@@ -3127,6 +3173,7 @@ export class Viewer3d {
     if (l.matrix) out.matrix = new Float64Array(l.matrix);
     if (l.edgeColor) out.edgeColor = l.edgeColor;
     if (l.profileColor) out.profileColor = l.profileColor;
+    if (l.pickOpaque) out.pickOpaque = true;
     return out;
   }
 
@@ -3140,7 +3187,7 @@ export class Viewer3d {
 
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
-    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor) this.looks.delete(id);
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor && !l.pickOpaque) this.looks.delete(id);
     else this.looks.set(id, l);
     this.lookChanged(moved);
   }
@@ -3287,8 +3334,9 @@ export class Viewer3d {
     const ctx = c.getContext('2d')!;
     ctx.drawImage(this.canvas, 0, 0);
     // 화면 덧그림을 그대로 쓴다. 다만 거리 글상자를 비켜 그렸으면(0.13.0 — 앱 십자선·툴팁은 그림에 없다) 덧그림만 기본 자리로 다시 그린다
-    // (0.23.0: 앱 측정 덧그림 글상자를 비켜 그렸을 때도)
-    if (this.labelAvoid && ((this.measuring && this.measurePts.length) || (this.annos && this.labelAvoid.rects.length))) this.drawOverlayOn(ctx, this.frame(), this.dpr);
+    // (0.23.0: 앱 측정 덧그림 글상자를 비켜 그렸을 때도, 0.24.0: 글상자끼리 비켜 그렸을 때도)
+    if ((this.labelAvoid && ((this.measuring && this.measurePts.length) || (this.annos && this.labelAvoid.rects.length))) || this.labelsShifted)
+      this.drawOverlayOn(ctx, this.frame(), this.dpr);
     else ctx.drawImage(this.overlay, 0, 0);
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
   }
@@ -3772,7 +3820,7 @@ export class Viewer3d {
   /**
    * 화면 점에서 고르기. 허용 거리는 포인터 종류로 가른다(터치 = touchPickTolerance, 그 밖 = pickTolerance). edges면 윤곽선도.
    * meshesOnly면 그물 면만(0.18.0 축과 면의 교차가 다시 맞춰 볼 때 — 면 위에 그린 선분·점이 그 면을 가리지 않게).
-   * through면 반투명 그물의 면을 지나 고른다(0.23.0 throughTranslucent — 불투명 판정은 겉모습 반영 meshOpaque)
+   * through면 반투명 그물의 면을 지나 고른다(0.23.0 throughTranslucent — 불투명 판정은 겉모습 반영 meshOpaque, 0.24.0 setItemPickOpaque 그물에서는 멈춘다)
    */
   private pickDetail(
     x: number,
@@ -3799,7 +3847,7 @@ export class Viewer3d {
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
-      ...(through ? { throughTranslucent: true, opaque: (m: Mesh3d) => this.meshOpaque(m) } : {}),
+      ...(through ? { throughTranslucent: true, opaque: (m: Mesh3d) => this.meshOpaque(m), pickOpaque: (m: Mesh3d) => this.looks.get(m.id)?.pickOpaque === true } : {}),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
   }
@@ -4316,19 +4364,34 @@ export class Viewer3d {
         if (!k || k.kind !== 'mesh' || k.section || k.id !== t.id || !k.normal || !d!.corners) return false;
         return hiddenByOwnPatch(t.corners, { corners: d!.corners, point: k.point, normal: k.normal }, p, 2 * t.wpp);
       },
+      // 0.24.0 둘째 힌트를 둘지 볼 이웃: 커서 둘레 삼각형(붙잡기 거리 안)에 없을 수 있어 그 삼각형 세 변 가운데의 화면 자리에서 모은다(같은 그물만)
+      (t) => this.edgeNeighbors(f, t),
     );
     return r ? { snap: r, line: near[r.line]! } : null;
   }
 
+  /** 삼각형 t의 세 변 가운데 화면 자리에서 1화소 안의 같은 그물 삼각형(0.24.0 면의 열린 교차 둘째 힌트 — 변을 함께 쓰는 이웃 찾기, 자리마다 6개까지) */
+  private edgeNeighbors(f: ViewFrame, t: NearTriangle): NearTriangle[] {
+    const out: NearTriangle[] = [];
+    const c = t.corners;
+    for (let k = 0; k < 3; k++) {
+      const a = c[k]!, b = c[(k + 1) % 3]!;
+      const s = projectToScreen(f, [(a[0]! + b[0]!) / 2, (a[1]! + b[1]!) / 2, (a[2]! + b[2]!) / 2]);
+      if (!s) continue;
+      for (const n of this.trianglesAround(f, s[0], s[1], 1, 6)) if (n.id === t.id && n.index !== t.index) out.push(n);
+    }
+    return out;
+  }
+
   /** 커서 tolPx 안의 보이는 그물 삼각형(0.22.0 선과 삼각형의 열린 교차 — scenepick.ts trianglesNear)과 그 깊이의 화소 세계 길이 */
-  private trianglesAround(f: ViewFrame, x: number, y: number, tolPx: number): NearTriangle[] {
+  private trianglesAround(f: ViewFrame, x: number, y: number, tolPx: number, max?: number): NearTriangle[] {
     const hits = trianglesNear(f, x, y, this.visibleItems(), {
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
-    }, tolPx);
+    }, tolPx, max);
     return hits.map((h) => {
       const t: NearTriangle = { corners: h.corners, wpp: worldPerPixel(f, h.depth), id: h.id, index: h.index, normal: h.normal };
       if (h.keep) t.keep = h.keep;
@@ -5154,6 +5217,7 @@ export class Viewer3d {
   /** 덧그림(단면 평면·좌표축·덧그림·측정)을 ctx에 CSS 화소 × k 배율로. screen = 화면 덧그림(측정 글상자 자리를 기억한다 — 0.12.0) */
   private drawOverlayOn(ctx: CanvasRenderingContext2D, f: ViewFrame, k: number, screen = false): void {
     ctx.setTransform(k, 0, 0, k, 0, 0);
+    if (screen) this.labelsShifted = false;
     if (this.multiSection) this.drawSectionPlanes(ctx, f);
     else if (this.sec?.plane) this.drawSectionPlane(ctx, f);
     if (this.opts.axes) this.drawTriad(ctx, f);
@@ -5166,12 +5230,15 @@ export class Viewer3d {
    * 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게.
    * 0.23.0: screen(화면 덧그림)이고 setMeasureLabelAvoid의 사각형이 있으면 글상자도 측정 거리 글상자와 같은 차례(placeMeasureLabel)로 비켜 그린다 —
    * 기준점은 글자 상자를 붙일 자리, 거리·반지름이면 두 점을 잇는 선분을 따라서도, 옮길 때는 그 덧그림의 점 표식도 될 수 있으면 가리지 않는다.
-   * 커서 둘레(pointerRadius)는 보지 않는다(커서를 따라다니지 않는 글상자다). 그림 저장은 기본 자리
+   * 커서 둘레(pointerRadius)는 보지 않는다(커서를 따라다니지 않는 글상자다). 그림 저장은 기본 자리.
+   * 0.24.0: 화면 덧그림이면 앞 차례에 그린 덧그림 글상자와도 겹치지 않게 놓는다(placeLabelAmong — 피할 사각형이 없어도)
    */
   private drawAnnotations(ctx: CanvasRenderingContext2D, f: ViewFrame, screen = false): void {
     const A = this.annos!;
     const rects = screen && this.labelAvoid?.rects.length ? this.labelAvoid.rects : null;
     const placed: (MeasureLabelRect | null)[] = screen ? A.list.map(() => null) : [];
+    /** 0.24.0: 앞 차례에 화면에 그린 글상자(뒤 글상자가 비킨다 — 화면 덧그림만) */
+    const before: MeasureLabelRect[] = [];
     const th = this.theme;
     const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
     // 점이 많으면 끄는 동안은 가림을 따지지 않는다(놓으면 다시 그린다)
@@ -5212,16 +5279,25 @@ export class Viewer3d {
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 14;
       const h = lines.length * 16 + 8;
-      // 기본 자리(기준점 오른쪽 위 — placeMeasureLabel의 첫 자리와 한 줄씩 같다)와, 피할 사각형이 있으면 비킨 자리
+      // 기본 자리(기준점 오른쪽 위 — placeMeasureLabel의 첫 자리와 한 줄씩 같다)와, 피할 사각형이 있으면 비킨 자리.
+      // 0.24.0: 화면 덧그림이면 앞 차례에 그린 덧그림 글상자와도 겹치지 않게(placeLabelAmong — 겹치지 않으면 0.23.0 자리)
       let avoid: LabelAvoidAreas | null = null;
       let seg: [V3, V3] | null = null;
-      if (rects) {
+      let soft: LabelCircle[] = [];
+      if (rects || before.length) {
         const ds = g.dots.map((p) => projectToScreen(f, p)).filter((s): s is V3 => !!s);
         if ((an.kind === 'distance' || an.kind === 'radius') && ds.length === 2) seg = [ds[0]!, ds[1]!];
-        avoid = { rects, soft: ds.map((s) => ({ x: s[0], y: s[1], r: LABEL_POINT_R })) };
+        soft = ds.map((s) => ({ x: s[0], y: s[1], r: LABEL_POINT_R }));
+        if (rects) avoid = { rects, soft };
       }
-      const { x, y } = placeMeasureLabel(at, { width: w, height: h }, { width: this.cssW, height: this.cssH }, avoid, seg);
-      if (screen) placed[i] = { x, y, width: w, height: h };
+      const view = { width: this.cssW, height: this.cssH };
+      const { x, y } = screen ? placeLabelAmong(at, { width: w, height: h }, view, avoid, before, seg, soft) : placeMeasureLabel(at, { width: w, height: h }, view, avoid, seg);
+      if (screen) {
+        placed[i] = { x, y, width: w, height: h };
+        before.push(placed[i]!);
+        const d = placeMeasureLabel(at, { width: w, height: h }, view);
+        if (d.x !== x || d.y !== y) this.labelsShifted = true;
+      }
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
@@ -5440,9 +5516,18 @@ export class Viewer3d {
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((s) => ctx.measureText(s).width)) + 14;
       const h = lines.length * 16 + 8;
-      // 기본 자리는 두 점 화면 가운데의 오른쪽 위(캔버스 안으로 당김). 화면 덧그림이고 앱이 피할 자리를 줬으면 비켜 그린다(0.13.0)
-      const { x, y } = placeMeasureLabel(at, { width: w, height: h }, { width: this.cssW, height: this.cssH }, screen ? this.labelAvoidAreas(seg) : null, seg);
-      if (screen) this.measureLabel = { x, y, width: w, height: h };
+      // 기본 자리는 두 점 화면 가운데의 오른쪽 위(캔버스 안으로 당김). 화면 덧그림이고 앱이 피할 자리를 줬으면 비켜 그린다(0.13.0).
+      // 0.24.0: 화면 덧그림이면 앱 측정 덧그림 글상자(먼저 그린다)와도 겹치지 않게(placeLabelAmong — 겹치지 않으면 0.23.0 자리)
+      const size = { width: w, height: h }, view = { width: this.cssW, height: this.cssH };
+      let x: number, y: number;
+      if (screen) {
+        const annos = this.annoLabels.filter((r): r is MeasureLabelRect => !!r);
+        const soft = seg ? seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R })) : null;
+        ({ x, y } = placeLabelAmong(at, size, view, this.labelAvoidAreas(seg), annos, seg, soft));
+        this.measureLabel = { x, y, width: w, height: h };
+        const d = placeMeasureLabel(at, size, view);
+        if (d.x !== x || d.y !== y) this.labelsShifted = true;
+      } else ({ x, y } = placeMeasureLabel(at, size, view, null, seg));
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = th.measure;
       ctx.lineWidth = 1;

@@ -907,7 +907,9 @@ export interface TrackTriangle {
  * 선과 삼각형의 열린 교차 후보(0.22.0 openFaceCandidates): 코어 점(선 위에서 삼각형 무게중심에 가장 가까운 점 — 세계 축이면 남은 두 좌표가 지나는 점 그대로),
  * 받은 lines 안 번호, 삼각형(받은 tris의 그 객체), 선과 삼각형 사이 가장 가까운 거리(세계), 커서와 코어 점의 화면 거리.
  * 0.23.0: reachPx = 선에서 그 삼각형 위 곡면 조각 자리(삼각형 평면에 내린 발이 삼각형 안, 평면에서 OPEN_FACE_CHORD × 가장 긴 변 안)인 조각과 커서의 화면 거리.
- * 받는 점은 그 조각 위이므로 커서에서 이보다 가까울 수 없다
+ * 받는 점은 그 조각 위이므로 커서에서 이보다 가까울 수 없다.
+ * 0.24.0: 선이 그 삼각형 위 곡면 조각을 두 번 지날 수 있으면(선이 곡면에 접하는 방향이 그 삼각형 안에 있다) 그 선·삼각형의 후보 모두 twice = true,
+ * 그 가운데 더한 둘째 힌트면 twin = true(아니면 이 필드들이 없다) — twin의 p는 선에서 그 조각 자리인 조각(reachPx의 조각)의 한 끝이다
  */
 export interface OpenFaceCandidate<T extends TrackTriangle = TrackTriangle> {
   p: V3;
@@ -916,6 +918,8 @@ export interface OpenFaceCandidate<T extends TrackTriangle = TrackTriangle> {
   gap: number;
   distPx: number;
   reachPx: number;
+  twice?: true;
+  twin?: true;
 }
 
 /** 열린 면 교차 결과(0.22.0 openFaceSnap): 받은 점(선 위로 내린 자리), 그 후보의 코어 점·선 번호·삼각형, 커서와 받은 점의 화면 거리 */
@@ -986,6 +990,10 @@ function lineTriClosest(P: readonly number[], e: readonly number[], c: readonly 
  *   (선을 따라 OPEN_FACE_CHORD × 이웃의 가장 긴 변 ÷ 이웃 평면과 선 사잇각의 사인 — 그 안이면 이웃의 코어 교차와 0.19.0 다듬기가 맡는다. 비스듬히 스치는 선은
  *   그물을 뚫는 자리와 곡면을 뚫는 자리가 몇 삼각형 떨어질 수 있어 남긴다), 코어 점이 화면에 투영되지 않는 것(눈 뒤),
  *   0.23.0: 선에서 그 삼각형 위 곡면 조각 자리인 조각(reachPx)이 화면에서 커서 snapPx 밖인 것(받는 점은 그 조각 위·커서에서 snapPx 안이어야 한다 — 0.20.0 열린 교차와 같은 근거)
+ * - 0.24.0 두 번 지날 수 있는 삼각형(twice — faceTwice): 매끈한 이웃(tris 안, 변을 함께 쓰고 법선 사잇각 45° 안)과 사이의 변 법선·그 삼각형 법선이 선 방향과 이루는
+ *   내적이 양·음 모두 있고(곡면이 선과 나란해지는 자리가 그 삼각형을 지난다) 선이 이웃의 먼 꼭짓점 쪽(곡면 안쪽)만이 아니면, 선에서 그 조각 자리인 조각의
+ *   두 끝(reachPx의 조각 [s0, s1])을 같은 선·삼각형의 둘째 힌트(twin)로 더한다. 두 교차는 그 조각 안이라 각 끝에 가까운 쪽이 따로 온다(0.22.0 선분의 둘째 힌트와 같은 틀).
+ *   앞의 후보(무게중심 쪽 힌트)는 0.22.0 그대로다. 이웃은 tris와 around(t)(주면 — 뷰어는 커서에서 먼 이웃을 그 변 가운데 화면 자리에서 모은다)에서 찾는다
  * 커서에 가까운 코어 점부터(같으면 선 → 삼각형 차례). 다듬기 손잡이를 부를 차례와 같다
  */
 export function openFaceCandidates<T extends TrackTriangle>(
@@ -995,6 +1003,7 @@ export function openFaceCandidates<T extends TrackTriangle>(
   x: number,
   y: number,
   snapPx: number,
+  around?: ((t: T) => readonly TrackTriangle[]) | null,
 ): OpenFaceCandidate<T>[] {
   const out: OpenFaceCandidate<T>[] = [];
   if (!lines.length || !tris.length) return out;
@@ -1031,11 +1040,88 @@ export function openFaceCandidates<T extends TrackTriangle>(
       const m = lineFoot(P, e, [(A[0]! + B[0]! + C[0]!) / 3, (A[1]! + B[1]! + C[1]!) / 3, (A[2]! + B[2]! + C[2]!) / 3]);
       const d = screenDistance(f, m, x, y);
       if (d === null) continue;
-      out.push({ p: m, line: li, tri: t, gap: c.gap, distPx: d, reachPx: reach });
+      // 0.24.0 두 번 지날 수 있는 삼각형: 선이 곡면에 접하는 방향이 그 삼각형 안이면(변 법선과 선 방향의 내적이 부호를 바꾼다) 곡면 조각을 들어가고 나오는 두 교차가 있을 수 있다.
+      // 변 법선은 매끈한 이웃과 45° 안이라 그 삼각형 법선에서 22.5° 안이다 — 선이 그보다 가파르면 이웃을 찾지 않는다
+      const twice = Math.abs(dot3(triNormal(t.corners), e)) < TANGENT_STEEP && faceTwice(e, t, around ? [...tris, ...around(t)] : tris, m, tol);
+      const o: OpenFaceCandidate<T> = { p: m, line: li, tri: t, gap: c.gap, distPx: d, reachPx: reach };
+      if (twice) o.twice = true;
+      out.push(o);
+      // 앱은 힌트(point) 둘레의 교차 하나를 주므로 선에서 그 조각 자리인 조각의 두 끝으로 한 번씩 더 묻는다 — 두 교차는 그 조각 안이라
+      // 각 끝에 가까운 쪽이 따로 온다(0.22.0 선분의 둘째 힌트 — 현 끝의 발 — 와 같은 틀). 무게중심 쪽 힌트(0.22.0)는 그대로다.
+      // 힌트는 커서와 상관없이 선과 삼각형으로만 정한다(앱 결과를 기억한다) — 화소 허용치 없이 삼각형 그대로·평면에서 OPEN_FACE_CHORD × 가장 긴 변 안인 조각
+      const hs = twice ? triPrismSpan(P, e, t.corners, OPEN_FACE_CHORD * longestEdge(t.corners), 0) : null;
+      if (hs)
+        for (const s of hs) {
+          const q: V3 = [e[0] === 0 ? P[0]! : P[0]! + e[0]! * s, e[1] === 0 ? P[1]! : P[1]! + e[1]! * s, e[2] === 0 ? P[2]! : P[2]! + e[2]! * s];
+          if (dist3(q, P) <= tol || dist3(q, m) <= tol) continue;
+          const dq = screenDistance(f, q, x, y);
+          if (dq !== null) out.push({ p: q, line: li, tri: t, gap: c.gap, distPx: dq, reachPx: reach, twice: true, twin: true });
+        }
     }
   }
-  // 안정 정렬(같은 거리면 넣은 차례 — 선 → 삼각형)
+  // 안정 정렬(같은 거리면 넣은 차례 — 선 → 삼각형, 한 삼각형에서는 0.22.0 힌트 → 둘째 힌트)
   return out.sort((p, q) => p.distPx - q.distPx);
+}
+
+/** 이웃 삼각형을 곡면을 나눈 같은 면으로 볼 법선 사잇각의 코사인(45° — OPEN_FACE_CHORD의 "한 변이 45°보다 덜 도는 나눔"과 같은 근거) */
+const SMOOTH_COS = Math.SQRT1_2;
+/** 변 법선과 선 방향의 내적을 0으로 볼 허용치(단위 벡터 — float32 좌표의 반올림보다 크게) */
+const TANGENT_EPS = 1e-5;
+/** 삼각형 법선과 선 방향의 내적이 이보다 크면(sin 22.5° — 변 법선이 닿을 수 있는 기울기 밖) 접하는 방향이 그 삼각형 안일 수 없다 */
+const TANGENT_STEEP = Math.sin(Math.PI / 8);
+
+/** 삼각형 단위 법선(넓이 0이면 [0, 0, 0]) */
+function triNormal(c: readonly (readonly number[])[]): V3 {
+  const n = cross3(sub3(c[1]!, c[0]!), sub3(c[2]!, c[0]!));
+  const l = Math.hypot(n[0], n[1], n[2]);
+  return l > 0 ? [n[0] / l, n[1] / l, n[2] / l] : [0, 0, 0];
+}
+
+/**
+ * 방향 e(단위)인 선(힌트 m을 지난다)이 삼각형 t 위 곡면 조각을 두 번 지날 수 있는지(0.24.0 — 면의 열린 교차 둘째 힌트의 조건, 0.22.0 선분 lensSide와 같은 몫).
+ * - 접하는 방향이 그 삼각형 안: t와 변을 함께 쓰는 매끈한 이웃(tris 안, 법선 사잇각 45° 안)마다 변 법선(두 면 법선의 합 — 그 변 둘레 곡면 법선)을 두고,
+ *   t 법선과 그 변 법선들이 선 방향과 이루는 내적이 양·음 모두 있어야 한다(곡면이 선과 나란해지는 자리가 그 삼각형을 지난다 — 볼록한 곡면을 얕게 스치는 선의
+ *   두 교차 가운데쯤). 한쪽 부호뿐이면 선이 곡면을 한 번 지나거나 두 교차가 이웃 삼각형에 나뉜다(구의 적도를 스치는 축 — 적도 변 법선은 축과 수직이다).
+ *   변 법선만 쓰므로 모은 삼각형이 그 꼭짓점 둘레를 다 덮지 않아도 흔들리지 않는다. 매끈한 이웃이 없으면(모른다) false
+ * - 선이 볼록한 쪽: 매끈한 이웃의 먼 꼭짓점은 곡면이 휘어 들어가는 쪽이고 곡면 조각은 그 반대쪽이다. 선(힌트 m)이 그 먼 꼭짓점들과 같은 쪽뿐이면 false
+ */
+function faceTwice(e: readonly number[], t: TrackTriangle, tris: readonly TrackTriangle[], m: readonly number[], tol: number): boolean {
+  const [A, B, C] = t.corners as [readonly number[], readonly number[], readonly number[]];
+  const unitNormal = (c: readonly (readonly number[])[]): V3 | null => {
+    const n = cross3(sub3(c[1]!, c[0]!), sub3(c[2]!, c[0]!));
+    const l = Math.hypot(n[0], n[1], n[2]);
+    return l > 0 ? [n[0] / l, n[1] / l, n[2] / l] : null;
+  };
+  const nt = unitNormal(t.corners);
+  if (!nt) return false;
+  const dots = [dot3(nt, e)];
+  const side = dot3(nt, sub3(m, A));
+  let same = false, other = false;
+  for (let k = 0; k < 3; k++) {
+    const a = [A, B, C][k]!, b = [A, B, C][(k + 1) % 3]!;
+    for (const nb of tris) {
+      if (nb === t || nb.corners.length < 3) continue;
+      const ia = nb.corners.findIndex((W) => dist3(W, a) <= tol), ib = nb.corners.findIndex((W) => dist3(W, b) <= tol);
+      if (ia < 0 || ib < 0 || ia === ib) continue;
+      let nn = unitNormal(nb.corners);
+      if (!nn) continue;
+      const cos = dot3(nn, nt);
+      if (Math.abs(cos) < SMOOTH_COS) continue;
+      if (cos < 0) nn = [-nn[0], -nn[1], -nn[2]];
+      const s: V3 = [nt[0] + nn[0], nt[1] + nn[1], nt[2] + nn[2]];
+      const sl = Math.hypot(s[0], s[1], s[2]);
+      if (sl > 0) dots.push(dot3(s, e) / sl);
+      // 먼 꼭짓점(그 변에 없는 꼭짓점)이 t 평면의 어느 쪽인지
+      const far = nb.corners.find((_, i) => i !== ia && i !== ib)!;
+      const k2 = dot3(nt, sub3(far, A));
+      if (Math.abs(k2) > tol && Math.abs(side) > tol) {
+        if (k2 * side > 0) same = true;
+        else other = true;
+      }
+    }
+  }
+  if (dots.length < 2 || (same && !other)) return false;
+  return Math.max(...dots) > TANGENT_EPS && Math.min(...dots) < -TANGENT_EPS;
 }
 
 /**
@@ -1060,9 +1146,10 @@ export function openFaceSnap<T extends TrackTriangle>(
   snapPx: number,
   refine: (c: OpenFaceCandidate<T>) => readonly number[] | null | undefined,
   visible?: ((p: V3, tri: T) => boolean) | null,
+  around?: ((t: T) => readonly TrackTriangle[]) | null,
 ): OpenFaceSnap<T> | null {
   let best: OpenFaceSnap<T> | null = null;
-  for (const c of openFaceCandidates(f, lines, tris, x, y, snapPx)) {
+  for (const c of openFaceCandidates(f, lines, tris, x, y, snapPx, around)) {
     if (best && c.reachPx >= best.distPx) continue;
     const q = finitePoint(refine(c));
     if (!q) continue;
