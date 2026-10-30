@@ -1111,7 +1111,11 @@ export class Renderer3d {
    * 앱이 다시 줄 때까지 기다리는 무늬('missing')·풀지 못한 무늬는 들지 않는다(앞은 restoreNeed가 센다)
    */
   get uploadBusy(): boolean {
-    if (this.uploading) return true;
+    return this.uploading || this.texturesBusy;
+  }
+
+  /** 무늬를 푸는 중인지(0.29.0 — 줄 선 것·푸는 중·앱이 다시 준 원본을 푸는 중이 있다) */
+  get texturesBusy(): boolean {
     for (const r of this.textures.values()) if (r.state === 'queued' || r.state === 'decoding' || r.state === 'restoring') return true;
     return false;
   }

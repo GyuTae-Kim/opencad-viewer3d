@@ -1281,7 +1281,9 @@ export class Viewer3d {
     renderer.textureBudget = this.opts.textureBudget;
     // 무늬를 다 풀어 올릴 때마다 다시 그린다
     renderer.onTexture = () => {
-      this.invalidate();
+      // 0.29.0: 문맥을 되찾은 뒤 무늬를 잇달아 풀어 올리는 동안은 한 장마다 다시 그리지 않고, 푸는 무늬가 다 끝났을 때 한 번 그린다 —
+      // 그리기가 비싼 큰 모형(소프트웨어 GPU 등)에서 그사이의 그리기가 다음 무늬 올리기를 붙잡아 되찾기가 몇 배~수십 배 늘었다(처음 올릴 때는 그대로)
+      if (!this.restoreWait || !this.renderer.texturesBusy) this.invalidate();
       // 0.29.0: 무늬를 다 풀어 올렸으면 되찾은 뒤 끝 알림
       this.checkRestoreDone();
     };
@@ -1608,7 +1610,11 @@ export class Viewer3d {
    */
   restoreTexture(id: string, src: TextureSource): Promise<boolean> {
     if (!this.gpu) return Promise.resolve(false);
-    return this.renderer.restoreTexture(id, src);
+    // 0.29.0: 되찾은 뒤에는 무늬마다 다시 그리지 않으므로(푸는 무늬가 다 끝날 때 한 번) 풀지 못한 무늬가 마지막이었으면 여기서 그린다
+    return this.renderer.restoreTexture(id, src).then((ok) => {
+      if (!ok && !this.disposed && !this.lost && !this.renderer.texturesBusy) this.invalidate();
+      return ok;
+    });
   }
 
   /** 문맥을 되찾아 장면을 다시 올린 뒤: 다시 받을 것(없으면 빈 목록)을 알린다 */

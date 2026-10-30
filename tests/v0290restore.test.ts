@@ -205,6 +205,39 @@ describe('되찾은 뒤 다시 올리기 끝 알림(0.29.0 onContextRestoreDone�
     expect(v.restorePending).toBe(false);
   });
 
+  it('되찾은 뒤 무늬를 잇달아 풀어 올리는 동안은 한 장마다 다시 그리지 않고 다 끝났을 때 한 번 그린다(처음 올릴 때는 한 장마다 — 0.28.0 그대로)', async () => {
+    const v = view();
+    const inv = vi.spyOn(v as unknown as { invalidate(): void }, 'invalidate');
+    v.setScene(makeScene());
+    inv.mockClear();
+    await until(() => ready(v));
+    // 처음: 무늬 둘이 한 장씩 다시 그린다
+    expect(inv.mock.calls.length).toBe(2);
+    const done = vi.fn();
+    v.onContextRestoreDone(done);
+    lose(v);
+    restore(v);
+    inv.mockClear();
+    await until(() => done.mock.calls.length > 0);
+    expect(inv.mock.calls.length).toBe(1);
+    expect(v.restorePending).toBe(false);
+  });
+
+  it('되찾은 뒤 앱이 준 원본을 풀지 못한 것이 마지막이면 그때 다시 그린다(앞서 올린 무늬가 그려지게)', async () => {
+    const s = makeScene();
+    const v = view();
+    v.setScene(s, { release: true });
+    await until(() => ready(v));
+    lose(v);
+    restore(v);
+    const inv = vi.spyOn(v as unknown as { invalidate(): void }, 'invalidate');
+    const closed = fakeBitmap('격자', 16, 16);
+    closed.close();
+    expect(await v.restoreTexture('격자', closed as unknown as ImageBitmap)).toBe(false);
+    expect(inv).toHaveBeenCalled();
+    expect(v.restoreNeed!.textures).toEqual(['바둑판', '격자']);
+  });
+
   it('되찾은 뒤 새 장면을 주면 그 장면을 다 올렸을 때 온다. 해제한 알림·없앤 뒤는 부르지 않는다', async () => {
     const v = view();
     v.setScene(makeScene(false), { release: { normals: true } });
