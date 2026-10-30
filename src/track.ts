@@ -26,8 +26,9 @@
  * - 0.26.0 끌어온 점에서 나란함·수직 방향(trackDirGuides·trackDirSnap): 기억한 점 P를 지나 기준 선분과 나란한 선,
  *   기준 선분에 수직인 선(P에서 그 직선으로 내린 수직, 축을 수직 평면에 비친 방향) 위에서 커서 광선에 가장 가까운 점
  *   (0.27.0부터 뷰어는 MeasureInference.trackDirs를 켰을 때 끌어온 축과 함께 견준다 — 세계 축)
- * - 0.28.0 그 선이 다른 것과 만나는 점(trackDirMeetSnap — 순수 계산만, 뷰어는 아직 쓰지 않는다): 부르는 쪽이 준 직선(첫 점 축·첫 점의 나란함·다른 끌어온 점의 축)과의
+ * - 0.28.0 그 선이 다른 것과 만나는 점(trackDirMeetSnap): 부르는 쪽이 준 직선(첫 점 축·첫 점의 나란함·다른 끌어온 점의 축)과의
  *   3D 교차(trackPairSnap과 같은 허용치), 선분과의 교차(trackEdgeSnap 규칙), 커서 아래 면을 뚫는 점(axisFaceSnap 규칙)
+ *   (0.29.0부터 뷰어는 MeasureInference.trackDirs { meets: true }일 때 끌어온 점 후보 뒤 차례로 견준다)
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -1389,7 +1390,7 @@ export interface TrackDirMeetOptions<S extends TrackSegment, H extends TrackFace
 }
 
 /**
- * 끌어온 점의 나란함·수직 선이 다른 것과 만나는 점(0.28.0, 순수 — 뷰어 측정 붙잡기에는 아직 넣지 않았다): 기억한 점 P마다 trackDirGuides(P, seg, axes)의 선이
+ * 끌어온 점의 나란함·수직 선이 다른 것과 만나는 점(0.28.0, 순수 — 0.29.0부터 뷰어 MeasureInference.trackDirs { meets }도 쓴다): 기억한 점 P마다 trackDirGuides(P, seg, axes)의 선이
  * - 다른 직선(lines — 첫 점 축·첫 점의 나란함·다른 끌어온 점의 축 등, 부르는 쪽이 준다)과 3D로 만나는 점(두 직선 사이 가장 가까운 자리가 그 깊이에서 화면 반 화소 안 —
  *   0.17.0 trackPairSnap과 같은 허용치. 나란한 직선, 교차가 P 자리거나 그 직선이 지나는 점 자리인 것은 뺀다)
  * - 선분(segs)과 3D로 만나는 점(0.17.0 trackEdgeSnap과 같은 규칙 — 선분 쪽 허용치, 선분 끝점·P 자리·첫 점 자리·잘린 쪽은 빼고 visible로 가림을 묻는다)

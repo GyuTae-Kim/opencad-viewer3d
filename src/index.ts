@@ -50,6 +50,7 @@ export type {
   MeasureTrackDirOptions,
   MeasureTrackOptions,
   NormalizedInference,
+  NormalizedTrackDirs,
   SnapAxis,
   TrackDirEdgeFilter,
 } from './inference';
