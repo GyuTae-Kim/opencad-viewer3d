@@ -47,6 +47,16 @@ export const LABEL_POINT_R = 6;
  */
 export type LabelSpot = 'topRight' | 'topLeft' | 'bottomRight' | 'bottomLeft' | 'center' | 'above' | 'below' | { x: number; y: number };
 
+/** 이름으로 정한 기본 자리(0.27.0 — 기준점을 따라 움직이는 뷰어 글상자가 받는 꼴: LabelSpot에서 앱 자리 { x, y }를 뺀 것) */
+export type LabelSpotName = Exclude<LabelSpot, { x: number; y: number }>;
+
+const SPOT_NAMES: readonly string[] = ['topRight', 'topLeft', 'bottomRight', 'bottomLeft', 'center', 'above', 'below'];
+
+/** 이름 자리인지 고른다(0.27.0): LabelSpotName이면 그 값, 아니면(모르는 문자열·{ x, y }·그 밖) null */
+export function labelSpotName(v: unknown): LabelSpotName | null {
+  return typeof v === 'string' && SPOT_NAMES.includes(v) ? (v as LabelSpotName) : null;
+}
+
 /** placeMeasureLabel·placeLabelAmong 선택(0.26.0) */
 export interface LabelPlaceOptions {
   /**

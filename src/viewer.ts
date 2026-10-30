@@ -99,7 +99,18 @@ import {
   trackEdgeSnap,
   trackPairSnap,
 } from './track';
-import { LABEL_POINT_R, type LabelAvoidAreas, type LabelCircle, type MeasureLabelRect, avoidRect, placeLabelAmong, placeMeasureLabel } from './measurelabel';
+import {
+  LABEL_POINT_R,
+  type LabelAvoidAreas,
+  type LabelCircle,
+  type LabelPlaceOptions,
+  type LabelSpotName,
+  type MeasureLabelRect,
+  avoidRect,
+  labelSpotName,
+  placeLabelAmong,
+  placeMeasureLabel,
+} from './measurelabel';
 import {
   type InferenceLock,
   type InferenceLockInput,
@@ -527,7 +538,7 @@ export interface MeasurePoint {
 }
 
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
-export type { MeasureLabelRect };
+export type { MeasureLabelRect, LabelSpotName };
 
 /**
  * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리)
@@ -537,6 +548,17 @@ export interface MeasureLabelAvoid {
   rects?: readonly MeasureLabelRect[];
   /** 측정 커서(코어가 미리 보기를 구한 포인터 자리) 둘레에서 피할 반지름(CSS 화소). 미리 보기가 있을 때만 본다. 0·없으면 커서를 보지 않는다 */
   pointerRadius?: number;
+}
+
+/**
+ * 뷰어 글상자의 기본 자리(0.27.0, Viewer3d.setMeasureLabelSpot): 순수 placeMeasureLabel·placeLabelAmong의 first와 같은 뜻의 이름 자리
+ * (기준점을 따라 움직이므로 앱 자리 { x, y }는 받지 않는다). 없는 필드는 기준점 오른쪽 위(0.26.0과 같다)
+ */
+export interface MeasureLabelSpot {
+  /** 측정 거리 글상자(기준점 = 두 점 화면 가운데) */
+  measure?: LabelSpotName;
+  /** 앱 측정 덧그림(setAnnotations) 글상자(기준점 = 덧그림의 글자 상자 자리) */
+  annotations?: LabelSpotName;
 }
 
 export interface GroupInfo {
@@ -1063,6 +1085,8 @@ export class Viewer3d {
   private measureLabel: MeasureLabelRect | null = null;
   /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
   private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number } | null = null;
+  /** 0.27.0 뷰어 글상자 기본 자리(setMeasureLabelSpot — 준 것만, 없으면 null = 0.26.0 그대로 오른쪽 위) */
+  private labelSpot: MeasureLabelSpot | null = null;
   /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
   private annoLabels: (MeasureLabelRect | null)[] = [];
   /** 마지막 화면 덧그림에서 기본 자리가 아닌 곳에 그린 글상자가 있는지(0.24.0 — 그림 저장이 화면 덧그림을 그대로 쓰지 않고 기본 자리로 다시 그린다) */
@@ -3144,6 +3168,43 @@ export class Viewer3d {
     const r: MeasureLabelAvoid = { rects: a.rects.map((x) => ({ ...x })) };
     if (a.pointerRadius) r.pointerRadius = a.pointerRadius;
     return r;
+  }
+
+  /**
+   * 뷰어 글상자의 기본 자리(0.27.0): 측정 거리 글상자(measure)·앱 측정 덧그림 글상자(annotations)를 기준점 오른쪽 위 대신 앱이 정한 자리부터 놓는다 —
+   * 순수 placeMeasureLabel·placeLabelAmong의 first와 같은 뜻('topRight'·'topLeft'·'bottomRight'·'bottomLeft'·'center'·'above'·'below' — 캔버스 안으로 당긴다).
+   * 문자열 하나면 둘 모두, 객체면 준 것만. 피할 자리(setMeasureLabelAvoid)·먼저 놓인 글상자와 겹치면 0.26.0 first와 같은 차례(기본 자리 → 기준점 네 귀 → 선분 위 →
+   * 피할 영역 위·아래)로 비키고, 모두 막히면 그 기본 자리다. 그림 저장(toBlob·renderImage)도 이 자리에 그린다(비키지는 않는다).
+   * 모르는 값·앱 자리 { x, y }는 그 글상자에 주지 않은 것으로 본다. null·빈 객체면 끈다(0.26.0과 같은 오른쪽 위). 장면을 바꿔도·측정을 지워도 남는다
+   */
+  setMeasureLabelSpot(spot: LabelSpotName | MeasureLabelSpot | null): void {
+    let next: MeasureLabelSpot | null = null;
+    if (typeof spot === 'string') {
+      const s = labelSpotName(spot);
+      if (s) next = { measure: s, annotations: s };
+    } else if (spot && typeof spot === 'object') {
+      const m = labelSpotName(spot.measure), a = labelSpotName(spot.annotations);
+      if (m || a) {
+        next = {};
+        if (m) next.measure = m;
+        if (a) next.annotations = a;
+      }
+    }
+    const prev = this.labelSpot;
+    this.labelSpot = next;
+    if (prev?.measure === next?.measure && prev?.annotations === next?.annotations) return;
+    if ((this.measuring && this.measurePts.length) || this.annos) this.invalidate();
+  }
+
+  /** 지금 뷰어 글상자의 기본 자리(0.27.0 — 준 것만의 복사본, 없으면 null) */
+  get measureLabelSpot(): MeasureLabelSpot | null {
+    return this.labelSpot ? { ...this.labelSpot } : null;
+  }
+
+  /** 0.27.0 그 글상자의 기본 자리 선택(없으면 undefined — 0.26.0과 같은 부르기) */
+  private spotOpts(which: 'measure' | 'annotations'): LabelPlaceOptions | undefined {
+    const s = this.labelSpot?.[which];
+    return s ? { first: s } : undefined;
   }
 
   /**
@@ -5441,6 +5502,7 @@ export class Viewer3d {
     const placed: (MeasureLabelRect | null)[] = screen ? A.list.map(() => null) : [];
     /** 0.24.0: 앞 차례에 화면에 그린 글상자(뒤 글상자가 비킨다 — 화면 덧그림만) */
     const before: MeasureLabelRect[] = [];
+    const spot = this.spotOpts('annotations');
     const th = this.theme;
     const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
     // 점이 많으면 끄는 동안은 가림을 따지지 않는다(놓으면 다시 그린다)
@@ -5493,11 +5555,14 @@ export class Viewer3d {
         if (rects) avoid = { rects, soft };
       }
       const view = { width: this.cssW, height: this.cssH };
-      const { x, y } = screen ? placeLabelAmong(at, { width: w, height: h }, view, avoid, before, seg, soft) : placeMeasureLabel(at, { width: w, height: h }, view, avoid, seg);
+      // 0.27.0: 앱이 정한 기본 자리(setMeasureLabelSpot annotations — 없으면 0.26.0과 같은 부르기)
+      const { x, y } = screen
+        ? placeLabelAmong(at, { width: w, height: h }, view, avoid, before, seg, soft, spot)
+        : placeMeasureLabel(at, { width: w, height: h }, view, avoid, seg, spot);
       if (screen) {
         placed[i] = { x, y, width: w, height: h };
         before.push(placed[i]!);
-        const d = placeMeasureLabel(at, { width: w, height: h }, view);
+        const d = placeMeasureLabel(at, { width: w, height: h }, view, null, null, spot);
         if (d.x !== x || d.y !== y) this.labelsShifted = true;
       }
       ctx.fillStyle = th.textBg;
@@ -5721,15 +5786,17 @@ export class Viewer3d {
       // 기본 자리는 두 점 화면 가운데의 오른쪽 위(캔버스 안으로 당김). 화면 덧그림이고 앱이 피할 자리를 줬으면 비켜 그린다(0.13.0).
       // 0.24.0: 화면 덧그림이면 앱 측정 덧그림 글상자(먼저 그린다)와도 겹치지 않게(placeLabelAmong — 겹치지 않으면 0.23.0 자리)
       const size = { width: w, height: h }, view = { width: this.cssW, height: this.cssH };
+      // 0.27.0: 앱이 정한 기본 자리(setMeasureLabelSpot measure — 없으면 0.26.0과 같은 부르기)
+      const spot = this.spotOpts('measure');
       let x: number, y: number;
       if (screen) {
         const annos = this.annoLabels.filter((r): r is MeasureLabelRect => !!r);
         const soft = seg ? seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R })) : null;
-        ({ x, y } = placeLabelAmong(at, size, view, this.labelAvoidAreas(seg), annos, seg, soft));
+        ({ x, y } = placeLabelAmong(at, size, view, this.labelAvoidAreas(seg), annos, seg, soft, spot));
         this.measureLabel = { x, y, width: w, height: h };
-        const d = placeMeasureLabel(at, size, view);
+        const d = placeMeasureLabel(at, size, view, null, null, spot);
         if (d.x !== x || d.y !== y) this.labelsShifted = true;
-      } else ({ x, y } = placeMeasureLabel(at, size, view, null, seg));
+      } else ({ x, y } = placeMeasureLabel(at, size, view, null, seg, spot));
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = th.measure;
       ctx.lineWidth = 1;
