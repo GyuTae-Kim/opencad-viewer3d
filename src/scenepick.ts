@@ -93,6 +93,11 @@ export interface ScenePickOptions {
   itemModel?: (it: LineSet3d | PointSet3d) => ArrayLike<number> | undefined;
   /** 고른 선분·윤곽선의 가운데 점에도 측정 점을 붙잡는다(0.8.0, 기본 false — 끝점과 같은 거리 snap 안에서 더 가까운 것) */
   midpoints?: boolean;
+  /**
+   * 0.23.0: 반투명 그물(opaque가 false — 없으면 color 알파 < 0.999)의 면을 지나 고른다. 광선이 그 뒤에서 불투명 그물 면(잘린 면 채움 포함)을 맞으면
+   * 가장 앞의 불투명 면을 고르고, 반투명 면만 맞으면 예전처럼 가장 앞의 반투명 면이다. 선분·점·윤곽선과 가림(occlude — 원래 불투명 면만 가린다)은 그대로다
+   */
+  throughTranslucent?: boolean;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
@@ -181,6 +186,8 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
     if (cap && (o.opaque ? o.opaque(cap.m) : cap.m.color[3] >= 0.999) && o.occlude) occl = cap.depth * (1 + 1e-4) + 1e-9;
   }
   if (!multi && (!clip || interval) && !cap) {
+    // 0.23.0 throughTranslucent: 가장 앞의 불투명 면을 따로 기억해 있으면 그것을 고른다
+    let solid: { m: Mesh3d; h: NonNullable<ReturnType<typeof pickMeshRay>> } | null = null;
     for (const m of items.meshes) {
       if (!boxHit(bounds(m))) continue;
       const bvh = o.bvh('triangle', m.positions, m.indices);
@@ -188,8 +195,11 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval, o.hidden?.(m));
       if (!h) continue;
       if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
-      if (o.occlude && (o.opaque ? o.opaque(m) : m.color[3] >= 0.999)) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
+      const opaque = o.opaque ? o.opaque(m) : m.color[3] >= 0.999;
+      if (o.throughTranslucent && opaque && (!solid || h.depth < solid.h.depth)) solid = { m, h };
+      if (o.occlude && opaque) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
     }
+    if (solid) mesh = solid;
   }
 
   // 점
@@ -530,6 +540,7 @@ function pickMeshesMulti(
   bounds: (it: Mesh3d) => Box3,
 ): { mesh: { m: Mesh3d; h: NonNullable<ReturnType<typeof pickMeshRay>> } | null; cap: { m: Mesh3d; point: V3; depth: number; n: V3 } | null; occl: number } {
   let mesh: { m: Mesh3d; h: NonNullable<ReturnType<typeof pickMeshRay>> } | null = null;
+  let solid: { m: Mesh3d; h: NonNullable<ReturnType<typeof pickMeshRay>> } | null = null;
   let occl = Infinity;
   const groups = new Map<string, { m: Mesh3d; n: number; t0: number; plane: Readonly<Plane4> }>();
   for (const m of items.meshes) {
@@ -562,8 +573,12 @@ function pickMeshesMulti(
     const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, model, pl.length ? [iv.t0, iv.t1] : null, o.hidden?.(m));
     if (!h) continue;
     if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
-    if (o.occlude && (o.opaque ? o.opaque(m) : m.color[3] >= 0.999)) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
+    const opaque = o.opaque ? o.opaque(m) : m.color[3] >= 0.999;
+    if (o.throughTranslucent && opaque && (!solid || h.depth < solid.h.depth)) solid = { m, h };
+    if (o.occlude && opaque) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
   }
+  // 0.23.0 throughTranslucent: 가장 앞의 불투명 면이 있으면 그것(잘린 면 채움과는 그 면으로 견준다)
+  if (solid) mesh = solid;
   let cap: { m: Mesh3d; point: V3; depth: number; n: V3 } | null = null;
   for (const e of groups.values()) {
     if (e.n % 2 !== 1) continue;
@@ -573,8 +588,8 @@ function pickMeshesMulti(
     const depth = viewDepth(f, point);
     if (!cap || depth < cap.depth) cap = { m: e.m, point, depth, n };
   }
-  // 잘린 면이 그물 맞음보다 앞이면 잘린 면(아니면 그물)
-  if (cap && mesh && mesh.h.depth < cap.depth) cap = null;
+  // 잘린 면이 그물 맞음보다 앞이면 잘린 면(아니면 그물). throughTranslucent인데 맞은 그물이 반투명뿐이면 잘린 면(불투명)이 이긴다
+  if (cap && mesh && mesh.h.depth < cap.depth && !(o.throughTranslucent && !solid)) cap = null;
   if (cap) {
     if ((o.opaque ? o.opaque(cap.m) : cap.m.color[3] >= 0.999) && o.occlude) occl = Math.min(occl, cap.depth * (1 + 1e-4) + 1e-9);
     mesh = null;

@@ -13,15 +13,21 @@ export const USAGE = `쓰는 법: npm run pixels -- --base <git 판> [선택]
   --port <N>       비교 페이지를 내줄 포트(기본 0 = 아무 빈 포트, 127.0.0.1에만)
   --chrome <경로>  Chrome 실행 파일(기본 CHROME_PATH 또는 흔한 자리)
   --keep-shots     같은 장면의 그림·값도 out/shots/에 남긴다
+  --timeout <초>   장면·값 묶음 하나를 찍는 CDP 한도(기본 120, 환경 변수 PIXELS_TIMEOUT도 된다 — 부하가 높은 기계에서 늘린다.
+                   비교 페이지 준비 한도는 그 1/4과 30초 가운데 긴 것)
 
 끝 값: 0 = 모두 같음(불안정·새 장면은 알리기만), 1 = 다른 장면·값 또는 사라진 장면,
        2 = 도구 오류나 head 장면 예외(비교 페이지 scripts/pixels/page.ts를 함께 고친다)`;
 
+/** 장면·값 묶음 하나를 찍는 CDP 한도 기본값(초) */
+export const DEFAULT_TIMEOUT_S = 120;
+
 /**
  * @param {string[]} argv
- * @returns {{ help: true } | { help: false; base: string; head: string | null; out: string | null; runs: number; size: { w: number; h: number }; only: RegExp | null; port: number; chrome: string | null; keepShots: boolean }}
+ * @param {Record<string, string | undefined>} [env] 환경 변수(PIXELS_TIMEOUT — --timeout이 먼저다)
+ * @returns {{ help: true } | { help: false; base: string; head: string | null; out: string | null; runs: number; size: { w: number; h: number }; only: RegExp | null; port: number; chrome: string | null; keepShots: boolean; timeoutMs: number }}
  */
-export function readArgs(argv) {
+export function readArgs(argv, env = {}) {
   const { values } = parseArgs({
     args: argv,
     allowPositionals: false,
@@ -35,6 +41,7 @@ export function readArgs(argv) {
       port: { type: 'string' },
       chrome: { type: 'string' },
       'keep-shots': { type: 'boolean' },
+      timeout: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -56,6 +63,9 @@ export function readArgs(argv) {
       throw new Error(`--only 정규식이 틀렸습니다: ${values.only}`);
     }
   }
+  const ts = values.timeout ?? env.PIXELS_TIMEOUT;
+  const timeout = ts === undefined || ts === '' ? DEFAULT_TIMEOUT_S : Number(ts);
+  if (!Number.isFinite(timeout) || timeout < 10 || timeout > 3600) throw new Error(`--timeout(PIXELS_TIMEOUT)은 10~3600초: ${ts}`);
   return {
     help: false,
     base: values.base,
@@ -67,8 +77,12 @@ export function readArgs(argv) {
     port,
     chrome: values.chrome ?? null,
     keepShots: !!values['keep-shots'],
+    timeoutMs: Math.round(timeout * 1000),
   };
 }
+
+/** 비교 페이지가 준비되기를 기다리는 한도(ms): CDP 한도의 1/4과 30초 가운데 긴 것(기본 30초 — 0.22.0까지와 같다) @param {number} timeoutMs */
+export const readyWaitMs = (timeoutMs) => Math.max(30_000, Math.round(timeoutMs / 4));
 
 /** 판 이름 → 폴더 이름에 쓸 조각 @param {string} ref */
 export const slug = (ref) => ref.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'ref';

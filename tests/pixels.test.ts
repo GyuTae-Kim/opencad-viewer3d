@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { readArgs, slug } from '../scripts/pixels/args.mjs';
+import { readArgs, readyWaitMs, slug } from '../scripts/pixels/args.mjs';
 import { chromeArgs, findChrome } from '../scripts/pixels/chrome.mjs';
 import { classify, countStatuses, exitCode, FAILING, markdown, valueDiff } from '../scripts/pixels/compare.mjs';
 import { gitSource, listTree, resolveCommit } from '../scripts/pixels/gitsrc.mjs';
@@ -206,6 +206,20 @@ describe('인자', () => {
     if (b.help) throw new Error('도움말이 아니다');
     expect(b.only?.test('base-shaded')).toBe(true);
     expect(readArgs(['--help'])).toEqual({ help: true });
+  });
+
+  it('CDP 한도(0.23.0): 기본 120초(CI 그대로), --timeout이 PIXELS_TIMEOUT보다 먼저, 페이지 준비 한도는 그 1/4과 30초 가운데 긴 것', () => {
+    expect(readArgs(['--base', 'x'])).toMatchObject({ timeoutMs: 120_000 });
+    expect(readArgs(['--base', 'x'], {})).toMatchObject({ timeoutMs: 120_000 });
+    expect(readArgs(['--base', 'x'], { PIXELS_TIMEOUT: '' })).toMatchObject({ timeoutMs: 120_000 });
+    expect(readArgs(['--base', 'x'], { PIXELS_TIMEOUT: '600' })).toMatchObject({ timeoutMs: 600_000 });
+    expect(readArgs(['--base', 'x', '--timeout', '300'], { PIXELS_TIMEOUT: '600' })).toMatchObject({ timeoutMs: 300_000 });
+    expect(readArgs(['--base', 'x', '--timeout', '90.5'])).toMatchObject({ timeoutMs: 90_500 });
+    for (const bad of ['5', '4000', 'abc', '-1']) expect(() => readArgs(['--base', 'x', '--timeout', bad])).toThrow(/--timeout/);
+    expect(() => readArgs(['--base', 'x'], { PIXELS_TIMEOUT: 'zz' })).toThrow(/PIXELS_TIMEOUT/);
+    expect(readyWaitMs(120_000)).toBe(30_000);
+    expect(readyWaitMs(60_000)).toBe(30_000);
+    expect(readyWaitMs(600_000)).toBe(150_000);
   });
 
   it('틀린 인자는 알린다', () => {

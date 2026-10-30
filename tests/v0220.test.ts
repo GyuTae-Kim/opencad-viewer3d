@@ -136,7 +136,7 @@ describe('openEdgeCandidates·openEdgeSnap: 한 토막 활꼴을 두 번 지나�
     expect(a).toHaveLength(1);
     expect(a[0]).not.toHaveProperty('twice');
     expect(a[0]).not.toHaveProperty('twin');
-    expect(Object.keys(a[0]!).sort()).toEqual(['distPx', 'gap', 'line', 'p', 'seg']);
+    expect(Object.keys(a[0]!).sort()).toEqual(['distPx', 'gap', 'line', 'p', 'reachPx', 'seg']);
     // 토막 1(45°–75°)은 위 선이 75° 끝 둘레만 스친다(현 가운데에서는 활꼴 높이 한도보다 멀다)
     const flat = [{ from: [-50, 29.2, 0], dir: [1, 0.01, 0] }];
     const [x1, y1] = at(vtx(2));
@@ -227,17 +227,25 @@ describe('openFaceCandidates·openFaceSnap(선과 삼각형의 열린 교차)', 
       expect(axisFaceSnap(f, [{ from: UP, axis: 'z' }], x + 1, y + 2, SNAP, hit, () => null)).toBeNull();
     }
     const cs = openFaceCandidates(f, lines, near, x + 1, y + 2, SNAP);
-    expect(cs.length).toBeGreaterThanOrEqual(2);
+    expect(cs.length).toBeGreaterThanOrEqual(1);
     for (const c of cs) {
       expect(c.gap).toBeGreaterThan(0.5 * c.tri.wpp);
       expect(c.gap).toBeLessThanOrEqual(OPEN_FACE_CHORD * Math.max(...[0, 1, 2].map((k) => dist(c.tri.corners[k]!, c.tri.corners[(k + 1) % 3]!))));
       // 코어 점은 축 위(남은 두 좌표는 지나는 점 그대로)이고 그 삼각형 무게중심 높이
       expect([c.p[0], c.p[1]]).toEqual([UP[0], UP[1]]);
       expect(c.p[2]).toBeCloseTo((c.tri.corners[0]![2]! + c.tri.corners[1]![2]! + c.tri.corners[2]![2]!) / 3, 9);
-      expect(Object.keys(c).sort()).toEqual(['distPx', 'gap', 'line', 'p', 'tri']);
+      // 0.23.0: 그 삼각형 위 곡면 조각 자리인 선 조각과 커서의 화면 거리(reachPx — 붙잡기 거리 안만 남는다)
+      expect(Object.keys(c).sort()).toEqual(['distPx', 'gap', 'line', 'p', 'reachPx', 'tri']);
+      expect(c.reachPx).toBeLessThanOrEqual(SNAP);
+      expect(c.p[2]).toBeGreaterThan(0);
     }
     // 커서에 가까운 차례
     for (let i = 1; i < cs.length; i++) expect(cs[i]!.distPx).toBeGreaterThanOrEqual(cs[i - 1]!.distPx);
+    // 아래 근 둘레를 가리키면 아래 칸 삼각형이 후보다(위 근 둘레에서는 그 조각이 커서에서 붙잡기 거리 밖이라 묻지 않는다 — 0.22.0은 둘 다 물었다)
+    const [lx, ly] = at(LOW);
+    const low = openFaceCandidates(f, lines, near, lx + 1, ly + 2, SNAP);
+    expect(low.length).toBeGreaterThanOrEqual(1);
+    expect(low.every((c) => c.p[2] < 0 && c.reachPx <= SNAP)).toBe(true);
   });
 
   it('앱이 준 구 위 교차(무게중심 쪽 힌트에 가까운 근)를 받는다: 위 근은 위 칸 삼각형, 아래 근은 아래 칸 삼각형 — 커서 쪽 하나', () => {
