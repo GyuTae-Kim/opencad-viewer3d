@@ -23,6 +23,7 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 큰 좌표(예: 1e6 mm대): 묶음 원점(`origin`)을 double 행렬로 합쳐 그려 떨리지 않음
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 장면 전체를 다시 주지 않고 그물 하나만 넣기·바꾸기·빼기(`setMesh`·`removeMesh` — 그 그물의 GPU 버퍼·BVH만 다시, 바뀐 정점 구간만 올리기도)
+- 큰 모형 메모리: 놓기 선택을 주면 올린 뒤 법선·무늬 좌표·무늬 원본을 코어가 놓고, 그래픽 문맥을 되찾으면 위치·색으로 먼저 그린 뒤 앱에서 다시 받기. 문맥 잃음·되찾음 알림
 
 ## 장면 계약
 
@@ -75,6 +76,7 @@ viewer.fit();
 - `viewCubeSize` 옵션·`setViewCubeSize(px)`: 뷰 큐브 크기(기본 112, 64~160) — 좁은 화면에서 줄여 쓴다
 - `setDrawLimitBySegmentId`, `setMarker`: NC 재생
 - `setMesh(mesh, { vertices?, incremental? })`, `removeMesh(id)`: 장면 전체를 다시 주지 않고 그물 하나만 넣기·바꾸기·빼기(0.11.0 — 아래 절)
+- `setScene(scene, { release })`, `onContextLost`, `onContextRestore(need)`, `restoreMeshArrays`, `restoreTexture`: 올린 뒤 법선·무늬 좌표·무늬 원본 놓기와 문맥 복구 때 다시 받기(0.25.0 — 아래 절)
 - `setHighlightSegments(positions, { origin })`: 강조 선분도 원점 기준 좌표로 줄 수 있다(큰 좌표). `highlightSegmentIds`는 묶음 원점을 알아서 반영한다
 
 터치 조작(0.6.0). 마우스·펜은 0.5.0과 똑같고 `pointerType === 'touch'`만 바뀐다:
@@ -1785,11 +1787,102 @@ if (!viewer.setMeasurePickThrough(on)) viewer.setMeasureSnap(measureSnapOptions(
   넘겨 같은 차례로 놓을 수 있다. 메모리·문맥 복구는 남은 일의 설계를 보고 다음 차수에 맞춘다
 - DWG: 3D 뷰어 코어를 쓰지 않는다
 
+## 0.25.0: 올린 뒤 법선·무늬 좌표·무늬 원본 놓기와 문맥 복구 때 다시 받기·문맥 잃음과 되찾음 알림
+
+놓기 선택(`setScene`의 `release`)을 주지 않으면 그림·고르기·측정·문맥 복구는 0.24.0과 화소·값까지 같다(`npm run pixels -- --base v0.24.0 --timeout 900`:
+장면 115개 가운데 0.24.0의 111개와 새 장면 `tex-release`·`tex-restore`·`tex-release-restore`가 0.24.0과 같고, 값 69묶음 가운데 0.24.0의 67묶음과 새 `tex-release-picks`가 같다.
+0.24.0에 없는 API를 쓰는 새 장면 `tex-release-restore-flat`과 새 값 `tex-release-restore`는 건너뛰고 head에서 두 번 찍어 같은 것을 확인했다.
+이 기계 부하(load average 16~45)에서 한 번에 끝났다(462초)).
+바뀐 기본 동작은 없다. 입력 타입은 그대로이고 `setScene`의 선택 필드 `release`와 메서드·알림만 더해졌다. 출력 타입 `TextureStats`에 `missing`(다시 받을 무늬 수)이 늘었다
+(앱이 이 타입 객체를 직접 만들면 채워야 한다 — NC·STEP·SKP 앱은 만들지 않는다).
+
+SketchUp 요청(0.24.0 남은 일에 적은 메모리·문맥 복구 설계 — 큰 모형에서 법선·무늬 좌표가 55 MB, 무늬 원본을 놓았다가 문맥 복구 때 무늬가 평균색이 되는 회귀로 SketchUp 23차가 되돌렸다)을
+설계대로 넣었다. SketchUp 26차 의견 넷 가운데 놓기를 쓰지 않아도 받는 알림(`onContextLost`, 늘 부르는 `onContextRestore`)과 무늬의 푼 그림만 놓기(`textures: 'bitmap'`)를 넣었고,
+작은 법선·무늬 좌표 배열 받기와 측정 글상자 기본 자리 받기는 남은 일에 적었다.
+
+### 올린 뒤 성분 기억
+
+- 렌더러가 그물마다 올릴 때 법선 유무, 앞·뒷면 무늬 좌표의 정점당 값 수(2·3), 쓰는 GPU 버퍼를 그물 기록에 기억한다. 그 뒤 무늬 쓰임 셈(`syncTextures`)·
+  그물 기록 다시 만들기(`setMesh`, 배열을 함께 쓰는 그물)·구간 숨김과 강조·와이어프레임의 VAO 묶기는 `Mesh3d.normals`·`uvs`·`backUvs` 배열과 그 길이를 다시 보지 않는다
+- GPU 버퍼 표는 배열과 무관한 열쇠로 둔다. 같은 배열을 한 번만 올리려고 배열에서 열쇠를 찾는 표는 약한 표(`WeakMap`)라 배열을 붙잡지 않는다
+- 고르기·측정·범위·단면 테두리·잘린 면 채우기는 위치·색인만 쓴다(놓아도 같다 — 가짜 WebGL 시험과 화소·값 회귀의 `tex-release-picks`)
+
+### 놓기 선택(`setScene(scene, { release })`)
+
+- `release: true`(셋 모두) 또는 `ReleaseOptions` `{ normals?: boolean; uvs?: boolean; textures?: boolean | 'bitmap' }`: 켠 것은 GPU에 올린 뒤 코어가 장면 객체에서 지운다(필드를 `delete`).
+  `normals`는 `Mesh3d.normals`, `uvs`는 `uvs`·`backUvs`, `textures`는 그물이 쓰는 무늬를 풀어 올린 뒤의 `Texture3d.data`·`bitmap`(푼 그림은 `close`)이다.
+  그 뒤 코어는 그 배열·원본을 읽지 않으므로, 앱이 따로 쥐지 않으면 GC가 거둔다
+- 나눠 올리기(`incremental`)에서는 그 그물 차례에 올린 뒤 지운다. 이 장면에 `setMesh`로 넣는 그물도 같다
+- 위치·색인·정점 색·윤곽선은 놓지 않는다(고르기·측정·범위·단면이 쓴다)
+- 놓은 그물을 `setMesh`로 바꿀 때: 새 그물이 그 배열을 주면 통째로 올리고, 주지 않으면 정점 수가 같고 위치 배열이 같거나 `vertices`를 줄 때 올려 둔 버퍼를 물려받는다.
+  `vertices` 구간을 놓은 배열에 올릴 수 없으면 `console.warn`으로 알리고 앞 것을 그대로 쓴다(바뀌었으면 그 배열을 통째로 준다)
+- 놓은 장면 객체를 `setScene`에 다시 주면 지운 배열은 다시 올릴 수 없다. 문맥 복구 때처럼 위치·색으로 그리고 `restoreNeed`에 남는다(알림은 없다 — 다시 줄 때는 새 장면 객체를 준다)
+- 주지 않으면 0.24.0과 같다(장면 배열을 붙잡고 문맥 복구 때 그대로 다시 올린다)
+
+### 문맥 잃음·되찾음 알림과 다시 받기
+
+- `viewer.onContextLost(cb: () => void): () => void`: 그래픽 문맥을 잃을 때 부른다(놓기와 무관). 되찾을 때까지 다시 그리지 않는다. `dispose`가 일으킨 잃음은 알리지 않는다
+- `viewer.onContextRestore(cb: (need: ContextRestoreNeed) => void | Promise<unknown>): () => void`: 되찾을 때마다 코어가 장면·덧그림·단면 테두리를 다시 올린 뒤 부른다.
+  놓기 선택이 없거나 놓은 것이 모두 GPU에 있으면 `need`는 빈 목록 `{ meshes: [], textures: [] }`이다(그래도 부른다 — 앱이 안내를 거두거나 라벨 가림 판정을 다시 할 때)
+- `need`(`ContextRestoreNeed`): `meshes`는 `{ id, normals, uvs, backUvs }`(다시 줄 배열마다 `true` — `uvs`는 뒷면이 `uvs`를 함께 썼으면 뒷면 몫도), `textures`는 무늬 id
+- 놓은 것이 있으면 되찾는 즉시 위치·색으로 그린다(놓은 법선이 없는 그물은 평면 음영, 놓은 무늬 좌표·원본이 없는 그물은 그물 `color` — 앱이 무늬 평균색을 `color`로 주면 평균색)
+- `viewer.restoreMeshArrays(id: string, arrays: MeshArrays): boolean`: `{ normals?, uvs?, backUvs? }` 가운데 그 그물에 지금 없는 놓은 배열만 받는다(길이가 맞을 때).
+  그 그물 기록만 다시 만들고 준 배열은 붙잡지 않는다(그물 객체에도 넣지 않는다). 나눠 올리는 중이라 아직 올리지 않은 그물이면 차례가 올 때 함께 올린다. 받은 것이 있으면 `true`
+- `viewer.restoreTexture(id: string, src: TextureSource): Promise<boolean>`: 그림 파일 바이트(`Uint8Array`), 푼 그림(`ImageBitmap` — 다 쓰면 닫는다), 또는 `{ data, bitmap, mime, width, height }`.
+  처음 올릴 때와 같은 크기 한도로 풀어 올린다. 기다리는 무늬가 아니거나 풀지 못하면 `false`(풀지 못하면 다시 기다린다)
+- `viewer.restoreNeed: ContextRestoreNeed | null`: 아직 주지 않은 것(없으면 `null`). `stats.textures.missing`은 다시 받을 무늬 수다(받아서 푸는 중인 것도 센다)
+- 천천히 주어도 된다(준 것부터 되돌아온다). 주지 않은 무늬는 그물 `color` 그대로이고, 다시 잃었다 되찾으면 또 알린다
+
+```ts
+// SKP: 큰 모형만 놓고, 되찾으면 안내를 보이며 파일을 다시 읽어 준다
+viewer.setScene(doc.scene, { incremental: true, release: { normals: true, uvs: true, textures: 'bitmap' } });
+viewer.onContextLost(() => showNotice('그래픽을 다시 준비하는 중'));
+viewer.onContextRestore(async (need) => {
+  for (const m of await reparseMeshes(need.meshes.map((x) => x.id))) viewer.restoreMeshArrays(m.id, m);
+  for (const id of need.textures) await viewer.restoreTexture(id, await recolorTexture(id));
+  hideNotice();
+  refreshLabelOcclusion();
+});
+```
+
+### 무늬는 푼 그림만 놓기(`release: { textures: 'bitmap' }`)
+
+- 푼 그림(`Texture3d.bitmap`)만 닫고 지우며 그림 바이트(`data`)는 장면에 둔다. 문맥을 되찾으면 코어가 `data`를 스스로 다시 풀어 올린다(`need.textures`에 들지 않는다).
+  `data`가 없는 무늬만 `need.textures`로 받는다. `bitmap` 없이 `data`만 준 무늬는 아무것도 놓지 않는다(코어가 푼 그림은 올린 뒤 늘 닫는다)
+- `data`가 `bitmap`과 같은 그림일 때만 쓴다. 앱이 색을 바꾸는 등 손질한 `bitmap`은 되찾을 때 `data`의 원래 그림으로 돌아가므로, 그 무늬는 `setScene` 전에 무늬 객체에서 `data`를 빼 두어
+  `need.textures`로 받는다
+
+### 메모리
+
+격자 그물 24개(그물마다 정점 40,401개 — 법선 11.1 MB·무늬 좌표 7.4 MB, 위치 11.1 MB·색인 22.0 MB)와 무늬 8장(512×512)인 합성 장면을 앱이 쥐지 않고 뷰어에만 준 뒤 쟀다.
+
+- 가짜 WebGL(시험 환경, 무늬 바이트 1 MB씩 8 MB, load average 54~81): 장면 객체가 쥔 법선·무늬 좌표·무늬 바이트는 놓지 않으면 26.5 MB, `release: true`면 0,
+  `{ normals, uvs, textures: 'bitmap' }`이면 8.0 MB(바이트만 준 무늬라 놓을 푼 그림이 없다). GC 뒤 `process.memoryUsage().arrayBuffers`(가짜 GL이 쥔 버퍼 사본을 뺀 값)는
+  놓지 않은 뷰어보다 올린 뒤 26.5 MB·18.5 MB 적고, 문맥을 잃었다 되찾아 앱이 다 준 뒤에도 26.5 MB·18.5 MB 적다(준 배열을 붙잡지 않는다)
+- 헤드리스 Chrome(SwiftShader, 무늬는 PNG 바이트 4.8 MB와 같은 그림의 푼 그림 `bitmap` — SKP 알파 무늬의 꼴, load average 22~133): 새로 연 페이지마다 GC 뒤
+  `Runtime.getHeapUsage`의 ArrayBuffer 뒷저장이 올린 뒤 놓지 않으면 59.2 MB, `release: true`면 38.3 MB(20.9 MB 적다), `'bitmap'`이면 43.1 MB(16.1 MB 적다 — 바이트 4.8 MB는 남는다)였다.
+  둘 다 JS 힙 밖의 푼 그림 8장(512×512, 8 MB)도 닫는다. `WEBGL_lose_context`로 잃었다 되찾으면 놓지 않은 뷰어는 빈 `need`에 그림이 그대로이고,
+  `true`는 그물 24개·무늬 8장을, `'bitmap'`은 그물 24개만 받았다(무늬는 코어가 바이트를 다시 풀었다). 앱이 다 준 뒤 그림(RGBA 해시)은 세 경우 모두 처음과 같다.
+  되찾은 뒤의 뒷저장 값은 놓지 않은 뷰어도 그림을 읽을 때마다 늘어 견주지 않았다
+
+### 앱이 할 일
+
+- SKP: 코어를 `#v0.25.0`으로 올린다. 큰 모형(나눠 올리는 모형)에서 `setScene(d.scene, { incremental, release: { normals: true, uvs: true, textures: 'bitmap' } })`로 주면
+  법선·무늬 좌표와 알파 무늬의 푼 그림을 코어가 놓는다. 그 전에 색을 바꾼 재질 무늬(`prepareSceneTextures`가 `bitmap`을 바꾼 것)는 무늬 객체에서 `data`를 빼 둔다
+  (견본 그림에 쓰는 바이트는 앱이 따로 쥔다 — 남겨 두면 되찾을 때 원래 색 그림이 된다). 놓은 뒤에는 앱이 `d.scene`의 법선·무늬 좌표·무늬 원본을 읽지 않아야 한다
+  (`revokeImages`의 `t.bitmap?.close()`는 필드가 없으면 건너뛰므로 그대로 된다). 같은 장면 객체를 `setScene`에 다시 주지 않는다.
+  `onContextRestore`에서 `need.meshes`의 그물을 파일에서 다시 풀어 `restoreMeshArrays`로, `need.textures`(색을 바꾼 무늬)를 다시 풀고 색을 바꿔 `restoreTexture`로 준다 —
+  그동안 위치·색(평면 음영·평균색)으로 보인다. `onContextLost`·`onContextRestore`(빈 `need`도 온다)로 안내를 보이고 거두며 라벨 가림 판정을 다시 한다.
+  화면에 새로 보이는 글(안내)은 앱 사전에 넣는다
+- NC·STEP: 선택. 바꾸지 않으면 0.24.0과 같다. 문맥 잃음·되찾음 알림만 쓸 수도 있다(놓기와 무관). STEP 큰 모형에서 법선을 놓으려면 `release: { normals: true }`와
+  `onContextRestore`에서 다시 삼각화한 법선을 준다(NC는 공구 경로 선분이 대부분이라 얻을 것이 적다)
+- DWG: 3D 뷰어 코어를 쓰지 않는다
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
 "dependencies": {
-  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.24.0"
+  "opencad-viewer3d": "github:GyuTae-Kim/opencad-viewer3d#v0.25.0"
 }
 ```
 
@@ -1807,7 +1900,8 @@ import type { Scene3d } from 'opencad-viewer3d/types';
 | `src/types.ts` | 장면 계약(`Scene3d`, `Mesh3d`, `LineSet3d`, `PointSet3d`, `Pick3d`) |
 | `src/viewer.ts` | `Viewer3d`: 조작·고르기·측정·단면·화면 덧그림 |
 | `src/pointer.ts` | 포인터 종류별 문턱(끌기 시작·고르기 허용 거리·두 번 누르기, 터치만 넓게) |
-| `src/renderer.ts`, `src/shaders.ts`, `src/upload.ts` | WebGL2 그리기(묶음 원점 RTC, 단면 자르기·잘린 면 채우기, 무늬, 셰이더 변종 — 여러 단면·숨은 선·해·그림자·안개·뒷면, 외곽선(그물마다 색)·하늘 바탕·그림자 깊이 그림), 큰 배열 조각 올리기 |
+| `src/renderer.ts`, `src/shaders.ts`, `src/upload.ts` | WebGL2 그리기(묶음 원점 RTC, 단면 자르기·잘린 면 채우기, 무늬, 셰이더 변종 — 여러 단면·숨은 선·해·그림자·안개·뒷면, 외곽선(그물마다 색)·하늘 바탕·그림자 깊이 그림), 큰 배열 조각 올리기, 올린 뒤 성분 기억·놓기·문맥 복구 때 다시 받기 |
+| `src/release.ts` | 놓기·문맥 복구 순수 계산(놓기 선택 정리, 지운 배열의 올린 꼴에서 다시 받을 것 고르기) |
 | `src/annotate.ts` | 앱 측정 덧그림 모양·글(거리·각·반지름·점) |
 | `src/closest.ts` | 두 묶음 최근접점(BVH 둘을 함께 내려가며, 점·선분·삼각형 쌍) |
 | `src/billboard.ts` | 마주 보는 그물 돌림·범위 |
@@ -1852,6 +1946,8 @@ npm run dev        # dev/viewer3d.html (주소 인자 ?segs=선분 수&sseg=구 
                    #   0.24.0 상자 고르기 불투명(반투명 지나 고르기를 켠 채 setItemPickOpaque — 상자 위를 누르면 "반투명 너머"가 상자),
                    #     너머 고르기만 바꾸기(setMeasurePickThrough — 잠금·끌어온 점·찍은 첫 점을 둔 채 측정 고르기의 반투명 너머만 켜고 끈다),
                    #     글상자 겹침(기준점이 겹치는 덧그림 넷 — 화면에서 뒤 글상자가 앞 글상자를, 측정 거리 글상자가 덧그림 글상자를 비킨다)
+                   #   0.25.0 놓기(장면 사본을 release로 다시 준다 — 상태 줄에 "놓음"과 사본에 남은 MB), 문맥 잃기·되찾기(WEBGL_lose_context —
+                   #     상태 줄에 onContextLost·onContextRestore 알림과 다시 줄 것), 앱이 다시 줌(켜 두면 되찾을 때 원본 장면에서 다시 준다; 무늬는 &tex=1)
 npm run typecheck
 npm test
 npm run pixels -- --base origin/main   # 화소·값 회귀 비교(아래)
@@ -1863,7 +1959,7 @@ npm run bench:edit -- --reps 5         # 그물 바꾸기 비용(0.11.0 비용 �
 `npm run pixels -- --base <git 판>`은 같은 기계에서 base 판과 지금 작업 트리(커밋 안 한 변경 포함)를 헤드리스 Chrome으로 똑같이 찍어 비교합니다.
 Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), WebGL은 SwiftShader(CPU)로 그려 같은 기계에서는 같은 화소가 나옵니다.
 
-- 합성 장면 111가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
+- 합성 장면 115가지를 960×600으로 찍어 RGBA 해시를 비교합니다. 그리기 모드 일곱 가지와 밝은 테마, 숨은 점선, 외곽선, 단면, 평행 투영,
   구간 숨김과 강조, 측정 미리 보기는 보통 좌표와 큰 좌표에서 한 벌씩 찍습니다. 0.8.0의 붙잡기 표식, 음영 뒤 모서리, 대비 선 색과
   걷기(중력 포함), 하늘 바탕, 그림자, 안개, 무늬, 두 단면, 재생, 묶음 겉모습, 측정 덧그림, 뷰 큐브, 0.9.0의 추론 붙잡기 표식(교차점·수직 발·축),
   그물마다 윤곽선·외곽선 색, 나눠 올린 큰 장면, 0.10.0의 붙잡기 한도 미리 보기와 추론 잠금(Shift·앱 단추)·나란함 표식,
@@ -1931,6 +2027,11 @@ Chrome이 있어야 하고(못 찾으면 `CHROME_PATH`로 알려 줍니다), Web
   `setMeasureSnap`을 다시 주면 풀리는지, 붙잡기를 끄면 `false`인지, `base-annotation-overlap`은 기준점이 겹치는 덧그림 넷의 하나씩·함께 단 글상자 자리(서로 겹치지 않는지),
   측정 거리 글상자(덧그림 없이·있게), 가로 띠를 피할 자리로 준 뒤입니다. 장면 `base-annotation-overlap`(화면 덧그림 — 새 장면)과 `base-annotation-overlap-image`(같은 장면의 그림 저장 —
   비키지 않으므로 0.23.0과 화소까지 같아야 한다)도 찍습니다.
+  0.25.0 장면 `tex-release`(무늬 자료의 얕은 사본을 `release: true`로 다시 준 그림), `tex-restore`(놓지 않고 `WEBGL_lose_context`로 문맥을 잃었다 되찾은 그림),
+  `tex-release-restore`(놓고 잃었다 되찾은 뒤 알림의 `need`대로 원본 자료에서 다시 준 그림)는 놓기를 모르는 판(0.24.0 — `release`를 무시하고 문맥 복구 때 장면 배열을 다시 올린다)과
+  화소까지 같아야 하고, `tex-release-restore-flat`(놓고 되찾은 뒤 아무것도 주지 않은 그림 — 평면 음영·그물 색)은 새 장면입니다. 값 묶음 `tex-release-picks`는 놓은 장면의
+  화면 격자 고르기·축 범위와 문맥 복구 뒤에도 같은지(0.24.0과 같아야 한다), `tex-release-restore`는 놓은 뒤 장면 객체에 남은 배열·무늬 원본, 되찾음 알림의 `need`,
+  다시 주기 전 무늬 상태, 법선만 준 뒤와 다 준 뒤 남은 것, 문맥 복구 전후 고르기가 같은지입니다(새 값).
 - 판마다 두 번 찍어 같은 코드가 같은 그림을 내는지 먼저 봅니다. 두 번이 다르면 그 장면은 "불안정"(`unstable`)으로 따로 알리고 비교에서 뺍니다.
 - base에 아직 없는 API를 쓰는 장면은 "새 장면"(`new`)으로 건너뜁니다. 다른 장면·값(또는 head에서 사라진 장면)이 있으면 1,
   도구 오류나 head 장면에서 난 예외는 2로 끝납니다(예외는 라벨로 넘기지 않습니다 — API를 바꿨으면 `scripts/pixels/page.ts`를 같은 PR에서 고칩니다).
@@ -2005,15 +2106,13 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 구간 숨김은 그물 윤곽선(`edges`)을 삼각형과 짝지어 주지 않는다 — 윤곽선도 숨기려면 `{ prims, edges }`로 윤곽선 번호를 함께 준다
 - 무늬는 그물마다 앞·뒷면 하나씩(여러 겹 무늬, 법선·거칠기 같은 PBR 그림 없음). 색 공간은 정점 색과 같이 sRGB 값 그대로 조명한다
 - 투명 화소를 쓰는 무늬(`alpha`)는 그물 단위로 앞뒤를 정렬해 그린다(그물 안 삼각형끼리는 정렬하지 않는다)
-- 그래픽 문맥을 잃었다 되찾으면 장면(`Scene3d`)의 배열(위치·법선·무늬 좌표)과 무늬 그림 원본(`Texture3d.data`)을 그대로 다시 올린다. 그래서 앱은 올린 뒤 CPU 사본을 놓을 수 없다
-  (SketchUp 큰 모형에서 법선·무늬 좌표가 55 MB. 무늬 원본을 놓았다가 문맥 복구 때 무늬가 평균색이 되는 회귀로 SketchUp 23차가 되돌렸다). 다음 차수 설계(기본 동작은 그대로):
-  - 렌더러가 그물마다 올릴 때 법선 유무와 무늬 좌표 성분 수(앞·뒷면 2·3)를 기억해, 그 뒤 장면을 다시 맞출 때(무늬 쓰임 셈 `syncTextures`, 그물 기록·속성 묶기)
-    `Mesh3d.normals`·`uvs`·`backUvs` 배열과 그 길이를 다시 보지 않게 한다(지금은 다시 본다 — 배열이 없으면 평면 음영·무늬 없음이 되고, GPU 버퍼도 배열 객체를 열쇠로 함께 쓴다).
-    고르기·측정·범위는 위치·색인만 쓰므로 그대로다
-  - 앱이 놓아도 된다고 알리는 선택(예: `setScene(scene, { release: { normals, uvs, textures } })` — 올린 뒤 코어가 그 배열·원본을 참조하지 않는다)과, 문맥을 되찾을 때 놓은 것을 앱에서 다시 받는 콜백
-    (예: `onContextRestore(async (need) => …)` — `need`는 다시 줄 그물 id·무늬 id, 앱이 `restoreMeshArrays(id, { normals, uvs })`·`restoreTexture(id, data)`로 주고, 주지 않은 무늬는 지금처럼 평균색).
-    문맥이 돌아온 뒤 앱이 줄 때까지는 위치·색만으로 그린다
-  - 선택을 주지 않은 앱은 지금처럼 장면 배열을 다시 올린다(0.23.0과 같다). `setMesh`의 정점 구간 올리기(0.11.0)는 놓은 배열이 있는 그물에서 그 속성 구간을 받지 않는다
+- 놓기(0.25.0 `release`)는 법선·무늬 좌표·무늬 원본만이다. 위치·색인·정점 색은 고르기·측정·범위가 쓰므로 놓지 않고, 놓아도 GPU 버퍼(그림)는 그대로 남는다.
+  놓은 그물은 문맥을 잃었다 되찾을 때 앱이 다시 줄 때까지 평면 음영·그물 색이다(코어가 법선을 스스로 다시 만들지 않는다). 놓은 장면 객체를 `setScene`에 다시 주면 지운 배열은 다시 올리지 못해
+  `restoreNeed`에 남는다(알림 없음). 놓은 그물의 `setMesh` `vertices` 구간은 놓은 속성에는 올리지 않는다(알림만 — 통째로 다시 준다).
+  `textures: 'bitmap'`은 `data`가 `bitmap`과 같은 그림이라고 믿고 되찾을 때 `data`를 다시 푼다(코어는 둘이 같은지 모른다)
+- SketchUp 26차 의견 가운데 남은 것:
+  - 법선·무늬 좌표를 작은 배열로 받기(예: Int8·Int16 정규화 법선, Uint16·Float16 무늬 좌표 — `Mesh3d.normals`가 `Float32Array`만이라 장면 계약·셰이더 속성 꼴·고르기에 쓰지 않는 확인까지 함께 바꾼다)
+  - 측정 거리 글상자·덧그림 글상자 자리(`placeMeasureLabel`·`placeLabelAmong`)가 앱이 정한 기본 자리를 받는 선택(지금은 기준점 네 귀가 먼저인 정해진 차례)
 
 ## 내력
 
