@@ -19,6 +19,9 @@
  * 0.20.0 단추: 열린 교차(잠근 선 교차에 시연 원·기둥과 refine까지 — 기둥 아래 끝을 첫 점으로 찍고 그 Z축이 원을 뚫는 자리를 가리키면 현과는 만나지 않아도
  *   정확한 원 위 교차에 붙는다. 잠근 선이 축이 아니어도 다듬는다). 상태 줄에 "첫 점 Z축 · 시연 원#111 위(다듬음)".
  *   면만 고르기(누른 자리의 pick(x, y, { meshesOnly: true }) — 상태 줄 고름 뒤에 "아래 면")
+ * 0.21.0 단추: 끌어온 축 잠금(열린 교차에 inference.lockTracks까지 — 잠근 동안 잠근 선이 끌어온 점의 축과 만나는 점, 상태 줄에 "잠근 X축 · (…)의 Y축과 만나는 점").
+ *   구 위 아무 데나 가리키면 refineFace('onFace')로 정확한 구 위 점(상태 줄에 "면 위(다듬음)" — 0.19.0 단추부터 같은 함수라 함께 붙는다).
+ *   다듬기 기억 비우기(clearMeasureRefine — 상태 줄에 비운 수)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -259,6 +262,32 @@ toggle(
     '정확한 원 위 교차에 붙는다(Shift로 잠가도, 비스듬히 잠근 선도)',
 );
 toggle('면만 고르기', (v) => (meshesOnly = v), '누른 자리에서 그물 면만 고른 결과(pick meshesOnly)를 상태 줄 고름 뒤에 보인다 — 면 위 선분·점 아래의 면');
+// 0.21.0: 잠근 선이 끌어온 축과 만나는 점(inference.lockTracks), 다듬기 기억만 비우기(clearMeasureRefine)
+toggle(
+  '끌어온 축 잠금',
+  (v) => {
+    viewer.setScene(v ? { ...scene, lines: [...scene.lines, ...demoRingLines()] } : scene, { keepView: true });
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true, lockTracks: true },
+            refine: demoRingEdge,
+            refineFace: demoSphereFace,
+          }
+        : null,
+    );
+  },
+  '열린 교차에 더해, Shift·잠금 단추로 잠근 동안 잠근 선이 끌어온 점(0.5초 머문 점)의 X·Y·Z 축과 만나는 점에도 붙잡기(축으로 잠갔으면 그 점과 나란한 자리). ' +
+    '구 위 아무 데나 가리키면 정확한 구 위 점으로 다듬는다(refineFace onFace)',
+);
+button('다듬기 기억 비우기', () => {
+  const n = viewer.clearMeasureRefine();
+  hoverInfo = `다듬기 기억 ${n}개를 비웠다(잠금·끌어온 점은 그대로)`;
+  showStatus();
+}, '앱이 다듬기에 쓰는 자료를 나중에 받았을 때처럼 refine·refineFace 결과 기억만 비운다(clearMeasureRefine)');
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -458,14 +487,22 @@ viewer.onMeasure((m) => {
 });
 /**
  * 0.17.0: 측정 미리 보기의 끌어온 축 — 첫 점 축 위 나란한 자리, 끌어온 점의 축(둘째 축과 만나는 점이면 그 축도, 모서리와 만나는 점이면 그 선분).
- * 0.18.0: 첫 점 축이 모서리와 만나는 점이면 그 축과 선분(앱이 다듬었으면 표시), 축이 면을 뚫는 점이면 그 면의 그물 id
+ * 0.18.0: 첫 점 축이 모서리와 만나는 점이면 그 축과 선분(앱이 다듬었으면 표시), 축이 면을 뚫는 점이면 그 면의 그물 id.
+ * 0.21.0: 잠근 선이 끌어온 축과 만나는 점(만나는 끌어온 축, 잠근 축 위 나란한 자리), 붙잡지 않은 면 위 점을 다듬었으면 "면 위(다듬음)"
  */
 viewer.canvas.addEventListener('pointermove', () =>
   requestAnimationFrame(() => {
     const h = viewer.measureHoverSnap;
     const ax = (a: string | undefined): string => `${(a ?? '').toUpperCase()}축`;
     const face = h?.face ? ` · ${h.face.id} 면` : '';
-    const next = !h?.trackFrom
+    const lockLine = `잠근 ${h?.axis ? ax(h.axis) : '선'}`;
+    const next = h?.locked && h.trackOther
+      ? `미리 보기: ${lockLine} · ${pt(h.trackOther.from)}의 ${ax(h.trackOther.axis)}과 만나는 점`
+      : h?.locked && h.trackFrom
+        ? `미리 보기: ${lockLine} 위 ${pt(h.trackFrom)}와 나란한 자리`
+        : h && h.snap === null && h.refined
+          ? '미리 보기: 면 위(다듬음)'
+          : !h?.trackFrom
       ? h?.locked && (h.segment || h.face)
         ? `미리 보기: 잠근 ${h.axis ? ax(h.axis) : '선'}${h.segment ? ` · ${h.segment.id}#${h.segment.index} 위` : ''}${face}${h.refined ? '(다듬음)' : ''}`
         : h?.snap === 'axis' && (h.segment || h.face)
@@ -569,7 +606,7 @@ function demoSnapPoints(): SnapPoint[] {
 
 /**
  * 0.19.0 축이 면을 뚫는 점 다듬기(개발 확인용 refineFace): 구 그물이면 축 직선과 정확한 구(그물 범위의 가운데·반지름)의 교차 가운데 코어 점에 가까운 것,
- * 다른 그물(평면 상자)이면 null — 삼각형 위 점 그대로
+ * 다른 그물(평면 상자)이면 null — 삼각형 위 점 그대로. 0.21.0 'onFace'(line = 커서 광선)도 종류를 가리지 않고 같은 계산이다(커서 아래 구 위 점)
  */
 function demoSphereFace(c: SnapRefineFaceInput): number[] | null {
   const m = c.face.id === '구' ? scene.meshes.find((k) => k.id === '구') : undefined;
