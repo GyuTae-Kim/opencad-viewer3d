@@ -103,6 +103,12 @@ export interface ScenePickOptions {
    * throughTranslucent일 때만 본다. 가림(occlude)·잘린 면 판정은 그대로 opaque를 따른다(그림이 바뀌지 않으므로 뒤 선분·점을 가리지 않는다)
    */
   pickOpaque?: (m: Mesh3d) => boolean;
+  /**
+   * 0.27.0: throughTranslucent가 지나갈 그 그물의 삼각형(번호 판정 — Pick3d.raw와 같은 번호, 없으면 null). 그물이 불투명이거나 pickOpaque여도 이 삼각형에서는 멈추지 않고
+   * 반투명 면처럼 지나 그 뒤(같은 그물의 다른 면 포함)를 본다 — 판 안 포켓의 뚜껑처럼 그물의 일부 면만 지나가게 할 때.
+   * throughTranslucent일 때만 본다. 반투명 면만 맞으면 예전처럼 가장 앞의 면(이 삼각형일 수도 있다)이다. 가림(occlude)·잘린 면 판정은 그대로 opaque를 따른다
+   */
+  pickThrough?: (m: Mesh3d) => ((tri: number) => boolean) | null | undefined;
 }
 
 const FAST_SCAN_LIMIT = 20_000;
@@ -110,6 +116,24 @@ const FAST_SCAN_LIMIT = 20_000;
 /** throughTranslucent가 이 그물 면에서 멈추는지: 불투명(opaque)이거나 앱이 고르기에서 불투명으로 보라고 한 그물(0.24.0 pickOpaque) */
 function stopsThrough(o: ScenePickOptions, m: Mesh3d, opaque: boolean): boolean {
   return opaque || (!!o.pickOpaque && o.pickOpaque(m));
+}
+
+type MeshRayHit = NonNullable<ReturnType<typeof pickMeshRay>>;
+
+/**
+ * throughTranslucent가 이 그물에서 멈추는 면 맞음(0.27.0): 가장 앞 맞음 h가 지나갈 삼각형(o.pickThrough)이 아니면 h 그대로, 그렇다면
+ * 지나갈 삼각형과 숨긴 삼각형을 빼고 같은 광선(같은 구간)으로 다시 맞춘 것(없으면 null). 지나갈 삼각형이 없는 그물은 다시 맞추지 않는다
+ */
+function stopHit(
+  o: ScenePickOptions,
+  m: Mesh3d,
+  h: MeshRayHit,
+  redo: (skip: (tri: number) => boolean) => MeshRayHit | null,
+): MeshRayHit | null {
+  const pass = o.pickThrough?.(m);
+  if (!pass || !pass(h.tri)) return h;
+  const hid = o.hidden?.(m);
+  return redo(hid ? (t) => pass(t) || hid(t) : pass);
 }
 
 /** 화면 점(x, y)에서 고르기 */
@@ -202,11 +226,16 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
       if (!boxHit(bounds(m))) continue;
       const bvh = o.bvh('triangle', m.positions, m.indices);
       if (!bvh) continue;
-      const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, o.model ? o.model(m) : modelMatrix(m.matrix, m.origin), interval, o.hidden?.(m));
+      const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
+      const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, model, interval, o.hidden?.(m));
       if (!h) continue;
       if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
       const opaque = o.opaque ? o.opaque(m) : m.color[3] >= 0.999;
-      if (o.throughTranslucent && stopsThrough(o, m, opaque) && (!solid || h.depth < solid.h.depth)) solid = { m, h };
+      if (o.throughTranslucent && stopsThrough(o, m, opaque)) {
+        // 0.27.0: 그 그물의 지나갈 삼각형(pickThrough)을 맞았으면 그 뒤에서 멈추는 면
+        const hs = stopHit(o, m, h, (skip) => pickMeshRay(f, ray, m.positions, m.indices, bvh, model, interval, skip));
+        if (hs && (!solid || hs.depth < solid.h.depth)) solid = { m, h: hs };
+      }
       if (o.occlude && opaque) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
     }
     if (solid) mesh = solid;
@@ -580,11 +609,15 @@ function pickMeshesMulti(
         else groups.set(key, { m, n: hits, t0: iv.t0, plane: pl[iv.enter]! });
       }
     }
-    const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, model, pl.length ? [iv.t0, iv.t1] : null, o.hidden?.(m));
+    const range: [number, number] | null = pl.length ? [iv.t0, iv.t1] : null;
+    const h = pickMeshRay(f, ray, m.positions, m.indices, bvh, model, range, o.hidden?.(m));
     if (!h) continue;
     if (!mesh || h.depth < mesh.h.depth) mesh = { m, h };
     const opaque = o.opaque ? o.opaque(m) : m.color[3] >= 0.999;
-    if (o.throughTranslucent && stopsThrough(o, m, opaque) && (!solid || h.depth < solid.h.depth)) solid = { m, h };
+    if (o.throughTranslucent && stopsThrough(o, m, opaque)) {
+      const hs = stopHit(o, m, h, (skip) => pickMeshRay(f, ray, m.positions, m.indices, bvh, model, range, skip));
+      if (hs && (!solid || hs.depth < solid.h.depth)) solid = { m, h: hs };
+    }
     if (o.occlude && opaque) occl = Math.min(occl, h.depth * (1 + 1e-4) + 1e-9);
   }
   // 0.23.0 throughTranslucent: 가장 앞의 불투명 면이 있으면 그것(잘린 면 채움과는 그 면으로 견준다)

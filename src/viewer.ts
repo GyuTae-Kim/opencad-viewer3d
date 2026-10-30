@@ -587,6 +587,8 @@ export interface ItemLookState {
   profileColor?: Rgba;
   /** 0.24.0: 반투명 그물 너머 고르기(throughTranslucent)가 이 그물 면에서 멈춘다(setItemPickOpaque — 켰을 때만 true) */
   pickOpaque?: boolean;
+  /** 0.27.0: 반투명 그물 너머 고르기가 지나가는 이 그물의 삼각형 구간(setItemPickThrough — 합친 것, 복사본. 줬을 때만) */
+  pickThrough?: IndexRange[];
 }
 
 interface LookState {
@@ -597,6 +599,9 @@ interface LookState {
   edgeColor?: Rgba;
   profileColor?: Rgba;
   pickOpaque?: boolean;
+  /** 0.27.0 setItemPickThrough: 합친 삼각형 구간(그물 삼각형 수 안)과 그 판정 */
+  pickThrough?: IndexRange[];
+  pickThroughTest?: (i: number) => boolean;
 }
 
 /** setLighting 선택 */
@@ -1419,6 +1424,12 @@ export class Viewer3d {
       r.eHidden = mergeRanges(r.eHidden, ne);
       r.eHi = mergeRanges(r.eHi, ne);
       this.rangesChanged(it);
+    }
+    // 0.27.0: 고르기에서 지나갈 삼각형 구간도 새 삼각형 수로 자른다(모두 밖이면 지운다)
+    const lk = this.looks.get(mesh.id);
+    if (lk?.pickThrough) {
+      this.applyPickThrough(lk, mergeRanges(lk.pickThrough, primCount(this.items.get(mesh.id)!)));
+      if (!lk.pickThrough) this.setLook(mesh.id, lk, false);
     }
     const inc = opts.incremental;
     if (inc) this.meshBudget = Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8);
@@ -3293,6 +3304,38 @@ export class Viewer3d {
     this.setLook(id, l, false);
   }
 
+  /**
+   * 고르기에서 지나갈 그물의 일부 면(0.27.0): 반투명 그물 너머 고르기(pick·onPick·측정 붙잡기의 throughTranslucent)가 이 그물의 삼각형 구간
+   * ({ start, count } — 삼각형 번호, Pick3d.raw·setHiddenRanges와 같은 번호)을 반투명 면처럼 지나 그 뒤(같은 그물의 다른 면 포함)를 고른다.
+   * 그물이 setItemPickOpaque로 켰거나 불투명이어도 이 삼각형에서는 멈추지 않는다 — 판 안 포켓의 뚜껑(판 윗면 자리)만 지나 포켓 바닥·그 안 구멍을 고르고 벽에서는 멈출 때.
+   * 그대로인 것: 그림·윤곽선(그물을 나누지 않는다), 윤곽선 고르기(반투명 그물 윤곽선처럼 늘 고른다), 가림(그림대로 — 불투명 그물의 이 면은 뒤 선분·점을 가린다),
+   * 잘린 면 채움, 면의 열린 교차가 보는 커서 둘레 삼각형(반투명 그물 삼각형처럼 본다), throughTranslucent를 주지 않은 고르기와 onPick front.
+   * 빈 목록·null이면 되돌린다. 다른 겉모습처럼 장면을 바꾸면(setScene)·clearItemLooks가 비우고, setMesh로 바꿔도 남는다(새 삼각형 수로 자른다). 그물이 아닌 id는 무시한다
+   */
+  setItemPickThrough(id: string, ranges: readonly IndexRange[] | null): void {
+    if (this.disposed) return;
+    const it = this.items.get(id);
+    if (!it || it.kind !== 'mesh') return;
+    const l = this.looks.get(id) ?? {};
+    const next = mergeRanges(ranges, primCount(it));
+    const prev = l.pickThrough ?? [];
+    if (prev.length === next.length && prev.every((r, i) => r.start === next[i]!.start && r.count === next[i]!.count)) return;
+    this.applyPickThrough(l, next);
+    this.setLook(id, l, false);
+  }
+
+  /** 지나갈 삼각형 구간과 그 판정을 겉모습에 둔다(빈 목록이면 지운다) */
+  private applyPickThrough(l: LookState, r: IndexRange[]): void {
+    const t = r.length ? rangeTester(r) : null;
+    if (t) {
+      l.pickThrough = r;
+      l.pickThroughTest = t;
+    } else {
+      delete l.pickThrough;
+      delete l.pickThroughTest;
+    }
+  }
+
   /** 묶음 겉모습(바꾼 것만, 없으면 null) */
   itemLook(id: string): ItemLookState | null {
     const l = this.looks.get(id);
@@ -3304,6 +3347,7 @@ export class Viewer3d {
     if (l.edgeColor) out.edgeColor = l.edgeColor;
     if (l.profileColor) out.profileColor = l.profileColor;
     if (l.pickOpaque) out.pickOpaque = true;
+    if (l.pickThrough) out.pickThrough = l.pickThrough.map((r) => ({ ...r }));
     return out;
   }
 
@@ -3317,7 +3361,7 @@ export class Viewer3d {
 
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
-    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor && !l.pickOpaque) this.looks.delete(id);
+    if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor && !l.pickOpaque && !l.pickThrough) this.looks.delete(id);
     else this.looks.set(id, l);
     this.lookChanged(moved);
   }
@@ -3977,7 +4021,14 @@ export class Viewer3d {
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
-      ...(through ? { throughTranslucent: true, opaque: (m: Mesh3d) => this.meshOpaque(m), pickOpaque: (m: Mesh3d) => this.looks.get(m.id)?.pickOpaque === true } : {}),
+      ...(through
+        ? {
+            throughTranslucent: true,
+            opaque: (m: Mesh3d) => this.meshOpaque(m),
+            pickOpaque: (m: Mesh3d) => this.looks.get(m.id)?.pickOpaque === true,
+            pickThrough: (m: Mesh3d) => this.looks.get(m.id)?.pickThroughTest,
+          }
+        : {}),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     });
   }
