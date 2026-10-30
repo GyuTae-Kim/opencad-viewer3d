@@ -281,6 +281,11 @@ export interface PickEvent {
   /** 누른 단추(0 = 왼쪽)와 포인터 종류('mouse'·'touch'·'pen') */
   button: number;
   pointerType: string;
+  /**
+   * 0.26.0: onPick(cb, { front: true })로 단 알림에만 있다 — 같은 누르기에서 반투명 그물을 지나지 않은 고르기(그 알림의 throughTranslucent만 뺀 고르기 —
+   * meshesOnly는 그 알림 그대로, 가장 앞의 그물 면·선분·점). 빈 곳이면 null. throughTranslucent 없이 단 알림이면 첫 인자와 같은 객체다
+   */
+  front?: Pick3d | null;
 }
 
 /**
@@ -676,6 +681,12 @@ export interface OnPickOptions {
   meshesOnly?: boolean;
   /** 0.23.0: 그 알림에는 반투명 그물의 면을 지나 고른 결과를 준다(PickOptions.throughTranslucent와 같은 고르기 — meshesOnly와 함께 줄 수 있다) */
   throughTranslucent?: boolean;
+  /**
+   * 0.26.0: 그 알림의 사건에 같은 누르기의 가장 앞 고르기(PickEvent.front — 이 알림의 고르기에서 throughTranslucent만 뺀 것)를 함께 준다.
+   * 판 너머 고르기와 가장 앞 고르기를 한 알림에서 받을 때 쓴다(알림 둘을 달아 사건 객체로 짝짓지 않아도 된다). 이 알림의 사건은 이 알림만의 사본이다
+   * (front 없이 단 다른 알림들의 사건과 같은 객체가 아니다). 주지 않으면 0.25.0 그대로(사건에 front가 없다)
+   */
+  front?: boolean;
 }
 
 /** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
@@ -1083,8 +1094,11 @@ export class Viewer3d {
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
 
-  /** 고르기 알림과 그 알림의 고르기 선택(0.22.0 onPick의 meshesOnly, 0.23.0 throughTranslucent) — 단 차례대로 */
-  private pickCbs = new Map<(p: Pick3d | null, e: PickEvent) => void, { meshesOnly: boolean; through: boolean }>();
+  /**
+   * 고르기 알림과 그 알림의 고르기 선택(0.22.0 onPick의 meshesOnly, 0.23.0 throughTranslucent, 0.26.0 front) — 단 차례대로
+   * (Map이라 같은 함수를 다시 달면 처음 자리를 지킨다)
+   */
+  private pickCbs = new Map<(p: Pick3d | null, e: PickEvent) => void, { meshesOnly: boolean; through: boolean; front: boolean }>();
   /** 0.25.0 지금 장면의 놓기 선택(setScene의 release — 문맥 복구에서 다시 올릴 때도 쓴다) */
   private releaseOpt: ReleaseFlags | null = null;
   /** 0.25.0 문맥 복구 알림(놓은 것을 다시 받는다 — 놓기 선택이 없어도 빈 need로 부른다) */
@@ -2604,9 +2618,11 @@ export class Viewer3d {
    * 0.22.0: 둘째 인자 { meshesOnly: true }면 그 알림에는 누른 자리의 그물 면만 고르기(pick(x, y, { meshesOnly: true })와 같은 고르기 — 선분·점·윤곽선은 고르지도 않고
    * 면을 가리지도 않는다, 그물 면이 없으면 null)를 준다. 같은 누르기의 다른 알림(선택 없이 단 것)은 그대로다. 같은 함수를 다시 달면 마지막 선택을 따른다.
    * 0.23.0: { throughTranslucent: true }면 반투명 그물의 면을 지나 고른 결과(pick(x, y, { throughTranslucent: true })와 같은 고르기)를 준다
+   * 0.26.0: { front: true }면 그 알림의 사건(그 알림만의 사본)에 throughTranslucent만 뺀 같은 누르기의 고르기(PickEvent.front)를 함께 준다.
+   * 차례: 한 누르기의 알림은 단 차례대로 부른다(같은 함수를 다시 달면 처음 자리, 끊었다 다시 달면 끝). front 없이 단 알림들은 모두 같은 사건 객체를 받는다
    */
   onPick(cb: (p: Pick3d | null, e: PickEvent) => void, opts?: OnPickOptions): () => void {
-    this.pickCbs.set(cb, { meshesOnly: !!opts?.meshesOnly, through: !!opts?.throughTranslucent });
+    this.pickCbs.set(cb, { meshesOnly: !!opts?.meshesOnly, through: !!opts?.throughTranslucent, front: !!opts?.front });
     return () => this.pickCbs.delete(cb);
   }
 
@@ -4784,17 +4800,24 @@ export class Viewer3d {
     };
     // 0.22.0: 그물 면만 받는 알림이 있으면 그 고르기를 한 번만 구해 함께 쓴다(0.23.0: 반투명 면을 지나는 고르기도 선택 짝마다 한 번)
     const picks = new Map<number, PickDetail | null>();
-    for (const [cb, o] of this.pickCbs) {
-      if (!o.meshesOnly && !o.through) cb(d ? d.pick : null, ev);
-      else {
-        const k = (o.meshesOnly ? 1 : 0) + (o.through ? 2 : 0);
-        let dm = picks.get(k);
-        if (dm === undefined) {
-          dm = o.meshesOnly ? this.pickDetail(x, y, true, type, false, false, true, o.through) : this.pickDetail(x, y, true, type, undefined, false, false, true);
-          picks.set(k, dm);
-        }
-        cb(dm ? dm.pick : null, ev);
+    const pickOf = (meshesOnly: boolean, through: boolean): PickDetail | null => {
+      if (!meshesOnly && !through) return d;
+      const k = (meshesOnly ? 1 : 0) + (through ? 2 : 0);
+      let dm = picks.get(k);
+      if (dm === undefined) {
+        dm = meshesOnly ? this.pickDetail(x, y, true, type, false, false, true, through) : this.pickDetail(x, y, true, type, undefined, false, false, true);
+        picks.set(k, dm);
       }
+      return dm;
+    };
+    for (const [cb, o] of this.pickCbs) {
+      const dm = pickOf(o.meshesOnly, o.through);
+      const p = dm ? dm.pick : null;
+      // 0.26.0 front: 그 알림만의 사본에 반투명 너머가 아닌 같은 고르기(같은 선택 짝 고르기는 한 번만)
+      if (o.front) {
+        const df = o.through ? pickOf(o.meshesOnly, false) : dm;
+        cb(p, { ...ev, front: df ? df.pick : null });
+      } else cb(p, ev);
     }
   }
 
