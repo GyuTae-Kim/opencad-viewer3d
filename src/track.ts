@@ -1449,6 +1449,69 @@ export function trackDirMeetSnap<S extends TrackSegment = TrackSegment, H extend
   return best;
 }
 
+/** 끌어온 점의 나란함·수직 선 하나(0.30.0 — trackDirPairSnap의 둘째 선, 뷰어 MeasureHoverSnap.trackGuide): 끌어온 점(복사본)·안내 종류·단위 방향 */
+export interface TrackDirLine {
+  from: V3;
+  kind: TrackDirKind;
+  dir: V3;
+}
+
+/** 두 끌어온 점의 나란함·수직 선끼리 만나는 점(0.30.0 trackDirPairSnap): TrackDirSnap(첫째 — 앞 점 P의 선)과 둘째 점 Q의 선(other) */
+export interface TrackDirPairSnap extends TrackDirSnap {
+  other: TrackDirLine;
+}
+
+/**
+ * 두 끌어온 점의 나란함·수직 선끼리 만나는 점(0.30.0, 순수 — 뷰어 MeasureInference.trackDirs { meets: { guides: true } }도 쓴다): 기억한 두 점 P·Q(P가 앞 — 더 최근)마다
+ * trackDirGuides(P, seg, axes)의 선과 trackDirGuides(Q, seg, axes)의 선이 3D로 만나는 점 m이 커서에서 snapPx 안이면 후보(가까운 것, 같으면 앞 점 쌍 → P의 안내 차례 → Q의 안내 차례).
+ * 0.17.0 trackPairSnap(끌어온 축끼리)과 같은 규칙이다:
+ * - 만난다: 두 선 사이 가장 가까운 두 점이 그 깊이에서 화면 반 화소 안. 만나지 않는 두 선(화면에서만 엇갈린다)은 받지 않고, 나란한 두 선(두 점의 나란함끼리 등)은 보지 않는다
+ * - m이 P·Q 자리거나 첫 점(skip) 자리면 뺀다. skip과 같은 점은 쌍에 넣지 않는다(첫 점의 나란함은 0.10.0 parallel — 그 선과 만나는 점은 trackDirMeetSnap의 lines다)
+ * - 커서가 P나 Q의 화면 자리 snapPx 안이면 그 쌍은 보지 않는다(점 붙잡기가 맡는다). 원근에서 가까운 면보다 앞이면 뺀다. 단면·가림은 따지지 않는다
+ * 같은 자리 두 점은 보지 않는다. 결과의 from·kind·dir은 P의 선, other는 Q의 선이다. 세계 축과 나란한 성분은 그 선의 값 그대로다(closestMid).
+ * seg가 없거나 점이 둘보다 적으면 없다
+ */
+export function trackDirPairSnap(
+  f: ViewFrame,
+  tracks: readonly (readonly number[])[],
+  seg: readonly [readonly number[], readonly number[]] | null | undefined,
+  x: number,
+  y: number,
+  snapPx: number,
+  skip?: readonly number[] | null,
+  axes?: TrackAxes | null,
+): TrackDirPairSnap | null {
+  if (tracks.length < 2 || !seg) return null;
+  const live = tracks.filter((P) => P.every(Number.isFinite) && !(skip && sameTrackPoint(P, skip)) && !cursorOn(f, P, x, y, snapPx));
+  const guides = live.map((P) => trackDirGuides(P, seg, axes));
+  let best: TrackDirPairSnap | null = null;
+  for (let i = 0; i < live.length; i++) {
+    const P = live[i]!;
+    for (let j = i + 1; j < live.length; j++) {
+      const Q = live[j]!;
+      if (sameTrackPoint(P, Q)) continue;
+      for (const g of guides[i]!)
+        for (const h of guides[j]!) {
+          const c = closestMid(P, g.dir, Q, h.dir, false);
+          if (!c) continue;
+          const tol = meetTol(f, c.m);
+          if (!(c.gap <= tol) || dist3(c.m, P) <= tol || dist3(c.m, Q) <= tol || (skip && dist3(c.m, skip) <= tol)) continue;
+          const dist = screenDistance(f, c.m, x, y);
+          if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
+          best = {
+            p: c.m,
+            from: [P[0]!, P[1]!, P[2]!],
+            kind: g.kind,
+            dir: [g.dir[0], g.dir[1], g.dir[2]],
+            distPx: dist,
+            other: { from: [Q[0]!, Q[1]!, Q[2]!], kind: h.kind, dir: [h.dir[0], h.dir[1], h.dir[2]] },
+          };
+        }
+    }
+  }
+  return best;
+}
+
 /**
  * 끌어온 점 후보(점인 것) 가운데 하나(0.17.0): cands는 차례대로(뷰어는 첫 점 축 위 나란한 자리 → 축끼리 교차 → 선분 교차, 없는 것은 null).
  * 화면에서 가까운 것이 이기지만 뒤 차례 후보는 yieldPx(기본 TRACK_YIELD_PX) 넘게 가까워야 한다 — 첫 점 축 위 나란한 자리가 곧 모서리와 만나는 자리처럼

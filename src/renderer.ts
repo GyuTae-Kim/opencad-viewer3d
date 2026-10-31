@@ -633,8 +633,11 @@ export class Renderer3d {
   /** 무늬 한 장 긴 변 한도(화소, GPU 한도와 작은 쪽)와 전체 예산(바이트) — 다음 장면부터 */
   textureLimit = TEXTURE_LIMIT;
   textureBudget = TEXTURE_BUDGET;
-  /** 무늬를 올렸거나 풀지 못했을 때(다시 그리기용) */
-  onTexture: (() => void) | null = null;
+  /**
+   * 무늬를 올렸거나 풀지 못했을 때(다시 그리기용). 0.30.0: uploadMs = 그 무늬를 GPU에 올리는 데(texImage2D·밉맵 — 앞서 그린 화면이 GPU에서 끝나기를
+   * 기다린 시간이 든다) 걸린 벽시계 ms, 풀지 못했거나 올리지 못했으면 0
+   */
+  onTexture: ((uploadMs: number) => void) | null = null;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -2152,8 +2155,9 @@ export class Renderer3d {
           return back();
         }
         let ok = false;
+        let ms = 0;
         try {
-          this.uploadTexture(rec, bmp);
+          ms = this.uploadTexture(rec, bmp);
           rec.state = 'ready';
           ok = true;
         } catch {
@@ -2161,7 +2165,7 @@ export class Renderer3d {
         } finally {
           bmp.close();
         }
-        this.onTexture?.();
+        this.onTexture?.(ms);
         return ok;
       },
       () => {
@@ -2186,32 +2190,36 @@ export class Renderer3d {
             bmp.close();
             return;
           }
+          let ms = 0;
           try {
-            this.uploadTexture(rec, bmp);
+            ms = this.uploadTexture(rec, bmp);
             rec.state = 'ready';
             // 0.25.0 놓기: 올렸으면 원본을 지운다(문맥을 잃으면 앱이 restoreTexture로 다시 준다 — 'bitmap'이면 푼 그림만, 바이트는 코어가 다시 푼다)
             if (this.rel?.textures) this.stripTexture(rec.src, this.rel.textures === 'bitmap');
           } catch {
             rec.state = 'failed';
+            ms = 0;
           } finally {
             bmp.close();
           }
           this.decoding--;
           this.pumpTextures();
-          this.onTexture?.();
+          this.onTexture?.(ms);
         },
         () => {
           if (gen !== this.texGen || this.textures.get(rec.src.id) !== rec) return;
           rec.state = 'failed';
           this.decoding--;
           this.pumpTextures();
-          this.onTexture?.();
+          this.onTexture?.(0);
         },
       );
     }
   }
 
-  private uploadTexture(rec: TexRec, bmp: ImageBitmap): void {
+  /** 푼 그림을 GPU에 올린다. 걸린 벽시계 ms(0.30.0 — texImage2D·밉맵, 앞서 그린 화면을 GPU가 끝내기를 기다린 시간 포함)를 돌려준다 */
+  private uploadTexture(rec: TexRec, bmp: ImageBitmap): number {
+    const t0 = performance.now();
     const gl = this.gl;
     const t = gl.createTexture();
     if (!t) throw new Error('무늬를 만들지 못했습니다');
@@ -2228,6 +2236,7 @@ export class Renderer3d {
     gl.bindTexture(gl.TEXTURE_2D, null);
     rec.tex = t;
     rec.bytes = Math.round(bmp.width * bmp.height * 4 * (4 / 3));
+    return Math.max(0, performance.now() - t0);
   }
 
   /** 지운다: 올린 무늬 모두 */
