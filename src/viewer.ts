@@ -7,6 +7,7 @@
  * - 터치: 한 손가락 = 회전(TOUCH_DRAG_START_PX = 10화소 넘게 움직일 때부터, 그 안에서 떼면 누르기),
  *   두 손가락 = 이동·핀치 확대(한 손가락을 먼저 떼면 남은 손가락은 모두 뗄 때까지 회전도 누르기도 하지 않는다).
  *   터치로 누르면 고르기·측정 붙잡기 허용 거리가 넓다(touchPickTolerance, 기본 14화소)
+ * - 0.32.0: 앱이 누르기마다(누른 순간·끌기 시작 거리를 넘은 순간) 포인터를 맡을 수 있다(setPointerClaim·claimPointer) — 맡은 포인터로는 위 조작을 하지 않는다
  * - 키(캔버스에 초점이 있을 때): F = 전체 보기, 1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각, Esc = 측정 지우기
  * - 오른쪽 위 뷰 큐브: 면·모서리·구석을 누르면 그 방향 표준 뷰, 끌면 회전
  *
@@ -149,6 +150,7 @@ import { type ClosestResult, type ClosestShape, closestBetween } from './closest
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
 import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
+import { type PointerHold, PointerHolds, takesBackTouches } from './claim';
 import {
   AXIS_DIRS,
   type Plane4,
@@ -794,6 +796,63 @@ export interface OnPickOptions {
   front?: boolean;
 }
 
+/**
+ * 0.32.0 앱이 포인터를 맡을지 묻는 물음(setPointerClaim 처리기의 claim 인자). 좌표는 캔버스 기준 CSS 화소(pick과 같다).
+ * 'down' = 누른 순간(코어가 그 누르기를 아직 아무것도 하지 않았다), 'drag' = 'down'에서 맡지 않은 마우스·펜·한 손가락이 끌기 시작 거리
+ * (dragStartPx — 마우스·펜 4, 손가락 10화소)를 넘은 순간(코어가 궤도·이동을 시작하기 바로 전 — 두 손가락 몸짓 중에는 묻지 않는다)
+ */
+export interface PointerClaimQuery {
+  phase: 'down' | 'drag';
+  pointerId: number;
+  /** 'mouse'·'touch'·'pen'(빈 값은 'mouse' — PickEvent와 같다) */
+  pointerType: string;
+  /** 누른 단추(0 왼쪽·1 가운데·2 오른쪽 — 손가락·펜은 0). 'drag'에서도 누를 때의 단추 */
+  button: number;
+  /** 누른 자리 */
+  x: number;
+  y: number;
+  /** 지금 자리('down'이면 누른 자리, 'drag'면 끌기 시작 거리를 넘은 자리) */
+  at: { x: number; y: number };
+  /** 지금 캔버스를 누르고 있는 포인터 수(이 포인터 포함 — 코어가 다루는 것과 앱이 맡은 것 모두) */
+  pointers: number;
+  /** 앱이 이미 맡은 포인터 수(이 포인터 빼고) */
+  held: number;
+  /** 누른 자리의 고르기 — pick(x, y, { ...opts, pointerType })와 같다(부를 때만 구한다 — 처음 고르면 그 묶음 BVH를 만든다) */
+  pick(opts?: Omit<PickOptions, 'pointerType'>): Pick3d | null;
+  /** 그 사건('down'은 pointerdown, 'drag'는 끌기 시작 거리를 넘은 pointermove) */
+  event: PointerEvent;
+}
+
+/** 0.32.0 앱이 맡은 포인터(move·end 알림). 좌표는 캔버스 기준 CSS 화소 */
+export interface HeldPointer {
+  pointerId: number;
+  pointerType: string;
+  /** 누른 자리 */
+  sx: number;
+  sy: number;
+  /** 지금 자리(end는 뗀 자리 — 'pinch'·'off'면 마지막으로 본 자리) */
+  x: number;
+  y: number;
+  /** 그 사건(pointermove·pointerup·pointercancel — 'pinch'·'off'면 없다) */
+  event?: PointerEvent;
+}
+
+/** 0.32.0 맡은 포인터가 끝난 까닭: 뗌, 취소(pointercancel), 코어가 두 손가락 몸짓으로 돌려받음, 처리기를 바꾸거나 껐음 */
+export type PointerHoldEnd = 'up' | 'cancel' | 'pinch' | 'off';
+
+/** 0.32.0 맡은 포인터 알림(claimPointer 둘째 인자, setPointerClaim 처리기) */
+export interface PointerHoldHandler {
+  /** 맡은 포인터가 움직일 때마다(맡은 그 사건에는 부르지 않는다 — 그 자리는 물음의 at) */
+  move?(p: HeldPointer): void;
+  /** 맡은 포인터가 끝났을 때 한 번 */
+  end?(p: HeldPointer, reason: PointerHoldEnd): void;
+}
+
+/** 0.32.0 setPointerClaim 처리기: claim이 true를 돌려주면 그 포인터를 앱이 맡는다 */
+export interface PointerClaimHandler extends PointerHoldHandler {
+  claim(q: PointerClaimQuery): boolean;
+}
+
 /** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
 export interface AnnotationOptions {
   /** 가려진 부분(선·점·글자)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 그리지 않는다) */
@@ -845,6 +904,9 @@ export interface ReleaseOptions {
  * meshes = 그물마다 다시 줄 배열(normals, uvs — 뒷면이 uvs를 함께 썼으면 뒷면도, backUvs — 따로 준 뒷면 무늬 좌표), textures = 무늬 id
  */
 export type ContextRestoreNeed = RestoreNeed;
+
+/** 0.32.0 맡은 포인터 기록 → 앱에 넘길 값 */
+const heldOf = (h: PointerHold<unknown>, event?: PointerEvent): HeldPointer => ({ pointerId: h.id, pointerType: h.type, sx: h.sx, sy: h.sy, x: h.x, y: h.y, ...(event ? { event } : {}) });
 
 /** 두 상자의 여섯 값이 모두 같은지 */
 const sameBox = (a: Box3, b: Box3): boolean =>
@@ -1014,6 +1076,8 @@ interface Section {
 
 interface Drag {
   mode: 'orbit' | 'pan' | 'touch';
+  /** 0.32.0: 이 끌기를 시작한 포인터(끌기 시작 거리를 넘을 때 앱에 물을 포인터) */
+  id: number;
   button: number;
   /** 누른 포인터 종류(끌기 시작 거리를 가른다) */
   pointerType: string;
@@ -1121,7 +1185,11 @@ export class Viewer3d {
   private pendingFit = false;
   private wheelAnchor: { x: number; y: number; t: number; p: V3 } | null = null;
 
-  private pointers = new Map<number, { x: number; y: number }>();
+  /** 코어가 다루는 누른 포인터: 지금 자리, 0.32.0 종류·누른 자리(claimPointer가 맡길 때 쓴다) */
+  private pointers = new Map<number, { x: number; y: number; type: string; sx: number; sy: number }>();
+  /** 0.32.0: 누를 때마다 맡을지 묻는 앱 처리기(setPointerClaim — 없으면 0.31.0 그대로)와 앱이 맡은 포인터(코어가 끌기·고르기에 쓰지 않는다) */
+  private claimer: PointerClaimHandler | null = null;
+  private holds = new PointerHolds<PointerHoldHandler>();
   private drag: Drag | null = null;
   private touch: { dist: number; cx: number; cy: number } | null = null;
   private lastMiddle = { t: 0, x: 0, y: 0 };
@@ -1936,6 +2004,9 @@ export class Viewer3d {
     this.drag = null;
     this.touch = null;
     this.pointers.clear();
+    // 0.32.0: 맡은 포인터는 알리지 않고 잊는다
+    this.holds.clear();
+    this.claimer = null;
     this.wheelAnchor = null;
   }
 
@@ -2967,6 +3038,52 @@ export class Viewer3d {
   onCameraChange(cb: (c: CameraState) => void): () => void {
     this.camCbs.add(cb);
     return () => this.camCbs.delete(cb);
+  }
+
+  /**
+   * 0.32.0 앱이 포인터를 맡는 훅: 캔버스를 누를 때마다(마우스·펜·손가락, 앱이 보내는 합성 사건도) claim에 묻는다 — 누른 순간('down')에 묻고,
+   * 맡지 않은 마우스·펜·한 손가락이 끌기 시작 거리를 넘는 순간('drag')에 한 번 더 묻는다. true를 돌려주면 그 포인터는 뗄 때까지 앱 것이다:
+   * 코어는 그 포인터로 궤도·이동·걷기 둘러보기·핀치·고르기·측정 점 찍기·측정 미리 보기·두 번 누르기 판별을 하지 않고 움직임·떼기를 move·end로 넘긴다
+   * ('drag'에서 맡으면 코어가 그 포인터에 pointercancel을 받은 것과 같다 — 0.31.0에 앱이 합성 pointercancel을 보낸 것과 같은 상태, 그 전에 시작한 일은 없다).
+   * 캔버스는 맡은 포인터도 잡는다(setPointerCapture — 캔버스 밖으로 나가도 사건이 온다). 휠·키·뷰 큐브와 DOM 사건 전달은 그대로다.
+   * 둘째 손가락: 앱이 손가락을 맡은 동안 새 손가락이 닿으면 그 손가락도 묻고, 맡지 않으면 코어가 앱이 맡은 손가락을 모두 돌려받아(end 'pinch')
+   * 지금 자리에서 함께 누른 것으로 두 손가락 이동·핀치를 한다. 앱이 맡지 않은 손가락끼리는 0.31.0 그대로다(코어가 다루는 손가락이 있을 때 새 손가락을 맡으면
+   * 코어는 제 손가락만으로 하던 것을 잇는다). 마우스·펜은 서로·손가락과 상관없다.
+   * 함수만 주면 claim만 있는 처리기다. 다른 처리기를 주거나 null이면 앞 처리기가 맡은 포인터는 end('off')를 알리고 뗄 때까지 무시만 한다.
+   * 주지 않거나 null이면 0.31.0과 같다
+   */
+  setPointerClaim(h: PointerClaimHandler | PointerClaimHandler['claim'] | null): void {
+    if (this.disposed) return;
+    const next = typeof h === 'function' ? { claim: h } : (h ?? null);
+    const prev = this.claimer;
+    if (next === prev) return;
+    this.claimer = next;
+    if (prev) for (const x of this.holds.detach(prev)) prev.end?.(heldOf(x), 'off');
+  }
+
+  /**
+   * 0.32.0 누르고 있는 포인터를 지금 맡는다(앱 타이머의 길게 누르기 등 — 코어에는 그 포인터에 pointercancel이 온 것과 같다: 하던 궤도·이동을 그만두고
+   * 두 손가락 몸짓이었으면 0.31.0 손가락 하나를 뗀 것처럼 남은 손가락은 뗄 때까지 무시한다). 그 뒤는 setPointerClaim에서 맡은 것과 같다(둘째 손가락 규칙 포함).
+   * on을 주면 그 포인터의 move·end를 거기에, 주지 않으면 setPointerClaim 처리기에(없으면 알리지 않는다). 맡았거나 이미 앱 것이면 true,
+   * 코어가 모르는 포인터(누르지 않았거나 이미 뗀 것)면 false. 맡은 포인터 id로 보낸 합성 사건도 코어는 앱 것으로 본다
+   */
+  claimPointer(pointerId: number, on?: PointerHoldHandler | null): boolean {
+    if (this.disposed) return false;
+    const held = this.holds.get(pointerId);
+    if (held) {
+      if (on !== undefined) held.on = on;
+      return true;
+    }
+    const r = this.pointers.get(pointerId);
+    if (!r) return false;
+    this.coreUp(pointerId, true);
+    this.holds.hold(pointerId, r.type, r.sx, r.sy, r.x, r.y, on === undefined ? this.claimer : on);
+    return true;
+  }
+
+  /** 0.32.0 앱이 맡은 포인터 id(맡은 차례) */
+  get heldPointers(): number[] {
+    return this.holds.ids();
   }
 
   /**
@@ -5585,13 +5702,27 @@ export class Viewer3d {
       /* 이미 놓친 포인터 */
     }
     const p = this.local(e);
-    this.pointers.set(e.pointerId, p);
+    const type = e.pointerType || 'mouse';
+    // 0.32.0: 앱이 맡을지 먼저 묻는다. 맡지 않은 손가락이 닿았는데 앱이 손가락을 맡고 있으면 그 손가락들을 돌려받아 함께 두 손가락 몸짓을 한다
+    let took = false;
+    if (this.claimer || this.holds.size) {
+      // 맡은 포인터 id로 다시 누르면(앱이 코어에 돌려주는 합성 누르기 등) 앞 맡기는 끝난 것으로 본다
+      const again = this.holds.release(e.pointerId);
+      if (again) again.on?.end?.(heldOf(again), 'cancel');
+      const h = this.claimer;
+      if (h && this.askClaim(h, 'down', e, p, p, e.button)) {
+        this.holds.hold(e.pointerId, type, p.x, p.y, p.x, p.y, h);
+        return;
+      }
+      if (takesBackTouches(e.pointerType, this.holds.list())) took = this.takeBackTouches();
+    }
+    this.pointers.set(e.pointerId, { x: p.x, y: p.y, type, sx: p.x, sy: p.y });
     this.finishAnim();
     if (e.pointerType === 'touch') {
-      if (this.pointers.size === 1) this.drag = { mode: 'orbit', button: 0, pointerType: 'touch', sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
-      else if (this.pointers.size === 2) {
-        // 두 손가락 이동·핀치(앞의 핀치 뒤 남겨 둔 손가락에 새 손가락이 닿아도 여기서 다시 시작한다)
-        this.drag = { mode: 'touch', button: 0, pointerType: 'touch', sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: true, pivot: null, depth: null };
+      if (this.pointers.size === 1) this.drag = { mode: 'orbit', id: e.pointerId, button: 0, pointerType: 'touch', sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
+      else if (this.pointers.size === 2 || (took && this.pointers.size > 2)) {
+        // 두 손가락 이동·핀치(앞의 핀치 뒤 남겨 둔 손가락에 새 손가락이 닿아도 여기서 다시 시작한다 — 0.32.0 앱에서 돌려받은 손가락도)
+        this.drag = { mode: 'touch', id: e.pointerId, button: 0, pointerType: 'touch', sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: true, pivot: null, depth: null };
         this.touch = this.pinchState();
         this.interacting = true;
       }
@@ -5609,7 +5740,34 @@ export class Viewer3d {
       this.lastMiddle = { t: now, x: p.x, y: p.y };
     }
     const mode: Drag['mode'] = e.button === 0 ? 'orbit' : e.button === 1 && e.shiftKey ? 'orbit' : 'pan';
-    this.drag = { mode, button: e.button, pointerType: e.pointerType, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
+    this.drag = { mode, id: e.pointerId, button: e.button, pointerType: e.pointerType, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, pivot: null, depth: null };
+  }
+
+  /** 0.32.0: 앱 처리기에 묻는다(at0 = 누른 자리, at = 지금 자리) */
+  private askClaim(h: PointerClaimHandler, phase: PointerClaimQuery['phase'], e: PointerEvent, at0: { x: number; y: number }, at: { x: number; y: number }, button: number): boolean {
+    const type = e.pointerType || 'mouse';
+    const x = at0.x, y = at0.y;
+    return !!h.claim({
+      phase,
+      pointerId: e.pointerId,
+      pointerType: type,
+      button,
+      x,
+      y,
+      at: { x: at.x, y: at.y },
+      pointers: this.pointers.size + this.holds.size + (this.pointers.has(e.pointerId) ? 0 : 1),
+      held: this.holds.size,
+      pick: (o) => this.pick(x, y, { ...(o ?? {}), pointerType: type }),
+      event: e,
+    });
+  }
+
+  /** 0.32.0: 앱이 맡은 손가락을 모두 돌려받는다(지금 자리에서 누른 것으로 — 맡은 차례대로). 돌려받았으면 true */
+  private takeBackTouches(): boolean {
+    const back = this.holds.takeTouches();
+    for (const h of back) this.pointers.set(h.id, { x: h.x, y: h.y, type: h.type, sx: h.x, sy: h.y });
+    for (const h of back) h.on?.end?.(heldOf(h), 'pinch');
+    return back.length > 0;
   }
 
   /** 지금 누른 손가락 앞의 둘로 핀치 기준(거리·가운데) */
@@ -5620,8 +5778,17 @@ export class Viewer3d {
 
   private onMove(e: PointerEvent): void {
     const p = this.local(e);
+    // 0.32.0: 앱이 맡은 포인터는 앱에만 넘긴다(끌기·측정 미리 보기 없음)
+    if (this.holds.size) {
+      const h = this.holds.move(e.pointerId, p.x, p.y);
+      if (h) {
+        h.on?.move?.(heldOf(h, e));
+        return;
+      }
+    }
     const d = this.drag;
-    if (!d || !this.pointers.has(e.pointerId)) {
+    const rec = this.pointers.get(e.pointerId);
+    if (!d || !rec) {
       if (this.measuring && !d) {
         // Shift를 누른 채 움직이면(0.10.0) 앞 미리 보기의 방향 추론을 잠그고, 뗀 채 움직이면 푼다
         this.setShift(e.shiftKey);
@@ -5630,7 +5797,8 @@ export class Viewer3d {
       }
       return;
     }
-    this.pointers.set(e.pointerId, p);
+    rec.x = p.x;
+    rec.y = p.y;
     if (d.mode === 'touch') {
       if (this.pointers.size < 2 || !this.touch) return;
       const [a, b] = [...this.pointers.values()];
@@ -5657,6 +5825,13 @@ export class Viewer3d {
     }
     if (!d.moved) {
       if (!dragStarted(p.x - d.sx, p.y - d.sy, d.pointerType)) return;
+      // 0.32.0: 궤도·이동을 시작하기 전에 앱에 묻는다(맡으면 코어에는 이 포인터가 취소된 것과 같다)
+      const h = this.claimer;
+      if (h && e.pointerId === d.id && this.askClaim(h, 'drag', e, { x: d.sx, y: d.sy }, p, d.button)) {
+        this.coreUp(e.pointerId, true);
+        this.holds.hold(e.pointerId, rec.type, rec.sx, rec.sy, p.x, p.y, h);
+        return;
+      }
       d.moved = true;
       this.interacting = true;
       // 터치는 끌기 시작 거리가 커서 그만큼을 한꺼번에 돌리면 튀어 보인다 — 여기서부터 움직인 만큼만 돌린다
@@ -5686,7 +5861,23 @@ export class Viewer3d {
   }
 
   private onUp(e: PointerEvent, cancel: boolean): void {
-    const had = this.pointers.delete(e.pointerId);
+    // 0.32.0: 앱이 맡은 포인터는 앱에만 알린다
+    if (this.holds.size) {
+      const h = this.holds.release(e.pointerId);
+      if (h) {
+        const p = this.local(e);
+        h.x = p.x;
+        h.y = p.y;
+        h.on?.end?.(heldOf(h, e), cancel ? 'cancel' : 'up');
+        return;
+      }
+    }
+    this.coreUp(e.pointerId, cancel, e);
+  }
+
+  /** 코어가 다루는 포인터를 뗐다(cancel이면 누르기로 치지 않는다 — 0.32.0 앱이 맡을 때도 이것). e는 떼기 사건(취소면 없어도 된다) */
+  private coreUp(id: number, cancel: boolean, e?: PointerEvent): void {
+    const had = this.pointers.delete(id);
     const d = this.drag;
     if (!had || !d) return;
     if (d.mode === 'touch') {
@@ -5703,7 +5894,7 @@ export class Viewer3d {
         this.invalidate();
         return;
       }
-    } else if (!cancel && !d.moved && (d.button === 0 || e.pointerType === 'touch')) {
+    } else if (!cancel && e && !d.moved && (d.button === 0 || e.pointerType === 'touch')) {
       const p = this.local(e);
       this.click(p.x, p.y, e);
     }
