@@ -4718,7 +4718,16 @@ export class Viewer3d {
         for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, openRef)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
         if (ls.length) openG = this.openLineEdge(so, f, x, y, snapPx, ls, first, nearSegs(), budget, vis);
       }
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap]);
+      // 0.32.0 안내 선의 면의 열린 교차(trackDirs { meets: { openFaces: true } } — refineFace가 있을 때만): 같은 안내 선이 커서 둘레 삼각형을 뚫지 않지만
+      // 그 삼각형과 곡면 사이를 지날 만큼 가까우면 앱 refineFace('axisFace', open — 축 이름 없는 그 선)가 준 곡면 위 교차. 0.22.0 면의 열린 교차와 같은 셈·한도·기억. 열 후보 뒤 차례
+      const openFaceRef = tracks && refsBefore && so.refineFace && inf!.trackDirs !== true && inf!.trackDirs!.meetOpenFaces ? this.trackDirBase(inf, refsBefore) : null;
+      let openGF: { snap: OpenFaceSnap<NearTriangle>; line: OpenRefineLine } | null = null;
+      if (openFaceRef) {
+        const ls: OpenRefineLine[] = [];
+        for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, openFaceRef)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
+        if (ls.length) openGF = this.openLineFace(so, f, x, y, snapPx, ls, first, budget);
+      }
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap, openGF?.snap]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       if (t && t === pair) {
         const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
@@ -4826,6 +4835,22 @@ export class Viewer3d {
         if (sg) out.segment = copySegment(sg);
         out.refined = true;
         return out;
+      }
+      if (t && openGF && t === openGF.snap) {
+        // 0.32.0 안내 선의 면의 열린 교차: 앱이 준 곡면 위 교차(그 안내 선 위로 내린 자리 — 다듬은 점)와 그 삼각형(face). 0.31.0 열린 교차처럼 기준 선분을 되돌리고 잠글 방향이 없다
+        this.parallelRef = refsBefore!.parallel;
+        this.trackDirRef = refsBefore!.track;
+        this.parallelOwn = refsBefore!.own;
+        const { snap: o, line: l } = openGF;
+        return {
+          p: o.p,
+          vertex: true,
+          kind: l.guide!,
+          trackFrom: [l.from[0], l.from[1], l.from[2]],
+          edge: [[...openFaceRef![0]] as V3, [...openFaceRef![1]] as V3],
+          face: copyFace(o.tri),
+          refined: true,
+        };
       }
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
