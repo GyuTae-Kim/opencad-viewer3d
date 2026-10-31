@@ -46,6 +46,8 @@
  * 0.29.0 단추: 안내 선 만나는 점(inference.trackDirs { edge, meets } — 끌어온 점의 나란함·수직 선이 첫 점 축·다른 끌어온 점의 축·모서리·면과 만나는 점,
  *   상태 줄 "(…)에서 모서리와 나란함 · 첫 점 X축과 만나는 점", 첫 점 나란함도 곡선 현을 거른다 — parallelEdge), 글상자 막히면 예전 차례(setMeasureLabelSpot fallback).
  *   문맥 잃기·되찾기 뒤 상태 줄에 "다시 올리기 끝"(onContextRestoreDone)
+ * 0.30.0 단추: 안내 선끼리(inference.trackDirs { meets: { guides: true } } — 두 끌어온 점의 나란함·수직 선끼리 만나는 점, 상태 줄 "… · (…)에서 수직인 선과 만나는 점"),
+ *   처음 올리기 재기(&tex=1 — 같은 그림을 새 무늬 id로 다시 올려 다 보이기까지의 시간과 그사이 그린 화면 수)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -547,6 +549,60 @@ viewer.onContextRestoreDone(() => {
   hoverInfo = `${hoverInfo ? `${hoverInfo} · ` : ''}다시 올리기 끝(onContextRestoreDone)`;
   showStatus();
 });
+// 0.30.0: 두 끌어온 점의 안내 선끼리 만나는 점(trackDirs { meets: { guides } }), 처음 올릴 때 무늬 다시 그리기 모으기
+toggle(
+  '안내 선끼리',
+  (v) => {
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, trackDirs: { edge: notCurve, meets: { guides: true } }, parallelEdge: notCurve },
+          }
+        : null,
+    );
+  },
+  '안내 선 만나는 점에 더해 두 끌어온 점의 나란함·수직 선끼리 만나는 점에 붙는다(inference.trackDirs { meets: { guides: true } } — 두 점에서 추론 색 쇄선과 ×). ' +
+    '두 점에 머물러 끌어온 뒤 기운 모서리를 지나가고, 한 점의 나란한 선과 다른 점의 수직인 선이 만나는 구석을 가리킨다',
+);
+button(
+  '처음 올리기 재기',
+  () => {
+    const tex = scene.textures ?? [];
+    if (!tex.length) {
+      hoverInfo = '무늬가 없다(&tex=1로 연다)';
+      showStatus();
+      return;
+    }
+    // 같은 그림을 새 무늬 id로 준 장면 사본(같은 id면 코어가 올린 무늬를 그대로 쓴다) — 다 보이기까지의 시간과 그사이 그린 화면 수
+    const tag = `#${Date.now() % 100000}`;
+    const copy: Scene3d = {
+      ...scene,
+      meshes: scene.meshes.map((m) => ({ ...m, ...(m.texture ? { texture: m.texture + tag } : {}), ...(m.backTexture ? { backTexture: m.backTexture + tag } : {}) })),
+      textures: tex.map((t) => ({ ...t, id: t.id + tag })),
+    };
+    const raf = window.requestAnimationFrame;
+    let frames = 0;
+    window.requestAnimationFrame = (cb) => raf.call(window, (t) => (frames++, cb(t)));
+    const t0 = performance.now();
+    viewer.setScene(copy, { keepView: true });
+    const poll = (): void => {
+      const s = viewer.stats.textures;
+      if (s.ready + s.failed < s.count && performance.now() - t0 < 60_000) return void setTimeout(poll, 5);
+      // 마지막 무늬로 그린 화면까지
+      raf.call(window, () => {
+        window.requestAnimationFrame = raf;
+        hoverInfo = `처음 올리기: 무늬 ${s.count}장 ${(performance.now() - t0).toFixed(0)} ms · 다시 그린 화면 ${frames}번`;
+        showStatus();
+      });
+    };
+    poll();
+  },
+  '같은 그림을 새 무늬 id로 준 장면 사본을 setScene으로 다시 올려 무늬가 다 보이기까지의 시간과 그사이 그린 화면 수를 상태 줄에 보인다(&tex=1 — 0.30.0부터 첫 무늬 뒤로는 ' +
+    '250 ms와 올리기·그리기 시간의 4배 가운데 긴 간격마다만 다시 그린다). 다른 단추가 장면을 다시 주면 원본 장면으로 돌아간다',
+);
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
   viewer.setItemEdgeColor('구', v ? '#22aa66' : null);
@@ -775,7 +831,9 @@ viewer.canvas.addEventListener('pointermove', () =>
               ? ` · ${h.segment.id}#${h.segment.index}과 만나는 점${h.refined ? '(다듬음)' : ''}`
               : h.face
                 ? ` · ${h.face.id} 면과 만나는 점${h.refined ? '(다듬음)' : ''}`
-                : '';
+                : h.trackGuide
+                  ? ` · ${pt(h.trackGuide.from)}에서 ${h.trackGuide.kind === 'parallel' ? '나란한' : '수직인'} 선과 만나는 점`
+                  : '';
     const next = dirOf && h?.trackFrom
       ? `미리 보기: ${pt(h.trackFrom)}에서 모서리와 ${dirOf === 'parallel' ? '나란함' : '수직'}${meet}`
       : h?.locked && h.trackOther
