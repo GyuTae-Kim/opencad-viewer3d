@@ -4,6 +4,7 @@
  * 0.24.0: 글상자 여러 개를 차례로 놓을 때 먼저 놓인 글상자도 비킨다(placeLabelAmong — 앱 측정 덧그림 글상자끼리, 덧그림 글상자와 측정 거리 글상자).
  * 0.26.0: 앱이 정한 기본 자리(가운데·네 귀·위·아래, 또는 앱이 구한 왼쪽 위 자리)를 받는다(LabelPlaceOptions.first — 주지 않으면 0.25.0과 같은 오른쪽 위).
  * 0.28.0: 기본 자리가 막히면 0.25.0 차례 그대로 고르는 선택(LabelPlaceOptions.fallback 'topRight' — 주지 않으면 0.27.0과 같다).
+ * 0.31.0: 측정 점 표식(soft)을 덮는 자리도 옮기는 선택(LabelAvoidAreas.softBlocks — 주지 않으면 0.30.0과 같다).
  */
 
 /** 화면 사각형: 캔버스 왼쪽 위 기준 CSS 화소 */
@@ -30,6 +31,13 @@ export interface LabelAvoidAreas {
    * 옮길 자리는 이것까지 비켜 가는 자리를 먼저 찾는다(없으면 rects·circles만 비켜 가는 자리)
    */
   soft?: readonly LabelCircle[];
+  /**
+   * 0.31.0: true면 soft도 자리를 옮길 까닭이 된다(기본 꺼짐 — 주지 않으면 0.30.0과 같다). 위 규칙으로 고른 자리(기본 자리 또는 rects·circles를 비킨 자리)가
+   * soft와 겹치면 soft를 피할 원으로 더해(circles 뒤) 같은 차례로 다시 고르고, 그 자리가 rects·circles·soft 모두와 겹치지 않을 때만 받는다
+   * (placeLabelAmong은 먼저 놓인 글상자도 — 처음 자리가 그것과 겹치지 않았으면). 받지 못하면 처음 고른 자리다.
+   * 다시 고를 때는 soft 둘레 원의 바로 위·아래 자리도 차례에 든다(피할 영역 위·아래와 같은 규칙)
+   */
+  softBlocks?: boolean;
 }
 
 /** 기준점에서 글상자까지 가로·세로 간격과 캔버스 가장자리 여백(0.12.0까지의 기본 자리와 같다) */
@@ -142,9 +150,37 @@ function spotRect(spot: LabelSpot | undefined, sx: number, sy: number, w: number
  * (기본 자리·왼쪽 위의 가로 자리, 기본 자리에서 세로로 가까운 것부터 — 선분이 짧아 커서·십자선이 기준점 바로 옆일 때)를 차례로 보고,
  * 피할 영역과 soft(측정 점 표식)에 모두 겹치지 않는 첫 자리를 고른다. 그런 자리가 없으면 피할 영역에만 겹치지 않는 첫 자리, 그것도 없으면 기본 자리.
  * 0.26.0 opts.first: 기본 자리를 앱이 정한다(예: SketchUp 결과 글처럼 'center'). 그 뒤 차례는 기준점 네 귀(기본 자리와 같은 귀는 빼고) → 선분 위 자리 →
- * 피할 영역 위·아래(가로는 기본 자리 → 오른쪽 위 → 왼쪽 위)이고, 모두 막히면 그 기본 자리다. 주지 않으면 0.25.0과 같다
+ * 피할 영역 위·아래(가로는 기본 자리 → 오른쪽 위 → 왼쪽 위)이고, 모두 막히면 그 기본 자리다. 주지 않으면 0.25.0과 같다.
+ * 0.31.0 avoid.softBlocks: 고른 자리가 soft(측정 점 표식)를 덮으면 soft도 피할 원으로 보고 같은 차례로 다시 고른다(LabelAvoidAreas.softBlocks)
  */
 export function placeMeasureLabel(
+  at: readonly number[],
+  size: { width: number; height: number },
+  view: { width: number; height: number },
+  avoid?: LabelAvoidAreas | null,
+  segment?: readonly [readonly number[], readonly number[]] | null,
+  opts?: LabelPlaceOptions | null,
+): MeasureLabelRect {
+  const r = placeOnce(at, size, view, avoid, segment, opts);
+  const marks = softMarks(avoid);
+  if (!marks || !hitsAvoid(r, { circles: marks })) return r;
+  const strict = strictAreas(avoid!, marks);
+  const s = placeOnce(at, size, view, strict, segment, opts);
+  return hitsAvoid(s, strict) ? r : s;
+}
+
+/** 0.31.0 softBlocks를 켰고 soft가 있으면 그 원들(아니면 null — 0.30.0과 같은 고르기) */
+function softMarks(avoid: LabelAvoidAreas | null | undefined): readonly LabelCircle[] | null {
+  return avoid?.softBlocks && avoid.soft?.length ? avoid.soft : null;
+}
+
+/** 0.31.0 다시 고를 때의 피할 영역: rects 그대로, circles 뒤에 soft(옮길 때 될 수 있으면 비킬 것은 없다) */
+function strictAreas(avoid: LabelAvoidAreas, marks: readonly LabelCircle[]): LabelAvoidAreas {
+  return { rects: avoid.rects ?? [], circles: [...(avoid.circles ?? []), ...marks] };
+}
+
+/** placeMeasureLabel의 한 번 고르기(0.30.0까지의 규칙 그대로 — softBlocks는 보지 않는다) */
+function placeOnce(
   at: readonly number[],
   size: { width: number; height: number },
   view: { width: number; height: number },
@@ -157,7 +193,7 @@ export function placeMeasureLabel(
   if (!avoid || (!avoid.rects?.length && !avoid.circles?.length) || !hitsAvoid(first, avoid)) return first;
   // 0.28.0 fallback 'topRight': 막히면 0.25.0 차례의 자리, 그것도 막혔으면 기본 자리
   if (opts?.fallback === 'topRight') {
-    const r = placeMeasureLabel(at, size, view, avoid, segment);
+    const r = placeOnce(at, size, view, avoid, segment);
     return hitsAvoid(r, avoid) ? first : r;
   }
   const cands: MeasureLabelRect[] = [];
@@ -233,7 +269,9 @@ function labelReachX(
  * 옮길 때 될 수 있으면 가리지 않을 것은 avoid.soft, 그것이 없으면 soft(그 글상자의 점 표식). 그래도 모두 막히면 0.23.0 자리다.
  * 더하는 것은 이 글상자의 후보가 닿을 수 있는 가로 범위와 겹치는 먼저 놓인 글상자 가운데 0.23.0 자리 가운데에 가까운 LABEL_PLACED_MAX개
  * (거리가 같으면 먼저 놓인 것부터)다. 같은 입력이면 같은 자리다.
- * 0.26.0 opts.first: 앱이 정한 기본 자리(placeMeasureLabel과 같다 — 두 번 고르기 모두 그 자리부터). 주지 않으면 0.25.0과 같다
+ * 0.26.0 opts.first: 앱이 정한 기본 자리(placeMeasureLabel과 같다 — 두 번 고르기 모두 그 자리부터). 주지 않으면 0.25.0과 같다.
+ * 0.31.0 avoid.softBlocks: 고른 자리가 avoid.soft(측정 점 표식)를 덮으면 그것도 피할 원으로 보고 같은 차례로 다시 고른다 — 그 자리가 피할 영역·표식과 겹치지 않고
+ * 먼저 놓인 글상자와도 겹치지 않을 때(처음 자리가 먼저 놓인 글상자와 겹쳤으면 따지지 않는다)만 받는다
  */
 export function placeLabelAmong(
   at: readonly number[],
@@ -245,8 +283,28 @@ export function placeLabelAmong(
   soft?: readonly LabelCircle[] | null,
   opts?: LabelPlaceOptions | null,
 ): MeasureLabelRect {
+  const r = amongOnce(at, size, view, avoid, placed, segment, soft, opts);
+  const marks = softMarks(avoid);
+  if (!marks || !hitsAvoid(r, { circles: marks })) return r;
+  const strict = strictAreas(avoid!, marks);
+  const s = amongOnce(at, size, view, strict, placed, segment, null, opts);
+  const onPlaced = (q: MeasureLabelRect): boolean => placed.some((p) => rectsOverlap(q, p));
+  return hitsAvoid(s, strict) || (onPlaced(s) && !onPlaced(r)) ? r : s;
+}
+
+/** placeLabelAmong의 한 번 고르기(0.30.0까지의 규칙 그대로 — softBlocks는 보지 않는다) */
+function amongOnce(
+  at: readonly number[],
+  size: { width: number; height: number },
+  view: { width: number; height: number },
+  avoid: LabelAvoidAreas | null | undefined,
+  placed: readonly MeasureLabelRect[],
+  segment?: readonly [readonly number[], readonly number[]] | null,
+  soft?: readonly LabelCircle[] | null,
+  opts?: LabelPlaceOptions | null,
+): MeasureLabelRect {
   if (opts?.fallback === 'topRight') return amongFallback(at, size, view, avoid, placed, segment, soft, opts.first);
-  const base = placeMeasureLabel(at, size, view, avoid, segment, opts);
+  const base = placeOnce(at, size, view, avoid, segment, opts);
   if (!placed.length || !placed.some((r) => rectsOverlap(base, r))) return base;
   const w = size.width, h = size.height;
   const first = spotRect(opts?.first, at[0]!, at[1]!, w, h, view.width, view.height).r;
@@ -261,7 +319,7 @@ export function placeLabelAmong(
     .map((e) => e.r);
   const hard: LabelAvoidAreas = { rects: [...(avoid?.rects ?? []), ...near], circles: avoid?.circles ?? [] };
   const s = avoid?.soft?.length ? avoid.soft : (soft ?? []);
-  const r = placeMeasureLabel(at, size, view, { ...hard, soft: s }, segment, opts);
+  const r = placeOnce(at, size, view, { ...hard, soft: s }, segment, opts);
   return hitsAvoid(r, hard) ? base : r;
 }
 
@@ -284,7 +342,7 @@ function amongFallback(
   const hard = !!avoid && (!!avoid.rects?.length || !!avoid.circles?.length);
   const hit = hard && hitsAvoid(first, avoid!);
   if (!hit && !placed.some((p) => rectsOverlap(first, p))) return first;
-  const r = placeLabelAmong(at, size, view, avoid, placed, segment, soft);
+  const r = amongOnce(at, size, view, avoid, placed, segment, soft);
   if ((hard && hitsAvoid(r, avoid!)) || (!hit && placed.some((p) => rectsOverlap(r, p)))) return first;
   return r;
 }

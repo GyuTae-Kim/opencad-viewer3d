@@ -583,6 +583,14 @@ export interface MeasureLabelAvoid {
   rects?: readonly MeasureLabelRect[];
   /** 측정 커서(코어가 미리 보기를 구한 포인터 자리) 둘레에서 피할 반지름(CSS 화소). 미리 보기가 있을 때만 본다. 0·없으면 커서를 보지 않는다 */
   pointerRadius?: number;
+  /**
+   * 0.31.0: true면 두 측정 점 표식(첫 점·미리 보기 점 또는 두 점째 — 반지름 LABEL_POINT_R 6)을 덮는 자리도 옮긴다(기본 꺼짐 — true일 때만).
+   * 0.30.0까지 표식은 글상자를 옮길 때만 될 수 있으면 비켰다 — 기본 자리(두 점 화면 가운데의 오른쪽 위)가 첫 점 표식을 덮어도 그대로였다
+   * (첫 점이 가운데에서 오른쪽 위 8~48화소에 있을 때, 휴대폰처럼 글상자가 화면 폭의 절반을 넘으면 캔버스 안으로 당겨져 더 자주).
+   * 켜면 고른 자리가 표식을 덮을 때 표식도 피할 원으로 보고 같은 차례로 다시 고른다(순수 LabelAvoidAreas.softBlocks — 그런 자리가 없으면 0.30.0 자리).
+   * rects·pointerRadius 없이 이것만 줘도 된다. 측정 거리 글상자에만 쓴다(앱 측정 덧그림 글상자는 0.30.0 그대로)
+   */
+  points?: boolean;
 }
 
 /**
@@ -1192,7 +1200,7 @@ export class Viewer3d {
   /** 마지막으로 화면에 그린 측정 거리 글상자(0.12.0 — CSS 화소, 그리지 않았으면 null) */
   private measureLabel: MeasureLabelRect | null = null;
   /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
-  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number } | null = null;
+  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number; points: boolean } | null = null;
   /** 0.27.0 뷰어 글상자 기본 자리(setMeasureLabelSpot — 준 것만, 없으면 null = 0.26.0 그대로 오른쪽 위) */
   private labelSpot: MeasureLabelSpot | null = null;
   /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
@@ -3405,7 +3413,8 @@ export class Viewer3d {
    * 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). null·빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지워도 남는다.
    * 0.23.0: 앱 측정 덧그림(setAnnotations)의 글상자도 이 사각형을 같은 차례로 비켜 그린다(커서 둘레는 보지 않는다 — annotationLabelRects).
    * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다.
-   * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다
+   * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다.
+   * 0.31.0: points: true면 측정 거리 글상자가 두 측정 점 표식을 덮는 자리도 옮긴다(MeasureLabelAvoid.points — 이것만 줘도 켠다)
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
@@ -3416,13 +3425,16 @@ export class Viewer3d {
     }
     const pr = o?.pointerRadius;
     const pointerRadius = typeof pr === 'number' && Number.isFinite(pr) && pr > 0 ? pr : 0;
-    const next = rects.length || pointerRadius ? { rects, pointerRadius } : null;
+    // 0.31.0: 측정 점 표식도 비키기(true일 때만 — 이것만 줘도 켠다)
+    const points = o?.points === true;
+    const next = rects.length || pointerRadius || points ? { rects, pointerRadius, points } : null;
     const prev = this.labelAvoid;
     const same =
       prev === next ||
       (!!prev &&
         !!next &&
         prev.pointerRadius === next.pointerRadius &&
+        prev.points === next.points &&
         prev.rects.length === next.rects.length &&
         prev.rects.every((r, i) => {
           const s = next.rects[i]!;
@@ -3453,12 +3465,13 @@ export class Viewer3d {
     return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
-  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null) */
+  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null). 0.31.0: 측정 점 표식도 비키면 points: true */
   get measureLabelAvoid(): MeasureLabelAvoid | null {
     const a = this.labelAvoid;
     if (!a) return null;
     const r: MeasureLabelAvoid = { rects: a.rects.map((x) => ({ ...x })) };
     if (a.pointerRadius) r.pointerRadius = a.pointerRadius;
+    if (a.points) r.points = true;
     return r;
   }
 
@@ -3506,17 +3519,19 @@ export class Viewer3d {
 
   /**
    * 화면 덧그림의 글상자가 지금 피할 영역(커서 둘레는 미리 보기가 있을 때만). 옮길 때는 두 측정 점 표식(seg)도 될 수 있으면 가리지 않는다.
-   * 꺼져 있으면 null
+   * 0.31.0: points를 켰으면 표식을 덮는 자리도 옮긴다(softBlocks). 꺼져 있으면 null
    */
   private labelAvoidAreas(seg: [V3, V3] | null): LabelAvoidAreas | null {
     const a = this.labelAvoid;
     if (!a) return null;
     const at = a.pointerRadius && this.measuring && this.measureHover ? this.lastHoverAt : null;
-    return {
+    const out: LabelAvoidAreas = {
       rects: a.rects,
       circles: at ? [{ x: at.x, y: at.y, r: a.pointerRadius }] : [],
       soft: seg ? seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R })) : [],
     };
+    if (a.points) out.softBlocks = true;
+    return out;
   }
 
   /** 측정을 지운다(찍은 점·미리 보기·잠금, 0.16.0부터 끌어온 점도) */
