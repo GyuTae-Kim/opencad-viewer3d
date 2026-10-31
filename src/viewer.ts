@@ -997,7 +997,7 @@ export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
 const SNAPSHOT_MAX_SIDE = 16384;
 /**
  * 0.30.0 처음 올릴 때 무늬 다시 그리기 간격: 첫 무늬 뒤로는 다른 무늬를 아직 푸는 중이면 앞서 무늬로 다시 그린 때부터 이만큼(ms)과
- * 그 뒤 무늬 올리기 한 번에 걸린 가장 긴 시간 × TEXTURE_REDRAW_SLOW 가운데 긴 시간이 지나야 다시 그린다
+ * 그 뒤 그린 화면의 그리기·무늬 올리기 한 번·GPU 울타리 기다림에 걸린 가장 긴 시간 × TEXTURE_REDRAW_SLOW 가운데 긴 시간이 지나야 다시 그린다
  */
 export const TEXTURE_REDRAW_MS = 250;
 /** 0.30.0 무늬 다시 그리기 간격의 올리기 시간 배수 — 다시 그린 화면을 GPU가 끝내기를 기다리는 몫이 올리는 시간의 1/(1 + 4)쯤을 넘지 않게 */
@@ -1223,7 +1223,7 @@ export class Viewer3d {
   private restoreEmitting = false;
   /**
    * 0.30.0 처음 올릴 때 무늬 다시 그리기 모으기(texRedraw): 이번 무늬 올리기에서 무늬로 다시 그렸는지, 마지막으로 무늬로 다시 그린 때(performance.now),
-   * 그 뒤 무늬 올리기 한 번에 걸린 가장 긴 시간(ms), 미룬 다시 그리기 타이머
+   * 그 뒤 그린 화면·무늬 올리기 한 번·울타리 기다림에 걸린 가장 긴 시간(ms), 미룬 다시 그리기 타이머
    */
   private texDrawn = false;
   private texDrawAt = 0;
