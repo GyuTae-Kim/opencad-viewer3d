@@ -55,6 +55,9 @@
  *   빈 곳 끌기는 궤도, 둘째 손가락이면 앞 자리로 돌아가고 두 손가락 몸짓 — 상태 줄 "부품 끌기: …"·"부품 끌기 끝: … (up·pinch)"),
  *   분해(행렬 한꺼번에 — setItemMatrices로 모든 그물을 장면 가운데에서 바깥으로, 상태 줄에 건 수·시간),
  *   안내 선 면 열린 교차(inference.trackDirs { meets: { openFaces } }와 refineFace — 끌어온 점의 안내 선이 구 그물을 비켜 가며 곡면만 뚫는 자리를 정확한 구 위로)
+ * 0.33.0 단추: 꼭짓점 교차 다듬기(refineEnds — 축·끌어온 축·안내 선·잠근 선이 시연 원 토막 끝을 반 화소 안으로 지나는 자리도 정확한 원 위로),
+ *   그림 저장 표식 비키기(setMeasureLabelAvoid({ points, snapshotPoints }) — PNG의 거리 글상자도 표식을 비킨다),
+ *   겉모습 한 번에(setItemLooks — 그물마다 불투명도·색·행렬을 한 번에, 상태 줄에 건 수·시간)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -752,6 +755,65 @@ toggle(
     ),
   '끌어온 점의 나란함·수직 선이 구 그물 삼각형은 비켜 가며 곡면만 뚫는 자리를 정확한 구 위 교차로 붙잡는다(inference.trackDirs { meets: { openFaces: true } } — 앱 refineFace axisFace open). ' +
     '점에 머물러 끌어온 뒤 곧은 모서리를 지나가고 그 안내 선이 구 가장자리를 스치는 자리를 가리킨다 — 상태 줄 "… · 구 면과 만나는 점(다듬음)"',
+);
+// 0.33.0: 켠 선이 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리 다듬기(refineEnds), 그림 저장의 표식 비키기(snapshotPoints), 겉모습 한 번에(setItemLooks)
+toggle(
+  '꼭짓점 교차 다듬기',
+  (v) => {
+    viewer.setScene(v ? { ...scene, lines: [...scene.lines, ...demoRingLines()] } : scene, { keepView: true });
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: {
+              intersections: true,
+              axes: true,
+              parallel: true,
+              lock: true,
+              track: true,
+              axisEdges: true,
+              lockEdges: true,
+              trackDirs: { edge: notCurve, meets: { guides: true, open: true } },
+              parallelEdge: notCurve,
+            },
+            refine: demoRingEdge,
+            refineEnds: true,
+          }
+        : null,
+    );
+  },
+  '열린 교차·안내 선 열린 교차에 더해, 첫 점 축·끌어온 축·안내 선·잠근 선이 시연 원 토막 끝(꼭짓점)을 화면 반 화소 안으로 지나는 자리도 앱 refine에 물어(refineEnds) ' +
+    '끝점·선 위 커서 자리 대신 정확한 원 위 교차에 붙는다. 원을 작게 보이도록 물러나 원 꼭대기 바로 아래를 지나는 축이 꼭대기 토막 끝 둘레를 지날 때',
+);
+toggle(
+  '그림 저장 표식 비키기',
+  (v) => {
+    const cur = viewer.measureLabelAvoid;
+    viewer.setMeasureLabelAvoid(v ? { ...(cur ?? {}), points: true, snapshotPoints: true } : cur ? { ...cur, snapshotPoints: false } : null);
+  },
+  '점 표식 비키기를 켜고 그림 저장(PNG 단추 — toBlob)의 거리 글상자도 표식을 비킨다(setMeasureLabelAvoid({ points, snapshotPoints })). 끄면 점 표식 비키기는 남는다',
+);
+toggle(
+  '겉모습 한 번에',
+  (on) => {
+    const t0 = performance.now();
+    const n = viewer.setItemLooks(
+      scene.meshes.map(
+        (m, i) =>
+          [
+            m.id,
+            on
+              ? { opacity: 0.55, color: i % 2 ? '#e08a3c' : '#3c8ae0', matrix: partMatrix(m.id) ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 8, 1] }
+              : { opacity: null, color: null, matrix: partMatrix(m.id) },
+          ] as const,
+      ),
+    );
+    claimInfo = `setItemLooks ${n}개 ${(performance.now() - t0).toFixed(3)} ms`;
+    showStatus();
+  },
+  '그물마다 불투명도·색·행렬(분해·끌어 옮긴 양 — 없으면 위로 8)을 setItemLooks 한 번으로 건다(끄면 불투명도·색을 되돌리고 행렬은 분해·끈 양만) — 상태 줄에 건 수와 시간',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
