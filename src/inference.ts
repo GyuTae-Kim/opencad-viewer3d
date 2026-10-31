@@ -132,6 +132,14 @@ export interface MeasureTrackDirMeets {
    * 첫 점을 지나는 선이 아니라 잠글 방향이 없고, 정확한 직선끼리라 앱 다듬기에 넘기지 않는다
    */
   guides?: boolean;
+  /**
+   * 0.31.0: 안내 선의 열린 교차(기본 꺼짐 — true일 때만, 측정 붙잡기 refine이 있을 때만 본다). 끌어온 점의 나란함·수직 선이 커서 둘레 꺾은선 토막과 3D로 만나지 않지만
+   * 그 토막의 활꼴(현과 곡선 사이)을 지날 만큼 가까우면 앱 refine을 'axisEdge'·open = true(line = 그 안내 선 — 축 이름 없음)로 불러 곡선과의 정확한 교차를 받는다.
+   * 0.20.0 잠근 선의 열린 교차와 같은 규칙이다(순수 opencad-viewer3d/track openEdgeSnap — 후보·받는 범위·둘째 힌트, 미리 보기 한 번에 앱 함수를 새로 부르는 한도
+   * OPEN_REFINE_CALLS 6번을 0.15.0·0.20.0 열린 후보와 함께 쓰고, 결과는 같은 기억에 둔다). 점 후보로 0.30.0 안내 선끼리 만나는 점 뒤 차례다(1화소 넘게 가까워야 이긴다).
+   * 값은 0.29.0 만나는 점의 선분과 같다 — snap(안내 종류)·trackFrom·edge(기준 선분)에 segment(그 토막)·refined: true. 잠근 동안에는 보지 않는다
+   */
+  open?: boolean;
 }
 
 /** 끌어온 축: 점 붙잡기 위에 머물러야 하는 시간 기본값(ms, 0.16.0) */
@@ -166,12 +174,15 @@ export interface NormalizedTrackDirs {
   meets?: true;
   /** 0.30.0: 두 끌어온 점의 안내 선끼리 만나는 점(meets: { guides: true }를 줬을 때만 — 그때 meets도 true) */
   meetGuides?: true;
+  /** 0.31.0: 안내 선의 열린 교차(meets: { open: true }를 줬을 때만 — 그때 meets도 true) */
+  meetOpen?: true;
 }
 
 /**
  * 끌어온 점의 나란함·수직 선택을 편다(0.28.0): 꺼짐이면 null, 켰고 edge가 함수면 { edge }, 아니면 true(0.27.0과 같은 꼴).
  * 0.29.0: meets가 true면 그 열쇠도(edge 없이 { meets: true } — 0.28.0과 같은 것만 줬으면 꼴도 같다).
- * 0.30.0: meets가 객체(null 아님)여도 meets: true, 그 객체의 guides가 true면 meetGuides: true도({}·{ guides: false }는 meets: true와 같은 꼴)
+ * 0.30.0: meets가 객체(null 아님)여도 meets: true, 그 객체의 guides가 true면 meetGuides: true도({}·{ guides: false }는 meets: true와 같은 꼴).
+ * 0.31.0: 그 객체의 open이 true면 meetOpen: true도({ open: false }는 meets: true와 같은 꼴)
  */
 export function normalizeTrackDirs(o: boolean | MeasureTrackDirOptions | null | undefined): true | NormalizedTrackDirs | null {
   if (!o) return null;
@@ -181,6 +192,7 @@ export function normalizeTrackDirs(o: boolean | MeasureTrackDirOptions | null | 
   const m = o.meets;
   if (m === true || (typeof m === 'object' && m !== null)) r.meets = true;
   if (typeof m === 'object' && m !== null && m.guides === true) r.meetGuides = true;
+  if (typeof m === 'object' && m !== null && m.open === true) r.meetOpen = true;
   return r.edge || r.meets ? r : true;
 }
 

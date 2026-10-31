@@ -78,6 +78,7 @@ import {
   MeasureTracker,
   type OpenEdgeSnap,
   type OpenFaceSnap,
+  type TrackDirKind,
   type TrackDirLine,
   type TrackDirMeetSnap,
   type TrackDirOtherLine,
@@ -98,6 +99,7 @@ import {
   trackAlongFirst,
   trackAxisSnap,
   trackCrossSnap,
+  trackDirGuides,
   trackDirMeetSnap,
   trackDirPairSnap,
   trackDirSnap,
@@ -898,8 +900,11 @@ const copyLine = (l: SnapRefineLine): SnapRefineLine => {
 };
 /** 점 origin을 지나는 세계 축 직선(0.18.0 'axisEdge'·0.19.0 'axisFace'의 line) */
 const axisRefineLine = (origin: readonly number[], axis: SnapAxis): SnapRefineLine => ({ origin: [origin[0]!, origin[1]!, origin[2]!], dir: axisLock(axis).direction, axis });
-/** 열린 교차(0.20.0)가 보는 선: 지나는 점·단위 방향, 세계 축이면 그 이름, 끌어온 축인지(그 점을 trackFrom으로 싣는다) */
-type OpenRefineLine = { from: V3; dir: V3; axis?: SnapAxis; track: boolean };
+/**
+ * 열린 교차(0.20.0)가 보는 선: 지나는 점·단위 방향, 세계 축이면 그 이름, 끌어온 축인지(그 점을 trackFrom으로 싣는다).
+ * 0.31.0: 끌어온 점의 안내 선(trackDirs { meets: { open } })이면 그 안내 종류(guide — 축 이름 없음, track: true)
+ */
+type OpenRefineLine = { from: V3; dir: V3; axis?: SnapAxis; track: boolean; guide?: TrackDirKind };
 /** 열린 교차·잠근 선의 선 → 다듬기에 넘기는 직선(복사하지 않는다 — 넘길 때 copyLine) */
 const refineLineOf = (l: OpenRefineLine): SnapRefineLine => (l.axis ? { origin: l.from, dir: l.dir, axis: l.axis } : { origin: l.from, dir: l.dir });
 /**
@@ -4531,7 +4536,17 @@ export class Viewer3d {
       // 0.30.0 두 끌어온 점의 안내 선끼리 만나는 점(trackDirs { meets: { guides: true } }): 같은 기준 선분(이 고르기가 바꾸기 전)에 대한 두 점의 선. 여덟 후보 뒤 차례
       const guideRef = tracks && tracks.length > 1 && refsBefore && inf!.trackDirs !== true && inf!.trackDirs!.meetGuides ? this.trackDirBase(inf, refsBefore) : null;
       const guide = guideRef ? trackDirPairSnap(f, tracks!, guideRef, x, y, snapPx, first) : null;
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide]);
+      // 0.31.0 안내 선의 열린 교차(trackDirs { meets: { open: true } } — refine이 있을 때만): 끌어온 점의 나란함·수직 선(첫 점과 같은 점은 뺀다 — 0.29.0과 같다)이
+      // 커서 둘레 토막과 3D로 만나지 않지만 그 활꼴을 지날 만큼 가까우면 앱 refine('axisEdge', open — 축 이름 없는 그 선)이 준 곡선 위 교차. 0.20.0 열린 교차와 같은 셈·한도·기억
+      // (한도는 앞의 열린 교차들이 먼저 쓴다). 아홉 후보 뒤 차례
+      const openRef = tracks && refsBefore && so.refine && inf!.trackDirs !== true && inf!.trackDirs!.meetOpen ? this.trackDirBase(inf, refsBefore) : null;
+      let openG: { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null = null;
+      if (openRef) {
+        const ls: OpenRefineLine[] = [];
+        for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, openRef)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
+        if (ls.length) openG = this.openLineEdge(so, f, x, y, snapPx, ls, first, nearSegs(), budget, vis);
+      }
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       if (t && t === pair) {
         const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
@@ -4626,6 +4641,19 @@ export class Viewer3d {
         this.trackDirRef = refsBefore!.track;
         this.parallelOwn = refsBefore!.own;
         return { p: guide.p, vertex: true, kind: guide.kind, trackFrom: guide.from, edge: [[...guideRef![0]] as V3, [...guideRef![1]] as V3], trackGuide: copyDirLine(guide.other) };
+      }
+      if (t && openG && t === openG.snap) {
+        // 0.31.0 안내 선의 열린 교차: 앱이 준 곡선 위 교차(그 안내 선 위로 내린 자리 — 다듬은 점)와 그 토막(segment). 0.29.0 만나는 점처럼 기준 선분을 되돌리고,
+        // 첫 점을 지나는 선이 아니라 잠글 방향이 없다(0.20.0 열린 교차처럼 선분 방향 잠금도 보지 않는다)
+        this.parallelRef = refsBefore!.parallel;
+        this.trackDirRef = refsBefore!.track;
+        this.parallelOwn = refsBefore!.own;
+        const { snap: o, line: l } = openG;
+        const out: MeasurePick = { p: o.p, vertex: true, kind: l.guide!, trackFrom: [l.from[0], l.from[1], l.from[2]], edge: [[...openRef![0]] as V3, [...openRef![1]] as V3] };
+        const sg = nearSegmentId(o.seg);
+        if (sg) out.segment = copySegment(sg);
+        out.refined = true;
+        return out;
       }
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
