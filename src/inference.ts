@@ -117,9 +117,21 @@ export interface MeasureTrackDirOptions {
    * 0.10.0 기준 선분과 나란한 선), 다른 끌어온 점의 X·Y·Z 축, 커서 둘레 선분·윤곽선, 커서 아래 보이는 그물 면이다(순수 trackDirMeetSnap — 직선끼리는 3D로 만날 때만).
    * 점 후보로 끌어온 점 후보(첫 점 축 위 나란한 자리·축끼리·선분·첫 점 축과 선분·면·열린 교차) 뒤 차례이고, 첫 점 축·나란함·그 선 위 점보다 먼저다.
    * 값은 snap 'parallel'·'perpendicular'·trackFrom·edge(기준 선분)에 만난 것이 실린다 — 첫 점 축이면 axis·direction(Shift가 그 축에 잠근다), 첫 점의 나란함이면 direction,
-   * 다른 끌어온 점의 축이면 trackOther, 선분이면 segment, 면이면 face. 선분·면과 만나는 점은 앱 refine('axisEdge')·refineFace('axisFace')가 그 선(SnapRefineLine — 축 이름 없음)으로 다듬는다
+   * 다른 끌어온 점의 축이면 trackOther, 선분이면 segment, 면이면 face. 선분·면과 만나는 점은 앱 refine('axisEdge')·refineFace('axisFace')가 그 선(SnapRefineLine — 축 이름 없음)으로 다듬는다.
+   * 0.30.0: 객체 꼴(MeasureTrackDirMeets)도 받는다 — 객체는 true와 같이 켜고, { guides: true }면 두 끌어온 점의 안내 선끼리 만나는 점도 본다
    */
-  meets?: boolean;
+  meets?: boolean | MeasureTrackDirMeets | null;
+}
+
+/** 끌어온 점 안내 선이 만나는 점의 선택(0.30.0, MeasureTrackDirOptions.meets 객체 꼴 — 객체면 meets: true와 같이 켠다) */
+export interface MeasureTrackDirMeets {
+  /**
+   * 두 끌어온 점의 나란함·수직 선끼리 3D로 만나는 점(기본 꺼짐 — true일 때만, 순수 opencad-viewer3d/track trackDirPairSnap). 두 선은 같은 기준 선분에 대한 안내다
+   * (끌어온 점 P의 나란한 선과 Q의 수직인 선 — 기운 사각형의 구석). 0.17.0 끌어온 축끼리의 교차와 같은 허용치(그 깊이에서 화면 반 화소 — 만나지 않으면 받지 않는다)·빼는 규칙이고,
+   * 점 후보로 0.29.0 만나는 점 뒤 차례다(1화소 넘게 가까워야 이긴다). 값은 snap(P의 안내 종류)·trackFrom(P)·edge(기준 선분)에 둘째 점의 선(trackGuide — 점·종류·방향)이 실린다.
+   * 첫 점을 지나는 선이 아니라 잠글 방향이 없고, 정확한 직선끼리라 앱 다듬기에 넘기지 않는다
+   */
+  guides?: boolean;
 }
 
 /** 끌어온 축: 점 붙잡기 위에 머물러야 하는 시간 기본값(ms, 0.16.0) */
@@ -148,22 +160,27 @@ export interface NormalizedInference {
   parallelEdge?: TrackDirEdgeFilter;
 }
 
-/** 편 끌어온 점의 나란함·수직 객체 꼴(0.28.0 { edge }, 0.29.0 meets) — 준 것만 열쇠가 있다(둘 다 없으면 객체가 아니라 true) */
+/** 편 끌어온 점의 나란함·수직 객체 꼴(0.28.0 { edge }, 0.29.0 meets, 0.30.0 meetGuides) — 준 것만 열쇠가 있다(모두 없으면 객체가 아니라 true) */
 export interface NormalizedTrackDirs {
   edge?: TrackDirEdgeFilter;
   meets?: true;
+  /** 0.30.0: 두 끌어온 점의 안내 선끼리 만나는 점(meets: { guides: true }를 줬을 때만 — 그때 meets도 true) */
+  meetGuides?: true;
 }
 
 /**
  * 끌어온 점의 나란함·수직 선택을 편다(0.28.0): 꺼짐이면 null, 켰고 edge가 함수면 { edge }, 아니면 true(0.27.0과 같은 꼴).
- * 0.29.0: meets가 true면 그 열쇠도(edge 없이 { meets: true } — 0.28.0과 같은 것만 줬으면 꼴도 같다)
+ * 0.29.0: meets가 true면 그 열쇠도(edge 없이 { meets: true } — 0.28.0과 같은 것만 줬으면 꼴도 같다).
+ * 0.30.0: meets가 객체(null 아님)여도 meets: true, 그 객체의 guides가 true면 meetGuides: true도({}·{ guides: false }는 meets: true와 같은 꼴)
  */
 export function normalizeTrackDirs(o: boolean | MeasureTrackDirOptions | null | undefined): true | NormalizedTrackDirs | null {
   if (!o) return null;
   if (typeof o !== 'object') return true;
   const r: NormalizedTrackDirs = {};
   if (typeof o.edge === 'function') r.edge = o.edge;
-  if (o.meets === true) r.meets = true;
+  const m = o.meets;
+  if (m === true || (typeof m === 'object' && m !== null)) r.meets = true;
+  if (typeof m === 'object' && m !== null && m.guides === true) r.meetGuides = true;
   return r.edge || r.meets ? r : true;
 }
 

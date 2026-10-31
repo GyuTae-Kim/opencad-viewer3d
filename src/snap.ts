@@ -521,6 +521,8 @@ export interface MeasurePointSnap {
   trackOther?: { from: V3; axis: SnapAxis };
   /** 0.18.0: 축과 면의 교차로 찍은 점이면 그 면 — 측정 결과에는 싣지 않는다 */
   face?: SnapFace;
+  /** 0.30.0: 두 끌어온 점의 안내 선끼리 만나는 점으로 찍었으면 둘째 끌어온 점의 선(점·종류·단위 방향) — 측정 결과에는 싣지 않는다 */
+  trackGuide?: { from: V3; kind: 'parallel' | 'perpendicular'; dir: V3 };
 }
 
 /**
