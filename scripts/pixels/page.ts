@@ -5205,6 +5205,106 @@ const restoreDoneValues: ValueSet = {
   },
 };
 
+// ───────────── 0.30.0 두 끌어온 점의 안내 선끼리 만나는 점 ─────────────
+/** 0.30.0 안내 선끼리 만나는 점(inference.trackDirs { meets: { guides: true } })이 있는 판인지 — 편 선택에 meetGuides가 남는다 */
+const v0300guides: Need = (v, c) => {
+  const why = v0290meets(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { track: true, trackDirs: { meets: { guides: true } } } });
+  const ok = (v.measureSnap?.inference as any)?.trackDirs?.meetGuides === true;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.30.0 안내 선끼리 만나는 점(inference.trackDirs { meets: { guides } })';
+};
+/** 기준(엇갈린 선분 0)에 수평으로 수직인 방향 — 끌어온 점 높이(z 40) 평면 안의 수직인 선 */
+const GUIDE_N = [DIR_U[1]!, -DIR_U[0]!, 0];
+/** 끌어온 점 P에서 방향 d인 선과 Q에서 d에 수직인 선(같은 평면)이 만나는 점 */
+const guideMeet = (P: number[], Q: number[], d: number[]): number[] => {
+  const s = (Q[0]! - P[0]!) * d[0]! + (Q[1]! - P[1]!) * d[1]! + (Q[2]! - P[2]!) * d[2]!;
+  return [P[0]! + d[0]! * s, P[1]! + d[1]! * s, P[2]! + d[2]! * s];
+};
+/** TRACK_P의 나란한 선 × TRACK_P2의 수직인 선(≈ (37.1, 18.2, 40)), TRACK_P의 수직인 선 × TRACK_P2의 나란한 선(≈ (82.9, 61.8, 40)) */
+const GUIDE_M1 = guideMeet(TRACK_P, TRACK_P2, DIR_U);
+const GUIDE_M2 = guideMeet(TRACK_P, TRACK_P2, GUIDE_N);
+/** 공구 경로·구멍 점을 숨기고 끌어온 점 둘(TRACK_P가 앞)을 준 뒤 기준 선분을 지나간다(첫 점 없이) */
+function guideSetup(c: Ctx, guides: boolean): void {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ edges: true, inference: { axes: true, parallel: true, track: true, trackDirs: { meets: guides ? { guides: true } : true } } });
+  v.setMeasureTrackPoints([c.world(TRACK_P), c.world(TRACK_P2)]);
+  const r = c.at(c.world(DIR_REF));
+  if (r) c.hover(r.x + 0.4, r.y + 0.3);
+  v.renderNow();
+}
+/** 두 끌어온 점의 안내 선이 만나는 점(두 점에서 추론 색 쇄선, 추론 색 × — 새 장면) */
+SHOTS.push({
+  name: 'cross-measure-track-dir-guides',
+  data: 'cross',
+  needs: v0300guides,
+  setup: (c) => {
+    guideSetup(c, true);
+    const q = c.at(c.world(GUIDE_M1));
+    if (q) c.hover(q.x + 2, q.y + 1);
+  },
+});
+/**
+ * 0.30.0 안내 선끼리 만나는 점 값(cross — 새 값): 끈 뒤({ meets: true })·켠 뒤 같은 차례로 두 구석·그 뒤 안내 선 위(기준이 그대로인지), 첫 점(상자 윗면 앞 구석)을 찍은 뒤
+ * 같은 구석과 그 자리를 두 점째로 찍은 값(measurePoints의 trackGuide), 잠금 단추가 잠그지 않는지
+ */
+const guideValues: ValueSet = {
+  name: 'cross-measure-track-dir-guides',
+  data: 'cross',
+  needs: v0300guides,
+  run: (c) => {
+    const { v } = c;
+    const row = (name: string): unknown[] => {
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [
+        name,
+        h ? [h.snap, r10s(h.point), r10s(h.trackFrom), h.edge ? h.edge.map(r10s) : null, r10s(h.direction), h.trackGuide ? [r10s(h.trackGuide.from), h.trackGuide.kind, r10s(h.trackGuide.dir)] : null] : null,
+        lockState(v.measureHoverLock),
+      ];
+    };
+    const go = (p: number[], dx = 2, dy = 1): void => {
+      const q = c.at(c.world(p));
+      if (q) c.hover(q.x + dx, q.y + dy);
+      v.renderNow();
+    };
+    const out: unknown[] = [];
+    for (const guides of [false, true]) {
+      guideSetup(c, guides);
+      go(GUIDE_M1);
+      out.push(row(`m1-${guides}`));
+      go(GUIDE_M2);
+      out.push(row(`m2-${guides}`));
+      go(DIR_PAR);
+      out.push(row(`par-after-${guides}`));
+      const a = c.at(c.world([120, 0, 40]));
+      if (a) c.click(a.x - 1, a.y + 1);
+      v.setMeasureTrackPoints([c.world(TRACK_P), c.world(TRACK_P2)]);
+      go(DIR_REF, 0.4, 0.3);
+      go(GUIDE_M1);
+      out.push(row(`first-m1-${guides}`));
+      out.push([`lock-${guides}`, v.setMeasureInferenceLock(true), lockState(v.measureInferenceLock)]);
+      v.setMeasureInferenceLock(false);
+      const q = c.at(c.world(GUIDE_M1));
+      if (q) c.click(q.x + 2, q.y + 1);
+      out.push([
+        `second-${guides}`,
+        v.measurePoints.map((p: any) => [p.snap, r10s(p.point), r10s(p.trackFrom), p.trackGuide ? [r10s(p.trackGuide.from), p.trackGuide.kind] : null]),
+      ]);
+      v.setMeasureSnap(null);
+      v.clearMeasure();
+      v.setMeasureMode(false);
+      v.setGroupVisible('공구 경로', true);
+      v.setGroupVisible('구멍', true);
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -5274,6 +5374,7 @@ const VALUES: ValueSet[] = [
   parallelEdgeValues,
   labelFallbackValues,
   restoreDoneValues,
+  guideValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
