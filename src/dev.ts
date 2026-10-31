@@ -51,6 +51,10 @@
  * 0.31.0 단추: 안내 선 열린 교차(inference.trackDirs { meets: { guides, open } }와 시연 원·refine — 끌어온 점의 안내 선이 시연 원 토막의 활꼴만 지나는 자리를 정확한 원 위로,
  *   상태 줄 "… · 시연 원#…과 만나는 점(다듬음)"), 글 꼴 번역(setMeasureFormat의 둘째 인자 — 코어 기본 수 꼴·단위 글로 이름표만 "Distance"),
  *   점 표식 비키기(setMeasureLabelAvoid({ points }) — 거리 글상자가 첫 점·미리 보기 점 표식을 덮는 자리도 옮긴다, 글상자 비키기와 함께도)
+ * 0.32.0 단추: 부품 끌기(setPointerClaim — 작은 상자·구를 끌기 시작하면 앱이 포인터를 맡아 그 부품을 세계 XY 평면 안에서 옮긴다, 그냥 누르기는 고르기,
+ *   빈 곳 끌기는 궤도, 둘째 손가락이면 앞 자리로 돌아가고 두 손가락 몸짓 — 상태 줄 "부품 끌기: …"·"부품 끌기 끝: … (up·pinch)"),
+ *   분해(행렬 한꺼번에 — setItemMatrices로 모든 그물을 장면 가운데에서 바깥으로, 상태 줄에 건 수·시간),
+ *   안내 선 면 열린 교차(inference.trackDirs { meets: { openFaces } }와 refineFace — 끌어온 점의 안내 선이 구 그물을 비켜 가며 곡면만 뚫는 자리를 정확한 구 위로)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -90,6 +94,8 @@ let secInfo = '';
 let upInfo = '';
 /** 0.17.0: 측정 미리 보기의 끌어온 축 설명(상태 줄) */
 let hoverInfo = '';
+/** 0.32.0: 부품 끌기·분해(행렬 한꺼번에) 상태(상태 줄) */
+let claimInfo = '';
 /** 0.20.0: 누른 자리에서 그물 면만 고른 결과도 보일지(면만 고르기 단추). 0.22.0부터 그 결과는 onPick(cb, { meshesOnly: true }) 알림으로 받는다 */
 let meshesOnly = false;
 let under: { id: string; index: number } | null = null;
@@ -121,7 +127,7 @@ const showStatus = (): void => {
   const b = s.buffers;
   const mb = (n: number): string => (n / 1048576).toFixed(1);
   const gb = ` · GPU 버퍼 ${mb(b.bytes)} MB(위치 ${mb(b.positions)} · 법선 ${mb(b.normals)} · 무늬 좌표 ${mb(b.uvs + b.backUvs)} · 색인 ${mb(b.indices)} · 선분 ${mb(b.lines + b.lineColors)})`;
-  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}${cp}${gb}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${pickInfo}`;
+  status.textContent = `선분 ${segs.toLocaleString()} · 그리기 ${s.drawCalls}회 · 삼각형 ${Math.round(s.triangles).toLocaleString()} · CPU ${s.frameMs.toFixed(1)} ms · ${s.width}×${s.height}@${s.dpr}${off}${tx}${cp}${gb}  ${upInfo}  ${secInfo}  ${info}  ${hoverInfo}  ${claimInfo}  ${pickInfo}`;
 };
 viewer.onCameraChange(() => {
   showStatus();
@@ -642,6 +648,110 @@ toggle(
   },
   '거리 글상자가 첫 점·미리 보기 점 표식을 덮는 자리도 옮긴다(setMeasureLabelAvoid({ points: true }) — 글상자 비키기와 함께 켜면 띠·뷰 큐브도 비킨다). ' +
     '첫 점을 찍고 그 왼쪽 아래를 가리키면 기본 자리(두 점 가운데 오른쪽 위)가 첫 점 표식을 덮는다',
+);
+// 0.32.0: 앱이 포인터를 맡는 훅(setPointerClaim — 부품 끌기), 여러 묶음 행렬 한 번에(setItemMatrices — 분해)
+/** 끌어 옮긴 양(묶음마다 세계 이동)과 분해를 켰는지 — 둘을 더해 묶음 행렬로 건다 */
+const dragOffsets = new Map<string, [number, number, number]>();
+let explodeOn = false;
+const DRAG_PARTS = new Set(['작은 상자 1', '작은 상자 2', '작은 상자 3', '구']);
+/** 분해 이동: 장면 그물 범위 가운데에서 그 그물 범위 가운데로 0.6배 */
+function explodeOffset(id: string): [number, number, number] {
+  const boxes = scene.meshes.map((m) => [m.id, itemBounds(m)] as const);
+  const mid = (b: { min: readonly number[]; max: readonly number[] }, i: number): number => (b.min[i]! + b.max[i]!) / 2;
+  const lo = [0, 1, 2].map((i) => Math.min(...boxes.map(([, b]) => b.min[i]!))), hi = [0, 1, 2].map((i) => Math.max(...boxes.map(([, b]) => b.max[i]!)));
+  const b = boxes.find(([k]) => k === id)?.[1];
+  if (!b) return [0, 0, 0];
+  return [0, 1, 2].map((i) => (mid(b, i) - (lo[i]! + hi[i]!) / 2) * 0.6) as [number, number, number];
+}
+function partMatrix(id: string): number[] | null {
+  const d = dragOffsets.get(id) ?? [0, 0, 0];
+  const e = explodeOn ? explodeOffset(id) : [0, 0, 0];
+  const t = [d[0] + e[0]!, d[1] + e[1]!, d[2] + e[2]!];
+  return t.every((x) => x === 0) ? null : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, t[0]!, t[1]!, t[2]!, 1];
+}
+/** 끄는 부품: 잡은 세계 점(잡을 때 자리), 잡을 때의 끈 양 */
+let grab: { id: string; p: number[]; base: [number, number, number] } | null = null;
+/** 잡은 점이 화면 (x, y)에 오도록 끈 양을 고친다(세계 XY 평면 안 — 화면 자리를 세 번 맞춰 본다) */
+function dragTo(x: number, y: number): void {
+  const g = grab;
+  if (!g) return;
+  const o: [number, number, number] = [...(dragOffsets.get(g.id) ?? g.base)];
+  for (let k = 0; k < 3; k++) {
+    const q = [g.p[0]! + o[0] - g.base[0], g.p[1]! + o[1] - g.base[1], g.p[2]! + o[2] - g.base[2]];
+    const s = viewer.project(q), sx = viewer.project([q[0]! + 1, q[1]!, q[2]!]), sy = viewer.project([q[0]!, q[1]! + 1, q[2]!]);
+    if (!s || !sx || !sy) return;
+    const a = sx.x - s.x, b = sy.x - s.x, c = sx.y - s.y, d = sy.y - s.y, det = a * d - b * c;
+    if (Math.abs(det) < 1e-9) return;
+    const ex = x - s.x, ey = y - s.y;
+    o[0] += (d * ex - b * ey) / det;
+    o[1] += (a * ey - c * ex) / det;
+  }
+  dragOffsets.set(g.id, o);
+  viewer.setItemMatrix(g.id, partMatrix(g.id));
+  claimInfo = `부품 끌기: ${g.id} (${o[0].toFixed(1)}, ${o[1].toFixed(1)})`;
+  showStatus();
+}
+toggle(
+  '부품 끌기',
+  (on) =>
+    viewer.setPointerClaim(
+      on
+        ? {
+            claim: (q) => {
+              // 그냥 누르기는 예전처럼 고르기 — 끌기 시작 거리를 넘을 때 누른 자리가 움직일 부품이면 맡는다(두 손가락이면 맡지 않는다)
+              if (q.phase !== 'drag' || q.pointers !== 1) return false;
+              const p = q.pick({ meshesOnly: true });
+              if (!p || !DRAG_PARTS.has(p.id)) return false;
+              grab = { id: p.id, p: [...p.point], base: [...(dragOffsets.get(p.id) ?? [0, 0, 0])] };
+              dragTo(q.at.x, q.at.y);
+              return true;
+            },
+            move: (h) => dragTo(h.x, h.y),
+            end: (_h, why) => {
+              const g = grab;
+              grab = null;
+              if (!g) return;
+              // 뗀 것만 남긴다(취소·두 손가락으로 돌려받음·끄기는 앞 자리로)
+              if (why !== 'up') {
+                dragOffsets.set(g.id, g.base);
+                viewer.setItemMatrix(g.id, partMatrix(g.id));
+              }
+              claimInfo = `부품 끌기 끝: ${g.id} (${why})`;
+              showStatus();
+            },
+          }
+        : null,
+    ),
+  '작은 상자·구를 끌면 그 부품을 세계 XY 평면 안에서 옮긴다(setPointerClaim — 끌기 시작 거리를 넘는 순간 누른 자리가 부품이면 앱이 맡는다). ' +
+    '그냥 누르면 예전처럼 고르기, 빈 곳·다른 그물을 끌면 궤도, 끄는 중 둘째 손가락이 닿으면 앞 자리로 돌아가고 두 손가락 이동·핀치',
+);
+toggle(
+  '분해(행렬 한꺼번에)',
+  (on) => {
+    explodeOn = on;
+    const t0 = performance.now();
+    const n = viewer.setItemMatrices(scene.meshes.map((m) => [m.id, partMatrix(m.id)] as const));
+    claimInfo = `setItemMatrices ${n}개 ${(performance.now() - t0).toFixed(3)} ms`;
+    showStatus();
+  },
+  '그물마다 장면 가운데에서 바깥으로 옮긴 행렬(끌어 옮긴 양을 더해)을 setItemMatrices 한 번으로 건다 — 상태 줄에 건 수와 시간',
+);
+toggle(
+  '안내 선 면 열린 교차',
+  (v) =>
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, trackDirs: { edge: notCurve, meets: { guides: true, openFaces: true } }, parallelEdge: notCurve },
+            refineFace: demoSphereFace,
+          }
+        : null,
+    ),
+  '끌어온 점의 나란함·수직 선이 구 그물 삼각형은 비켜 가며 곡면만 뚫는 자리를 정확한 구 위 교차로 붙잡는다(inference.trackDirs { meets: { openFaces: true } } — 앱 refineFace axisFace open). ' +
+    '점에 머물러 끌어온 뒤 곧은 모서리를 지나가고 그 안내 선이 구 가장자리를 스치는 자리를 가리킨다 — 상태 줄 "… · 구 면과 만나는 점(다듬음)"',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);

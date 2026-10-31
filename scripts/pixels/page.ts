@@ -5652,6 +5652,409 @@ const pointsValues: ValueSet = {
   },
 };
 
+// ───────────── 0.32.0 앱이 포인터를 맡는 훅·여러 묶음 행렬 한 번에 ─────────────
+interface PtrOpts {
+  pointerType?: string;
+  button?: number;
+  buttons?: number;
+  shiftKey?: boolean;
+}
+/** 포인터 사건(캔버스 기준 자리 — pointerId·종류·단추를 정한다. 여러 손가락 몸짓용) */
+function pev(v: V, type: string, id: number, x: number, y: number, o: PtrOpts = {}): void {
+  const r = v.canvas.getBoundingClientRect();
+  v.canvas.dispatchEvent(
+    new PointerEvent(type, {
+      clientX: r.left + x,
+      clientY: r.top + y,
+      pointerId: id,
+      pointerType: o.pointerType ?? 'mouse',
+      button: o.button ?? (type === 'pointermove' ? -1 : 0),
+      buttons: o.buttons ?? (type === 'pointerup' || type === 'pointercancel' ? 0 : 1),
+      shiftKey: !!o.shiftKey,
+      bubbles: true,
+      cancelable: true,
+      isPrimary: true,
+    }),
+  );
+}
+const camKey = (v: V): unknown[] => {
+  const k = v.getCamera();
+  return [r10s(k.target), r10(k.distance), r10(k.yaw), r10(k.pitch), k.projection];
+};
+const TOUCH: PtrOpts = { pointerType: 'touch' };
+
+/**
+ * 몸짓 차례(0.31.0에도 있는 조작만 — 캔버스 가운데 둘레): 마우스 왼쪽 끌기, 구석 누르기 뒤 누르기·두 번 누르기, 오른쪽 끌기, Shift+가운데 끌기, 가운데 두 번(전체 보기),
+ * 손가락 누르기·끌기, 두 손가락(하나 먼저 떼기), 셋째 손가락, 끄는 중 취소, 펜 끌기, 측정 점 둘. 단계마다 카메라·누르기 알림 수·측정 알림 수
+ */
+function gestureRun(c: Ctx): unknown[] {
+  const { v, w, h } = c;
+  const x0 = w / 2, y0 = h / 2;
+  const picks: unknown[] = [];
+  const measures: unknown[] = [];
+  const offP = v.onPick((p: any, e: any) => picks.push([p ? [p.kind, p.id, p.index, r10s(p.point)] : null, e.clicks, e.button, e.pointerType]));
+  const offM = v.onMeasure((m: any) => measures.push(m ? [r10s(m.a), r10s(m.b), r10(m.distance)] : null));
+  const steps: [string, () => void][] = [
+    [
+      'mouse-orbit',
+      () => {
+        pev(v, 'pointerdown', 1, x0, y0);
+        pev(v, 'pointermove', 1, x0 + 2, y0 + 1);
+        pev(v, 'pointermove', 1, x0 + 20, y0 + 10);
+        pev(v, 'pointermove', 1, x0 + 60, y0 + 30);
+        pev(v, 'pointerup', 1, x0 + 60, y0 + 30);
+      },
+    ],
+    [
+      'click-double',
+      () => {
+        // 앞 장면이 남긴 누르기와 두 번 누르기로 묶이지 않게 구석부터
+        pev(v, 'pointerdown', 1, 7.3, 9.1);
+        pev(v, 'pointerup', 1, 7.3, 9.1);
+        pev(v, 'pointerdown', 1, x0 + 1.3, y0 + 0.6);
+        pev(v, 'pointerup', 1, x0 + 1.3, y0 + 0.6);
+        pev(v, 'pointerdown', 1, x0 + 2.1, y0 + 1.2);
+        pev(v, 'pointerup', 1, x0 + 2.1, y0 + 1.2);
+      },
+    ],
+    [
+      'right-pan',
+      () => {
+        pev(v, 'pointerdown', 1, x0 - 20, y0 - 20, { button: 2, buttons: 2 });
+        pev(v, 'pointermove', 1, x0 - 5, y0 - 10, { buttons: 2 });
+        pev(v, 'pointermove', 1, x0 + 30, y0, { buttons: 2 });
+        pev(v, 'pointerup', 1, x0 + 30, y0, { button: 2 });
+      },
+    ],
+    [
+      'shift-middle-orbit',
+      () => {
+        pev(v, 'pointerdown', 1, x0 - 20, y0 - 20, { button: 1, buttons: 4, shiftKey: true });
+        pev(v, 'pointermove', 1, x0 - 40, y0, { buttons: 4, shiftKey: true });
+        pev(v, 'pointerup', 1, x0 - 40, y0, { button: 1, shiftKey: true });
+      },
+    ],
+    [
+      'middle-double-fit',
+      () => {
+        pev(v, 'pointerdown', 1, x0 - 100, y0, { button: 1, buttons: 4 });
+        pev(v, 'pointerup', 1, x0 - 100, y0, { button: 1 });
+        pev(v, 'pointerdown', 1, x0 - 99, y0, { button: 1, buttons: 4 });
+        pev(v, 'pointerup', 1, x0 - 99, y0, { button: 1 });
+      },
+    ],
+    [
+      'touch-tap',
+      () => {
+        pev(v, 'pointerdown', 11, x0 + 5.2, y0 + 10.4, TOUCH);
+        pev(v, 'pointermove', 11, x0 + 9.1, y0 + 12.2, TOUCH);
+        pev(v, 'pointerup', 11, x0 + 9.1, y0 + 12.2, TOUCH);
+      },
+    ],
+    [
+      'touch-orbit',
+      () => {
+        pev(v, 'pointerdown', 11, x0 - 100, y0, TOUCH);
+        pev(v, 'pointermove', 11, x0 - 95, y0, TOUCH);
+        pev(v, 'pointermove', 11, x0 - 80, y0 + 5, TOUCH);
+        pev(v, 'pointermove', 11, x0 - 50, y0 + 20, TOUCH);
+        pev(v, 'pointerup', 11, x0 - 50, y0 + 20, TOUCH);
+      },
+    ],
+    [
+      'pinch',
+      () => {
+        pev(v, 'pointerdown', 11, x0 - 100, y0, TOUCH);
+        pev(v, 'pointerdown', 12, x0 + 20, y0, TOUCH);
+        pev(v, 'pointermove', 12, x0 + 70, y0 + 5, TOUCH);
+        pev(v, 'pointermove', 11, x0 - 120, y0 + 10, TOUCH);
+        pev(v, 'pointerup', 11, x0 - 120, y0 + 10, TOUCH);
+        pev(v, 'pointermove', 12, x0 + 120, y0 + 20, TOUCH);
+        pev(v, 'pointerup', 12, x0 + 120, y0 + 20, TOUCH);
+      },
+    ],
+    [
+      'three-fingers',
+      () => {
+        pev(v, 'pointerdown', 11, x0 - 100, y0, TOUCH);
+        pev(v, 'pointerdown', 12, x0 + 20, y0, TOUCH);
+        pev(v, 'pointerdown', 13, x0 - 40, y0 + 100, TOUCH);
+        pev(v, 'pointermove', 13, x0 - 20, y0 + 120, TOUCH);
+        pev(v, 'pointerup', 13, x0 - 20, y0 + 120, TOUCH);
+        pev(v, 'pointermove', 12, x0 + 40, y0 - 10, TOUCH);
+        pev(v, 'pointerup', 11, x0 - 100, y0, TOUCH);
+        pev(v, 'pointerup', 12, x0 + 40, y0 - 10, TOUCH);
+      },
+    ],
+    [
+      'cancel',
+      () => {
+        pev(v, 'pointerdown', 1, x0, y0);
+        pev(v, 'pointermove', 1, x0 + 30, y0);
+        pev(v, 'pointercancel', 1, x0 + 30, y0);
+        pev(v, 'pointermove', 1, x0 + 70, y0, { buttons: 0 });
+      },
+    ],
+    [
+      'pen-orbit',
+      () => {
+        pev(v, 'pointerdown', 21, x0, y0, { pointerType: 'pen' });
+        pev(v, 'pointermove', 21, x0 + 2, y0 + 3, { pointerType: 'pen' });
+        pev(v, 'pointermove', 21, x0 - 20, y0 + 20, { pointerType: 'pen' });
+        pev(v, 'pointerup', 21, x0 - 20, y0 + 20, { pointerType: 'pen' });
+      },
+    ],
+    [
+      'measure',
+      () => {
+        v.setMeasureMode(true);
+        pev(v, 'pointermove', 1, x0 - 4.6, y0 + 5.3, { buttons: 0 });
+        v.renderNow();
+        pev(v, 'pointerdown', 1, x0 - 4.6, y0 + 5.3);
+        pev(v, 'pointerup', 1, x0 - 4.6, y0 + 5.3);
+        pev(v, 'pointermove', 1, x0 + 30.2, y0 + 20.7, { buttons: 0 });
+        v.renderNow();
+        pev(v, 'pointerdown', 1, x0 + 30.2, y0 + 20.7);
+        pev(v, 'pointerup', 1, x0 + 30.2, y0 + 20.7);
+        v.setMeasureMode(false);
+      },
+    ],
+  ];
+  const out: unknown[] = [];
+  for (const [name, f] of steps) {
+    f();
+    v.renderNow();
+    out.push([name, camKey(v), picks.length, measures.length]);
+  }
+  offP();
+  offM();
+  out.push(picks, measures);
+  return out;
+}
+
+/** 0.32.0 몸짓 값(0.31.0과 견준다 — 처리기 없이) */
+const gestureValues: ValueSet = { name: 'base-pointer-gestures', data: 'base', needs: fn('project', 'setMeasureMode'), run: (c) => gestureRun(c) };
+/**
+ * 0.32.0 늘 false인 처리기(setPointerClaim — 그 API가 없는 판은 처리기 없이)로 같은 몸짓: 0.31.0 처리기 없는 값과 같아야 한다
+ * (맡지 않으면 0.31.0 그대로). 처리기가 받은 물음 수는 값에 넣지 않는다(base에 없다)
+ */
+const gestureDeclinedValues: ValueSet = {
+  name: 'base-pointer-declined',
+  data: 'base',
+  needs: fn('project', 'setMeasureMode'),
+  run: (c) => {
+    c.v.setPointerClaim?.(() => false);
+    try {
+      return gestureRun(c);
+    } finally {
+      c.v.setPointerClaim?.(null);
+    }
+  },
+};
+
+/**
+ * 0.32.0 맡은 포인터 값(새 값): 누른 순간에 맡은 마우스 끌기(카메라 그대로·누르기 알림 없음·end), 상자 위 끌기 시작에서만 맡기(그냥 누르기는 고르기, 빈 곳 끌기는 궤도),
+ * 앱이 맡은 손가락에 둘째 손가락(돌려받아 핀치 — 그 자리에서 두 손가락을 누른 카메라와 같은지), claimPointer(궤도 중 — 합성 pointercancel과 같은지), 물음의 꼴
+ */
+const claimValues: ValueSet = {
+  name: 'base-pointer-claim',
+  data: 'base',
+  needs: fn('setPointerClaim', 'claimPointer', 'project'),
+  run: (c) => {
+    const { v, w, h } = c;
+    const x0 = w / 2, y0 = h / 2;
+    // 공구 경로(나선)는 상자 위를 덮어 선분을 먼저 고르므로 감춘다
+    v.setGroupVisible('공구 경로', false);
+    v.renderNow();
+    const out: unknown[] = [];
+    const picks: unknown[] = [];
+    const offP = v.onPick((p: any) => picks.push(p ? p.id : null));
+    const qs: unknown[] = [];
+    const ends: unknown[] = [];
+    let moves = 0;
+    let rule: (q: any) => boolean = () => false;
+    v.setPointerClaim({
+      claim: (q: any) => {
+        qs.push([q.phase, q.pointerId, q.pointerType, q.button, q.pointers, q.held, r10(q.x - q.at.x), r10(q.y - q.at.y)]);
+        return rule(q);
+      },
+      move: () => void moves++,
+      end: (p: any, why: string) => void ends.push([p.pointerId, p.pointerType, why]),
+    });
+    const cam0 = v.getCamera();
+    const k0 = JSON.stringify(camKey(v));
+    const same = (): boolean => JSON.stringify(camKey(v)) === k0;
+    // 누른 순간에 맡은 마우스 끌기
+    rule = (q) => q.phase === 'down' && q.pointerType === 'mouse' && q.button === 0;
+    pev(v, 'pointerdown', 1, x0, y0);
+    const held = [...v.heldPointers];
+    pev(v, 'pointermove', 1, x0 + 30, y0 + 10);
+    pev(v, 'pointermove', 1, x0 + 60, y0 + 30);
+    pev(v, 'pointerup', 1, x0 + 60, y0 + 30);
+    v.renderNow();
+    out.push(['down', held, same(), picks.length, moves, ends.splice(0)]);
+    // 상자 윗면 위에서 끌기 시작할 때만 맡는다
+    const box = c.at(c.world([110.3, 8.2, 40]));
+    rule = (q) => q.phase === 'drag' && q.pick()?.id === '상자';
+    moves = 0;
+    if (box) {
+      pev(v, 'pointerdown', 1, box.x, box.y);
+      pev(v, 'pointerup', 1, box.x, box.y);
+      pev(v, 'pointerdown', 1, box.x, box.y);
+      pev(v, 'pointermove', 1, box.x + 2, box.y);
+      const before = [...v.heldPointers];
+      pev(v, 'pointermove', 1, box.x + 6, box.y);
+      const after = [...v.heldPointers];
+      pev(v, 'pointermove', 1, box.x + 40, box.y + 10);
+      pev(v, 'pointerup', 1, box.x + 40, box.y + 10);
+      v.renderNow();
+      out.push(['drag-box', [...picks], before, after, same(), moves, ends.splice(0)]);
+      // 빈 곳 끌기는 궤도
+      pev(v, 'pointerdown', 1, 12, 12);
+      pev(v, 'pointermove', 1, 62, 22);
+      pev(v, 'pointerup', 1, 62, 22);
+      v.renderNow();
+      out.push(['drag-empty', same(), ends.splice(0)]);
+    } else out.push('상자 자리 없음');
+    // 앱이 맡은 손가락에 둘째 손가락: 맡지 않으면 돌려받아 핀치
+    rule = (q) => q.phase === 'drag' && q.pointers === 1;
+    v.setCamera(cam0);
+    pev(v, 'pointerdown', 11, x0 - 100, y0, TOUCH);
+    pev(v, 'pointermove', 11, x0 - 70, y0, TOUCH);
+    pev(v, 'pointermove', 11, x0 - 50, y0 + 10, TOUCH);
+    pev(v, 'pointerdown', 12, x0 + 50, y0, TOUCH);
+    const takeEnds = ends.splice(0);
+    const pinch = (): void => {
+      pev(v, 'pointermove', 12, x0 + 90, y0, TOUCH);
+      pev(v, 'pointermove', 11, x0 - 70, y0 + 20, TOUCH);
+      pev(v, 'pointerup', 11, x0 - 70, y0 + 20, TOUCH);
+      pev(v, 'pointerup', 12, x0 + 90, y0, TOUCH);
+      v.renderNow();
+    };
+    pinch();
+    const camA = JSON.stringify(camKey(v));
+    v.setPointerClaim(null);
+    v.setCamera(cam0);
+    pev(v, 'pointerdown', 11, x0 - 50, y0 + 10, TOUCH);
+    pev(v, 'pointerdown', 12, x0 + 50, y0, TOUCH);
+    pinch();
+    const camB = JSON.stringify(camKey(v));
+    out.push(['pinch', takeEnds, camA === camB, camA !== k0, ends.splice(0)]);
+    // claimPointer: 궤도 중에 맡기 = 합성 pointercancel
+    const orbit = (take: () => void): string => {
+      v.setCamera(cam0);
+      pev(v, 'pointerdown', 11, x0 - 100, y0, TOUCH);
+      pev(v, 'pointermove', 11, x0 - 70, y0, TOUCH);
+      pev(v, 'pointermove', 11, x0 - 50, y0 + 10, TOUCH);
+      take();
+      pev(v, 'pointermove', 11, x0, y0 + 40, TOUCH);
+      pev(v, 'pointerup', 11, x0, y0 + 40, TOUCH);
+      v.renderNow();
+      return JSON.stringify(camKey(v));
+    };
+    let got: unknown = null;
+    const camC = orbit(() => (got = [v.claimPointer(11, { end: (p: any, why: string) => ends.push([p.pointerId, why]) }), [...v.heldPointers]]));
+    const camD = orbit(() => pev(v, 'pointercancel', 11, x0 - 50, y0 + 10, TOUCH));
+    out.push(['claimPointer', got, camC === camD, camC !== k0, ends.splice(0), v.claimPointer(99)]);
+    out.push(['queries', qs, picks]);
+    offP();
+    v.setCamera(cam0);
+    return out;
+  },
+};
+
+/** 0.32.0 묶음 행렬 목록(없는 id·짧은 행렬·같은 id 둘·되돌림 포함) */
+function itemMatrixList(): [string, number[] | null][] {
+  const T = (x: number, y: number, z: number): number[] => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+  const R = (a: number, x: number, y: number, z: number): number[] => [Math.cos(a), Math.sin(a), 0, 0, -Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1, 0, x, y, z, 1];
+  return [
+    ['상자', T(0, 0, 12)],
+    ['구', R(0.15, 5, -20, 8)],
+    ['작은 상자 1', T(0, 0, 30)],
+    ['작은 상자 2', T(-15, 10, 0)],
+    ['작은 상자 3', null],
+    ['판', T(0, 0, -4)],
+    ['공구 경로', T(5, -5, 10)],
+    ['급속 이송', T(5, -5, 10)],
+    ['구멍', T(0, 0, 8)],
+    ['없는 묶음', T(1, 1, 1)],
+    ['작은 상자 3', T(10, 0, 6)],
+    ['구', [1, 2, 3]],
+  ];
+}
+/** 그 판에 setItemMatrices가 있으면 한 번에, 없으면(0.31.0) 차례대로 setItemMatrix — 두 판의 그림·값이 같아야 한다 */
+function applyItemMatrices(v: V): void {
+  const L = itemMatrixList();
+  if (typeof v.setItemMatrices === 'function') v.setItemMatrices(L);
+  else for (const [id, m] of L) v.setItemMatrix(id, m);
+}
+SHOTS.push(
+  {
+    name: 'base-item-matrices',
+    data: 'base',
+    needs: fn('setItemMatrix', 'setLighting'),
+    setup: ({ v }) => {
+      v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true });
+      applyItemMatrices(v);
+      v.fit(false);
+    },
+  },
+  {
+    name: 'base-item-matrices-section',
+    data: 'base',
+    needs: fn('setItemMatrix', 'setSection'),
+    setup: ({ v }) => {
+      applyItemMatrices(v);
+      v.setSection({ normal: [0, 1, 0], offset: 40 });
+    },
+  },
+);
+/** 0.32.0 묶음 행렬 값(0.31.0과 견준다 — 그 판은 하나씩): 화면 격자 고르기(마우스·터치), 전체 보기·묶음 보기 카메라, 최근접점, itemLook 행렬, 측정 두 점 */
+const itemMatrixValues: ValueSet = {
+  name: 'base-item-matrices',
+  data: 'base',
+  needs: fn('setItemMatrix', 'closestPoints', 'fitItems', 'itemLook'),
+  run: (c) => {
+    const { v, w, h } = c;
+    applyItemMatrices(v);
+    const out: unknown[] = [];
+    for (const pointerType of ['mouse', 'touch'])
+      for (let j = 0; j < 12; j++)
+        for (let i = 0; i < 16; i++) {
+          const p = v.pick(((i + 0.43) * w) / 16, ((j + 0.37) * h) / 12, { pointerType });
+          out.push(p ? [p.kind, p.id, p.index, r10s(p.point)] : null);
+        }
+    const ids = ['상자', '구', '작은 상자 1', '작은 상자 2', '작은 상자 3', '판', '공구 경로', '급속 이송', '구멍'];
+    out.push(ids.map((id) => r10s(v.itemLook(id)?.matrix ?? null)));
+    v.fit(false);
+    out.push(camKey(v));
+    v.fitItems(['상자', '구', '작은 상자 3'], false);
+    out.push(camKey(v));
+    out.push(
+      [
+        ['상자', '구'],
+        ['작은 상자 1', '판'],
+        ['급속 이송', '상자'],
+        ['구멍', '작은 상자 3'],
+      ].map(([a, b]) => {
+        const r = v.closestPoints(a, b);
+        return r ? [r10(r.distance), r10s(r.a), r10s(r.b)] : null;
+      }),
+    );
+    v.setView('seIso', false);
+    v.fit(false);
+    const res: unknown[] = [];
+    const off = v.onMeasure((m: any) => m && res.push([r10s(m.a), r10s(m.b), r10(m.distance)]));
+    v.setMeasureMode(true);
+    c.click(w / 2 + 0.6, h / 2 - 20.3);
+    c.click(w / 2 + 40.2, h / 2 + 10.9);
+    v.setMeasureMode(false);
+    off();
+    out.push(res);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -5725,6 +6128,10 @@ const VALUES: ValueSet[] = [
   formatCoreValues,
   guideOpenValues,
   pointsValues,
+  gestureValues,
+  gestureDeclinedValues,
+  claimValues,
+  itemMatrixValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -5776,6 +6183,8 @@ function reset(v: V, d: Data): void {
   call('setMeasureLabelSpot', null);
   // 0.31.0: 측정 글 꼴도 장면을 바꿔도 남는다(그 값 묶음이 끄지만 예외로 끝나도 다음 장면에 남지 않게)
   call('setMeasureFormat', null);
+  // 0.32.0: 앱이 포인터를 맡는 처리기도 남는다
+  call('setPointerClaim', null);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
   call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null });
