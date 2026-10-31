@@ -1033,7 +1033,8 @@ export interface TrackTriangle {
  * 0.23.0: reachPx = 선에서 그 삼각형 위 곡면 조각 자리(삼각형 평면에 내린 발이 삼각형 안, 평면에서 OPEN_FACE_CHORD × 가장 긴 변 안)인 조각과 커서의 화면 거리.
  * 받는 점은 그 조각 위이므로 커서에서 이보다 가까울 수 없다.
  * 0.24.0: 선이 그 삼각형 위 곡면 조각을 두 번 지날 수 있으면(선이 곡면에 접하는 방향이 그 삼각형 안에 있다) 그 선·삼각형의 후보 모두 twice = true,
- * 그 가운데 더한 둘째 힌트면 twin = true(아니면 이 필드들이 없다) — twin의 p는 선에서 그 조각 자리인 조각(reachPx의 조각)의 한 끝이다
+ * 그 가운데 더한 둘째 힌트면 twin = true(아니면 이 필드들이 없다) — twin의 p는 선에서 그 조각 자리인 조각(reachPx의 조각)의 한 끝이다.
+ * 0.36.0: 선이 그 삼각형을 뚫으면(gap 0 — 반 화소 안) 코어 점은 뚫는 자리다
  */
 export interface OpenFaceCandidate<T extends TrackTriangle = TrackTriangle> {
   p: V3;
@@ -1101,13 +1102,6 @@ function lineTriClosest(P: readonly number[], e: readonly number[], c: readonly 
   return best;
 }
 
-/** 점 p와 삼각형 c 평면 사이 거리(넓이 0이면 Infinity) */
-function planeGap(p: readonly number[], c: readonly (readonly number[])[]): number {
-  const n = cross3(sub3(c[1]!, c[0]!), sub3(c[2]!, c[0]!));
-  const nn = Math.hypot(n[0], n[1], n[2]);
-  return nn > 0 ? Math.abs(dot3(n, sub3(p, c[0]!))) / nn : Infinity;
-}
-
 /** 광선(origin·단위 dir — 커서 광선)이 삼각형 c(채운 면)를 앞쪽(매개변수 0 이상)에서 맞는지(0.34.0 — 커서가 그 삼각형 위인지, 화면 투영과 상관없이) */
 export function rayHitsTriangle(ray: { origin: readonly number[]; dir: readonly number[] }, c: readonly (readonly number[])[]): boolean {
   const A = c[0]!, B = c[1]!, C = c[2]!;
@@ -1128,11 +1122,15 @@ export function rayHitsTriangle(ray: { origin: readonly number[]; dir: readonly 
  * - 가까움: 선과 삼각형 사이 거리가 min(OPEN_FACE_CHORD × 가장 긴 변, 커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안(0.20.0 OPEN_EDGE_CHORD와 같은 근거).
  *   0.34.0: 커서 광선이 그 삼각형을 맞으면(rayHitsTriangle — 커서가 그 삼각형 위) 붙잡기 거리의 세계 길이는 보지 않는다(OPEN_FACE_CHORD × 가장 긴 변 안만).
  *   아주 가까이 확대하면 활꼴 높이가 그 길이보다 크고, 구멍 안 벽처럼 선과 삼각형 사이가 거의 눈 쪽이면 화면에서는 선이 커서 아래 그 삼각형을 지나기 때문이다.
- *   0.34.0: 선이 삼각형을 뚫어도(gap 0) 커서가 그 삼각형 위이고 뚫는 자리가 화면에서 커서 snapPx 밖이며 커서 광선에 가장 가까운 선 위 점이 그 삼각형 평면에서
- *   snapPx의 세계 길이보다 멀면(커서 쪽 활꼴이 붙잡기 거리보다 두껍다 — 아주 가까이 확대한 자리) 후보다. 뚫는 자리(axisFaceSnap 등의 코어 점)가 커서에서 멀어 맡지 못하는 자리다
+ *   0.34.0: 선이 삼각형을 뚫어도(gap 0) 커서가 그 삼각형 위이고 뚫는 자리가 화면에서 커서 snapPx 밖이면 후보다(pierced). 뚫는 자리(axisFaceSnap 등의
+ *   코어 점)가 커서에서 멀어 맡지 못하는 자리다. 0.36.0: 0.34.0의 셋째 조건(커서 광선에 가장 가까운 선 위 점이 그 삼각형 평면에서 snapPx의 세계 길이보다 멀다 —
+ *   커서 쪽 활꼴이 붙잡기 거리보다 두껍다)을 뺐다. 중간·보통 거리에서 칸을 얕게 뚫는 선은 활꼴이 그보다 얇아도 뚫는 자리와 곡면 위 교차가 화면에서 붙잡기 거리보다
+ *   떨어져 붙지 않았다. 받는 점은 openFaceSnap 규칙(앱 점이 그 삼각형 위 곡면 조각 자리·커서 snapPx 안) 그대로라 늘 앱이 준 곡면 위 교차다
  * - 코어 점(앱에 넘기는 힌트)은 선 위에서 그 삼각형 무게중심에 가장 가까운 점이다. 선이 삼각형을 비켜 가면 가장 가까운 자리는 늘 이웃과 함께 쓰는 테두리라
  *   그 자리로는 이 삼각형 위 교차와 이웃 삼각형 위 교차를 가르지 못한다(구를 스치는 선은 곡면을 두 번 뚫는다). 무게중심 쪽 자리면 앱이 힌트 둘레 교차 하나를 줄 때
- *   이 삼각형 위 교차가 온다. 커서와 상관없이 선과 삼각형으로만 정해진다(앱 결과를 기억할 수 있게)
+ *   이 삼각형 위 교차가 온다. 커서와 상관없이 선과 삼각형으로만 정해진다(앱 결과를 기억할 수 있게).
+ *   0.36.0: 뚫는 삼각형(pierced)의 힌트는 뚫는 자리(그 삼각형 안 — 역시 선과 삼각형으로만 정해진다). 그 삼각형 위 곡면 조각의 교차는 선이 그 칸을 뚫는 자리 옆 근인데,
+ *   선을 따라 긴 삼각형(누운 구멍 옆면 칸을 비스듬히 따라가는 안내 선)은 무게중심 쪽 자리가 다른 근에 더 가까워 앱이 다른 근을 주었다
  * - 빼는 것: 선 위에서 삼각형에 가장 가까운 점이 선이 지나는 점 자리인 것(첫 점이 곡면 위면 그 점에서 만난다), 커서가 지나는 점의 화면 자리 snapPx 안인 선,
  *   가장 가까운 자리가 삼각형의 변(꼭짓점)인데 그 변(꼭짓점)을 함께 쓰는 이웃 삼각형(tris 안)을 선이 뚫고, 그 뚫는 자리에서 곡면 위 교차까지가 붙잡기 거리 안인 것
  *   (선을 따라 OPEN_FACE_CHORD × 이웃의 가장 긴 변 ÷ 이웃 평면과 선 사잇각의 사인 — 그 안이면 이웃의 코어 교차와 0.19.0 다듬기가 맡는다. 비스듬히 스치는 선은
@@ -1167,18 +1165,16 @@ export function openFaceCandidates<T extends TrackTriangle>(
       if (!c) continue;
       const tol = meetTol(f, c.m, t.wpp);
       if (dist3(c.m, P) <= tol) continue;
-      // 0.34.0: 선이 그 삼각형을 뚫어도 커서가 그 삼각형 위이고, 뚫는 자리가 화면에서 커서 붙잡기 거리 밖이고, 커서 쪽 선 위 점(커서 광선에 가장 가까운 점)이
-      // 그 삼각형 평면에서 붙잡기 거리의 세계 길이보다 멀면 열린 후보로 본다(pierced). 아주 가까이 확대하면 그물을 뚫는 자리(축·안내 선과 면의 교차 — 코어 점)와
-      // 곡면을 뚫는 자리가 활꼴을 따라 수십 화소 떨어져, 곡면 위 교차 둘레를 가리키면 코어 점이 커서에서 멀어 붙지 않았다. 마지막 조건(커서 쪽 활꼴이
-      // 붙잡기 거리보다 두껍다)이 없는 보통 거리는 0.33.0 그대로다. 그 삼각형 위 곡면 조각 자리·커서 붙잡기 거리 안인 앱 점만 받는 것은 그대로다
+      // 0.34.0: 선이 그 삼각형을 뚫어도 커서가 그 삼각형 위이고 뚫는 자리가 화면에서 커서 붙잡기 거리 밖이면 열린 후보로 본다(pierced). 아주 가까이 확대하면
+      // 그물을 뚫는 자리(축·안내 선과 면의 교차 — 코어 점)와 곡면을 뚫는 자리가 활꼴을 따라 수십 화소 떨어져, 곡면 위 교차 둘레를 가리키면 코어 점이 커서에서 멀어
+      // 붙지 않았다. 0.36.0: 커서 쪽 활꼴이 붙잡기 거리의 세계 길이보다 두꺼워야 한다는 0.34.0의 셋째 조건을 뺐다 — 중간 거리(NC 37차 실제 판재 거리 3)와
+      // 보통 거리에서 칸을 얕게 뚫는 선도 두 자리가 화면에서 붙잡기 거리보다 떨어진다. 그 삼각형 위 곡면 조각 자리·커서 붙잡기 거리 안인 앱 점만 받는 것은 그대로다
       let pierced = false;
       if (!(c.gap > tol)) {
         const sp = projectToScreen(f, c.m);
         if (!sp || !(Math.hypot(sp[0] - x, sp[1] - y) > snapPx)) continue;
         const r = (ray ??= screenRay(f, x, y));
         if (!rayHitsTriangle(r, t.corners)) continue;
-        const near = rayLinePoint(r.origin, r.dir, P, e);
-        if (!near || !(planeGap(near, t.corners) > snapPx * t.wpp)) continue;
         pierced = true;
       } else {
         if (!(c.gap <= OPEN_FACE_CHORD * longestEdge(t.corners))) continue;
@@ -1209,7 +1205,10 @@ export function openFaceCandidates<T extends TrackTriangle>(
       if (reach == null || reach > snapPx) continue;
       const [A, B, C] = t.corners as [readonly number[], readonly number[], readonly number[]];
       const m = lineFoot(P, e, [(A[0]! + B[0]! + C[0]!) / 3, (A[1]! + B[1]! + C[1]!) / 3, (A[2]! + B[2]! + C[2]!) / 3]);
-      const d = screenDistance(f, m, x, y);
+      // 0.36.0: 뚫는 삼각형의 힌트는 뚫는 자리 c.m(그 삼각형 안) — 그 삼각형 위 곡면 조각의 교차는 그 옆 근이다. 선을 따라 긴 삼각형이면 무게중심 쪽 자리 m이
+      // 다른 근에 더 가까웠다. 두 번 지날지(twice)는 0.24.0 그대로 m으로 본다
+      const hint = pierced ? c.m : m;
+      const d = screenDistance(f, hint, x, y);
       if (d === null) continue;
       // 0.24.0 두 번 지날 수 있는 삼각형: 선이 곡면에 접하는 방향이 그 삼각형 안이면(변 법선과 선 방향의 내적이 부호를 바꾼다) 곡면 조각을 들어가고 나오는 두 교차가 있을 수 있다.
       // 변 법선은 매끈한 이웃과 45° 안이라 그 삼각형 법선에서 22.5° 안이다 — 선이 그보다 가파르면 이웃을 찾지 않는다
@@ -1218,7 +1217,7 @@ export function openFaceCandidates<T extends TrackTriangle>(
       const twice =
         Math.abs(dot3(triNormal(t.corners), e)) < TANGENT_STEEP &&
         (faceTwice(e, t, pool, m, tol) || cellTwice(e, m, t, pool, tol, around ? (n) => around(n as T) : null));
-      const o: OpenFaceCandidate<T> = { p: m, line: li, tri: t, gap: c.gap, distPx: d, reachPx: reach };
+      const o: OpenFaceCandidate<T> = { p: hint, line: li, tri: t, gap: c.gap, distPx: d, reachPx: reach };
       if (twice) o.twice = true;
       out.push(o);
       // 앱은 힌트(point) 둘레의 교차 하나를 주므로 선에서 그 조각 자리인 조각의 두 끝으로 한 번씩 더 묻는다 — 두 교차는 그 조각 안이라
@@ -1228,7 +1227,7 @@ export function openFaceCandidates<T extends TrackTriangle>(
       if (hs)
         for (const s of hs) {
           const q: V3 = [e[0] === 0 ? P[0]! : P[0]! + e[0]! * s, e[1] === 0 ? P[1]! : P[1]! + e[1]! * s, e[2] === 0 ? P[2]! : P[2]! + e[2]! * s];
-          if (dist3(q, P) <= tol || dist3(q, m) <= tol) continue;
+          if (dist3(q, P) <= tol || dist3(q, hint) <= tol) continue;
           const dq = screenDistance(f, q, x, y);
           if (dq !== null) out.push({ p: q, line: li, tri: t, gap: c.gap, distPx: dq, reachPx: reach, twice: true, twin: true });
         }

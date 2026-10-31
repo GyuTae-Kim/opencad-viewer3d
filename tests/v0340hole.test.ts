@@ -7,7 +7,8 @@
  * 이제 커서 광선이 그 삼각형을 맞으면 붙잡기 거리의 세계 길이를 보지 않고(활꼴), 칸을 뚫는 자리가 커서에서 붙잡기 거리 밖이고 커서 쪽 활꼴이 붙잡기 거리보다 두꺼우면 열린 후보로 본다.
  * - 순수: rayHitsTriangle, openFaceCandidates(아주 가까이·보통 거리, 커서 아래·아닌 삼각형, 뚫는 칸)
  * - 뷰어(가짜 DOM — 실제 포인터 사건): 세운 구멍·누운 구멍 M± 둘레가 원기둥 위 다듬은 교차로 붙고(그 안내 선 위), refineFace가 null이면 붙지 않는다, 화면 격자에서
- *   refineFace 없는 뷰어와 다른 자리는 모두 그 안내 선 위·원기둥 위 다듬은 교차, 보통 거리(15)에서 칸을 뚫는 자리 둘레는 0.33.0 그대로(커서 쪽 활꼴이 얇다)
+ *   refineFace 없는 뷰어와 다른 자리는 모두 그 안내 선 위·원기둥 위 다듬은 교차, 보통 거리(15)에서 칸을 뚫는 자리 둘레는 0.36.0부터 원기둥 위 교차
+ *   (0.34.0·0.35.0은 커서 쪽 활꼴이 얇아 0.33.0 그대로였다 — tests/v0360pierce.test.ts)
  * 장면: 판 400 × 300 × 18(반투명 0.35), 세운 구멍 (150, 150) 반지름 5 z 6~18(20토막 원기둥 고체 — 옆면 칸마다 두 삼각형·두 뚜껑, 테두리 윤곽선),
  * 누운 구멍 (0, 220, 9) X 방향 반지름 4 길이 30(16토막), 판 윗면의 기운 기준 선분(27°). 앱 refineFace = 그 직선과 원기둥 벽(높이 안)의 교차 가운데 point에 가까운 근.
  * 화면 좌표로 가리킬 때는 선·그물의 경계나 바깥 구석을 정확히 가리키지 않고 몇 화소 옆을 가리킨다(Node 판마다 마지막 자리 반올림이 다르다).
@@ -375,12 +376,11 @@ describe('Viewer3d: 구멍 안 아주 가까이 본 벽의 안내 선 면 위 �
         }
   });
 
-  it('보통 거리(바깥 비스듬히 15): 칸을 뚫는 자리가 커서에서 붙잡기 거리 밖인 M 둘레는 0.33.0 그대로 안내 선 위 커서 자리(커서 쪽 활꼴이 붙잡기 거리보다 얇다)', () => {
+  it('보통 거리(바깥 비스듬히 15): 칸을 뚫는 자리가 커서에서 붙잡기 거리 밖인 M 둘레는 0.36.0부터 원기둥 위 다듬은 교차에 붙는다(0.34.0·0.35.0은 커서 쪽 활꼴이 붙잡기 거리보다 얇아 안내 선 위 커서 자리)', () => {
     const { T, M, P0 } = vertCase(DEG + 270, 12, 0.1, -1);
     const on = view(wallRefine(), T, [150, 150, 12], [0.3, -1, 0.5], 15);
     const off = view(() => null, T, [150, 150, 12], [0.3, -1, 0.5], 15);
     const c = at(on, M);
-    let same = 0;
     for (const [ix, iy] of [
       [-4, -1],
       [-4, 0],
@@ -390,10 +390,16 @@ describe('Viewer3d: 구멍 안 아주 가까이 본 벽의 안내 선 면 위 �
       const x = c.x + ix * 2 + 0.31, y = c.y + iy * 2 + 0.17;
       ptr(on, x, y);
       ptr(off, x, y);
-      expect(on.v.measureHoverSnap, `${ix},${iy}`).toEqual(off.v.measureHoverSnap);
-      if (on.v.measureHoverSnap?.snap === 'parallel' && !on.v.measureHoverSnap.face) same++;
+      const k = `${ix},${iy}`;
+      const h = on.v.measureHoverSnap!;
+      // refineFace가 없으면 0.33.0~0.35.0과 같은 안내 선 위 커서 자리
+      expect(off.v.measureHoverSnap, k).toMatchObject({ snap: 'parallel' });
+      expect(off.v.measureHoverSnap, k).not.toHaveProperty('face');
+      expect(h, k).toMatchObject({ snap: 'parallel', refined: true, face: { id: VERT.id } });
+      expect(onWall(VERT, h.point), k).toBe(true);
+      expect(offGuide(h), k).toBeLessThan(1e-9);
+      expect(dist(h.point, M), k).toBeLessThan(1e-4);
     }
-    expect(same).toBeGreaterThan(0);
     expect(offLine(P0, T, DIR)).toBeLessThan(1e-9);
     on.v.dispose();
     off.v.dispose();

@@ -5388,7 +5388,7 @@ export class Viewer3d {
    * 그 활꼴을 지날 만큼 가까우면 앱 refine을 'axisEdge'·open = true로 불러(point = 선 위에서 토막에 가장 가까운 점, line = 그 선) 곡선과의 교차를 받는다.
    * 받는 규칙은 openEdgeSnap(그 선 위로 내린 자리, 코어 점·커서에서 붙잡기 거리 안, 그 토막의 곡선 조각 자리, 단면에서 남는 쪽, 가리지 않음).
    * 앱 함수는 미리 보기 한 번에 budget.calls(0.15.0 열린 후보와 함께 쓰는 OPEN_REFINE_CALLS)번까지만 새로 부르고, 결과는 커서 광선을 뺀 입력으로 기억한다
-   * (0.18.0 'axisEdge'와 같은 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다). 받은 것이 없으면 null.
+   * (0.18.0 'axisEdge'와 같은 꼴의 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다. 0.36.0부터 끝에 '#open'이 붙어 같은 입력의 닫힌 'axisEdge'와 따로 묻는다). 받은 것이 없으면 null.
    * 0.33.0: at이 undefined가 아니면 열린 교차 대신 선이 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리(track.ts vertexEdgeSnap — refineEnds)를 같은 부르기·한도·기억으로 본다
    * (at = 끝점 붙잡기가 고른 꼭짓점 — 그 자리만, null이면 커서 둘레 토막의 모든 끝)
    */
@@ -5444,7 +5444,8 @@ export class Viewer3d {
    * 그 삼각형과 곡면 사이를 지날 만큼 가까우면 앱 refineFace를 'axisFace'·open = true로 불러(point = 선 위에서 삼각형에 가장 가까운 점, face = 그 삼각형, line = 그 선)
    * 곡면과의 교차를 받는다. 받는 규칙은 openFaceSnap(그 선 위로 내린 자리, 코어 점·커서에서 붙잡기 거리 안, 그 삼각형 위 곡면 조각 자리, 단면에서 남는 쪽, 가리지 않음).
    * 앱 함수는 미리 보기 한 번에 budget.calls(0.15.0·0.20.0 열린 후보와 함께 쓰는 OPEN_REFINE_CALLS — 그 둘이 먼저 쓴다)번까지만 새로 부르고, 결과는 커서 광선을 뺀 입력으로
-   * 기억한다(0.19.0 'axisFace'와 같은 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다). 받은 것이 없으면 null
+   * 기억한다(0.19.0 'axisFace'와 같은 꼴의 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다. 0.36.0부터 끝에 '#open'이 붙어, 뚫는 칸의 힌트가 코어 'axisFace'의 점과
+   * 같아도 따로 묻고 각자 제 답을 쓴다). 받은 것이 없으면 null
    */
   private openLineFace(
     so: NonNullable<Viewer3d['snapOpt']>,
