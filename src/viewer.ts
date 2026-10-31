@@ -981,6 +981,15 @@ const CUBE_INSET = 8;
 export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
 /** 그림 저장 한 변 한도(화소) */
 const SNAPSHOT_MAX_SIDE = 16384;
+/**
+ * 0.30.0 처음 올릴 때 무늬 다시 그리기 간격: 첫 무늬 뒤로는 다른 무늬를 아직 푸는 중이면 앞서 무늬로 다시 그린 때부터 이만큼(ms)과
+ * 그 뒤 무늬 올리기 한 번에 걸린 가장 긴 시간 × TEXTURE_REDRAW_SLOW 가운데 긴 시간이 지나야 다시 그린다
+ */
+export const TEXTURE_REDRAW_MS = 250;
+/** 0.30.0 무늬 다시 그리기 간격의 올리기 시간 배수 — 다시 그린 화면을 GPU가 끝내기를 기다리는 몫이 올리는 시간의 1/(1 + 4)쯤을 넘지 않게 */
+export const TEXTURE_REDRAW_SLOW = 4;
+/** 0.30.0 미룬 무늬 다시 그리기가 앞서 그린 화면을 GPU가 끝내기를 기다릴 때 다시 보는 간격(ms) */
+const TEXTURE_REDRAW_POLL_MS = 50;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 표준 뷰 키 — 0.10.0부터 작은 모듈 camera.ts에 두고 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
 export { VIEW_KEYS };
@@ -1196,6 +1205,19 @@ export class Viewer3d {
   private restoreWait = false;
   /** 0.29.0 문맥 복구 알림을 부르는 동안(그 사이 앱이 다시 준 것으로 끝 알림이 먼저 가지 않게) */
   private restoreEmitting = false;
+  /**
+   * 0.30.0 처음 올릴 때 무늬 다시 그리기 모으기(texRedraw): 이번 무늬 올리기에서 무늬로 다시 그렸는지, 마지막으로 무늬로 다시 그린 때(performance.now),
+   * 그 뒤 무늬 올리기 한 번에 걸린 가장 긴 시간(ms), 미룬 다시 그리기 타이머
+   */
+  private texDrawn = false;
+  private texDrawAt = 0;
+  private texSlow = 0;
+  private texTimer: ReturnType<typeof setTimeout> | 0 = 0;
+  /** 0.30.0 무늬를 올리는 동안 마지막으로 그린 화면 뒤의 GPU 울타리(미룬 무늬는 그 화면을 GPU가 끝낸 뒤 그린다 — 없으면 끝난 것으로 본다) */
+  private texFence: WebGLSync | null = null;
+  /** 0.30.0 그 울타리를 둔 때와 미룬 다시 그리기가 그 울타리를 기다렸는지(기다렸으면 그 화면의 GPU 시간으로 간격을 다시 정한다) */
+  private texFenceAt = 0;
+  private texFenceWaited = false;
   private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
@@ -1289,10 +1311,8 @@ export class Viewer3d {
     renderer.textureLimit = this.opts.textureLimit;
     renderer.textureBudget = this.opts.textureBudget;
     // 무늬를 다 풀어 올릴 때마다 다시 그린다
-    renderer.onTexture = () => {
-      // 0.29.0: 문맥을 되찾은 뒤 무늬를 잇달아 풀어 올리는 동안은 한 장마다 다시 그리지 않고, 푸는 무늬가 다 끝났을 때 한 번 그린다 —
-      // 그리기가 비싼 큰 모형(소프트웨어 GPU 등)에서 그사이의 그리기가 다음 무늬 올리기를 붙잡아 되찾기가 몇 배~수십 배 늘었다(처음 올릴 때는 그대로)
-      if (!this.restoreWait || !this.renderer.texturesBusy) this.invalidate();
+    renderer.onTexture = (uploadMs) => {
+      this.texRedraw(uploadMs);
       // 0.29.0: 무늬를 다 풀어 올렸으면 되찾은 뒤 끝 알림
       this.checkRestoreDone();
     };
@@ -1389,6 +1409,8 @@ export class Viewer3d {
     this.wheelAnchor = null;
     const inc = opts.incremental;
     this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), cb: opts.onProgress ?? null } : null;
+    // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
+    this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
     this.allBox = scene.bounds && !boxIsEmpty(scene.bounds) ? scene.bounds : sceneBounds(scene);
     this.visBox = null;
@@ -1416,6 +1438,7 @@ export class Viewer3d {
     this.lookMoves = 0;
     this.upload = null;
     this.releaseOpt = null;
+    this.texReset();
     this.sceneRef = null;
     this.items.clear();
     this.bbList = [];
@@ -1657,6 +1680,99 @@ export class Viewer3d {
     return this.restoreWait && !this.disposed;
   }
 
+  /**
+   * 무늬를 하나 올렸거나 풀지 못했을 때 다시 그릴지(uploadMs = 그 올리기에 걸린 시간 — 렌더러 onTexture):
+   * - 푸는 무늬가 다 끝났으면 곧 그린다(되찾을 때·처음 올릴 때 모두)
+   * - 0.29.0 문맥을 되찾은 뒤 끝 알림 전(restoreWait)이면 그 사이에는 그리지 않는다
+   * - 0.30.0 처음 올릴 때(setScene·setMesh로 새 무늬 — 다른 무늬를 아직 푸는 중): 이번 올리기의 첫 무늬는 곧 그리고(texLater — 앞 화면을 GPU가 끝냈으면),
+   *   그 뒤로는 앞서 무늬로 다시 그린 때부터 TEXTURE_REDRAW_MS와 "그 뒤 그린 화면·무늬 올리기·GPU 울타리 기다림 가운데 가장 긴 시간 × TEXTURE_REDRAW_SLOW"
+   *   가운데 긴 시간이 지났을 때만 그린다. 미룬 무늬는 그 시간이 되면(다음 무늬를 기다리지 않고) 함께 그린다.
+   *   그리기가 비싼 큰 모형(소프트웨어 GPU 등)에서 무늬마다 그린 화면을 GPU가 끝낼 때까지 다음 무늬 올리기가 기다려, 다 보이기까지 몇 배가 걸렸다
+   */
+  private texRedraw(uploadMs: number): void {
+    if (!this.renderer.texturesBusy) {
+      this.texReset();
+      this.invalidate();
+      return;
+    }
+    if (this.restoreWait || this.disposed || this.lost) return;
+    if (uploadMs > this.texSlow) this.texSlow = uploadMs;
+    // 미룬 것이 있으면 그 때를 새 간격으로 다시 정한다(texLater가 간격·울타리를 본다)
+    if (this.texTimer) clearTimeout(this.texTimer);
+    this.texTimer = 0;
+    this.texLater();
+  }
+
+  /** 0.30.0 무늬 다시 그리기 간격(ms) */
+  private texGap(): number {
+    return Math.max(TEXTURE_REDRAW_MS, TEXTURE_REDRAW_SLOW * this.texSlow);
+  }
+
+  /**
+   * 0.30.0 무늬로 다시 그릴 때가 됐으면 그린다: 첫 무늬가 아니면 간격(texGap)이 지나야 하고, 무늬를 올리는 동안 마지막으로 그린 화면을 GPU가 아직 끝내지 않았으면(울타리)
+   * TEXTURE_REDRAW_POLL_MS 뒤 다시 본다 — 소프트웨어 GPU는 그 화면을 그리는 동안 그림 풀기도 늦어져 다음 무늬 올리기(그 기다림을 재는 때)보다 이 때가 먼저 올 수 있다.
+   * 기다렸으면 그 화면이 GPU에서 걸린 시간(울타리를 둔 때부터)도 간격에 셈한다
+   */
+  private texLater(): void {
+    this.texTimer = 0;
+    if (this.disposed || this.lost || this.restoreWait || !this.renderer.texturesBusy) return;
+    const later = (ms: number): void => {
+      this.texTimer = setTimeout(() => this.texLater(), Math.max(0, ms));
+    };
+    const now = performance.now();
+    if (this.texDrawn && now - this.texDrawAt < this.texGap()) return later(this.texDrawAt + this.texGap() - now);
+    const gl = this.gl;
+    const s = this.texFence && typeof gl.getSyncParameter === 'function' ? gl.getSyncParameter(this.texFence, gl.SYNC_STATUS) : null;
+    if (s !== null && s !== undefined && s === gl.UNSIGNALED) {
+      this.texFenceWaited = true;
+      return later(TEXTURE_REDRAW_POLL_MS);
+    }
+    if (this.texFenceWaited) {
+      this.texFenceWaited = false;
+      const gpu = now - this.texFenceAt;
+      if (gpu > this.texSlow) this.texSlow = gpu;
+      if (this.texDrawn && now - this.texDrawAt < this.texGap()) return later(this.texDrawAt + this.texGap() - now);
+    }
+    this.texNow(now);
+  }
+
+  /** 0.30.0 무늬로 지금 다시 그린다(그 때를 기억하고 올리기 시간은 새로 잰다) */
+  private texNow(now: number): void {
+    this.texDrawn = true;
+    this.texDrawAt = now;
+    this.texSlow = 0;
+    if (this.texTimer) clearTimeout(this.texTimer);
+    this.texTimer = 0;
+    this.invalidate();
+  }
+
+  /**
+   * 0.30.0 처음 올리며 무늬를 푸는 동안 그린 화면: 그 그리기 시간(ms — 앞 화면을 GPU가 끝내기를 기다린 시간이 들 수 있다)을 간격에 셈하고,
+   * 화면 뒤에 GPU 울타리를 둔다(앞 울타리는 지운다 — fenceSync가 없으면 두지 않는다). 되찾는 동안(restoreWait)은 0.29.0 차례라 두지 않는다
+   */
+  private texAfterDraw(frameMs: number): void {
+    if (this.restoreWait || !this.renderer.texturesBusy) return;
+    if (frameMs > this.texSlow) this.texSlow = frameMs;
+    const gl = this.gl;
+    if (typeof gl.fenceSync !== 'function') return;
+    if (this.texFence) gl.deleteSync(this.texFence);
+    this.texFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) ?? null;
+    this.texFenceAt = performance.now();
+    this.texFenceWaited = false;
+  }
+
+  /** 0.30.0 무늬 다시 그리기 모으기를 처음으로(무늬를 다 올렸을 때·새 장면·문맥을 잃었을 때·없앨 때) */
+  private texReset(): void {
+    this.texDrawn = false;
+    this.texSlow = 0;
+    if (this.texTimer) clearTimeout(this.texTimer);
+    this.texTimer = 0;
+    // 잃은 문맥의 울타리는 지울 수 없다(버리기만)
+    if (this.texFence && !this.lost && !this.gl.isContextLost()) this.gl.deleteSync(this.texFence);
+    this.texFence = null;
+    this.texFenceWaited = false;
+  }
+
   /** 0.29.0: 되찾은 뒤 다시 올리기가 다 끝났으면 끝 알림(잃은 동안·복구 알림을 부르는 동안·끝난 뒤에는 아무것도 하지 않는다) */
   private checkRestoreDone(): void {
     if (!this.restoreWait || this.lost || this.disposed || this.restoreEmitting) return;
@@ -1718,6 +1834,7 @@ export class Viewer3d {
     clearTimeout(this.bvhTimer);
     clearTimeout(this.wheelTimer);
     clearTimeout(this.dwellTimer);
+    this.texReset();
     this.bvhGen++;
     for (const f of this.off) f();
     this.off = [];
@@ -5284,6 +5401,8 @@ export class Viewer3d {
       this.renderer.forget();
       if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
+      // 0.30.0: 미룬 무늬 다시 그리기는 버린다(되찾은 뒤는 0.29.0 차례)
+      this.texReset();
       // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다)
       if (!this.disposed) for (const cb of [...this.lostCbs]) cb();
     });
@@ -5660,6 +5779,8 @@ export class Viewer3d {
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
     this.frameMs = performance.now() - t0;
+    // 0.30.0: 무늬를 올리는 동안이면 이 화면 뒤에 울타리를 두고 그리기 시간을 무늬 다시 그리기 간격에 셈한다
+    this.texAfterDraw(this.frameMs);
     const key = `${this.cam.target.join(',')}|${this.cam.distance}|${this.cam.yaw}|${this.cam.pitch}|${this.cam.projection}|${this.cssW}x${this.cssH}|${this.cam.fovY}|${this.cam.roll ?? 0}|${this.cam.shiftX ?? 0}|${this.cam.shiftY ?? 0}`;
     if (key !== this.lastCamKey) {
       this.lastCamKey = key;

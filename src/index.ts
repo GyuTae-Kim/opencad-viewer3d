@@ -3,7 +3,7 @@
  */
 export type { Box3, LineSet3d, Mesh3d, NormalArray, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, Texture3d, UvArray, UvTransform } from './types';
 export { packNormals, packUvs } from './attribs';
-export { SNAPSHOT_MAX_PIXELS, Viewer3d } from './viewer';
+export { SNAPSHOT_MAX_PIXELS, TEXTURE_REDRAW_MS, TEXTURE_REDRAW_SLOW, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
   BackgroundOptions,
