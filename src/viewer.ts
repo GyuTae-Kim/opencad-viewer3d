@@ -905,6 +905,18 @@ export interface ReleaseOptions {
  */
 export type ContextRestoreNeed = RestoreNeed;
 
+/** 묶음 행렬(setItemMatrix·setItemMatrices): 앞 16개가 모두 유한한 수면 Float64Array 사본, 아니면 null */
+function lookMatrix(matrix: ArrayLike<number>): Float64Array | null {
+  if (!(matrix.length >= 16)) return null;
+  const out = new Float64Array(16);
+  for (let i = 0; i < 16; i++) {
+    const v = matrix[i];
+    if (!Number.isFinite(v)) return null;
+    out[i] = v!;
+  }
+  return out;
+}
+
 /** 0.32.0 맡은 포인터 기록 → 앱에 넘길 값 */
 const heldOf = (h: PointerHold<unknown>, event?: PointerEvent): HeldPointer => ({ pointerId: h.id, pointerType: h.type, sx: h.sx, sy: h.sy, x: h.x, y: h.y, ...(event ? { event } : {}) });
 
@@ -1304,8 +1316,8 @@ export class Viewer3d {
   } = { profiles: null, hiddenEdges: 0, hiddenEdgesShaded: false, hiddenEdgeColor: null, edgeColor: null };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
   private looks = new Map<string, LookState>();
-  /** 묶음 행렬을 건 묶음 수(있으면 보이는 범위를 다시 모은다) */
-  private lookMoves = 0;
+  /** 묶음 행렬을 건 묶음 id(있으면 보이는 범위를 다시 모은다 — 0.32.0부터 수를 세지 않고 모아 둔다: 하나 바꿀 때 겉모습 전체를 훑지 않게) */
+  private lookMoved = new Set<string>();
   private lineModels = new WeakMap<LineSet3d | PointSet3d, ArrayLike<number>>();
   /** 앱 측정 덧그림(setAnnotations)과 계산한 모양 */
   private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number; box: Box3 | null } | null = null;
@@ -1509,7 +1521,7 @@ export class Viewer3d {
     this.ranges.clear();
     this.rangeSel.clear();
     this.looks.clear();
-    this.lookMoves = 0;
+    this.lookMoved.clear();
     this.lineModels = new WeakMap();
     this.segHi = null;
     this.measurePts = [];
@@ -1559,7 +1571,7 @@ export class Viewer3d {
     const hadSection = !!this.sec;
     this.rangeSel.clear();
     this.looks.clear();
-    this.lookMoves = 0;
+    this.lookMoved.clear();
     this.upload = null;
     this.releaseOpt = null;
     this.texReset();
@@ -1699,11 +1711,8 @@ export class Viewer3d {
     this.sceneRef = { ...s, meshes: s.meshes.filter((x) => x !== m) };
     this.items.delete(id);
     this.rangeSel.delete(id);
-    if (this.looks.delete(id)) {
-      let n = 0;
-      for (const l of this.looks.values()) if (l.matrix) n++;
-      this.lookMoves = n;
-    }
+    this.looks.delete(id);
+    this.lookMoved.delete(id);
     if (this.gpu) this.renderer.removeMesh(id, this.sceneRef);
     this.sceneEdited();
     // 0.29.0: 다시 받을 그물을 뺐으면 되찾은 뒤 끝일 수 있다
@@ -3753,9 +3762,35 @@ export class Viewer3d {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
     if (matrix === null) delete l.matrix;
-    else if (matrix.length >= 16 && Array.from(matrix).slice(0, 16).every((v) => Number.isFinite(v))) l.matrix = Float64Array.from(Array.from(matrix).slice(0, 16));
-    else return;
+    else {
+      const m = lookMatrix(matrix);
+      if (!m) return;
+      l.matrix = m;
+    }
     this.setLook(id, l, true);
+  }
+
+  /**
+   * 0.32.0 여러 묶음 행렬을 한 번에 건다: [묶음 id, 행렬(열 우선 4×4 — setItemMatrix와 같다) 또는 null(되돌림)] 목록(Map도 그대로 준다).
+   * 결과(그림·고르기·측정·범위·단면·최근접점·itemLook)는 목록 차례대로 setItemMatrix를 부른 것과 같다 — 같은 id가 둘이면 뒤의 것,
+   * 없는 id와 앞 16개가 유한한 수가 아닌 행렬(배열이 아닌 값 포함)은 건너뛴다. 범위·고르기 목록·단면 테두리·그림자·측정 미리 보기는 한 번만 버린다
+   * (다음 그리기·고르기에서 한 번 다시 센다). 분해 밀대·끌기처럼 부품 여럿을 한꺼번에 옮길 때. 돌려주는 값: 건 항목 수(건너뛴 것 빼고)
+   */
+  setItemMatrices(entries: Iterable<readonly [string, ArrayLike<number> | null]>): number {
+    if (this.disposed) return 0;
+    let n = 0;
+    for (const [id, matrix] of entries) {
+      if (!this.items.has(id)) continue;
+      const m = matrix === null ? null : matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
+      if (matrix !== null && !m) continue;
+      const l = this.looks.get(id) ?? {};
+      if (m) l.matrix = m;
+      else delete l.matrix;
+      this.storeLook(id, l);
+      n++;
+    }
+    if (n) this.lookChanged(true);
+    return n;
   }
 
   /**
@@ -3849,23 +3884,28 @@ export class Viewer3d {
   /** 모든 묶음 겉모습을 되돌린다 */
   clearItemLooks(): void {
     if (!this.looks.size) return;
-    const moved = this.lookMoves > 0;
+    const moved = this.lookMoved.size > 0;
     this.looks.clear();
+    this.lookMoved.clear();
     this.lookChanged(moved);
   }
 
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
+    this.storeLook(id, l);
+    this.lookChanged(moved);
+  }
+
+  /** 겉모습 하나를 둔다(빈 겉모습이면 지운다 — 다시 셀 것은 lookChanged가 버린다) */
+  private storeLook(id: string, l: LookState): void {
     if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor && !l.pickOpaque && !l.pickThrough) this.looks.delete(id);
     else this.looks.set(id, l);
-    this.lookChanged(moved);
+    if (l.matrix) this.lookMoved.add(id);
+    else this.lookMoved.delete(id);
   }
 
   private lookChanged(moved: boolean): void {
     this.shadowVer++;
-    let n = 0;
-    for (const l of this.looks.values()) if (l.matrix) n++;
-    this.lookMoves = n;
     this.visLists = null;
     if (moved) {
       this.boxes = new WeakMap();
@@ -4192,7 +4232,7 @@ export class Viewer3d {
     if (!s) return (this.visBox = emptyBox());
     let ranged = false;
     for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
-    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoves && !this.bbList.length) return (this.visBox = this.allBox);
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoved.size && !this.bbList.length) return (this.visBox = this.allBox);
     let b = emptyBox();
     for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
