@@ -1071,11 +1071,35 @@ function lineTriClosest(P: readonly number[], e: readonly number[], c: readonly 
   return best;
 }
 
+/** 점 p와 삼각형 c 평면 사이 거리(넓이 0이면 Infinity) */
+function planeGap(p: readonly number[], c: readonly (readonly number[])[]): number {
+  const n = cross3(sub3(c[1]!, c[0]!), sub3(c[2]!, c[0]!));
+  const nn = Math.hypot(n[0], n[1], n[2]);
+  return nn > 0 ? Math.abs(dot3(n, sub3(p, c[0]!))) / nn : Infinity;
+}
+
+/** 광선(origin·단위 dir — 커서 광선)이 삼각형 c(채운 면)를 앞쪽(매개변수 0 이상)에서 맞는지(0.34.0 — 커서가 그 삼각형 위인지, 화면 투영과 상관없이) */
+export function rayHitsTriangle(ray: { origin: readonly number[]; dir: readonly number[] }, c: readonly (readonly number[])[]): boolean {
+  const A = c[0]!, B = c[1]!, C = c[2]!;
+  const n = cross3(sub3(B, A), sub3(C, A));
+  const nn = Math.hypot(n[0], n[1], n[2]);
+  const den = dot3(n, ray.dir);
+  if (!(nn > 0) || !(Math.abs(den) > 1e-12 * nn)) return false;
+  const s = dot3(n, sub3(A, ray.origin)) / den;
+  if (!(s >= 0)) return false;
+  const w = barycentric([ray.origin[0]! + ray.dir[0]! * s, ray.origin[1]! + ray.dir[1]! * s, ray.origin[2]! + ray.dir[2]! * s], A, B, C);
+  return !!w && w[0] >= 0 && w[1] >= 0 && w[2] >= 0;
+}
+
 /**
  * 선과 삼각형의 열린 교차 후보(0.22.0, 순수): 선 lines(지나는 점 from·방향 dir — 0.20.0 OpenEdgeLine)가 삼각형 tris(커서 둘레 그물 면 — 뷰어는 화면에서 커서
  * 붙잡기 거리 안의 삼각형)를 뚫지 않지만(가장 가까운 거리가 그 깊이의 화면 반 화소를 넘는다 — 뚫으면 axisFaceSnap·lockFaceSnap이 맡는다) 그 삼각형과 곡면 사이를
  * 지날 만큼 가까운 것. 곡면이 삼각형 밖으로 볼록해 선이 곡면만 뚫고 삼각형은 비켜 가는 자리다(구를 스치듯 지나는 축 — 실루엣 둘레 등)
- * - 가까움: 선과 삼각형 사이 거리가 min(OPEN_FACE_CHORD × 가장 긴 변, 커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안(0.20.0 OPEN_EDGE_CHORD와 같은 근거)
+ * - 가까움: 선과 삼각형 사이 거리가 min(OPEN_FACE_CHORD × 가장 긴 변, 커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안(0.20.0 OPEN_EDGE_CHORD와 같은 근거).
+ *   0.34.0: 커서 광선이 그 삼각형을 맞으면(rayHitsTriangle — 커서가 그 삼각형 위) 붙잡기 거리의 세계 길이는 보지 않는다(OPEN_FACE_CHORD × 가장 긴 변 안만).
+ *   아주 가까이 확대하면 활꼴 높이가 그 길이보다 크고, 구멍 안 벽처럼 선과 삼각형 사이가 거의 눈 쪽이면 화면에서는 선이 커서 아래 그 삼각형을 지나기 때문이다.
+ *   0.34.0: 선이 삼각형을 뚫어도(gap 0) 커서가 그 삼각형 위이고 뚫는 자리가 화면에서 커서 snapPx 밖이며 커서 광선에 가장 가까운 선 위 점이 그 삼각형 평면에서
+ *   snapPx의 세계 길이보다 멀면(커서 쪽 활꼴이 붙잡기 거리보다 두껍다 — 아주 가까이 확대한 자리) 후보다. 뚫는 자리(axisFaceSnap 등의 코어 점)가 커서에서 멀어 맡지 못하는 자리다
  * - 코어 점(앱에 넘기는 힌트)은 선 위에서 그 삼각형 무게중심에 가장 가까운 점이다. 선이 삼각형을 비켜 가면 가장 가까운 자리는 늘 이웃과 함께 쓰는 테두리라
  *   그 자리로는 이 삼각형 위 교차와 이웃 삼각형 위 교차를 가르지 못한다(구를 스치는 선은 곡면을 두 번 뚫는다). 무게중심 쪽 자리면 앱이 힌트 둘레 교차 하나를 줄 때
  *   이 삼각형 위 교차가 온다. 커서와 상관없이 선과 삼각형으로만 정해진다(앱 결과를 기억할 수 있게)
@@ -1101,6 +1125,7 @@ export function openFaceCandidates<T extends TrackTriangle>(
 ): OpenFaceCandidate<T>[] {
   const out: OpenFaceCandidate<T>[] = [];
   if (!lines.length || !tris.length) return out;
+  let ray: { origin: V3; dir: V3 } | undefined;
   for (let li = 0; li < lines.length; li++) {
     const { from: P, dir } = lines[li]!;
     const e = unitDir([0, 0, 0], dir);
@@ -1110,9 +1135,30 @@ export function openFaceCandidates<T extends TrackTriangle>(
       const c = lineTriClosest(P, e, t.corners);
       if (!c) continue;
       const tol = meetTol(f, c.m, t.wpp);
-      if (!(c.gap > tol) || !(c.gap <= Math.min(OPEN_FACE_CHORD * longestEdge(t.corners), snapPx * t.wpp)) || dist3(c.m, P) <= tol) continue;
+      if (dist3(c.m, P) <= tol) continue;
+      // 0.34.0: 선이 그 삼각형을 뚫어도 커서가 그 삼각형 위이고, 뚫는 자리가 화면에서 커서 붙잡기 거리 밖이고, 커서 쪽 선 위 점(커서 광선에 가장 가까운 점)이
+      // 그 삼각형 평면에서 붙잡기 거리의 세계 길이보다 멀면 열린 후보로 본다(pierced). 아주 가까이 확대하면 그물을 뚫는 자리(축·안내 선과 면의 교차 — 코어 점)와
+      // 곡면을 뚫는 자리가 활꼴을 따라 수십 화소 떨어져, 곡면 위 교차 둘레를 가리키면 코어 점이 커서에서 멀어 붙지 않았다. 마지막 조건(커서 쪽 활꼴이
+      // 붙잡기 거리보다 두껍다)이 없는 보통 거리는 0.33.0 그대로다. 그 삼각형 위 곡면 조각 자리·커서 붙잡기 거리 안인 앱 점만 받는 것은 그대로다
+      let pierced = false;
+      if (!(c.gap > tol)) {
+        const sp = projectToScreen(f, c.m);
+        if (!sp || !(Math.hypot(sp[0] - x, sp[1] - y) > snapPx)) continue;
+        const r = (ray ??= screenRay(f, x, y));
+        if (!rayHitsTriangle(r, t.corners)) continue;
+        const near = rayLinePoint(r.origin, r.dir, P, e);
+        if (!near || !(planeGap(near, t.corners) > snapPx * t.wpp)) continue;
+        pierced = true;
+      } else {
+        if (!(c.gap <= OPEN_FACE_CHORD * longestEdge(t.corners))) continue;
+        // 0.34.0: 그 틈이 붙잡기 거리의 세계 길이(snapPx × 커서 쪽 깊이의 화소 세계 길이)를 넘어도 커서가 그 삼각형 위(커서 광선이 그 삼각형을 맞는다)면 남긴다.
+        // 아주 가까이 확대하면 활꼴 높이가 붙잡기 거리의 세계 길이보다 크고, 구멍 안 벽처럼 그 틈이 거의 눈 쪽이면 화면에서는 선이 커서 아래 그 삼각형을 지난다
+        // (선에서 그 조각 자리인 조각이 커서에서 붙잡기 거리 안인지는 아래 reachPx가 본다). 커서 아래가 아닌 삼각형은 0.33.0 그대로다
+        if (!(c.gap <= snapPx * t.wpp) && !rayHitsTriangle((ray ??= screenRay(f, x, y)), t.corners)) continue;
+      }
       let through = false;
-      for (const n of tris) {
+      // 뚫는 삼각형(pierced)은 이웃을 볼 것이 없다 — 그 삼각형을 뚫는 자리가 커서에서 멀어 남긴 것이다
+      for (const n of pierced ? [] : tris) {
         if (n === t || n.corners.length < 3 || !c.near.every((V) => n.corners.some((W) => dist3(V, W) <= tol))) continue;
         const k = lineTriClosest(P, e, n.corners);
         if (!k || !(k.gap <= meetTol(f, k.m, n.wpp))) continue;
