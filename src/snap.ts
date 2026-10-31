@@ -172,7 +172,8 @@ export interface SnapRefineFaceInput {
    * (곡면이 삼각형 밖으로 볼록해 선이 곡면만 뚫는 자리 — 실루엣 둘레 등). point는 선 위에서 그 삼각형에 가장 가까운 점이다.
    * 앱은 열린 후보가 아닐 때와 같이 그 선이 face가 놓인 곡면을 뚫는 점(point 둘레)을 돌려준다. 만나지 않거나 모르면 null — 그러면 후보가 없다.
    * 0.34.0: 선이 face 삼각형을 뚫어도 그 뚫는 자리가 커서에서 붙잡기 거리 밖이고 커서가 그 삼각형 위면 열린 후보다(0.36.0부터 커서 쪽 활꼴 두께는 보지 않는다).
-   * 0.36.0: 그때 point는 그 뚫는 자리다(열린 후보가 아닌 'axisFace'(0.19.0)의 코어 점과 같은 뜻 — 앱은 같은 답을 주면 된다. 기억 열쇠에는 open을 넣지 않는다)
+   * 0.36.0: 그때 point는 그 뚫는 자리다(열린 후보가 아닌 'axisFace'(0.19.0)의 코어 점과 같은 자리일 수 있다). 뷰어는 open을 기억 열쇠에 넣어(openRefineKey)
+   * 같은 입력이라도 open이 다르면 따로 묻고 각자 제 답을 쓴다 — open일 때 다른 길로 푸는 앱도 된다
    */
   open?: boolean;
 }
@@ -347,14 +348,16 @@ const segKey = (s: SnapSegment): string => `${s.kind}|${s.id.length}:${s.id}|${s
  * 열린 후보의 코어 점은 토막과 첫 점으로만 정해지므로(커서와 상관없다) 커서가 그 둘레에서 움직이는 동안 같은 열쇠다.
  * 0.18.0: 축과 선분의 교차('axisEdge')도 이 기억을 쓴다 — 축 직선(line)이 있으면 열쇠 끝에 붙는다(없으면 0.15.0 열쇠 그대로).
  * 0.19.0: 축이 면을 뚫는 점('axisFace')은 선분 자리에 면(그물 id·삼각형 번호·법선)이 들어간다. 0.21.0 'onFace'도 같은 꼴이다(line이 커서 광선이라 커서마다 다른 열쇠 —
- * 뷰어는 이 기억에 넣지 않고 바로 앞 입력 하나만 견준다)
+ * 뷰어는 이 기억에 넣지 않고 바로 앞 입력 하나만 견준다).
+ * 0.36.0: 열린 후보(open = true)면 열쇠 끝에 '#open'이 붙는다(아니면 그대로). 뚫는 칸의 열린 후보(0.34.0)는 코어 'axisFace'·'axisEdge'와 같은 입력일 수 있는데,
+ * open일 때 다른 길로 푸는 앱(높이 판정을 달리하는 등)이면 먼저 물은 쪽 답이 다른 쪽에 쓰이지 않게 따로 묻는다
  */
 export function openRefineKey(
-  c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line'> | Pick<SnapRefineFaceInput, 'kind' | 'point' | 'face' | 'first' | 'line'>,
+  c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line' | 'open'> | Pick<SnapRefineFaceInput, 'kind' | 'point' | 'face' | 'first' | 'line' | 'open'>,
 ): string {
   const l = c.line;
   const where = 'face' in c ? `face|${c.face.id.length}:${c.face.id}|${c.face.index}|${c.face.normal.join(',')}#-` : `${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}`;
-  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis ?? '-'}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}`;
+  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis ?? '-'}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}${c.open ? '#open' : ''}`;
 }
 
 /** 열린 후보 다듬기 기억(0.15.0): 열쇠 → 앱이 돌려준 점(받을 수 있는 수 셋의 복사본, 아니면 null). 가장 오래 쓰지 않은 것부터 지운다 */
@@ -448,7 +451,7 @@ export function refineOpen(
 ): SnapCandidate[] {
   const out: SnapCandidate[] = [];
   for (const c of cands) {
-    const key = openRefineKey({ kind: c.kind, point: c.p, segment: c.seg, other: c.other, first });
+    const key = openRefineKey({ kind: c.kind, point: c.p, segment: c.seg, other: c.other, first, open: true });
     let q = memo.get(key);
     if (q === undefined) {
       if (budget.calls <= 0) continue;

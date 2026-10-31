@@ -5,7 +5,8 @@
  * 이제 셋째 조건을 빼고(보통 거리에서도 — 기본 동작이 바뀐다), 뚫는 삼각형의 힌트를 뚫는 자리로 둔다(선을 따라 긴 칸이면 무게중심 쪽 자리가 다른 근에 가깝다).
  * - 순수: openFaceCandidates(거리 3에서 셋째 조건에 걸리던 자리, 누운 구멍 옆면 칸을 따라가는 안내 선의 힌트)
  * - 뷰어(가짜 DOM — 실제 포인터 사건): 세운 구멍 거리 1~8·누운 구멍 거리 1~4의 M± 둘레가 원기둥 위 다듬은 교차(그 안내 선 위)에 붙고,
- *   보통 거리(옆 15·위 30) 화면 격자에서 refineFace 없는 뷰어와 다른 자리는 모두 그 안내 선 위·원기둥 위 다듬은 교차
+ *   보통 거리(옆 15·위 30) 화면 격자에서 refineFace 없는 뷰어와 다른 자리는 모두 그 안내 선 위·원기둥 위 다듬은 교차,
+ *   open일 때와 아닐 때 다른 답을 주는 앱이면 뚫는 칸의 열린 후보와 코어 'axisFace'(같은 점·면·선)를 어느 차례로 물어도 각자 제 답(openRefineKey의 '#open')
  * 장면은 tests/v0340hole.test.ts와 같다: 판 400 × 300 × 18(반투명 0.35), 세운 구멍 (150, 150) 반지름 5 z 6~18(20토막), 누운 구멍 (0, 220, 9) X 방향 반지름 4
  * 길이 30(16토막), 판 윗면의 기운 기준 선분(27°). 앱 refineFace = 그 직선과 원기둥 벽(범위 안)의 교차 가운데 point에 가까운 근.
  * 화면 좌표로 가리킬 때는 선·그물의 경계나 바깥 구석을 정확히 가리키지 않고 몇 화소 옆을 가리킨다(Node 판마다 마지막 자리 반올림이 다르다).
@@ -17,7 +18,7 @@ import { openFaceCandidates, rayHitsTriangle } from '../src/track';
 import { rayLinePoint } from '../src/inference';
 import { boxMesh } from '../src/synth';
 import { type MeasureSnapOptions, Viewer3d } from '../src/viewer';
-import type { SnapRefineFaceInput } from '../src/snap';
+import { type SnapRefineFaceInput, openRefineKey } from '../src/snap';
 import type { V3 } from '../src/math';
 import type { LineSet3d, Mesh3d, Scene3d } from '../src/types';
 
@@ -363,5 +364,77 @@ describe('Viewer3d: 칸을 얕게 뚫는 안내 선의 면 위 만나는 점(0.3
           on.v.dispose();
           off.v.dispose();
         }
+  });
+
+  it("open일 때와 아닐 때 다른 답을 주는 앱(닫힌 'axisFace'는 코어 점 그대로, 열린 후보는 원기둥 위 근): 같은 점·면·선을 어느 차례로 물어도 각자 제 답을 쓴다", () => {
+    // 세운 구멍 δ 0.1 거리 3: 뚫는 칸의 열린 후보 힌트(뚫는 자리)가 코어 'axisFace'(커서가 뚫는 자리 둘레일 때)의 점과 같다
+    const { T, M } = vertCase(DEG + 270, 12, 0.1, 1);
+    const am = Math.atan2(M[1] - VERT.cv, M[0] - VERT.cu);
+    const f = computeFrame(camAt(M, inside(am), 3), 800, 600, SPHERE);
+    const sm = projectToScreen(f, M)!;
+    const under = triUnder(VMESH, 40, f, sm[0] + 1.3, sm[1] + 2.1);
+    expect(under.length).toBe(1);
+    const X = pierceAt(T, DIR, triOf(VMESH, under[0]!));
+    const twoWay = (calls: SnapRefineFaceInput[]) => (c: SnapRefineFaceInput): V3 | null => {
+      calls.push(c);
+      if (c.kind !== 'axisFace' || c.face.id !== VERT.id || Math.abs(c.face.normal[2]) > 1e-3) return null;
+      return c.open ? wallRoot(VERT, c.line.origin, c.line.dir, c.point) : [c.point[0], c.point[1], c.point[2]];
+    };
+    const wallCalls = (calls: SnapRefineFaceInput[], open: boolean): SnapRefineFaceInput[] =>
+      calls.filter((c) => c.kind === 'axisFace' && c.face.id === VERT.id && !!c.open === open && dist(c.point, X) < 1e-4);
+    // 뚫는 자리 둘레: 코어 'axisFace'(닫힌 물음)의 답 — 코어 점 그대로
+    const atX = (w: View, calls: SnapRefineFaceInput[], k: string): void => {
+      const s = at(w, X);
+      ptr(w, s.x + 0.31, s.y + 0.17);
+      const h = w.v.measureHoverSnap!;
+      const closed = wallCalls(calls, false);
+      expect(closed.length, k).toBe(1);
+      expect(h, k).toMatchObject({ refined: true, face: { id: VERT.id } });
+      expect(dist(h.point, closed[0]!.point), k).toBeLessThan(1e-12);
+    };
+    // 곡면 위 교차 둘레: 뚫는 칸의 열린 후보(열린 물음)의 답 — 원기둥 위 근
+    const atM = (w: View, calls: SnapRefineFaceInput[], k: string): void => {
+      const s = at(w, M);
+      ptr(w, s.x + 1.3, s.y + 2.1);
+      const h = w.v.measureHoverSnap!;
+      expect(wallCalls(calls, true).length, k).toBe(1);
+      expect(h, k).toMatchObject({ snap: 'parallel', refined: true, face: { id: VERT.id } });
+      expect(onWall(VERT, h.point), k).toBe(true);
+      expect(dist(h.point, M), k).toBeLessThan(1e-4);
+    };
+    for (const order of ['closed-first', 'open-first'] as const) {
+      const calls: SnapRefineFaceInput[] = [];
+      const w = view(twoWay(calls), T, M, inside(am), 3);
+      if (order === 'closed-first') {
+        atX(w, calls, `${order} X`);
+        atM(w, calls, `${order} M`);
+      } else {
+        atM(w, calls, `${order} M`);
+        atX(w, calls, `${order} X`);
+      }
+      // 두 물음은 open 말고 같은 입력이다(그래서 open이 열쇠에 없으면 먼저 물은 쪽 답을 다른 쪽이 썼다)
+      const [c1] = wallCalls(calls, false), [c2] = wallCalls(calls, true);
+      expect(c1!.point, order).toEqual(c2!.point);
+      expect(c1!.face, order).toEqual(c2!.face);
+      expect(c1!.line, order).toEqual(c2!.line);
+      w.v.dispose();
+    }
+  });
+});
+
+describe('openRefineKey(0.36.0 — open)', () => {
+  it("열린 후보면 열쇠 끝에 '#open'이 붙는다(닫힌 열쇠는 그대로)", () => {
+    const face = { id: VERT.id, index: 3, normal: [1, 0, 0] as V3 };
+    const base: SnapRefineFaceInput = { kind: 'axisFace', point: [1, 2, 3], face, line: { origin: [0, 0, 0], dir: [1, 0, 0] }, first: null, ray: { origin: [0, 0, 9], dir: [0, 0, -1] } };
+    const k = openRefineKey(base);
+    expect(k.endsWith('#open')).toBe(false);
+    expect(openRefineKey({ ...base, open: true })).toBe(`${k}#open`);
+    expect(openRefineKey({ ...base, open: false })).toBe(k);
+    // 선분('axisEdge' — refine)도 같다
+    const segment = { kind: 'line' as const, id: '테두리', index: 4, raw: 4, ends: [[0, 0, 0], [1, 0, 0]] as [V3, V3] };
+    const edge = { kind: 'axisEdge' as const, point: [1, 2, 3] as V3, segment, first: null, line: { origin: [0, 0, 0] as V3, dir: [0, 1, 0] as V3, axis: 'y' as const } };
+    const ke = openRefineKey(edge);
+    expect(ke.endsWith('#open')).toBe(false);
+    expect(openRefineKey({ ...edge, open: true })).toBe(`${ke}#open`);
   });
 });
