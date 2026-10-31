@@ -712,6 +712,23 @@ export interface ItemLookState {
   pickThrough?: IndexRange[];
 }
 
+/**
+ * 0.33.0 묶음 겉모습 한 번에(Viewer3d.setItemLooks)의 한 묶음 몫: 준 필드만 바꾸고(undefined·없는 필드는 그대로) null은 그 겉모습 되돌림 —
+ * 하나씩 부르는 함수와 같은 값을 받는다. opacity = setItemOpacity(pickable은 opacity가 수일 때 그 opts.pickable — null이면 함께 되돌린다),
+ * color = setItemColor, matrix = setItemMatrix, edgeColor = setItemEdgeColor, profileColor = setItemProfileColor, pickOpaque = setItemPickOpaque,
+ * pickThrough = setItemPickThrough
+ */
+export interface ItemLookInput {
+  opacity?: number | null;
+  pickable?: boolean;
+  color?: Rgba | string | null;
+  matrix?: ArrayLike<number> | null;
+  edgeColor?: Rgba | string | null;
+  profileColor?: Rgba | string | null;
+  pickOpaque?: boolean;
+  pickThrough?: readonly IndexRange[] | null;
+}
+
 interface LookState {
   alpha?: number;
   pickable?: boolean;
@@ -3808,7 +3825,7 @@ export class Viewer3d {
    */
   setItemMatrices(entries: Iterable<readonly [string, ArrayLike<number> | null]>): number {
     if (this.disposed) return 0;
-    let n = 0;
+    const moved: string[] = [];
     for (const [id, matrix] of entries) {
       if (!this.items.has(id)) continue;
       const m = matrix === null ? null : matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
@@ -3817,9 +3834,75 @@ export class Viewer3d {
       if (m) l.matrix = m;
       else delete l.matrix;
       this.storeLook(id, l);
-      n++;
+      moved.push(id);
     }
-    if (n) this.lookChanged(true);
+    if (moved.length) this.lookChanged(moved);
+    return moved.length;
+  }
+
+  /**
+   * 0.33.0 여러 묶음 겉모습을 한 번에 건다: [묶음 id, 겉모습(ItemLookInput — 준 필드만, null 필드는 그 겉모습 되돌림) 또는 null(그 묶음의 겉모습을 모두 되돌림)] 목록
+   * (Map도 그대로 준다). 결과(그림·고르기·측정·범위·단면·최근접점·itemLook)는 목록 차례대로, 한 항목 안에서는 opacity(pickable과 함께) → color → matrix → edgeColor →
+   * profileColor → pickOpaque → pickThrough 차례로 하나씩 부른 것과 같다 — 같은 id가 둘이면 뒤의 것이 덮고, 없는 id·겉모습이 객체도 null도 아닌 항목은 건너뛰며,
+   * 앞 16개가 유한한 수가 아닌 행렬(배열이 아닌 값 포함)은 그 행렬만 건너뛴다(setItemMatrix와 같다). pickThrough는 그물에만.
+   * 그림자·고르기 목록·측정 미리 보기와 행렬을 바꾼 묶음의 범위·모형 행렬은 한 번만 버린다(setItemMatrices와 같다). 돌려주는 값: 건 항목 수(건너뛴 것 빼고)
+   */
+  setItemLooks(entries: Iterable<readonly [string, ItemLookInput | null]>): number {
+    if (this.disposed) return 0;
+    let n = 0;
+    const moved: string[] = [];
+    // 같은 색 글은 한 번만 푼다(묶음마다 새 배열 — 하나씩 부른 것처럼 겉모습끼리 배열을 함께 쓰지 않는다)
+    const parsed = new Map<string, Rgba>();
+    const col = (c: Rgba | string): Rgba => {
+      if (typeof c !== 'string') return [c[0], c[1], c[2], c[3] ?? 1] as Rgba;
+      let p = parsed.get(c);
+      if (!p) parsed.set(c, (p = this.rgba(c)));
+      return [p[0], p[1], p[2], p[3]] as Rgba;
+    };
+    for (const [id, look] of entries) {
+      const it = this.items.get(id);
+      if (!it || (look !== null && (!look || typeof look !== 'object'))) continue;
+      n++;
+      if (look === null) {
+        if (this.looks.has(id)) {
+          if (this.looks.get(id)!.matrix) moved.push(id);
+          this.storeLook(id, {});
+        }
+        continue;
+      }
+      const l = this.looks.get(id) ?? {};
+      const { opacity, color, matrix, edgeColor, profileColor, pickOpaque, pickThrough } = look;
+      if (opacity === null) {
+        delete l.alpha;
+        delete l.pickable;
+      } else if (opacity !== undefined) {
+        l.alpha = Math.min(1, Math.max(0, Number(opacity) || 0));
+        if (look.pickable !== undefined) l.pickable = look.pickable;
+      }
+      if (color === null) delete l.color;
+      else if (color !== undefined) l.color = col(color);
+      if (matrix === null) {
+        if (l.matrix) moved.push(id);
+        delete l.matrix;
+      } else if (matrix !== undefined) {
+        const m = matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
+        if (m) {
+          l.matrix = m;
+          moved.push(id);
+        }
+      }
+      if (edgeColor === null) delete l.edgeColor;
+      else if (edgeColor !== undefined) l.edgeColor = col(edgeColor);
+      if (profileColor === null) delete l.profileColor;
+      else if (profileColor !== undefined) l.profileColor = col(profileColor);
+      if (pickOpaque !== undefined) {
+        if (pickOpaque) l.pickOpaque = true;
+        else delete l.pickOpaque;
+      }
+      if (pickThrough !== undefined && it.kind === 'mesh') this.applyPickThrough(l, mergeRanges(pickThrough, primCount(it)));
+      this.storeLook(id, l);
+    }
+    if (n) this.lookChanged(moved.length ? moved : false);
     return n;
   }
 
@@ -3923,7 +4006,7 @@ export class Viewer3d {
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
     this.storeLook(id, l);
-    this.lookChanged(moved);
+    this.lookChanged(moved ? [id] : false);
   }
 
   /** 겉모습 하나를 둔다(빈 겉모습이면 지운다 — 다시 셀 것은 lookChanged가 버린다) */
@@ -3934,14 +4017,32 @@ export class Viewer3d {
     else this.lookMoved.delete(id);
   }
 
-  private lookChanged(moved: boolean): void {
+  /**
+   * 겉모습이 바뀐 뒤 다시 셀 것을 버린다. moved = 행렬이 바뀌었을 수 있는 묶음: true면 모든 묶음(0.32.0까지 — clearItemLooks), id 목록이면 그 묶음들만(0.33.0 —
+   * 범위·모형 행렬·숨긴 구간 범위는 묶음마다 그 묶음의 행렬로만 정해진다), false면 없음. 보이는 범위·단면 테두리·휠 기준은 하나라도 바뀌면 버린다
+   */
+  private lookChanged(moved: boolean | readonly string[]): void {
     this.shadowVer++;
     this.visLists = null;
-    if (moved) {
+    // 묶음 절반 넘게 옮겼으면 하나씩 지우기보다 통째로 버리는 편이 싸다(값은 같다)
+    if (moved !== true && moved && 2 * moved.length >= this.items.size) moved = true;
+    if (moved === true) {
       this.boxes = new WeakMap();
       this.models = new WeakMap();
       this.lineModels = new WeakMap();
       for (const r of this.rangeSel.values()) r.box = null;
+    } else if (moved)
+      for (const id of moved) {
+        const it = this.items.get(id);
+        if (it) {
+          this.boxes.delete(it.item);
+          if (it.kind === 'mesh') this.models.delete(it.item);
+          else this.lineModels.delete(it.item);
+        }
+        const r = this.rangeSel.get(id);
+        if (r) r.box = null;
+      }
+    if (moved === true || (moved && moved.length)) {
       this.visBox = null;
       this.cutDirty = true;
       this.wheelAnchor = null;

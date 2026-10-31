@@ -10,6 +10,7 @@ export type {
   ContextRestoreNeed,
   FogOptions,
   GroupInfo,
+  ItemLookInput,
   ItemLookState,
   LightingOptions,
   MarkerOptions,
