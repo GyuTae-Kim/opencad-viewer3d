@@ -48,6 +48,9 @@
  *   문맥 잃기·되찾기 뒤 상태 줄에 "다시 올리기 끝"(onContextRestoreDone)
  * 0.30.0 단추: 안내 선끼리(inference.trackDirs { meets: { guides: true } } — 두 끌어온 점의 나란함·수직 선끼리 만나는 점, 상태 줄 "… · (…)에서 수직인 선과 만나는 점"),
  *   처음 올리기 재기(&tex=1 — 같은 그림을 새 무늬 id로 다시 올려 다 보이기까지의 시간과 그사이 그린 화면 수)
+ * 0.31.0 단추: 안내 선 열린 교차(inference.trackDirs { meets: { guides, open } }와 시연 원·refine — 끌어온 점의 안내 선이 시연 원 토막의 활꼴만 지나는 자리를 정확한 원 위로,
+ *   상태 줄 "… · 시연 원#…과 만나는 점(다듬음)"), 글 꼴 번역(setMeasureFormat의 둘째 인자 — 코어 기본 수 꼴·단위 글로 이름표만 "Distance"),
+ *   점 표식 비키기(setMeasureLabelAvoid({ points }) — 거리 글상자가 첫 점·미리 보기 점 표식을 덮는 자리도 옮긴다, 글상자 비키기와 함께도)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -602,6 +605,43 @@ button(
   },
   '같은 그림을 새 무늬 id로 준 장면 사본을 setScene으로 다시 올려 무늬가 다 보이기까지의 시간과 그사이 그린 화면 수를 상태 줄에 보인다(&tex=1 — 0.30.0부터 첫 무늬 뒤로는 ' +
     '250 ms와 올리기·그리기 시간의 4배 가운데 긴 간격마다만 다시 그린다). 다른 단추가 장면을 다시 주면 원본 장면으로 돌아간다',
+);
+// 0.31.0: 안내 선의 열린 교차(trackDirs { meets: { open } }), 측정 글 꼴의 코어 기본 꼴(setMeasureFormat 둘째 인자), 측정 점 표식 비키기(setMeasureLabelAvoid points)
+toggle(
+  '안내 선 열린 교차',
+  (v) => {
+    viewer.setScene(v ? { ...scene, lines: [...scene.lines, ...demoRingLines()] } : scene, { keepView: true });
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, trackDirs: { edge: notCurve, meets: { guides: true, open: true } }, parallelEdge: notCurve },
+            refine: demoRingEdge,
+          }
+        : null,
+    );
+  },
+  '안내 선끼리에 더해 시연 원(바닥 12토막)을 더하고, 끌어온 점의 나란함·수직 선이 원 토막의 현과는 만나지 않고 현과 곡선 사이만 지나는 자리를 정확한 원 위 교차로 붙잡는다 ' +
+    '(inference.trackDirs { meets: { open: true } } — 앱 refine axisEdge open). 점에 머물러 끌어온 뒤 곧은 모서리를 지나가고 그 안내 선이 원 둘레를 스치는 자리를 가리킨다',
+);
+toggle(
+  '글 꼴 번역',
+  (v) =>
+    viewer.setMeasureFormat(
+      v ? (m, c) => (c.source === 'measure' ? [`Distance ${c.num(m.distance)}${c.unit ? ` ${c.unit}` : ''}`, c.lines[1]!] : c.lines) : null,
+    ),
+  '측정 거리 글상자의 이름표만 "Distance"로 옮긴다 — 수·자릿수·"-0"·단위 글은 글 꼴의 둘째 인자(코어 기본 꼴 — num·digits·unit·lines)를 그대로 쓴다',
+);
+toggle(
+  '점 표식 비키기',
+  (v) => {
+    const cur = viewer.measureLabelAvoid;
+    viewer.setMeasureLabelAvoid(v ? { ...(cur ?? {}), points: true } : cur ? { ...cur, points: false } : null);
+  },
+  '거리 글상자가 첫 점·미리 보기 점 표식을 덮는 자리도 옮긴다(setMeasureLabelAvoid({ points: true }) — 글상자 비키기와 함께 켜면 띠·뷰 큐브도 비킨다). ' +
+    '첫 점을 찍고 그 왼쪽 아래를 가리키면 기본 자리(두 점 가운데 오른쪽 위)가 첫 점 표식을 덮는다',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
