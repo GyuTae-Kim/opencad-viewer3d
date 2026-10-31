@@ -5305,6 +5305,353 @@ const guideValues: ValueSet = {
   },
 };
 
+// ───────────── 0.31.0 측정 글 꼴의 코어 기본 꼴·안내 선의 열린 교차·측정 점 표식을 덮는 글상자 옮기기 ─────────────
+/** 0.31.0 측정 글 꼴의 둘째 인자(MeasureFormatCore)가 있는 판인지 — 글을 주지 않은 거리 덧그림 하나를 그려 글 꼴이 받은 둘째 인자를 본다 */
+const v0310format: Need = (v, c) => {
+  const why = fn('setMeasureFormat', 'setAnnotations')(v, c);
+  if (why) return why;
+  let core: any = null;
+  v.setMeasureFormat((_m: unknown, k?: unknown) => ((core = k ?? null), ['x']));
+  v.setAnnotations([{ kind: 'distance', a: c.world([0, 0, 40]), b: c.world([120, 0, 40]) }]);
+  v.renderNow();
+  v.setAnnotations(null);
+  v.setMeasureFormat(null);
+  v.renderNow();
+  return core && Array.isArray(core.lines) && typeof core.num === 'function' ? null : '이 판에 없는 선택: 0.31.0 측정 글 꼴의 둘째 인자(MeasureFormatCore)';
+};
+/**
+ * 0.31.0 측정 글 꼴의 코어 기본 꼴 값(base — 새 값): 상자 윗면 앞 구석을 첫 점으로 찍고 가까운 점들을 가리킨 미리 보기마다 글 꼴 없이·(m, c) => c.lines의
+ * 글상자 자리가 같은지, 화면 덧그림·그림 저장의 다른 화소 수(0이어야 한다), 받은 기본 꼴(줄·자릿수·단위 글·어느 글상자인지·수 꼴), 이름표만 옮긴 글 꼴의 글상자 자리,
+ * 글을 주지 않은 거리 덧그림·글을 준 덧그림에서 받은 것
+ */
+const formatCoreValues: ValueSet = {
+  name: 'base-measure-format-core',
+  data: 'base',
+  needs: v0310format,
+  run: (c) => {
+    const { v } = c;
+    const overlay = c.host.querySelector<HTMLCanvasElement>('canvas.v3d-overlay')!;
+    const screen = (): Uint8ClampedArray => overlay.getContext('2d')!.getImageData(0, 0, overlay.width, overlay.height).data;
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++;
+      return n;
+    };
+    const rect = (r: any): number[] | null => (r ? [r.x, r.y, r.width, r.height].map(r10) : null);
+    const keep = (k: any): unknown[] => [k.lines, k.digits, k.unit, k.source, k.num(-0.0001), k.num(12.345678), k.num(-2.5)];
+    const out: unknown[] = [];
+    const seen: any[] = [];
+    // 화면 덧그림 캔버스를 처음 몇 번 읽으면 Chrome이 그 캔버스를 GPU 그리기에서 CPU 그리기로 바꿔 글자 가장자리 화소가 달라진다 —
+    // 먼저 그리고 여러 번 읽어 바꾼 뒤 잰다(이 묶음만 찍을 때도 같은 값)
+    labelPreview(c, LABEL_TARGET);
+    for (let i = 0; i < 4; i++) {
+      v.renderNow();
+      screen();
+    }
+    for (const t of [LABEL_TARGET, [90, 30, 40], [0, 0, 40], [120, 0, 0]]) {
+      v.setMeasureFormat(null);
+      v.clearMeasure();
+      const q = labelPreview(c, t);
+      v.renderNow();
+      const r0 = v.measureLabelRect;
+      if (!q || !r0) {
+        out.push([t, null]);
+        continue;
+      }
+      const s0 = screen();
+      v.setMeasureFormat((_m: unknown, k: any) => (seen.push(k), k.lines));
+      v.renderNow();
+      const r1 = v.measureLabelRect;
+      const s1 = screen();
+      const i1 = v.renderImage({}).data;
+      const k = seen.at(-1);
+      v.setMeasureFormat(null);
+      const i0 = v.renderImage({}).data;
+      // 이름표만 옮긴 글 꼴(NC 꼴 — 앱은 사전으로)
+      v.setMeasureFormat((m: any, k2: any) => (k2.source === 'measure' ? [`Distance ${k2.num(m.distance)}${k2.unit ? ` ${k2.unit}` : ''}`, k2.lines[1]] : k2.lines));
+      v.renderNow();
+      out.push([t, rect(r0), JSON.stringify(r0) === JSON.stringify(r1), diff(s0, s1), diff(i0, i1), k ? keep(k) : null, rect(v.measureLabelRect)]);
+    }
+    v.setMeasureFormat(null);
+    v.clearMeasure();
+    v.setMeasureMode(false);
+    seen.length = 0;
+    v.setMeasureFormat((_m: unknown, k: any) => (seen.push(k), k.lines));
+    v.setAnnotations([
+      { kind: 'distance', a: c.world([0, 0, 40]), b: c.world([120, 0, 40]) },
+      { kind: 'distance', a: c.world([0, 80, 40]), b: c.world([120, 80, 40]), label: '앱 글' },
+      { kind: 'radius', a: c.world([60, 40, 40]), b: c.world([70, 40, 40]) },
+    ]);
+    v.renderNow();
+    out.push(['annotations', seen.map(keep), v.annotationLabelRects.map(rect)]);
+    v.setAnnotations(null);
+    v.setMeasureFormat(null);
+    return out;
+  },
+};
+
+/** 0.31.0 안내 선의 열린 교차(inference.trackDirs { meets: { open: true } })가 있는 판인지 — 편 선택에 meetOpen이 남는다 */
+const v0310open: Need = (v, c) => {
+  const why = all(v0290meets, v0140refine, fn('fitItems', 'getCamera', 'setCamera'))(v, c);
+  if (why) return why;
+  v.setMeasureSnap({ inference: { track: true, trackDirs: { meets: { open: true } } } });
+  const ok = (v.measureSnap?.inference as any)?.trackDirs?.meetOpen === true;
+  v.setMeasureSnap(null);
+  return ok ? null : '이 판에 없는 선택: 0.31.0 안내 선의 열린 교차(inference.trackDirs { meets: { open } })';
+};
+/**
+ * 끌어온 점 GUIDE_OPEN_P = (80, 14, 60): 기준(상자 윗면 앞모서리 — y 0, z 40)으로 내린 수직인 선이 그 발 GUIDE_FOOT = (80, 0, 40)을 지나 원판 원의 0° 자리
+ * OPEN_T(토막 11 가운데 바깥 — 현과는 처짐 0.68 mm 떨어져 그 선은 토막과 3D로 만나지 않는다)에서 원판 평면을 뚫는다. 그 점의 안내는 이 수직인 선 하나다
+ * (나란한 선은 X축, 비친 축은 Y·Z축 그대로라 뺀다). 첫 점은 앱 붙잡기 점 OPEN_SLANT(그 축은 OPEN_T를 지나지 않는다)
+ */
+const GUIDE_FOOT = [OPEN_T[0]!, 0, 40];
+const GUIDE_OPEN_P = OPEN_T.map((x, i) => x + 1.5 * (GUIDE_FOOT[i]! - x));
+/** 원판 원 위 점인지(arc-measure-axis-open과 같다) */
+const onDisk = (p: readonly number[]): boolean => Math.abs(Math.hypot(p[0]! - ARC_DISK.c[0]!, p[1]! - ARC_DISK.c[1]!) - ARC_DISK.r) < 1e-9 && Math.abs(p[2]! - ARC_DISK.c[2]!) < 1e-9;
+/** 직선(origin, dir)이 원판 평면을 뚫는 점이 원 위면 그 점(평면 위 직선은 point에 가까운 근 — arc-measure-axis-open의 앱 함수와 같은 셈) */
+function diskRefine(count?: { open: number; lines: (string | null)[] }): (i: any) => number[] | null {
+  return (i: any) => {
+    if (i.kind !== 'axisEdge' || !i.line) return null;
+    if (count && i.open) {
+      count.open++;
+      count.lines.push(i.line.axis ?? null);
+    }
+    if (i.segment.id !== ARC_DISK.id) return null;
+    const K = ARC_DISK, o = i.line.origin, d = i.line.dir;
+    if (Math.abs(d[2]) > 1e-12) {
+      const t = (K.c[2]! - o[2]) / d[2];
+      const p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+      return onDisk(p) ? p : null;
+    }
+    if (Math.abs(o[2] - K.c[2]!) > 1e-9) return null;
+    const wx = o[0] - K.c[0]!, wy = o[1] - K.c[1]!;
+    const b = wx * d[0] + wy * d[1], cc = wx * wx + wy * wy - K.r * K.r, a = d[0] * d[0] + d[1] * d[1];
+    const disc = b * b - a * cc;
+    if (disc < 0) return null;
+    const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0] + d[0] * t, o[1] + d[1] * t, o[2]]);
+    const far = (s: number[]): number => Math.hypot(s[0]! - i.point[0], s[1]! - i.point[1], s[2]! - i.point[2]);
+    return far(ts[0]!) <= far(ts[1]!) ? ts[0]! : ts[1]!;
+  };
+}
+/**
+ * 공구 경로·구멍 점을 숨기고 붙잡기(끌어온 점 나란함·수직 — meets)를 준 뒤, 첫 화면(등각)에서 기준(상자 윗면 앞모서리)을 지나가고 끌어온 점을 주고 원판에 맞춘다.
+ * 지나간 기준 선분 값을 돌려준다
+ */
+function guideOpenSetup(c: Ctx, meets: any, refine: ((i: any) => number[] | null) | null): unknown {
+  const { v } = c;
+  v.setGroupVisible('공구 경로', false);
+  v.setGroupVisible('구멍', false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({
+    edges: true,
+    points: [{ point: c.world(OPEN_SLANT), kind: 'point' }],
+    inference: { track: true, trackDirs: { meets } },
+    ...(refine ? { refine } : {}),
+  });
+  const r = c.at(c.world([100, 0, 40]));
+  if (r) c.hover(r.x + 0.4, r.y + 0.3);
+  v.renderNow();
+  const ref = v.measureHoverSnap ? segRow(v.measureHoverSnap.segment) : null;
+  v.setMeasureTrackPoints([c.world(GUIDE_OPEN_P)]);
+  openCamera(v);
+  return ref;
+}
+/** 끌어온 점의 수직인 선이 원판 원을 뚫는 자리를 가리킨 그림(끌어온 점에서 추론 색 쇄선, 추론 색 × — 새 장면) */
+SHOTS.push({
+  name: 'arc-measure-track-dir-open',
+  data: 'arc',
+  needs: v0310open,
+  setup: (c) => {
+    guideOpenSetup(c, { open: true }, diskRefine());
+    const q = c.at(c.world(OPEN_T));
+    if (q) c.hover(q.x + 1, q.y + 3);
+  },
+});
+/**
+ * 0.31.0 안내 선의 열린 교차 값(arc — 새 값): { meets: { open: true } }·{ meets: true }·{ open: false }·refine 없이·null만 주는 앱마다 지나간 기준, OPEN_T 둘레 두 자리의
+ * 미리 보기(종류·점·다듬었는지·원 위인지·선분·끌어온 점·기준), 앱 호출 수(열린 후보 — 둘째 자리는 기억이라 0번)와 넘긴 선에 축 이름이 없는지, 첫 점(OPEN_SLANT) 뒤 같은 자리와
+ * 두 점째로 찍은 값·거리(정확한 원 위 점까지 1e-9 안인지)
+ */
+const guideOpenValues: ValueSet = {
+  name: 'arc-measure-track-dir-open',
+  data: 'arc',
+  needs: v0310open,
+  run: (c) => {
+    const { v } = c;
+    const out: unknown[] = [];
+    const row = (name: string, p: readonly number[], dx: number, dy: number): unknown[] => {
+      const q = c.at(c.world(p));
+      if (!q) return [name, null];
+      c.hover(q.x + dx, q.y + dy);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      return [name, h ? [h.snap, r10s(h.point), !!h.refined, onDisk(h.point), segRow(h.segment), r10s(h.trackFrom), h.edge ? h.edge.map(r10s) : null, r10s(h.direction)] : null];
+    };
+    const cases: [string, unknown, boolean | 'null'][] = [
+      ['open', { open: true }, true],
+      ['meets', true, true],
+      ['open-false', { open: false }, true],
+      ['open-no-refine', { open: true }, false],
+      ['open-null', { open: true }, 'null'],
+    ];
+    for (const [name, meets, refine] of cases) {
+      const count = { open: 0, lines: [] as (string | null)[] };
+      const fnR = refine === true ? diskRefine(count) : refine === 'null' ? () => null : null;
+      v.clearMeasure();
+      const ref = guideOpenSetup(c, meets, fnR);
+      const rows: unknown[] = [['ref', ref]];
+      const n0 = count.open;
+      rows.push(row('hit', OPEN_T, 1, 3), ['calls', count.open - n0]);
+      const n1 = count.open;
+      rows.push(row('hit2', OPEN_T, 3, 1), ['calls', count.open - n1], ['line-axis', [...new Set(count.lines)]]);
+      // 첫 점(앱 붙잡기 점) 뒤
+      const a = c.at(c.world(OPEN_SLANT));
+      if (a) c.click(a.x + 1, a.y);
+      v.setMeasureTrackPoints([c.world(GUIDE_OPEN_P)]);
+      rows.push(['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])], row('first-hit', OPEN_T, 1, 3));
+      const e = c.at(c.world(OPEN_T));
+      if (e) c.click(e.x + 1, e.y + 3);
+      const m = v.measurement();
+      const want = Math.hypot(OPEN_T[0]! - OPEN_SLANT[0]!, OPEN_T[1]! - OPEN_SLANT[1]!, OPEN_T[2]! - OPEN_SLANT[2]!);
+      rows.push([
+        'second',
+        m ? [r10s(m.b), r10(m.distance), m.snapB ?? null] : null,
+        !!m && Math.abs(m.distance - want) < 1e-9,
+        v.measurePoints.map((q: any) => [q.snap, !!q.refined, segRow(q.segment), r10s(q.trackFrom)]),
+      ]);
+      v.setMeasureTrackPoints(null);
+      v.setMeasureSnap(null);
+      v.clearMeasure();
+      v.setMeasureMode(false);
+      v.setView('seIso', false);
+      v.fit(false);
+      out.push([name, rows]);
+    }
+    return out;
+  },
+};
+
+/** 0.31.0 측정 점 표식 비키기(setMeasureLabelAvoid({ points }))가 있는 판인지 — 읽은 값에 points가 남는다 */
+const v0310points: Need = (v, c) => {
+  const why = v0130label(v, c);
+  if (why) return why;
+  v.setMeasureLabelAvoid({ points: true });
+  const ok = v.measureLabelAvoid?.points === true;
+  v.setMeasureLabelAvoid(null);
+  return ok ? null : '이 판에 없는 선택: 0.31.0 측정 점 표식 비키기(setMeasureLabelAvoid({ points }))';
+};
+/** 상자 윗면 앞 구석(첫 점)에서 화면 왼쪽 아래쪽으로 가리킬 자리들 — 기본 자리(두 점 가운데 오른쪽 위)가 첫 점 표식을 덮을 수 있다 */
+const POINTS_TARGETS = [LABEL_TARGET, [120, 6, 40], [120, 40, 40], [100, 0, 40], [120, 0, 25], [90, 30, 40], [0, 0, 40], [60, 0, 40], [90, 0, 30], [120, 0, 0], [60, 0, 0], [100, 0, 10]];
+/** 첫 점 표식(반지름 6)·커서를 글상자가 덮는지 */
+const coversDot = (r: { x: number; y: number; width: number; height: number }, p: { x: number; y: number }, rad = 6): boolean => {
+  const dx = p.x - Math.min(Math.max(p.x, r.x), r.x + r.width), dy = p.y - Math.min(Math.max(p.y, r.y), r.y + r.height);
+  return dx * dx + dy * dy < rad * rad;
+};
+/**
+ * 정밀 조준(펜, 십자선·손가락)에서 기본 자리가 첫 점 표식을 덮는 자리를 points로 비킨 화면 덧그림(새 장면): POINTS_TARGETS 가운데 십자선·손가락만 비킨 자리가
+ * 첫 점 표식을 덮는 첫 자리(없으면 LABEL_TARGET)
+ */
+SHOTS.push({
+  name: 'base-measure-label-points-aim',
+  data: 'base',
+  needs: v0310points,
+  capture: 'overlay',
+  setup: (c) => {
+    const { v } = c;
+    const a = c.at(c.world([120, 0, 40]));
+    let pick: { t: number[]; q: { x: number; y: number } } | null = null;
+    for (const t of POINTS_TARGETS) {
+      v.setMeasureLabelAvoid(null);
+      v.clearMeasure();
+      const q = c.at(c.world(t));
+      if (!q || !a) continue;
+      v.setMeasureLabelAvoid({ pointerRadius: AIM_R, rects: [finger(q.x, q.y)] });
+      labelPreview(c, t, 'pen');
+      v.renderNow();
+      const r = v.measureLabelRect;
+      if (r && coversDot(r, a)) {
+        pick = { t, q };
+        break;
+      }
+    }
+    v.clearMeasure();
+    const t = pick ? pick.t : LABEL_TARGET;
+    const q = pick ? pick.q : c.at(c.world(LABEL_TARGET));
+    v.setMeasureLabelAvoid(q ? { pointerRadius: AIM_R, rects: [finger(q.x, q.y)], points: true } : { points: true });
+    labelPreview(c, t, 'pen');
+  },
+});
+/**
+ * 0.31.0 측정 점 표식 비키기 값(base — 새 값): POINTS_TARGETS마다(마우스·펜) 피할 것 없이·points만·정밀 조준(십자선·손가락)·정밀 조준과 points의 글상자 자리,
+ * 첫 점 표식·커서 점 표식을 덮는지, points로 옮긴 자리가 십자선·손가락·두 표식을 모두 비키는지, 덮지 않던 자리는 그대로인지, 그림 저장은 기본 자리인지(다른 화소 수 0)
+ */
+const pointsValues: ValueSet = {
+  name: 'base-measure-label-points',
+  data: 'base',
+  needs: v0310points,
+  run: (c) => {
+    const { v } = c;
+    const rect = (r: any): number[] | null => (r ? [r.x, r.y, r.width, r.height].map(r10) : null);
+    const overlap = (p: any, q: any): boolean => p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height;
+    const out: unknown[] = [];
+    const a = c.at(c.world([120, 0, 40]))!;
+    for (const t of POINTS_TARGETS)
+      for (const pt of ['mouse', 'pen']) {
+        v.setMeasureLabelAvoid(null);
+        v.clearMeasure();
+        const q = labelPreview(c, t, pt);
+        v.renderNow();
+        const r0 = v.measureLabelRect;
+        // 둘째 표식은 붙잡은 미리 보기 점 자리(커서와 다를 수 있다 — 끝점 붙잡기 등)
+        const hb = v.measureHoverSnap;
+        const b = hb ? c.at(hb.point) : null;
+        if (!q || !r0 || !b) {
+          out.push([t, pt, null]);
+          continue;
+        }
+        const img0 = v.renderImage({}).data;
+        v.setMeasureLabelAvoid({ points: true });
+        v.renderNow();
+        const r1 = v.measureLabelRect!;
+        const aim = { pointerRadius: AIM_R, rects: [finger(q.x, q.y)] };
+        v.setMeasureLabelAvoid(aim);
+        v.renderNow();
+        const r2 = v.measureLabelRect!;
+        v.setMeasureLabelAvoid({ ...aim, points: true });
+        v.renderNow();
+        const r3 = v.measureLabelRect!;
+        const img3 = v.renderImage({}).data;
+        let d = 0;
+        for (let i = 0; i < img0.length; i += 4) if (img0[i] !== img3[i] || img0[i + 1] !== img3[i + 1] || img0[i + 2] !== img3[i + 2]) d++;
+        const marks = (r: any): boolean => coversDot(r, a) || coversDot(r, b);
+        const clear3 = !marks(r3) && !coversDot(r3, q, AIM_R) && !overlap(r3, aim.rects[0]!);
+        out.push([
+          t,
+          pt,
+          rect(r0),
+          coversDot(r0, a),
+          coversDot(r0, b),
+          rect(r1),
+          marks(r1),
+          // 표식을 덮지 않던 자리는 그대로
+          marks(r0) ? true : JSON.stringify(r1) === JSON.stringify(r0),
+          rect(r2),
+          marks(r2),
+          rect(r3),
+          // 옮겼으면 십자선·손가락·두 표식을 모두 비킨 자리, 아니면 정밀 조준만의 자리
+          clear3 || JSON.stringify(r3) === JSON.stringify(r2),
+          marks(r2) ? true : JSON.stringify(r3) === JSON.stringify(r2),
+          v.measureLabelAvoid,
+          d,
+        ]);
+      }
+    v.setMeasureLabelAvoid(null);
+    v.setMeasureMode(false);
+    v.renderNow();
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -5375,6 +5722,9 @@ const VALUES: ValueSet[] = [
   labelFallbackValues,
   restoreDoneValues,
   guideValues,
+  formatCoreValues,
+  guideOpenValues,
+  pointsValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -5424,6 +5774,8 @@ function reset(v: V, d: Data): void {
   call('setMeasureLabelAvoid', null);
   // 0.27.0: 글상자 기본 자리도 측정을 지워도·장면을 바꿔도 남는다
   call('setMeasureLabelSpot', null);
+  // 0.31.0: 측정 글 꼴도 장면을 바꿔도 남는다(그 값 묶음이 끄지만 예외로 끝나도 다음 장면에 남지 않게)
+  call('setMeasureFormat', null);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
   call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null });
