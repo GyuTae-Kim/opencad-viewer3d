@@ -282,12 +282,12 @@ const str = (cs: readonly Cell[]): string => cs.map((c) => c.k).join('');
 describe("Viewer3d refineEnds: 원호 꼭대기를 스치는 X축(NC 23차 재현 — 꼭짓점과 반 화소 안으로 겹치는 단)", () => {
   const DS = [0.0001, 0.001, 0.003, 0.01];
 
-  it('켜지 않으면(refineEnds 없이·false·refine 없이) 0.32.0 값 그대로(v0230.test.ts와 같은 줄)', () => {
+  it('켜지 않으면(refineEnds 없이·false·refine 없이) 0.32.0 값 그대로(v0230.test.ts와 같은 줄 — 0.35.0부터 앞 1단은 커서가 활꼴 쪽이라 원 위)', () => {
     const off = DS.map((d) => sweep(d, 'first', false));
-    expect(off.map((g) => str(g.plus))).toEqual(['aooooooooaav', 'aooooooooaav', 'aooooooooavv', 'ooooooooavvv']);
-    expect(off.map((g) => str(g.minus))).toEqual(['aooooooooaaa', 'aooooooooaav', 'aooooooooaav', 'ooooooooavvv']);
+    expect(off.map((g) => str(g.plus))).toEqual(['oooooooooaav', 'oooooooooaav', 'oooooooooavv', 'ooooooooavvv']);
+    expect(off.map((g) => str(g.minus))).toEqual(['oooooooooaaa', 'oooooooooaav', 'oooooooooaav', 'ooooooooavvv']);
     const f = sweep(0.001, 'first', false, { refineEnds: false });
-    expect(str(f.plus)).toBe('aooooooooaav');
+    expect(str(f.plus)).toBe('oooooooooaav');
     // refine 없이 켜도 켜지지 않는다(열린 교차도 없다 — 꼭짓점·커서 자리만, 끈 것과 같다)
     const n = sweep(0.001, 'first', true, { refine: null }), n0 = sweep(0.001, 'first', false, { refine: null });
     expect(str(n.plus)).not.toContain('o');
@@ -295,7 +295,7 @@ describe("Viewer3d refineEnds: 원호 꼭대기를 스치는 X축(NC 23차 재�
     expect(n.minus.map((c) => c.h)).toEqual(n0.minus.map((c) => c.h));
   });
 
-  it('켜면 바뀐 자리는 모두 원 위 교차이고, 선이 그 근 쪽 꼭대기 토막 끝을 반 화소 안으로 지나는 단이다(앞 1단 — 틈이 붙잡기 거리보다 넓은 단은 그대로)', () => {
+  it('켜면 바뀐 자리는 모두 원 위 교차이고, 선이 그 근 쪽 꼭대기 토막 끝을 반 화소 안으로 지나는 단이다', () => {
     for (const d of DS) {
       const off = sweep(d, 'first', false), on = sweep(d, 'first', true);
       for (const side of ['plus', 'minus'] as const) {
@@ -339,7 +339,11 @@ describe("Viewer3d refineEnds: 원호 꼭대기를 스치는 X축(NC 23차 재�
       const u = ((q[0]! - a[0]) * (b[0] - a[0]) + (q[1]! - a[1]) * (b[1] - a[1])) / (L * L);
       const inSeg = u >= 0 && u <= 1 && px(q, a) > 0.5 && px(q, b) > 0.5 && px(q, c) <= SNAP;
       const free = Math.min(px(c, a), px(c, b)) > SNAP;
-      return { wide: gap > tol && gap <= Math.min(0.1 * L, SNAP * w) && inSeg && free, ends: gap <= tol && inSeg };
+      // 0.35.0: 틈이 붙잡기 거리의 세계 길이보다 넓어도 커서가 그 토막 활꼴 쪽(현에 내린 발이 토막 안, 현에서 선 쪽으로 0.1 × 토막 길이 안)이면 받는다
+      const uc = ((c[0]! - a[0]) * (b[0] - a[0]) + (c[1]! - a[1]) * (b[1] - a[1])) / (L * L);
+      const cy = a[1] + (b[1] - a[1]) * uc;
+      const lens = uc >= 0 && uc <= 1 && c[1]! >= cy && c[1]! - cy <= 0.1 * L;
+      return { wide: gap > tol && gap <= 0.1 * L && (gap <= SNAP * w || lens) && inSeg && free, ends: gap <= tol && inSeg };
     };
     for (const d of DS) {
       const yl = Math.fround(25 - d);
@@ -352,10 +356,10 @@ describe("Viewer3d refineEnds: 원호 꼭대기를 스치는 X축(NC 23차 재�
     }
   });
 
-  it('줄로 보면: 12단 가운데 11단(δ 0.01은 12단)에서 두 교차 모두 붙는다', () => {
+  it('줄로 보면: 12단 모두에서 두 교차 모두 붙는다(0.34.0까지 앞 1단은 틈이 붙잡기 거리보다 넓어 붙지 않았다 — 0.35.0)', () => {
     const got = DS.map((d) => sweep(d, 'first', true));
-    expect(got.map((g) => str(g.plus))).toEqual(['aooooooooooo', 'aooooooooooo', 'aooooooooooo', 'oooooooooooo']);
-    expect(got.map((g) => str(g.minus))).toEqual(['aooooooooooo', 'aooooooooooo', 'aooooooooooo', 'oooooooooooo']);
+    expect(got.map((g) => str(g.plus))).toEqual(['oooooooooooo', 'oooooooooooo', 'oooooooooooo', 'oooooooooooo']);
+    expect(got.map((g) => str(g.minus))).toEqual(['oooooooooooo', 'oooooooooooo', 'oooooooooooo', 'oooooooooooo']);
     // 앱 함수는 기억으로 단마다 몇 번만 불린다(12단 × 두 자리)
     for (const g of got) expect(g.calls.filter((c) => c.open).length).toBeLessThanOrEqual(5 * 12);
   });
@@ -390,8 +394,9 @@ describe("Viewer3d refineEnds: 원호 꼭대기를 스치는 X축(NC 23차 재�
       expect(nt).toBeGreaterThan(0);
       const l0 = sweep(d, 'lock', false), l1 = sweep(d, 'lock', true);
       // 줄은 첫 점 축과 같다(끈 것은 0.32.0 — v0230.test.ts의 첫 점 X축 줄)
-      const off = d === 0.01 ? ['ooooooooavvv', 'ooooooooavvv'] : ['aooooooooaav', 'aooooooooaaa'];
-      const on = d === 0.01 ? 'oooooooooooo' : 'aooooooooooo';
+      // 0.35.0: 앞 1단(틈이 붙잡기 거리보다 넓다)도 커서가 활꼴 쪽이라 원 위
+      const off = d === 0.01 ? ['ooooooooavvv', 'ooooooooavvv'] : ['oooooooooaav', 'oooooooooaaa'];
+      const on = 'oooooooooooo';
       for (const [g0, g1] of [
         [t0, t1],
         [l0, l1],
