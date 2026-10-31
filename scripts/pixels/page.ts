@@ -30,7 +30,8 @@ type V = Viewer3d & Record<string, any>;
  * 그 선택이 없는 판의 syntheticScene은 Float32 그대로라 compactNeed로 건너뛴다),
  * apex = 반지름 25 원호 33토막 꺾은선과 그 끝에서 (40, 25 − 0.001)까지 급속 이동 선분뿐인 자료(0.33.0 refineEnds — NC 23차 재현, 첫 점 X축이 원호 꼭대기를 스친다),
  * hole = 반투명 판(400 × 300 × 18)에 세운 구멍(반지름 5, 20토막 원기둥 고체)·누운 구멍(반지름 4, 16토막)과 판 윗면의 기운 기준 선분(27°)뿐인 자료
- * (0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차 — NC 35차 재현, tests/v0340hole.test.ts와 같은 장면),
+ * (0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차 — NC 35차 재현, tests/v0340hole.test.ts와 같은 장면. 0.36.0 중간 거리에서 칸을 얕게 뚫는 선 —
+ * tests/v0360pierce.test.ts),
  * ring12 = 12토막 원(반지름 30, z 0)뿐인 자료(0.35.0 아주 가까이 본 꺾은선 활꼴 — tests/v0350edge.test.ts와 같은 장면),
  * lowcyl = 낮은 원기둥 옆면(반지름 30, 높이 60, 50토막 — 칸 0이 −90°를 가운데에)뿐인 자료(0.35.0 한 칸의 두 삼각형 위 두 번 스침 — tests/v0350twice.test.ts와 같은 장면)
  */
@@ -6658,8 +6659,9 @@ const holeNearValues: ValueSet = {
   },
 };
 /**
- * 0.34.0 보통 거리 값(hole — 0.33.0과 같아야 한다): 맞춰 보기·위 30·등각 60·옆 15에서 활꼴·칸을 뚫음 M± 둘레 3 × 3(3화소 칸) 미리 보기.
- * 커서 쪽 활꼴이 붙잡기 거리보다 얇아 0.34.0의 바뀐 규칙이 닿지 않는 자리다
+ * 0.34.0 보통 거리 값(hole): 맞춰 보기·위 30·등각 60·옆 15에서 활꼴·칸을 뚫음 M± 둘레 3 × 3(3화소 칸) 미리 보기.
+ * 0.35.0까지는 커서 쪽 활꼴이 붙잡기 거리보다 얇아 0.34.0의 바뀐 규칙이 닿지 않아 0.33.0과 같았다. 0.36.0은 그 셋째 조건을 빼 칸을 얕게 뚫는 자리가
+ * 원기둥 위 다듬은 교차로 바뀐다(기본 동작 바뀜 — README 0.36.0)
  */
 const holeNormalValues: ValueSet = {
   name: 'hole-measure-normal',
@@ -6683,6 +6685,74 @@ const holeNormalValues: ValueSet = {
           out.push([k, vk, sgn, holeGrid(c, M, 1, 3)]);
           holeDone(c.v);
         }
+    return out;
+  },
+};
+
+// ───────────── 0.36.0 칸을 얕게 뚫는 선의 면의 열린 교차(중간 거리) ─────────────
+/** 누운 구멍 꼭대기 아래 δ를 지나는 안내 선(x 15·y 220 자리를 지나 기준과 나란함)의 끌어온 점 T와 sgn 쪽 교차 M */
+function holeHorCase(delta: number, sgn: number): { T: number[]; M: number[] } {
+  const z = HOLE_H.cv + HOLE_H.r - delta;
+  const k = Math.sqrt(HOLE_H.r ** 2 - (z - HOLE_H.cv) ** 2) / HOLE_DIR[1]!;
+  return { T: [15 - 20 * HOLE_DIR[0]!, 220 - 20 * HOLE_DIR[1]!, z], M: [15 + sgn * k * HOLE_DIR[0]!, 220 + sgn * k * HOLE_DIR[1]!, z] };
+}
+/** 누운 구멍 안에서 벽 점 M을 보는 방향(단면에서 축 쪽 + 입구(x 0) 쪽 0.3) */
+const holeHorInside = (M: readonly number[]): number[] => [-0.3, -(M[1]! - HOLE_H.cu) / HOLE_H.r, -(M[2]! - HOLE_H.cv) / HOLE_H.r];
+/** 0.36.0 칸을 얕게 뚫는 선의 면의 열린 교차가 있는 판인지 — 거리 3에서 칸을 뚫음(δ 0.1) M− 둘레를 가리켜 원기둥 위 교차에 붙는지(없는 판은 안내 선 위 커서 자리) */
+const v0360pierce: Need = (v, c) => {
+  const why = holeNeed(v, c);
+  if (why) return why;
+  const { T, M } = holeCase(297, 12, 0.1, -1);
+  holeView(c, T, M, holeInside(M), 3);
+  const s = c.at(M);
+  if (s) c.hover(s.x + 1.3, s.y + 2.1);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && h.face?.id === HOLE_V.id;
+  holeDone(v);
+  return ok ? null : '이 판에 없는 동작: 0.36.0 칸을 얕게 뚫는 선의 면의 열린 교차(커서 쪽 활꼴 두께를 보지 않음)';
+};
+/** 거리 3에서 칸을 뚫음(δ 0.1) M− 둘레를 가리킨 그림 — 벽 위 다듬은 교차에 측정 미리 보기 표식(새 장면) */
+SHOTS.push({
+  name: 'hole-measure-mid',
+  data: 'hole',
+  needs: v0360pierce,
+  setup: (c) => {
+    const { T, M } = holeCase(297, 12, 0.1, -1);
+    holeView(c, T, M, holeInside(M), 3);
+    const s = c.at(M);
+    if (s) c.hover(s.x + 1.3, s.y + 2.1);
+  },
+});
+/**
+ * 0.36.0 값(hole — 새 값): 세운 구멍 활꼴(δ 0.03)·칸을 뚫음(δ 0.1·0.3) × 거리 3·4·8 × M± 둘레 3 × 3(4화소 칸)과 누운 구멍 옆면 칸을 따라가는 안내 선(δ 0.24 —
+ * 뚫는 자리 힌트) 거리 1·3 M± 둘레의 미리 보기(원기둥 위 다듬은 교차·그 안내 선 — 0.35.0은 칸을 뚫는 자리 대부분이 안내 선 위 커서 자리)
+ */
+const holeMidValues: ValueSet = {
+  name: 'hole-measure-mid',
+  data: 'hole',
+  needs: v0360pierce,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const [k, delta] of [
+      ['in', 0.03],
+      ['pierce', 0.1],
+      ['pierce3', 0.3],
+    ] as const)
+      for (const d of [3, 4, 8])
+        for (const sgn of [-1, 1]) {
+          const { T, M } = holeCase(297, 12, delta, sgn);
+          holeView(c, T, M, holeInside(M), d);
+          out.push([k, d, sgn, holeGrid(c, M, 1, 4)]);
+          holeDone(c.v);
+        }
+    for (const d of [1, 3])
+      for (const sgn of [-1, 1]) {
+        const { T, M } = holeHorCase(0.24, sgn);
+        holeView(c, T, M, holeHorInside(M), d);
+        out.push(['hor', d, sgn, holeGrid(c, M, 1, 4)]);
+        holeDone(c.v);
+      }
     return out;
   },
 };
@@ -6926,6 +6996,7 @@ const VALUES: ValueSet[] = [
   holeNormalValues,
   ringLensValues,
   lowCellValues,
+  holeMidValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
