@@ -209,6 +209,26 @@ describe('처음 올릴 때 무늬 다시 그리기 모으기(0.30.0)', () => {
     expect(v.stats.textures.ready).toBe(5);
   });
 
+  it('울타리가 끝났다고 오지 않으면(드라이버) 5초 뒤 끝난 것으로 보고 첫 무늬를 그린다 — 울타리를 둔 뒤 명령을 넘긴다(flush)', async () => {
+    fakeClock();
+    const v = view();
+    const gl = v.canvas.getContext('webgl2') as unknown as Record<string, unknown> & { UNSIGNALED: number };
+    let flushes = 0;
+    gl.fenceSync = () => ({});
+    gl.getSyncParameter = () => gl.UNSIGNALED;
+    gl.deleteSync = () => undefined;
+    gl.flush = () => void flushes++;
+    v.setScene(texScene(3));
+    v.renderNow();
+    expect(flushes).toBe(1);
+    const inv = spyInv(v);
+    await finish(0);
+    vi.advanceTimersByTime(4900);
+    expect(inv).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(150);
+    expect(inv).toHaveBeenCalledTimes(1);
+  });
+
   it('새 장면의 첫 무늬는 곧 그리고, 풀지 못한 무늬도 끝난 것으로 센다', async () => {
     fakeClock();
     const v = view();

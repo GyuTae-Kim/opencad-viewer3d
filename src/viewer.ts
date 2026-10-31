@@ -1004,6 +1004,8 @@ export const TEXTURE_REDRAW_MS = 250;
 export const TEXTURE_REDRAW_SLOW = 4;
 /** 0.30.0 미룬 무늬 다시 그리기가 앞서 그린 화면을 GPU가 끝내기를 기다릴 때 다시 보는 간격(ms) */
 const TEXTURE_REDRAW_POLL_MS = 50;
+/** 0.30.0 그 울타리를 이만큼(ms) 넘게 기다리면 끝난 것으로 본다(끝났다는 알림이 오지 않는 드라이버에서도 첫 무늬가 나타나게) */
+const TEXTURE_REDRAW_FENCE_MAX_MS = 5000;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 표준 뷰 키 — 0.10.0부터 작은 모듈 camera.ts에 두고 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
 export { VIEW_KEYS };
@@ -1737,7 +1739,8 @@ export class Viewer3d {
     if (this.texDrawn && now - this.texDrawAt < this.texGap()) return later(this.texDrawAt + this.texGap() - now);
     const gl = this.gl;
     const s = this.texFence && typeof gl.getSyncParameter === 'function' ? gl.getSyncParameter(this.texFence, gl.SYNC_STATUS) : null;
-    if (s !== null && s !== undefined && s === gl.UNSIGNALED) {
+    // 울타리가 아주 오래 안 끝나면(TEXTURE_REDRAW_FENCE_MAX_MS — 드라이버가 알리지 않는 때) 끝난 것으로 본다
+    if (s !== null && s !== undefined && s === gl.UNSIGNALED && now - this.texFenceAt < TEXTURE_REDRAW_FENCE_MAX_MS) {
       this.texFenceWaited = true;
       return later(TEXTURE_REDRAW_POLL_MS);
     }
@@ -1771,6 +1774,8 @@ export class Viewer3d {
     if (typeof gl.fenceSync !== 'function') return;
     if (this.texFence) gl.deleteSync(this.texFence);
     this.texFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) ?? null;
+    // 울타리까지의 명령을 GPU로 넘긴다(넘기지 않으면 끝났다는 알림이 오지 않을 수 있다)
+    if (this.texFence) gl.flush();
     this.texFenceAt = performance.now();
     this.texFenceWaited = false;
   }
