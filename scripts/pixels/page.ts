@@ -28,9 +28,11 @@ type V = Viewer3d & Record<string, any>;
  * (0.19.0 축이 곡면을 뚫는 점 다듬기 — 기둥 아래 끝의 Z축이 구를 뚫는다, 잠근 축과 원판 둘레의 교차 다듬기),
  * compact = tex와 같은 장면을 작은 배열(법선 Int8 정점 4값, 무늬 좌표 Int16 + uvTransform — syntheticScene compact)로 준 자료(0.26.0.
  * 그 선택이 없는 판의 syntheticScene은 Float32 그대로라 compactNeed로 건너뛴다),
- * apex = 반지름 25 원호 33토막 꺾은선과 그 끝에서 (40, 25 − 0.001)까지 급속 이동 선분뿐인 자료(0.33.0 refineEnds — NC 23차 재현, 첫 점 X축이 원호 꼭대기를 스친다)
+ * apex = 반지름 25 원호 33토막 꺾은선과 그 끝에서 (40, 25 − 0.001)까지 급속 이동 선분뿐인 자료(0.33.0 refineEnds — NC 23차 재현, 첫 점 X축이 원호 꼭대기를 스친다),
+ * hole = 반투명 판(400 × 300 × 18)에 세운 구멍(반지름 5, 20토막 원기둥 고체)·누운 구멍(반지름 4, 16토막)과 판 윗면의 기운 기준 선분(27°)뿐인 자료
+ * (0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차 — NC 35차 재현, tests/v0340hole.test.ts와 같은 장면)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole';
 
 interface Ctx {
   v: V;
@@ -79,6 +81,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (d === 'edit' || d === 'edit-big') return editScene(d === 'edit-big' ? EDIT_BIG : EDIT_GRID, flatTop);
   let s = scenes.get(d);
   if (!s && d === 'apex') scenes.set(d, (s = apexScene()));
+  if (!s && d === 'hole') scenes.set(d, (s = holeScene()));
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
@@ -6428,6 +6431,258 @@ const itemLookValues: ValueSet = {
   },
 };
 
+// ───────────── 0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차(NC 35차 재현) ─────────────
+const HOLE_RAD = Math.PI / 180;
+/** 기준 선분 방향(27°)과 같은 안내 선 방향 */
+const HOLE_DIR = [Math.cos(27 * HOLE_RAD), Math.sin(27 * HOLE_RAD), 0];
+/** 원기둥 벽: 축 성분 a2, 단면 성분 a0·a1과 중심 (cu, cv), 반지름 r, 축 범위 lo~hi */
+interface HoleWall {
+  id: string;
+  a0: number;
+  a1: number;
+  a2: number;
+  cu: number;
+  cv: number;
+  r: number;
+  lo: number;
+  hi: number;
+}
+const HOLE_V: HoleWall = { id: '세운 구멍', a0: 0, a1: 1, a2: 2, cu: 150, cv: 150, r: 5, lo: 6, hi: 18 };
+const HOLE_H: HoleWall = { id: '누운 구멍', a0: 1, a1: 2, a2: 0, cu: 220, cv: 9, r: 4, lo: 0, hi: 30 };
+/** 원기둥 고체: 시작 중심 a에서 방향 d(단위)로 len, 반지름 r, 둘레 seg(옆면 칸마다 두 삼각형, 두 뚜껑 부채꼴, 두 테두리 윤곽선) */
+function holeCylinder(id: string, a: readonly number[], d: readonly number[], len: number, r: number, seg: number, color: [number, number, number, number]): Mesh3d {
+  const t = Math.abs(d[2]!) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  let e1 = [d[1]! * t[2]! - d[2]! * t[1]!, d[2]! * t[0]! - d[0]! * t[2]!, d[0]! * t[1]! - d[1]! * t[0]!];
+  const l1 = Math.hypot(e1[0]!, e1[1]!, e1[2]!);
+  e1 = e1.map((x) => x / l1);
+  const e2 = [d[1]! * e1[2]! - d[2]! * e1[1]!, d[2]! * e1[0]! - d[0]! * e1[2]!, d[0]! * e1[1]! - d[1]! * e1[0]!];
+  const b = [a[0]! + d[0]! * len, a[1]! + d[1]! * len, a[2]! + d[2]! * len];
+  const ring = (c: readonly number[], k: number): number[] => {
+    const th = (k / seg) * Math.PI * 2;
+    return [0, 1, 2].map((i) => c[i]! + r * (Math.cos(th) * e1[i]! + Math.sin(th) * e2[i]!));
+  };
+  const P: number[] = [], I: number[] = [], E: number[] = [];
+  for (let k = 0; k <= seg; k++) P.push(...ring(a, k), ...ring(b, k));
+  for (let k = 0; k < seg; k++) I.push(2 * k, 2 * k + 2, 2 * k + 1, 2 * k + 1, 2 * k + 2, 2 * k + 3);
+  for (const [c, sgn] of [
+    [a, -1],
+    [b, 1],
+  ] as const) {
+    const cb = P.length / 3;
+    P.push(...c);
+    for (let k = 0; k < seg; k++) P.push(...ring(c, k));
+    for (let k = 0; k < seg; k++) {
+      const i1 = cb + 1 + k, i2 = cb + 1 + ((k + 1) % seg);
+      if (sgn > 0) I.push(cb, i1, i2);
+      else I.push(cb, i2, i1);
+    }
+    for (let k = 0; k < seg; k++) E.push(...ring(c, k), ...ring(c, k + 1));
+  }
+  return { id, name: id, positions: new Float32Array(P), indices: new Uint32Array(I), edges: new Float32Array(E), color, closed: true };
+}
+const HOLE_OFF = [-Math.sin(27 * HOLE_RAD) * 4, Math.cos(27 * HOLE_RAD) * 4];
+const HOLE_G0 = [250 + HOLE_OFF[0]!, 50 + HOLE_OFF[1]!, 18];
+const HOLE_G1 = [250 + 100 * HOLE_DIR[0]! + HOLE_OFF[0]!, 50 + 100 * HOLE_DIR[1]! + HOLE_OFF[1]!, 18];
+/** 기준 선분 위 한 자리(가운데에서 조금 비킨 — 커서가 지나가 기준으로 삼는다) */
+const HOLE_MID = [(HOLE_G0[0]! + HOLE_G1[0]!) / 2 + 0.013, (HOLE_G0[1]! + HOLE_G1[1]!) / 2 + 0.011, 18];
+function holeScene(): Scene3d {
+  return {
+    name: 'hole',
+    units: 'mm',
+    meshes: [
+      boxMesh('판', [0, 0, 0], [400, 300, 18], [0.86, 0.74, 0.55, 0.35]),
+      holeCylinder(HOLE_V.id, [150, 150, 18], [0, 0, -1], 12, 5, 20, [0.8, 0.35, 0.2, 1]),
+      holeCylinder(HOLE_H.id, [0, 220, 9], [1, 0, 0], 30, 4, 16, [0.15, 0.35, 0.8, 1]),
+    ],
+    lines: [{ id: '기준', name: '기준', positions: new Float32Array([...HOLE_G0, ...HOLE_G1]), color: [0.2, 0.6, 0.9, 1] }],
+    points: [],
+  };
+}
+/** 직선(o, d)을 벽 단면에 비춘 원과의 교차 가운데 near에 가까운 근(축 방향은 직선을 따라). 축과 나란하면 null */
+function holeRoot(w: HoleWall, o: readonly number[], d: readonly number[], near: readonly number[]): number[] | null {
+  const ou = o[w.a0]! - w.cu, ov = o[w.a1]! - w.cv, du = d[w.a0]!, dv = d[w.a1]!;
+  const A = du * du + dv * dv;
+  if (!(A > 1e-12)) return null;
+  const B = ou * du + ov * dv, C = ou * ou + ov * ov - w.r * w.r;
+  const disc = B * B - A * C;
+  if (disc < 0) return null;
+  const qs = [(-B - Math.sqrt(disc)) / A, (-B + Math.sqrt(disc)) / A].map((s) => [o[0]! + d[0]! * s, o[1]! + d[1]! * s, o[2]! + d[2]! * s]);
+  const g = (p: number[]): number => Math.hypot(p[0]! - near[0]!, p[1]! - near[1]!, p[2]! - near[2]!);
+  return g(qs[0]!) <= g(qs[1]!) ? qs[0]! : qs[1]!;
+}
+/** hole 자료의 앱 refineFace(NC 앱과 같은 뜻): 구멍 옆면 삼각형이면 그 직선과 원기둥(벽 범위 안)의 교차 가운데 point에 가까운 근 */
+function holeRefineFace(c: any): number[] | null {
+  const w = c.kind === 'axisFace' || c.kind === 'onFace' ? [HOLE_V, HOLE_H].find((x) => x.id === c.face.id) : undefined;
+  if (!w || Math.abs(c.face.normal[w.a2]) > 1e-3) return null;
+  const q = holeRoot(w, c.line.origin, c.line.dir, c.point);
+  return q && q[w.a2]! >= w.lo - 1e-9 && q[w.a2]! <= w.hi + 1e-9 ? q : null;
+}
+const holeOnWall = (p: readonly number[]): boolean =>
+  [HOLE_V, HOLE_H].some((w) => Math.abs(Math.hypot(p[w.a0]! - w.cu, p[w.a1]! - w.cv) - w.r) < 1e-9 && p[w.a2]! >= w.lo && p[w.a2]! <= w.hi);
+/** NC 앱 판재의 붙잡기 선택과 같은 뜻: 추론 모두, 기준 선분 거르기(기준만), 안내 선의 만나는 점(안내 선끼리·열린 교차·면의 열린 교차) */
+function holeSnap(refineFace: ((c: any) => number[] | null) | null): Record<string, unknown> {
+  const edgeOk = (_s: unknown, item: { id: string }): boolean => item.id === '기준';
+  return {
+    points: [
+      { point: [150, 150, 18], kind: 'center' },
+      { point: [150, 150, 6], kind: 'center' },
+    ],
+    edges: true,
+    inference: {
+      intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true,
+      axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true, lockTracks: true,
+      parallelEdge: edgeOk,
+      trackDirs: { edge: edgeOk, meets: { guides: true, open: true, openFaces: true } },
+    },
+    refine: () => null,
+    refineFace,
+    throughTranslucent: true,
+  };
+}
+/** 세운 구멍의 안내 선 자리: 구멍 중심에서 각 a(도) 쪽으로 r − δ 떨어진 점을 지나 기준과 나란한 선, 끌어온 점 T(구멍 밖), 두 교차 가운데 sgn 쪽 M */
+function holeCase(a: number, z: number, delta: number, sgn: number): { T: number[]; M: number[] } {
+  const w = HOLE_V;
+  const n = [Math.cos(a * HOLE_RAD), Math.sin(a * HOLE_RAD)];
+  const P0 = [w.cu + (w.r - delta) * n[0]!, w.cv + (w.r - delta) * n[1]!];
+  const tt = Math.sqrt(w.r ** 2 - (w.r - delta) ** 2);
+  return { T: [P0[0]! - 20 * HOLE_DIR[0]!, P0[1]! - 20 * HOLE_DIR[1]!, z], M: [P0[0]! + sgn * tt * HOLE_DIR[0]!, P0[1]! + sgn * tt * HOLE_DIR[1]!, z] };
+}
+/** 구멍 안에서 벽 점 M을 보는 방향(구멍 중심 쪽 수평 + 위 0.3) */
+const holeInside = (M: readonly number[]): number[] => {
+  const am = Math.atan2(M[1]! - HOLE_V.cv, M[0]! - HOLE_V.cu);
+  return [-Math.cos(am), -Math.sin(am), 0.3];
+};
+/** 끌어온 점 T를 두고 기준 선분을 지나간 뒤 target을 look 쪽 거리 d에서 본다(원근 — d가 null이면 맞춰 보기 그대로) */
+function holeView(c: Ctx, T: number[], target: readonly number[], look: readonly number[], d: number | null, refineFace: ((c: any) => number[] | null) | null = holeRefineFace): void {
+  const { v } = c;
+  v.setMeasureMode(true);
+  v.setMeasureSnap(holeSnap(refineFace));
+  v.setMeasureTrackPoints([T]);
+  v.renderNow();
+  const s = c.at(HOLE_MID);
+  if (s) c.hover(s.x + 0.3, s.y + 0.2);
+  // 미리 보기(기준 선분 기억)는 그리기 때 구한다
+  v.renderNow();
+  if (d !== null) {
+    const l = Math.hypot(look[0]!, look[1]!, look[2]!);
+    const n = look.map((x) => x / l);
+    v.setCamera({ ...v.getCamera(), yaw: Math.atan2(n[0]!, -n[1]!), pitch: Math.asin(n[2]!), target: [target[0]!, target[1]!, target[2]!], distance: d, projection: 'perspective' });
+  }
+  v.renderNow();
+}
+function holeDone(v: V): void {
+  v.setMeasureTrackPoints([]);
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setView('seIso', false);
+  v.fit(false);
+}
+/** M 화면 자리 둘레 (2n + 1)² 자리(step 화소, 0.31·0.17화소 비킴)를 가리킨 미리 보기: 붙잡은 종류·점·면·다듬었는지·원기둥 벽 위인지 */
+function holeGrid(c: Ctx, M: readonly number[], n: number, step: number): unknown[] {
+  const { v } = c;
+  const s = c.at(M);
+  if (!s) return [null];
+  const rows: unknown[] = [];
+  for (let j = -n; j <= n; j++)
+    for (let i = -n; i <= n; i++) {
+      c.hover(s.x + i * step + 0.31, s.y + j * step + 0.17);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      rows.push(h ? [h.snap ?? null, r10s(h.point), h.face?.id ?? null, !!h.refined, holeOnWall(h.point)] : null);
+    }
+  return rows;
+}
+const holeNeed = fn('setMeasureTrackPoints', 'setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure');
+/** 0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차가 있는 판인지 — 거리 1에서 활꼴 M 둘레를 가리켜 원기둥 위 교차에 붙는지(없는 판은 안내 선 위 커서 자리) */
+const v0340hole: Need = (v, c) => {
+  const why = holeNeed(v, c);
+  if (why) return why;
+  const { T, M } = holeCase(297, 12, 0.03, 1);
+  holeView(c, T, M, holeInside(M), 1);
+  const s = c.at(M);
+  if (s) c.hover(s.x + 1.3, s.y + 2.1);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && h.face?.id === HOLE_V.id;
+  holeDone(v);
+  return ok ? null : '이 판에 없는 동작: 0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차(커서 아래 벽 삼각형)';
+};
+/** 거리 1에서 활꼴 M 둘레를 가리킨 그림 — 벽 위 다듬은 교차에 측정 미리 보기 표식(새 장면) */
+SHOTS.push({
+  name: 'hole-measure-near',
+  data: 'hole',
+  needs: v0340hole,
+  setup: (c) => {
+    const { T, M } = holeCase(297, 12, 0.03, 1);
+    holeView(c, T, M, holeInside(M), 1);
+    const s = c.at(M);
+    if (s) c.hover(s.x + 1.3, s.y + 2.1);
+  },
+});
+/**
+ * 0.34.0 값(hole — 새 값): 세운 구멍 활꼴(δ 0.03·0.01)·칸을 뚫음(δ 0.1) × 거리 0.5·1·2 × M± 둘레 3 × 3(4화소 칸)과 누운 구멍 M± 거리 1의 미리 보기
+ * (원기둥 위 다듬은 교차·그 안내 선 — 0.33.0은 모두 안내 선 위 커서 자리)
+ */
+const holeNearValues: ValueSet = {
+  name: 'hole-measure-near',
+  data: 'hole',
+  needs: v0340hole,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const [k, delta] of [
+      ['in', 0.03],
+      ['in2', 0.01],
+      ['pierce', 0.1],
+    ] as const)
+      for (const d of [0.5, 1, 2])
+        for (const sgn of [-1, 1]) {
+          const { T, M } = holeCase(297, 12, delta, sgn);
+          holeView(c, T, M, holeInside(M), d);
+          out.push([k, d, sgn, holeGrid(c, M, 1, 4)]);
+          holeDone(c.v);
+        }
+    for (const sgn of [-1, 1]) {
+      const z = 13 - 0.02;
+      const s0 = (sgn * Math.sqrt(16 - (z - 9) ** 2)) / HOLE_DIR[1]!;
+      const M = [15 + s0 * HOLE_DIR[0]!, 220 + s0 * HOLE_DIR[1]!, z];
+      holeView(c, [15 - 20 * HOLE_DIR[0]!, 220 - 20 * HOLE_DIR[1]!, z], M, [0.2, -0.6 * sgn, -1], 1);
+      out.push(['hor', sgn, holeGrid(c, M, 1, 4)]);
+      holeDone(c.v);
+    }
+    return out;
+  },
+};
+/**
+ * 0.34.0 보통 거리 값(hole — 0.33.0과 같아야 한다): 맞춰 보기·위 30·등각 60·옆 15에서 활꼴·칸을 뚫음 M± 둘레 3 × 3(3화소 칸) 미리 보기.
+ * 커서 쪽 활꼴이 붙잡기 거리보다 얇아 0.34.0의 바뀐 규칙이 닿지 않는 자리다
+ */
+const holeNormalValues: ValueSet = {
+  name: 'hole-measure-normal',
+  data: 'hole',
+  needs: holeNeed,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const [k, delta] of [
+      ['in', 0.03],
+      ['pierce', 0.1],
+    ] as const)
+      for (const [vk, look, d] of [
+        ['fit', [0, 0, 1], null],
+        ['top30', [0.2, -0.3, 1], 30],
+        ['iso60', [1, -1, 0.8], 60],
+        ['side15', [0.3, -1, 0.5], 15],
+      ] as const)
+        for (const sgn of [-1, 1]) {
+          const { T, M } = holeCase(297, 12, delta, sgn);
+          holeView(c, T, [150, 150, 12], look, d);
+          out.push([k, vk, sgn, holeGrid(c, M, 1, 3)]);
+          holeDone(c.v);
+        }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -6509,6 +6764,8 @@ const VALUES: ValueSet[] = [
   apexValues,
   snapshotLabelValues,
   itemLookValues,
+  holeNearValues,
+  holeNormalValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
