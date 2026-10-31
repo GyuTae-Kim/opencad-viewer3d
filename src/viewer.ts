@@ -45,7 +45,7 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
+import { type V3, dot, hasOrigin, mat4Mul, modelMatrix, placeMatrix, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear, trianglesNear } from './scenepick';
 import {
   type MeasurePointSnap,
@@ -78,6 +78,7 @@ import {
   MeasureTracker,
   type OpenEdgeSnap,
   type OpenFaceSnap,
+  type TrackDirKind,
   type TrackDirLine,
   type TrackDirMeetSnap,
   type TrackDirOtherLine,
@@ -98,6 +99,7 @@ import {
   trackAlongFirst,
   trackAxisSnap,
   trackCrossSnap,
+  trackDirGuides,
   trackDirMeetSnap,
   trackDirPairSnap,
   trackDirSnap,
@@ -142,7 +144,7 @@ import {
 } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
-import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
+import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText, measureDigits, measureNumber } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
@@ -218,7 +220,8 @@ export interface Viewer3dOptions {
   maxPixelRatio?: number;
   /**
    * 측정 글 꼴(내장 측정과 글을 주지 않은 거리 덧그림): 거리·성분·두 점·장면 단위를 받아 글 줄들을 돌려준다.
-   * 앱이 단위(파일·mm·in)·자릿수·언어를 맞출 때 쓴다. 없으면 기본("거리 … mm" / "ΔX … ΔY … ΔZ …"). setMeasureFormat으로 바꾼다
+   * 앱이 단위(파일·mm·in)·자릿수·언어를 맞출 때 쓴다. 없으면 기본("거리 … mm" / "ΔX … ΔY … ΔZ …"). setMeasureFormat으로 바꾼다.
+   * 0.31.0: 둘째 인자로 코어 기본 꼴(MeasureFormatCore)을 받는다 — 이름표만 옮기는 앱은 수·자릿수·단위 글을 다시 세지 않는다
    */
   formatMeasure?: MeasureFormat | null;
   /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
@@ -580,6 +583,14 @@ export interface MeasureLabelAvoid {
   rects?: readonly MeasureLabelRect[];
   /** 측정 커서(코어가 미리 보기를 구한 포인터 자리) 둘레에서 피할 반지름(CSS 화소). 미리 보기가 있을 때만 본다. 0·없으면 커서를 보지 않는다 */
   pointerRadius?: number;
+  /**
+   * 0.31.0: true면 두 측정 점 표식(첫 점·미리 보기 점 또는 두 점째 — 반지름 LABEL_POINT_R 6)을 덮는 자리도 옮긴다(기본 꺼짐 — true일 때만).
+   * 0.30.0까지 표식은 글상자를 옮길 때만 될 수 있으면 비켰다 — 기본 자리(두 점 화면 가운데의 오른쪽 위)가 첫 점 표식을 덮어도 그대로였다
+   * (첫 점이 가운데에서 오른쪽 위 8~48화소에 있을 때, 휴대폰처럼 글상자가 화면 폭의 절반을 넘으면 캔버스 안으로 당겨져 더 자주).
+   * 켜면 고른 자리가 표식을 덮을 때 표식도 피할 원으로 보고 같은 차례로 다시 고른다(순수 LabelAvoidAreas.softBlocks — 그런 자리가 없으면 0.30.0 자리).
+   * rects·pointerRadius 없이 이것만 줘도 된다. 측정 거리 글상자에만 쓴다(앱 측정 덧그림 글상자는 0.30.0 그대로)
+   */
+  points?: boolean;
 }
 
 /**
@@ -615,8 +626,34 @@ export interface MarkerOptions {
   color?: Rgba;
 }
 
-/** 측정 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat): 받은 값으로 글 줄들을 만든다 */
-export type MeasureFormat = (m: MeasureResult & { units: Scene3d['units'] }) => string[];
+/**
+ * 측정 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat): 받은 값으로 글 줄들을 만든다.
+ * 0.31.0: 둘째 인자로 코어 기본 꼴(MeasureFormatCore — 기본 줄·수 꼴·자릿수·단위 글)을 받는다. 한 인자 함수는 그대로 된다(받은 것을 보지 않을 뿐)
+ */
+export type MeasureFormat = (m: MeasureResult & { units: Scene3d['units'] }, core: MeasureFormatCore) => string[];
+
+/**
+ * 측정 글 꼴의 둘째 인자(0.31.0): 글 꼴을 주지 않았을 때 코어가 그 글상자에 그릴 것. 앱이 이름표만 옮기고(번역) 수·자릿수·"-0" 처리·단위 글은
+ * 코어와 같게 쓸 수 있다 — 코어 규칙을 앱이 다시 세지 않는다. 그릴 때마다 새로 만든다(앱이 고쳐도 된다)
+ */
+export interface MeasureFormatCore {
+  /**
+   * 코어 기본 글 줄(글 꼴이 없을 때와 글자까지 같다): 내장 두 점 측정은 ["거리 12.345 mm", "ΔX 1.000  ΔY -2.000  ΔZ 0.000"](단위를 모르면 단위 없이),
+   * 글(label)을 주지 않은 거리 덧그림은 ["12.345 mm"]
+   */
+  lines: string[];
+  /** 코어 수 꼴: 소수 digits자리(toFixed — 언어와 상관없이 소수점), 반올림해 "-0.000"이 되면 "0.000"(순수 opencad-viewer3d/annotate measureNumber) */
+  num: (v: number) => string;
+  /**
+   * 소수 자릿수: 장면 범위(Scene3d.bounds, 없으면 그물·선분·점 범위 — setMesh로 바꾸면 바뀐 범위) 대각선 d에서 max(0, min(6, 5 − ⌊log10 d⌋))
+   * (순수 opencad-viewer3d/annotate measureDigits — 크기 0인 범위는 5자리, 빈 장면은 0자리)
+   */
+  digits: number;
+  /** 단위 글: 장면 단위 'mm' → "mm", 'inch' → "in", 'm' → "m", 모르면 "" */
+  unit: string;
+  /** 어느 글상자인지: 'measure' = 내장 두 점 측정(미리 보기·찍은 결과), 'annotation' = 글을 주지 않은 거리 덧그림(setAnnotations) */
+  source: 'measure' | 'annotation';
+}
 
 /** project() 결과: 세계 점의 캔버스 위치(CSS 화소, 왼쪽 위 원점)와 보이는지 */
 export interface ProjectedPoint {
@@ -871,8 +908,11 @@ const copyLine = (l: SnapRefineLine): SnapRefineLine => {
 };
 /** 점 origin을 지나는 세계 축 직선(0.18.0 'axisEdge'·0.19.0 'axisFace'의 line) */
 const axisRefineLine = (origin: readonly number[], axis: SnapAxis): SnapRefineLine => ({ origin: [origin[0]!, origin[1]!, origin[2]!], dir: axisLock(axis).direction, axis });
-/** 열린 교차(0.20.0)가 보는 선: 지나는 점·단위 방향, 세계 축이면 그 이름, 끌어온 축인지(그 점을 trackFrom으로 싣는다) */
-type OpenRefineLine = { from: V3; dir: V3; axis?: SnapAxis; track: boolean };
+/**
+ * 열린 교차(0.20.0)가 보는 선: 지나는 점·단위 방향, 세계 축이면 그 이름, 끌어온 축인지(그 점을 trackFrom으로 싣는다).
+ * 0.31.0: 끌어온 점의 안내 선(trackDirs { meets: { open } })이면 그 안내 종류(guide — 축 이름 없음, track: true)
+ */
+type OpenRefineLine = { from: V3; dir: V3; axis?: SnapAxis; track: boolean; guide?: TrackDirKind };
 /** 열린 교차·잠근 선의 선 → 다듬기에 넘기는 직선(복사하지 않는다 — 넘길 때 copyLine) */
 const refineLineOf = (l: OpenRefineLine): SnapRefineLine => (l.axis ? { origin: l.from, dir: l.dir, axis: l.axis } : { origin: l.from, dir: l.dir });
 /**
@@ -1160,7 +1200,7 @@ export class Viewer3d {
   /** 마지막으로 화면에 그린 측정 거리 글상자(0.12.0 — CSS 화소, 그리지 않았으면 null) */
   private measureLabel: MeasureLabelRect | null = null;
   /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
-  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number } | null = null;
+  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number; points: boolean } | null = null;
   /** 0.27.0 뷰어 글상자 기본 자리(setMeasureLabelSpot — 준 것만, 없으면 null = 0.26.0 그대로 오른쪽 위) */
   private labelSpot: MeasureLabelSpot | null = null;
   /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
@@ -3373,7 +3413,8 @@ export class Viewer3d {
    * 움직일 때마다 다시 준다(같은 값이면 다시 그리지 않는다). null·빈 값이면 끈다(0.12.0과 같은 자리). 측정을 지워도 남는다.
    * 0.23.0: 앱 측정 덧그림(setAnnotations)의 글상자도 이 사각형을 같은 차례로 비켜 그린다(커서 둘레는 보지 않는다 — annotationLabelRects).
    * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다.
-   * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다
+   * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다.
+   * 0.31.0: points: true면 측정 거리 글상자가 두 측정 점 표식을 덮는 자리도 옮긴다(MeasureLabelAvoid.points — 이것만 줘도 켠다)
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
@@ -3384,13 +3425,16 @@ export class Viewer3d {
     }
     const pr = o?.pointerRadius;
     const pointerRadius = typeof pr === 'number' && Number.isFinite(pr) && pr > 0 ? pr : 0;
-    const next = rects.length || pointerRadius ? { rects, pointerRadius } : null;
+    // 0.31.0: 측정 점 표식도 비키기(true일 때만 — 이것만 줘도 켠다)
+    const points = o?.points === true;
+    const next = rects.length || pointerRadius || points ? { rects, pointerRadius, points } : null;
     const prev = this.labelAvoid;
     const same =
       prev === next ||
       (!!prev &&
         !!next &&
         prev.pointerRadius === next.pointerRadius &&
+        prev.points === next.points &&
         prev.rects.length === next.rects.length &&
         prev.rects.every((r, i) => {
           const s = next.rects[i]!;
@@ -3421,12 +3465,13 @@ export class Viewer3d {
     return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
-  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null) */
+  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null). 0.31.0: 측정 점 표식도 비키면 points: true */
   get measureLabelAvoid(): MeasureLabelAvoid | null {
     const a = this.labelAvoid;
     if (!a) return null;
     const r: MeasureLabelAvoid = { rects: a.rects.map((x) => ({ ...x })) };
     if (a.pointerRadius) r.pointerRadius = a.pointerRadius;
+    if (a.points) r.points = true;
     return r;
   }
 
@@ -3474,17 +3519,19 @@ export class Viewer3d {
 
   /**
    * 화면 덧그림의 글상자가 지금 피할 영역(커서 둘레는 미리 보기가 있을 때만). 옮길 때는 두 측정 점 표식(seg)도 될 수 있으면 가리지 않는다.
-   * 꺼져 있으면 null
+   * 0.31.0: points를 켰으면 표식을 덮는 자리도 옮긴다(softBlocks). 꺼져 있으면 null
    */
   private labelAvoidAreas(seg: [V3, V3] | null): LabelAvoidAreas | null {
     const a = this.labelAvoid;
     if (!a) return null;
     const at = a.pointerRadius && this.measuring && this.measureHover ? this.lastHoverAt : null;
-    return {
+    const out: LabelAvoidAreas = {
       rects: a.rects,
       circles: at ? [{ x: at.x, y: at.y, r: a.pointerRadius }] : [],
       soft: seg ? seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R })) : [],
     };
+    if (a.points) out.softBlocks = true;
+    return out;
   }
 
   /** 측정을 지운다(찍은 점·미리 보기·잠금, 0.16.0부터 끌어온 점도) */
@@ -3716,7 +3763,10 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  /** 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다 */
+  /**
+   * 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다.
+   * 0.31.0: fn(m, core)의 core는 그 글상자의 코어 기본 꼴(MeasureFormatCore — 기본 줄·수 꼴·자릿수·단위 글·어느 글상자인지)
+   */
   setMeasureFormat(fn: MeasureFormat | null): void {
     this.measureFmt = fn ?? null;
     this.invalidate();
@@ -4501,7 +4551,17 @@ export class Viewer3d {
       // 0.30.0 두 끌어온 점의 안내 선끼리 만나는 점(trackDirs { meets: { guides: true } }): 같은 기준 선분(이 고르기가 바꾸기 전)에 대한 두 점의 선. 여덟 후보 뒤 차례
       const guideRef = tracks && tracks.length > 1 && refsBefore && inf!.trackDirs !== true && inf!.trackDirs!.meetGuides ? this.trackDirBase(inf, refsBefore) : null;
       const guide = guideRef ? trackDirPairSnap(f, tracks!, guideRef, x, y, snapPx, first) : null;
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide]);
+      // 0.31.0 안내 선의 열린 교차(trackDirs { meets: { open: true } } — refine이 있을 때만): 끌어온 점의 나란함·수직 선(첫 점과 같은 점은 뺀다 — 0.29.0과 같다)이
+      // 커서 둘레 토막과 3D로 만나지 않지만 그 활꼴을 지날 만큼 가까우면 앱 refine('axisEdge', open — 축 이름 없는 그 선)이 준 곡선 위 교차. 0.20.0 열린 교차와 같은 셈·한도·기억
+      // (한도는 앞의 열린 교차들이 먼저 쓴다). 아홉 후보 뒤 차례
+      const openRef = tracks && refsBefore && so.refine && inf!.trackDirs !== true && inf!.trackDirs!.meetOpen ? this.trackDirBase(inf, refsBefore) : null;
+      let openG: { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null = null;
+      if (openRef) {
+        const ls: OpenRefineLine[] = [];
+        for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, openRef)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
+        if (ls.length) openG = this.openLineEdge(so, f, x, y, snapPx, ls, first, nearSegs(), budget, vis);
+      }
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       if (t && t === pair) {
         const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
@@ -4596,6 +4656,19 @@ export class Viewer3d {
         this.trackDirRef = refsBefore!.track;
         this.parallelOwn = refsBefore!.own;
         return { p: guide.p, vertex: true, kind: guide.kind, trackFrom: guide.from, edge: [[...guideRef![0]] as V3, [...guideRef![1]] as V3], trackGuide: copyDirLine(guide.other) };
+      }
+      if (t && openG && t === openG.snap) {
+        // 0.31.0 안내 선의 열린 교차: 앱이 준 곡선 위 교차(그 안내 선 위로 내린 자리 — 다듬은 점)와 그 토막(segment). 0.29.0 만나는 점처럼 기준 선분을 되돌리고,
+        // 첫 점을 지나는 선이 아니라 잠글 방향이 없다(0.20.0 열린 교차처럼 선분 방향 잠금도 보지 않는다)
+        this.parallelRef = refsBefore!.parallel;
+        this.trackDirRef = refsBefore!.track;
+        this.parallelOwn = refsBefore!.own;
+        const { snap: o, line: l } = openG;
+        const out: MeasurePick = { p: o.p, vertex: true, kind: l.guide!, trackFrom: [l.from[0], l.from[1], l.from[2]], edge: [[...openRef![0]] as V3, [...openRef![1]] as V3] };
+        const sg = nearSegmentId(o.seg);
+        if (sg) out.segment = copySegment(sg);
+        out.refined = true;
+        return out;
       }
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
@@ -5980,7 +6053,11 @@ export class Viewer3d {
       let lines: string[];
       if (fm && an.kind === 'distance' && an.label === undefined) {
         const [p, q] = g.dots as [V3, V3];
-        lines = fm({ a: [...p] as V3, b: [...q] as V3, distance: g.value, dx: q[0] - p[0], dy: q[1] - p[1], dz: q[2] - p[2], units: this.sceneRef?.units ?? 'unknown' });
+        // 0.31.0: 둘째 인자는 코어 기본 꼴(이 덧그림의 기본 한 줄과 수 꼴)
+        lines = fm(
+          { a: [...p] as V3, b: [...q] as V3, distance: g.value, dx: q[0] - p[0], dy: q[1] - p[1], dz: q[2] - p[2], units: this.sceneRef?.units ?? 'unknown' },
+          this.formatCore('annotation', annotationText(an, g, (v) => this.fmt(v), unit)),
+        );
       } else lines = annotationText(an, g, (v) => this.fmt(v), unit);
       const at = projectToScreen(f, g.labelAt);
       if (!lines.length || !at) return;
@@ -6117,11 +6194,15 @@ export class Viewer3d {
     ctx.restore();
   }
 
+  /** 측정 글의 수: 장면 범위 대각선에 맞춘 소수 자릿수(measureDigits — 0.31.0에 순수 함수로 뺐다, 셈은 그대로), "-0"은 "0" */
   private fmt(v: number): string {
-    const diag = Math.max(length(sub(this.allBox.max, this.allBox.min)) || 1, 1e-9);
-    const digits = Math.max(0, Math.min(6, 5 - Math.floor(Math.log10(diag))));
-    const s = v.toFixed(digits);
-    return s === `-${(0).toFixed(digits)}` ? (0).toFixed(digits) : s;
+    return measureNumber(v, measureDigits(this.allBox));
+  }
+
+  /** 0.31.0 측정 글 꼴의 둘째 인자: 이 글상자의 코어 기본 줄과 수 꼴·자릿수·단위 글(그릴 때마다 새로) */
+  private formatCore(source: MeasureFormatCore['source'], lines: string[]): MeasureFormatCore {
+    const digits = measureDigits(this.allBox);
+    return { lines, num: (v) => measureNumber(v, digits), digits, unit: UNIT_LABEL[this.sceneRef?.units ?? 'unknown'], source };
   }
 
   private drawMeasure(ctx: CanvasRenderingContext2D, f: ViewFrame, screen = false): void {
@@ -6298,11 +6379,16 @@ export class Viewer3d {
       const fm = this.measureFmt;
       // 글 꼴에는 onMeasure와 같은 결과를 준다(0.9.1 — 붙잡기를 켰으면 snapA·snapB·axisB도. 미리 보기의 B는 커서 아래 붙잡을 점)
       const snapB = pts[1] ? this.measureSnaps.get(pts[1]) : hover ? pointSnapOf(hover) : undefined;
+      const lines = (): string[] => [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`];
       label(
         mid,
+        // 0.31.0: 글 꼴의 둘째 인자는 코어 기본 꼴(기본 두 줄과 수 꼴 — 앱이 이름표만 옮길 수 있게)
         fm
-          ? fm({ ...measureResult([...a] as V3, [...b] as V3, this.snapOpt ? [this.measureSnaps.get(a), snapB] : null), units: this.sceneRef?.units ?? 'unknown' })
-          : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
+          ? fm(
+              { ...measureResult([...a] as V3, [...b] as V3, this.snapOpt ? [this.measureSnaps.get(a), snapB] : null), units: this.sceneRef?.units ?? 'unknown' },
+              this.formatCore('measure', lines()),
+            )
+          : lines(),
         sa && sb ? [sa, sb] : null,
       );
     }

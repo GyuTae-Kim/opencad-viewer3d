@@ -14,6 +14,7 @@ export type {
   LightingOptions,
   MarkerOptions,
   MeasureFormat,
+  MeasureFormatCore,
   MeasureHoverSnap,
   MeasureInferenceLock,
   LabelFallback,
@@ -89,7 +90,7 @@ export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
 export { type ClosestResult, closestBetween } from './closest';
-export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry } from './annotate';
+export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export type { GpuBufferPart, GpuBufferStats, RenderMode, TextureSource, TextureStats } from './renderer';
