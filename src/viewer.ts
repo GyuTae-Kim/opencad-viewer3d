@@ -590,7 +590,8 @@ export interface MeasurePoint {
 export type { MeasureLabelRect, LabelSpotName, LabelFallback };
 
 /**
- * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리)
+ * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리 —
+ * 0.33.0 snapshotPoints를 켜면 측정 점 표식만 비킨다)
  */
 export interface MeasureLabelAvoid {
   /** 피할 화면 영역(캔버스 왼쪽 위 기준 CSS 화소 — 앱이 그린 십자선·손가락·툴팁 자리). 수가 아니거나 너비·높이가 0 이하인 것은 버린다 */
@@ -605,6 +606,12 @@ export interface MeasureLabelAvoid {
    * rects·pointerRadius 없이 이것만 줘도 된다. 측정 거리 글상자에만 쓴다(앱 측정 덧그림 글상자는 0.30.0 그대로)
    */
   points?: boolean;
+  /**
+   * 0.33.0: points와 함께 true면 그림 저장(toBlob·renderImage)의 측정 거리 글상자도 두 측정 점 표식을 덮는 자리를 옮긴다(기본 꺼짐 — 둘 다 true일 때만).
+   * 규칙은 points와 같고(기본 자리 setMeasureLabelSpot부터, 표식을 덮으면 표식을 피할 원으로 보고 같은 차례로 다시 고른다), 그림에 없는 앱 영역(rects)·커서 둘레(pointerRadius)와
+   * 화면 덧그림 글상자끼리 비키기(0.24.0)는 보지 않는다 — 그것들이 화면 글상자를 옮기지 않았으면 화면 글상자와 같은 자리다. 끄면 0.32.0처럼 그림 저장은 기본 자리다
+   */
+  snapshotPoints?: boolean;
 }
 
 /**
@@ -1294,7 +1301,8 @@ export class Viewer3d {
   /** 마지막으로 화면에 그린 측정 거리 글상자(0.12.0 — CSS 화소, 그리지 않았으면 null) */
   private measureLabel: MeasureLabelRect | null = null;
   /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
-  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number; points: boolean } | null = null;
+  /** 0.13.0 측정 거리 글상자가 비켜 그릴 자리(0.31.0 points, 0.33.0 snapshot — 그림 저장도 표식 비키기, points일 때만 true) */
+  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number; points: boolean; snapshot: boolean } | null = null;
   /** 0.27.0 뷰어 글상자 기본 자리(setMeasureLabelSpot — 준 것만, 없으면 null = 0.26.0 그대로 오른쪽 위) */
   private labelSpot: MeasureLabelSpot | null = null;
   /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
@@ -3556,6 +3564,7 @@ export class Viewer3d {
    * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다.
    * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다.
    * 0.31.0: points: true면 측정 거리 글상자가 두 측정 점 표식을 덮는 자리도 옮긴다(MeasureLabelAvoid.points — 이것만 줘도 켠다)
+   * 0.33.0: snapshotPoints도 true면 그림 저장(toBlob·renderImage)의 측정 거리 글상자도 표식만 같은 규칙으로 비킨다(MeasureLabelAvoid.snapshotPoints)
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
@@ -3566,9 +3575,10 @@ export class Viewer3d {
     }
     const pr = o?.pointerRadius;
     const pointerRadius = typeof pr === 'number' && Number.isFinite(pr) && pr > 0 ? pr : 0;
-    // 0.31.0: 측정 점 표식도 비키기(true일 때만 — 이것만 줘도 켠다)
+    // 0.31.0: 측정 점 표식도 비키기(true일 때만 — 이것만 줘도 켠다). 0.33.0: 그림 저장도 표식 비키기(points와 함께일 때만)
     const points = o?.points === true;
-    const next = rects.length || pointerRadius || points ? { rects, pointerRadius, points } : null;
+    const snapshot = points && o?.snapshotPoints === true;
+    const next = rects.length || pointerRadius || points ? { rects, pointerRadius, points, snapshot } : null;
     const prev = this.labelAvoid;
     const same =
       prev === next ||
@@ -3576,6 +3586,7 @@ export class Viewer3d {
         !!next &&
         prev.pointerRadius === next.pointerRadius &&
         prev.points === next.points &&
+        prev.snapshot === next.snapshot &&
         prev.rects.length === next.rects.length &&
         prev.rects.every((r, i) => {
           const s = next.rects[i]!;
@@ -3606,13 +3617,17 @@ export class Viewer3d {
     return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
-  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null). 0.31.0: 측정 점 표식도 비키면 points: true */
+  /**
+   * 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null). 0.31.0: 측정 점 표식도 비키면 points: true.
+   * 0.33.0: 그림 저장도 표식을 비키면 snapshotPoints: true(points 없이 준 snapshotPoints는 버린다)
+   */
   get measureLabelAvoid(): MeasureLabelAvoid | null {
     const a = this.labelAvoid;
     if (!a) return null;
     const r: MeasureLabelAvoid = { rects: a.rects.map((x) => ({ ...x })) };
     if (a.pointerRadius) r.pointerRadius = a.pointerRadius;
     if (a.points) r.points = true;
+    if (a.snapshot) r.snapshotPoints = true;
     return r;
   }
 
@@ -6660,6 +6675,10 @@ export class Viewer3d {
         this.measureLabel = { x, y, width: w, height: h };
         const d = placeMeasureLabel(at, size, view, null, null, spot);
         if (d.x !== x || d.y !== y) this.labelsShifted = true;
+      } else if (seg && this.labelAvoid?.snapshot) {
+        // 0.33.0 그림 저장도 표식 비키기(setMeasureLabelAvoid의 points·snapshotPoints): 그림에 없는 앱 영역·커서 둘레 없이 두 측정 점 표식만(softBlocks — 화면과 같은 규칙)
+        const soft = seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R }));
+        ({ x, y } = placeMeasureLabel(at, size, view, { rects: [], circles: [], soft, softBlocks: true }, seg, spot));
       } else ({ x, y } = placeMeasureLabel(at, size, view, null, seg, spot));
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = th.measure;
