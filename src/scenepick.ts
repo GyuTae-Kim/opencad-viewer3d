@@ -450,7 +450,8 @@ export interface NearTriangleHit {
 
 /**
  * 커서 tolPx 안의 그물 삼각형(0.22.0 — 측정의 선과 삼각형의 열린 교차): 보이는 그물(숨긴 구간 빼고)에서 화면에 그린 삼각형이 커서에서 tolPx 안인 것.
- * 꼭짓점 하나라도 눈 뒤인 삼각형과 한 단면 평면의 잘린 쪽에 모두 있는 삼각형은 뺀다(일부만 잘린 삼각형은 남는다 — 받는 점마다 keep으로 따진다).
+ * 한 단면 평면의 잘린 쪽에 모두 있는 삼각형은 뺀다(일부만 잘린 삼각형은 남는다 — 받는 점마다 keep으로 따진다).
+ * 0.33.0: 꼭짓점이 눈 뒤인 삼각형(원근에서 아주 가까이 확대한 키 큰 칸)은 가까운 면으로 자른 화면 다각형(nearClipRing)으로 본다 — 0.32.0까지는 뺐다.
  * 가림은 따지지 않는다(후보 점마다 따로 묻는다). 화면 거리 차례로 max개까지. segmentsNear와 같은 원뿔 질의(BVH)를 쓴다
  */
 export function trianglesNear(
@@ -487,20 +488,28 @@ export function trianglesNear(
       if (pl.some((c) => cs.every((p) => planeValue(c, p[0], p[1], p[2]) > 1e-9 * (Math.abs(c[3]) + 1)))) return;
       const s = cs.map((p) => projectToScreen(f, p));
       const s0 = s[0], s1 = s[1], s2 = s[2];
-      if (!s0 || !s1 || !s2) return;
-      const u: V3 = [cs[1][0] - cs[0][0], cs[1][1] - cs[0][1], cs[1][2] - cs[0][2]], w: V3 = [cs[2][0] - cs[0][0], cs[2][1] - cs[0][1], cs[2][2] - cs[0][2]];
+      // 0.33.0: 꼭짓점이 눈 뒤인 삼각형(아주 가까이 확대한 키 큰 칸 — 0.32.0까지는 뺐다)은 가까운 면으로 자른 화면 다각형으로 본다
+      const ring = s0 && s1 && s2 ? [s0, s1, s2] : nearClipRing(f, cs);
+      if (!ring) return;
+      const u: V3 =[cs[1][0] - cs[0][0], cs[1][1] - cs[0][1], cs[1][2] - cs[0][2]], w: V3 = [cs[2][0] - cs[0][0], cs[2][1] - cs[0][1], cs[2][2] - cs[0][2]];
       let nrm: V3 = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
       const nl = Math.hypot(nrm[0], nrm[1], nrm[2]);
       if (!(nl > 0)) return;
       nrm = [nrm[0] / nl, nrm[1] / nl, nrm[2] / nl];
       const toEye: readonly number[] = eye ? [eye[0] - cs[0][0], eye[1] - cs[0][1], eye[2] - cs[0][2]] : f.basis.back;
       if (nrm[0] * toEye[0]! + nrm[1] * toEye[1]! + nrm[2] * toEye[2]! < 0) nrm = [-nrm[0], -nrm[1], -nrm[2]];
-      // 화면에 그린 삼각형 안이면 거리 0(깊이는 커서 광선이 그 평면을 맞는 자리), 밖이면 가장 가까운 변
-      const side = (a: V3, b: V3): number => (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
-      const e0 = side(s0, s1), e1 = side(s1, s2), e2 = side(s2, s0);
+      // 화면에 그린 삼각형(눈 뒤 꼭짓점이 있으면 가까운 면으로 자른 다각형) 안이면 거리 0(깊이는 커서 광선이 그 평면을 맞는 자리), 밖이면 가장 가까운 변
+      // (변은 segmentScreenPick이 가까운 면으로 자른다)
+      const side = (a: readonly number[], b: readonly number[]): number => (b[0]! - a[0]!) * (y - a[1]!) - (b[1]! - a[1]!) * (x - a[0]!);
+      let pos = true, neg = true;
+      for (let k = 0; k < ring.length; k++) {
+        const e = side(ring[k]!, ring[(k + 1) % ring.length]!);
+        if (!(e >= 0)) pos = false;
+        if (!(e <= 0)) neg = false;
+      }
       let distPx = Infinity, depth = Infinity;
       const den = nrm[0] * ray.dir[0] + nrm[1] * ray.dir[1] + nrm[2] * ray.dir[2];
-      if (((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0)) && Math.abs(den) > 1e-12) {
+      if ((pos || neg) && Math.abs(den) > 1e-12) {
         const t = (nrm[0] * (cs[0][0] - ray.origin[0]) + nrm[1] * (cs[0][1] - ray.origin[1]) + nrm[2] * (cs[0][2] - ray.origin[2])) / den;
         distPx = 0;
         depth = viewDepth(f, [ray.origin[0] + ray.dir[0] * t, ray.origin[1] + ray.dir[1] * t, ray.origin[2] + ray.dir[2] * t]);
@@ -540,6 +549,36 @@ export function trianglesNear(
   }
   out.sort((p, q) => p.distPx - q.distPx);
   if (out.length > max) out.length = max;
+  return out;
+}
+
+/**
+ * 꼭짓점이 눈 뒤인 삼각형(원근 — 0.33.0 trianglesNear)을 가까운 면(클립 공간 z + w ≥ 0 — segmentScreenPick과 같은 자르기)으로 잘라 남은 다각형(3~4각, 볼록)의
+ * 화면 자리(x, y — projectToScreen과 같은 식). 평행 투영이거나 남는 것이 없으면 null
+ */
+export function nearClipRing(f: ViewFrame, cs: readonly (readonly number[])[]): [number, number][] | null {
+  if (f.projection !== 'perspective') return null;
+  const m = f.viewProj;
+  const c = cs.map((p) => {
+    const x = p[0]!, y = p[1]!, z = p[2]!;
+    return [m[0]! * x + m[4]! * y + m[8]! * z + m[12]!, m[1]! * x + m[5]! * y + m[9]! * z + m[13]!, m[2]! * x + m[6]! * y + m[10]! * z + m[14]!, m[3]! * x + m[7]! * y + m[11]! * z + m[15]!];
+  });
+  const kept: number[][] = [];
+  for (let k = 0; k < c.length; k++) {
+    const a = c[k]!, b = c[(k + 1) % c.length]!;
+    const da = a[2]! + a[3]!, db = b[2]! + b[3]!;
+    if (da >= 0) kept.push(a);
+    if (da >= 0 !== db >= 0) {
+      const t = da / (da - db);
+      kept.push(a.map((v, i) => v + (b[i]! - v) * t));
+    }
+  }
+  if (kept.length < 3) return null;
+  const out: [number, number][] = [];
+  for (const q of kept) {
+    if (!(q[3]! > 1e-12)) return null;
+    out.push([((q[0]! / q[3]! + 1) / 2) * f.width, ((1 - q[1]! / q[3]!) / 2) * f.height]);
+  }
   return out;
 }
 
