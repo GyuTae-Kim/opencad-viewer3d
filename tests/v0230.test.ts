@@ -272,11 +272,12 @@ describe("Viewer3d: 원호 꼭대기를 현과 거의 나란히 스치는 첫 �
     return { plus, minus, calls: calls.filter((c) => c.open).length };
   }
 
-  it('확대 12단 가운데 8단에서 두 교차 모두 붙는다(앞 1단은 틈이 붙잡기 거리보다 넓고, 뒤는 틈이 반 화소 아래거나 꼭짓점이 가깝다)', () => {
-    // 0.20.0(NC 23차 기록)은 어느 단에서도 붙지 않았다 — 받는 점이 코어 점(꼭짓점 위)에서 붙잡기 거리 안이어야 해서 붙을 자리가 꼭짓점 둘레뿐이었다
+  it('확대 12단 가운데 9단에서 두 교차 모두 붙는다(뒤는 틈이 반 화소 아래거나 꼭짓점이 가깝다 — 0.35.0부터 틈이 붙잡기 거리보다 넓은 앞 1단도 붙는다)', () => {
+    // 0.20.0(NC 23차 기록)은 어느 단에서도 붙지 않았다 — 받는 점이 코어 점(꼭짓점 위)에서 붙잡기 거리 안이어야 해서 붙을 자리가 꼭짓점 둘레뿐이었다.
+    // 0.34.0까지 앞 1단(1화소 0.002 — 틈 0.023이 붙잡기 거리의 세계 길이 0.02보다 넓다)은 'a'였다. 0.35.0은 커서가 그 토막 활꼴 쪽이면 그 길이를 보지 않는다(v0350edge.test.ts)
     const got = [0.0001, 0.001, 0.003, 0.01].map(sweep);
-    expect(got.map((g) => g.plus)).toEqual(['aooooooooaav', 'aooooooooaav', 'aooooooooavv', 'ooooooooavvv']);
-    expect(got.map((g) => g.minus)).toEqual(['aooooooooaaa', 'aooooooooaav', 'aooooooooaav', 'ooooooooavvv']);
+    expect(got.map((g) => g.plus)).toEqual(['oooooooooaav', 'oooooooooaav', 'oooooooooavv', 'ooooooooavvv']);
+    expect(got.map((g) => g.minus)).toEqual(['oooooooooaaa', 'oooooooooaav', 'oooooooooaav', 'ooooooooavvv']);
     // 앱 함수는 기억으로 단마다 몇 번만 불린다(12단 × 두 자리를 가리키는 동안)
     for (const g of got) expect(g.calls).toBeLessThanOrEqual(3 * 12);
   });

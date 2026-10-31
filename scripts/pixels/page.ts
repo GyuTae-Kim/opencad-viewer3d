@@ -30,9 +30,11 @@ type V = Viewer3d & Record<string, any>;
  * 그 선택이 없는 판의 syntheticScene은 Float32 그대로라 compactNeed로 건너뛴다),
  * apex = 반지름 25 원호 33토막 꺾은선과 그 끝에서 (40, 25 − 0.001)까지 급속 이동 선분뿐인 자료(0.33.0 refineEnds — NC 23차 재현, 첫 점 X축이 원호 꼭대기를 스친다),
  * hole = 반투명 판(400 × 300 × 18)에 세운 구멍(반지름 5, 20토막 원기둥 고체)·누운 구멍(반지름 4, 16토막)과 판 윗면의 기운 기준 선분(27°)뿐인 자료
- * (0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차 — NC 35차 재현, tests/v0340hole.test.ts와 같은 장면)
+ * (0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차 — NC 35차 재현, tests/v0340hole.test.ts와 같은 장면),
+ * ring12 = 12토막 원(반지름 30, z 0)뿐인 자료(0.35.0 아주 가까이 본 꺾은선 활꼴 — tests/v0350edge.test.ts와 같은 장면),
+ * lowcyl = 낮은 원기둥 옆면(반지름 30, 높이 60, 50토막 — 칸 0이 −90°를 가운데에)뿐인 자료(0.35.0 한 칸의 두 삼각형 위 두 번 스침 — tests/v0350twice.test.ts와 같은 장면)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole' | 'ring12' | 'lowcyl';
 
 interface Ctx {
   v: V;
@@ -82,6 +84,8 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   let s = scenes.get(d);
   if (!s && d === 'apex') scenes.set(d, (s = apexScene()));
   if (!s && d === 'hole') scenes.set(d, (s = holeScene()));
+  if (!s && d === 'ring12') scenes.set(d, (s = ring12Scene()));
+  if (!s && d === 'lowcyl') scenes.set(d, (s = lowCylScene()));
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
@@ -6683,6 +6687,160 @@ const holeNormalValues: ValueSet = {
   },
 };
 
+// ───────────── 0.35.0 아주 가까이 본 꺾은선 활꼴·한 칸의 두 삼각형 위 두 번 스침 ─────────────
+const R12_RAD = Math.PI / 180;
+/** 12토막 원(반지름 30, z 0, 꼭짓점 15° + 30°·k — 꼭대기 토막 75°~105°의 현 y = 28.98, 활꼴 높이 1.02) */
+const r12V = (k: number): number[] => [30 * Math.cos((15 + 30 * k) * R12_RAD), 30 * Math.sin((15 + 30 * k) * R12_RAD), 0];
+function ring12Scene(): Scene3d {
+  const P: number[] = [];
+  for (let k = 0; k < 12; k++) P.push(...r12V(k), ...r12V(k + 1));
+  return { name: 'ring12', units: 'mm', meshes: [], lines: [{ id: '원', positions: new Float32Array(P), segmentIds: new Uint32Array(Array.from({ length: 12 }, (_, k) => 100 + k)), color: [0.4, 0.85, 1, 1] }], points: [] };
+}
+/** 낮은 원기둥 옆면(반지름 30, 높이 60, 50토막 — 칸 0이 −90°를 가운데에, 칸마다 [아래 k, 아래 k + 1, 위 k]·[위 k, 아래 k + 1, 위 k + 1]) */
+const LC_STEP = (360 / 50) * R12_RAD;
+function lowCylScene(): Scene3d {
+  const P: number[] = [], I: number[] = [];
+  for (let k = 0; k <= 50; k++) {
+    const a = -90 * R12_RAD - LC_STEP / 2 + LC_STEP * k;
+    P.push(30 * Math.cos(a), 30 * Math.sin(a), 0, 30 * Math.cos(a), 30 * Math.sin(a), 60);
+  }
+  for (let k = 0; k < 50; k++) I.push(2 * k, 2 * k + 2, 2 * k + 1, 2 * k + 1, 2 * k + 2, 2 * k + 3);
+  return { name: 'lowcyl', units: 'mm', meshes: [{ id: '원기둥', positions: new Float32Array(P), indices: new Uint32Array(I), color: [0.6, 0.65, 0.7, 1] }], lines: [], points: [] };
+}
+/** 직선(o, d)과 원(중심 0, 반지름 r — z 평면에 비춤)의 교차 가운데 near에 가까운 근 */
+function r12Root(o: readonly number[], d: readonly number[], near: readonly number[], r: number): number[] | null {
+  const A = d[0]! * d[0]! + d[1]! * d[1]!, B = o[0]! * d[0]! + o[1]! * d[1]!, C = o[0]! * o[0]! + o[1]! * o[1]! - r * r;
+  const disc = B * B - A * C;
+  if (!(A > 1e-12) || disc < 0) return null;
+  const qs = [(-B - Math.sqrt(disc)) / A, (-B + Math.sqrt(disc)) / A].map((s) => [o[0]! + d[0]! * s, o[1]! + d[1]! * s, o[2]! + d[2]! * s]);
+  const g = (p: number[]): number => Math.hypot(p[0]! - near[0]!, p[1]! - near[1]!, p[2]! - near[2]!);
+  return g(qs[0]!) <= g(qs[1]!) ? qs[0]! : qs[1]!;
+}
+const R12_INF = { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true };
+/** 첫 점(앱 점)을 찍는다 — 맞춰 보기에서 */
+function r12First(c: Ctx, snap: Record<string, unknown>, first: number[]): void {
+  const { v } = c;
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ points: [{ point: first, kind: 'point' }], inference: R12_INF, ...snap });
+  v.renderNow();
+  const s = c.at(first);
+  if (s) {
+    c.hover(s.x + 1, s.y);
+    c.click(s.x + 1, s.y);
+  }
+  v.renderNow();
+}
+/** 점 둘레 (2n + 1)² 자리(step 화소, 0.31·0.17화소 비킴)의 미리 보기: 종류·점·토막·면·다듬었는지 */
+function r12Grid(c: Ctx, p: readonly number[], n: number, step: number): unknown[] {
+  const { v } = c;
+  const s = c.at(p);
+  if (!s) return [null];
+  const rows: unknown[] = [];
+  for (let j = -n; j <= n; j++)
+    for (let i = -n; i <= n; i++) {
+      c.hover(s.x + i * step + 0.31, s.y + j * step + 0.17);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      rows.push(h ? [h.snap ?? null, r10s(h.point), h.segment ? `${h.segment.id}#${h.segment.index}` : null, h.face ? h.face.index : null, !!h.refined] : null);
+    }
+  return rows;
+}
+function r12Done(v: V): void {
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setView('seIso', false);
+  v.fit(false);
+}
+const R12_XI = Math.sqrt(900 - 29.5 * 29.5);
+/** 위에서 원 꼭대기 둘레를 1화소 = w로 */
+function r12Zoom(c: Ctx, w: number): void {
+  const { v } = c;
+  v.setView('top', false);
+  v.fit(false);
+  v.renderNow();
+  const hw = (c.w / 2) * w;
+  const a = c.at([-hw, 29.5 - 0.75 * hw, 0]), b = c.at([hw, 29.5 + 0.75 * hw, 0]);
+  if (a && b) v.zoomToRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y), false);
+  v.renderNow();
+}
+const r12Refine = (i: any): number[] | null =>
+  i.kind !== 'axisEdge' || !i.line || i.segment.id !== '원' || Math.abs(i.line.dir[2]) > 1e-12 || Math.abs(i.line.origin[2]) > 1e-9 ? null : r12Root(i.line.origin, i.line.dir, i.point, 30);
+/**
+ * 0.35.0 아주 가까이 본 꺾은선 활꼴이 있는 판인지 — 확대 0.04(960 × 600에서 1화소 약 0.048 — 틈 0.52가 약 11화소)에서 첫 점 X축(y = 29.5)의 교차 둘레가 원 위 교차인지
+ * (없는 판은 축 위 커서 자리)
+ */
+const v0350lens: Need = (v, c) => {
+  const why = fn('zoomToRect', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { refine: r12Refine }, [-40, 29.5, 0]);
+  r12Zoom(c, 0.04);
+  const s = c.at([R12_XI, 29.5, 0]);
+  if (s) c.hover(s.x + 1, s.y + 2);
+  v.renderNow();
+  const ok = !!v.measureHoverSnap?.refined;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.35.0 아주 가까이 본 꺾은선 활꼴의 열린 교차(커서가 토막 활꼴 쪽)';
+};
+/** 0.35.0 값(ring12 — 새 값): 12토막 원의 활꼴을 지나는 첫 점 X축을 확대 0.02·0.04·0.1로 위에서 본 두 교차 둘레 5 × 5(2화소 칸) 미리 보기 */
+const ringLensValues: ValueSet = {
+  name: 'ring12-measure-lens',
+  data: 'ring12',
+  needs: v0350lens,
+  run: (c) => {
+    const out: unknown[] = [];
+    r12First(c, { refine: r12Refine }, [-40, 29.5, 0]);
+    for (const w of [0.02, 0.04, 0.1]) {
+      r12Zoom(c, w);
+      for (const sgn of [-1, 1]) out.push([w, sgn, r12Grid(c, [sgn * R12_XI, 29.5, 0], 2, 2)]);
+    }
+    r12Done(c.v);
+    return out;
+  },
+};
+/** 낮은 원기둥 칸 0을 첫 점 X축이 높이 z에서 스치는 자리: y = −30·cos(칸 반각의 ½), 두 교차 x = ±30·sin(칸 반각의 ½) */
+const LC_W = LC_STEP / 4;
+const lcRefine = (i: any): number[] | null => (i.face?.id === '원기둥' ? r12Root(i.line.origin, i.line.dir, i.point, 30) : null);
+/** 0.35.0 칸 둘째 힌트가 있는 판인지 — 높이 5에서 무게중심 쪽이 아닌 교차(오른쪽) 둘레가 원기둥 위 교차인지 */
+const v0350cell: Need = (v, c) => {
+  const why = fn('setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  const LD = 30 * Math.cos(LC_W);
+  r12First(c, { refineFace: lcRefine }, [-45, -LD, 5]);
+  const Q: [number, number, number] = [30 * Math.sin(LC_W), -LD, 5];
+  v.setCamera({ ...v.getCamera(), target: Q, distance: 15, yaw: Math.PI / 18, pitch: 0.25, projection: 'perspective' });
+  v.renderNow();
+  const s = c.at(Q);
+  if (s) c.hover(s.x + 1.3, s.y + 2.1);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && Math.abs(Math.hypot(h.point[0], h.point[1]) - 30) < 1e-9;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.35.0 한 칸의 두 삼각형 위 두 번 스침의 둘째 힌트(cellTwice)';
+};
+/** 0.35.0 값(lowcyl — 새 값): 높이 5·30·55의 첫 점 X축이 칸 0을 스치는 두 교차 둘레 5 × 5(2화소 칸) 미리 보기(거리 15) */
+const lowCellValues: ValueSet = {
+  name: 'lowcyl-measure-twice',
+  data: 'lowcyl',
+  needs: v0350cell,
+  run: (c) => {
+    const { v } = c;
+    const out: unknown[] = [];
+    const LD = 30 * Math.cos(LC_W);
+    for (const z of [5, 30, 55]) {
+      r12First(c, { refineFace: lcRefine }, [-45, -LD, z]);
+      for (const sgn of [-1, 1]) {
+        const Q: [number, number, number] = [sgn * 30 * Math.sin(LC_W), -LD, z];
+        v.setCamera({ ...v.getCamera(), target: Q, distance: 15, yaw: Math.PI / 18, pitch: 0.25, projection: 'perspective' });
+        v.renderNow();
+        out.push([z, sgn, r12Grid(c, Q, 2, 2)]);
+      }
+      r12Done(v);
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -6766,6 +6924,8 @@ const VALUES: ValueSet[] = [
   itemLookValues,
   holeNearValues,
   holeNormalValues,
+  ringLensValues,
+  lowCellValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

@@ -685,7 +685,8 @@ function lineSegClosest(
 /**
  * 선과 꺾은선 토막의 열린 교차 후보(0.20.0, 순수): 선 lines(지나는 점 from·방향 dir)가 토막 segs(커서 둘레 선분·윤곽선)와 3D로 만나지 않지만
  * (가장 가까운 두 점 사이가 그 깊이의 화면 반 화소를 넘는다 — 만나면 axisEdgeSnap·trackEdgeSnap·lockEdgeSnap이 맡는다) 그 토막의 활꼴을 지날 만큼 가까운 것.
- * - 가까움: 선과 토막(범위 안) 사이 거리가 min(OPEN_EDGE_CHORD × 토막 길이, 커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안(0.15.0 넓힌 교차와 같은 근거)
+ * - 가까움: 선과 토막(범위 안) 사이 거리가 min(OPEN_EDGE_CHORD × 토막 길이, 커서 쪽 깊이에서 붙잡기 거리 snapPx의 세계 길이) 안(0.15.0 넓힌 교차와 같은 근거).
+ *   0.35.0: 커서가 그 토막의 활꼴 쪽이면(cursorInLens) 붙잡기 거리의 세계 길이는 보지 않는다 — 아주 가까이 확대하면 활꼴 높이가 그 길이보다 크다
  * - 코어 점은 선 위에서 토막에 가장 가까운 점이다. 다른 평면의 곡선(축이 곡선 평면을 뚫는다)이면 곡선 위 교차와 거의 같은 자리이고,
  *   같은 평면에서 곡선에 거의 닿듯 지나가면(활꼴만 지난다) 토막 끝 쪽이다. 커서와 상관없이 선과 토막으로만 정해진다(앱 결과를 기억할 수 있게)
  * - 빼는 것: 선이 지나는 점 자리(그 점이 토막 둘레 — 첫 점이 곡선 위면 그 점에서 만난다), 커서가 지나는 점의 화면 자리 snapPx 안인 선(axisEdgeSnap과 같다),
@@ -709,6 +710,7 @@ export function openEdgeCandidates<S extends TrackSegment>(
 ): OpenEdgeCandidate<S>[] {
   const out: OpenEdgeCandidate<S>[] = [];
   if (!lines.length || !segs.length) return out;
+  let ray: { origin: V3; dir: V3 } | undefined;
   for (let li = 0; li < lines.length; li++) {
     const { from: P, dir } = lines[li]!;
     const e = unitDir([0, 0, 0], dir);
@@ -717,7 +719,10 @@ export function openEdgeCandidates<S extends TrackSegment>(
       const c = lineSegClosest(P, e, s.a, s.b);
       if (!c) continue;
       const tol = meetTol(f, c.m, s.wpp);
-      if (!(c.gap > tol) || !(c.gap <= Math.min(OPEN_EDGE_CHORD * dist3(s.a, s.b), snapPx * s.wpp)) || dist3(c.m, P) <= tol) continue;
+      if (!(c.gap > tol) || !(c.gap <= OPEN_EDGE_CHORD * dist3(s.a, s.b)) || dist3(c.m, P) <= tol) continue;
+      // 0.35.0: 그 틈이 붙잡기 거리의 세계 길이(snapPx × 커서 쪽 깊이의 화소 세계 길이)를 넘어도 커서가 그 토막의 활꼴 쪽(cursorInLens)이면 남긴다 —
+      // 아주 가까이 확대하면 활꼴 높이가 붙잡기 거리의 세계 길이보다 크다(0.34.0 면의 열린 교차와 같은 근거). 토막은 이미 화면에서 커서 snapPx 안이다(커서 둘레 선분)
+      if (!(c.gap <= snapPx * s.wpp) && !cursorInLens((ray ??= screenRay(f, x, y)), s.a, s.b, c.m, OPEN_EDGE_CHORD * dist3(s.a, s.b))) continue;
       // 가장 가까운 자리가 토막 끝 밖이면 그 끝, 나란하면 두 끝을 함께 쓰는 이웃 토막을 선이 3D로 지나는지
       if (c.clamped && throughNeighbor(f, P, e, s, segs, c.parallel ? [s.a, s.b] : [c.t === 0 ? s.a : s.b], tol)) continue;
       // 0.23.0: 받는 점은 선 위·그 토막 범위 안·커서에서 snapPx 안이다 — 선에서 그 범위인 조각이 화면에서 커서 snapPx 밖이면 앱에 묻지 않는다
@@ -748,6 +753,31 @@ export function openEdgeCandidates<S extends TrackSegment>(
   }
   // 안정 정렬(같은 거리면 넣은 차례 — 선 → 토막, 한 토막에서는 0.20.0 힌트 → 둘째 힌트)
   return out.sort((p, q) => p.distPx - q.distPx);
+}
+
+/**
+ * 커서 광선(origin·단위 dir)이 토막 a → b의 활꼴 쪽을 지나는지(0.35.0 — 아주 가까이 확대한 열린 교차): 현과 선 위 가장 가까운 점 m이 놓인 평면(같은 평면 곡선이면
+ * 그 곡선 평면)을 광선이 맞는 자리 C가, 현에 내린 발이 토막 안이고 현에서 m 쪽으로 h(활꼴 높이 한도) 안이면 true. m이 현의 직선 위거나 광선이 그 평면과 나란하면 false
+ */
+export function cursorInLens(ray: { origin: readonly number[]; dir: readonly number[] }, a: readonly number[], b: readonly number[], m: readonly number[], h: number): boolean {
+  const g = sub3(b, a);
+  const gg = dot3(g, g);
+  if (!(gg > 0)) return false;
+  // m에서 현의 직선으로 내린 발과 그 수직(활꼴 쪽)
+  const tm = dot3(sub3(m, a), g) / gg;
+  const side = sub3(m, [a[0]! + g[0] * tm, a[1]! + g[1] * tm, a[2]! + g[2] * tm]);
+  const sl = Math.hypot(side[0], side[1], side[2]);
+  const n = cross3(g, side);
+  const nn = Math.hypot(n[0], n[1], n[2]);
+  const den = dot3(n, ray.dir);
+  if (!(sl > 0) || !(nn > 0) || !(Math.abs(den) > 1e-12 * nn)) return false;
+  const s = dot3(n, sub3(a, ray.origin)) / den;
+  if (!(s >= 0)) return false;
+  const C = [ray.origin[0]! + ray.dir[0]! * s, ray.origin[1]! + ray.dir[1]! * s, ray.origin[2]! + ray.dir[2]! * s];
+  const tc = dot3(sub3(C, a), g) / gg;
+  if (!(tc >= 0 && tc <= 1)) return false;
+  const v = dot3(sub3(C, [a[0]! + g[0] * tc, a[1]! + g[1] * tc, a[2]! + g[2] * tc]), side) / sl;
+  return v >= 0 && v <= h;
 }
 
 /** 토막 s의 끝 ends(세계 점)를 함께 쓰는 이웃 토막(segs 안)을 선 P + t·e가 3D로 지나는지(0.20.0 열린 교차에서 뺄 때) */
@@ -1111,7 +1141,8 @@ export function rayHitsTriangle(ray: { origin: readonly number[]; dir: readonly 
  * - 0.24.0 두 번 지날 수 있는 삼각형(twice — faceTwice): 매끈한 이웃(tris 안, 변을 함께 쓰고 법선 사잇각 45° 안)과 사이의 변 법선·그 삼각형 법선이 선 방향과 이루는
  *   내적이 양·음 모두 있고(곡면이 선과 나란해지는 자리가 그 삼각형을 지난다) 선이 이웃의 먼 꼭짓점 쪽(곡면 안쪽)만이 아니면, 선에서 그 조각 자리인 조각의
  *   두 끝(reachPx의 조각 [s0, s1])을 같은 선·삼각형의 둘째 힌트(twin)로 더한다. 두 교차는 그 조각 안이라 각 끝에 가까운 쪽이 따로 온다(0.22.0 선분의 둘째 힌트와 같은 틀).
- *   앞의 후보(무게중심 쪽 힌트)는 0.22.0 그대로다. 이웃은 tris와 around(t)(주면 — 뷰어는 커서에서 먼 이웃을 그 변 가운데 화면 자리에서 모은다)에서 찾는다
+ *   앞의 후보(무게중심 쪽 힌트)는 0.22.0 그대로다. 이웃은 tris와 around(t)(주면 — 뷰어는 커서에서 먼 이웃을 그 변 가운데 화면 자리에서 모은다)에서 찾는다.
+ *   0.35.0: 그것으로 두 번 지날 수 없으면 같은 평면 이웃과 묶은 칸으로 두 근을 어림해 둘 다 그 삼각형 위일 때도 둘째 힌트를 둔다(cellTwice — 원기둥 옆면 칸을 대각선으로 나눈 자리)
  * 커서에 가까운 코어 점부터(같으면 선 → 삼각형 차례). 다듬기 손잡이를 부를 차례와 같다
  */
 export function openFaceCandidates<T extends TrackTriangle>(
@@ -1182,7 +1213,11 @@ export function openFaceCandidates<T extends TrackTriangle>(
       if (d === null) continue;
       // 0.24.0 두 번 지날 수 있는 삼각형: 선이 곡면에 접하는 방향이 그 삼각형 안이면(변 법선과 선 방향의 내적이 부호를 바꾼다) 곡면 조각을 들어가고 나오는 두 교차가 있을 수 있다.
       // 변 법선은 매끈한 이웃과 45° 안이라 그 삼각형 법선에서 22.5° 안이다 — 선이 그보다 가파르면 이웃을 찾지 않는다
-      const twice = Math.abs(dot3(triNormal(t.corners), e)) < TANGENT_STEEP && faceTwice(e, t, around ? [...tris, ...around(t)] : tris, m, tol);
+      // 0.35.0: 그것으로 두 번 지날 수 없으면 같은 평면 이웃과 묶은 칸(cellTwice — 두 근을 어림해 둘 다 그 삼각형 위일 때만)으로 한 번 더 본다
+      const pool = around ? [...tris, ...around(t)] : tris;
+      const twice =
+        Math.abs(dot3(triNormal(t.corners), e)) < TANGENT_STEEP &&
+        (faceTwice(e, t, pool, m, tol) || cellTwice(e, m, t, pool, tol, around ? (n) => around(n as T) : null));
       const o: OpenFaceCandidate<T> = { p: m, line: li, tri: t, gap: c.gap, distPx: d, reachPx: reach };
       if (twice) o.twice = true;
       out.push(o);
@@ -1262,6 +1297,153 @@ function faceTwice(e: readonly number[], t: TrackTriangle, tris: readonly TrackT
   }
   if (dots.length < 2 || (same && !other)) return false;
   return Math.max(...dots) > TANGENT_EPS && Math.min(...dots) < -TANGENT_EPS;
+}
+
+/** 이웃 삼각형을 같은 평면(한 칸을 나눈 두 삼각형)으로 볼 법선 사잇각의 코사인(0.35.0 — 약 0.008°: float32 꼭짓점 반올림보다 넉넉하고 곡면을 나눈 이웃보다 좁다) */
+const FLAT_COS = 1 - 1e-8;
+/** 칸의 두 휘는 변을 마주 보는 짝으로 볼 방향 코사인(0.35.0 — 사잇각 약 25° 안: 원기둥 옆면 칸·구의 위도 띠 칸) */
+const CELL_EDGE_COS = 0.9;
+/** cellTwice가 선을 따라 곡면 높이 어림과 선 높이를 견주는 자리 수 */
+const CELL_SAMPLES = 96;
+
+/**
+ * 같은 평면 이웃과 묶은 칸에서 선이 그 삼각형 위 곡면 조각을 두 번 지나는지(0.35.0 — STEP 37차, 0.24.0 faceTwice가 아니라고 본 뒤에만).
+ * 원기둥 옆면 칸을 대각선으로 나누면 삼각형마다 휘는 변(매끈한 이웃과 함께 쓰는 변)이 하나뿐이라, 칸과 나란히 지나는 선은 faceTwice에서 부호 하나만 얻는다.
+ * - 칸: t와 변을 함께 쓰는 같은 평면 이웃 nb(법선 사잇각 FLAT_COS 안), t의 휘는 변 E₁(이웃 n₁)과 nb의 다른 두 변 가운데 휘는 변 E₂(이웃 n₂ — tris와 more(nb)에서) 가운데
+ *   방향이 가장 나란한 짝(코사인 CELL_EDGE_COS 넘게). 없으면 false
+ * - 곡면 어림: 두 변 법선(t 법선 + 이웃 법선) 사이각 θ만큼 칸 너비 W에서 도는 원호 — 활꼴 높이 S = W/2 · tan(θ/4), 칸 안 자리 u(E₁에서 0, E₂에서 1)의 높이 4S·u(1 − u),
+ *   볼록한 쪽은 n₁의 먼 꼭짓점의 반대쪽. 선(힌트 m을 지난다)의 그 평면 위 높이와 견줘 칸 안에서 두 근을 어림한다
+ * - 두 근을 그 평면에 내린 발이 모두 t 안일 때만 true — 두 근이 칸의 두 삼각형에 나뉘면(0.24.0 시험 높이 3) false
+ */
+function cellTwice(
+  e: readonly number[],
+  m: readonly number[],
+  t: TrackTriangle,
+  tris: readonly TrackTriangle[],
+  tol: number,
+  more: ((n: TrackTriangle) => readonly TrackTriangle[]) | null,
+): boolean {
+  const nt = triNormal(t.corners);
+  if (!(Math.hypot(nt[0], nt[1], nt[2]) > 0)) return false;
+  const A = t.corners[0]!;
+  const unit = (v: readonly number[]): V3 => {
+    const l = Math.hypot(v[0]!, v[1]!, v[2]!);
+    return [v[0]! / l, v[1]! / l, v[2]! / l];
+  };
+  const shared = (n: TrackTriangle, a: readonly number[], b: readonly number[]): [number, number] | null => {
+    if (n.corners.length < 3) return null;
+    const ia = n.corners.findIndex((W) => dist3(W, a) <= tol), ib = n.corners.findIndex((W) => dist3(W, b) <= tol);
+    return ia < 0 || ib < 0 || ia === ib ? null : [ia, ib];
+  };
+  interface Curved {
+    a: readonly number[];
+    b: readonly number[];
+    n: V3;
+    far: readonly number[];
+  }
+  /** 이웃 n이 변 a·b를 함께 쓰는 매끈한(같은 평면은 아닌) 이웃이면 그 변 */
+  const curvedOf = (n: TrackTriangle, a: readonly number[], b: readonly number[]): Curved | null => {
+    const s = shared(n, a, b);
+    if (!s) return null;
+    let nn = triNormal(n.corners);
+    const cos = dot3(nn, nt);
+    if (Math.abs(cos) < SMOOTH_COS || Math.abs(cos) >= FLAT_COS) return null;
+    if (cos < 0) nn = [-nn[0], -nn[1], -nn[2]];
+    return { a, b, n: nn, far: n.corners.find((_, i) => i !== s[0] && i !== s[1])! };
+  };
+  let mate: { nb: TrackTriangle; ia: number; ib: number } | null = null;
+  const own: Curved[] = [];
+  for (let k = 0; k < 3; k++) {
+    const a = t.corners[k]!, b = t.corners[(k + 1) % 3]!;
+    for (const n of tris) {
+      if (n === t) continue;
+      const s = shared(n, a, b);
+      if (!s) continue;
+      if (!mate && Math.abs(dot3(triNormal(n.corners), nt)) >= FLAT_COS) mate = { nb: n, ia: s[0], ib: s[1] };
+      const c = curvedOf(n, a, b);
+      if (c) own.push(c);
+    }
+  }
+  if (!mate || !own.length) return false;
+  const { nb, ia, ib } = mate;
+  const pool = more ? [...tris, ...more(nb)] : tris;
+  const theirs: Curved[] = [];
+  for (let k = 0; k < 3; k++) {
+    const j = (k + 1) % 3;
+    if ((k === ia && j === ib) || (k === ib && j === ia)) continue;
+    const a = nb.corners[k]!, b = nb.corners[j]!;
+    for (const n of pool) {
+      if (n === t || n === nb) continue;
+      const c = curvedOf(n, a, b);
+      if (c) theirs.push(c);
+    }
+  }
+  // 마주 보는 두 휘는 변(방향이 가장 나란한 짝)
+  let best: [Curved, Curved] | null = null, bestCos = CELL_EDGE_COS;
+  for (const c1 of own)
+    for (const c2 of theirs) {
+      const k = Math.abs(dot3(unit(sub3(c1.b, c1.a)), unit(sub3(c2.b, c2.a))));
+      if (k > bestCos) {
+        bestCos = k;
+        best = [c1, c2];
+      }
+    }
+  if (!best) return false;
+  const [E1, E2] = best;
+  const N1 = unit([nt[0] + E1.n[0], nt[1] + E1.n[1], nt[2] + E1.n[2]]), N2 = unit([nt[0] + E2.n[0], nt[1] + E2.n[1], nt[2] + E2.n[2]]);
+  const theta = Math.acos(Math.min(1, Math.max(-1, dot3(N1, N2))));
+  const kfar = dot3(nt, sub3(E1.far, A));
+  if (!(theta > 1e-9) || !(Math.abs(kfar) > tol)) return false;
+  // 볼록한 쪽(곡면 조각이 있는 쪽): 이웃의 먼 꼭짓점 반대쪽
+  const sigma = kfar > 0 ? -1 : 1;
+  const centroid = (c: readonly (readonly number[])[]): V3 => [(c[0]![0]! + c[1]![0]! + c[2]![0]!) / 3, (c[0]![1]! + c[1]![1]! + c[2]![1]!) / 3, (c[0]![2]! + c[1]![2]! + c[2]![2]!) / 3];
+  // 평면 안에서 각 휘는 변의 직선까지 거리(칸 안쪽이 양) — 선 m + s·e를 따라 1차식
+  const inward = (E: Curved, toward: readonly number[]): V3 => {
+    let q = cross3(nt, unit(sub3(E.b, E.a)));
+    if (dot3(q, sub3(toward, E.a)) < 0) q = [-q[0], -q[1], -q[2]];
+    return q;
+  };
+  const m1 = inward(E1, centroid(nb.corners)), m2 = inward(E2, centroid(t.corners));
+  const d10 = dot3(sub3(m, E1.a), m1), d1s = dot3(e, m1), d20 = dot3(sub3(m, E2.a), m2), d2s = dot3(e, m2);
+  // d1 ≥ 0, d2 ≥ 0인 선의 구간
+  let lo = -Infinity, hi = Infinity;
+  for (const [c0, c1] of [
+    [d10, d1s],
+    [d20, d2s],
+  ] as const) {
+    if (Math.abs(c1) <= 1e-12) {
+      if (c0 < 0) return false;
+      continue;
+    }
+    const s = -c0 / c1;
+    if (c1 > 0) lo = Math.max(lo, s);
+    else hi = Math.min(hi, s);
+  }
+  if (!(Number.isFinite(lo) && Number.isFinite(hi) && hi > lo)) return false;
+  const h0 = dot3(sub3(m, A), nt) * sigma, hs = dot3(e, nt) * sigma;
+  const tq = Math.tan(theta / 4);
+  // 곡면 높이 어림 − 선 높이(양이면 선이 칸과 곡면 사이 — 활꼴 안)
+  const F = (s: number): number => {
+    const d1 = Math.max(0, d10 + d1s * s), d2 = Math.max(0, d20 + d2s * s), W = d1 + d2;
+    const u = W > 0 ? d1 / W : 0;
+    return 2 * W * tq * u * (1 - u) - (h0 + hs * s);
+  };
+  const roots: number[] = [];
+  let sp = lo, fp = F(lo);
+  for (let i = 1; i <= CELL_SAMPLES; i++) {
+    const s = lo + ((hi - lo) * i) / CELL_SAMPLES, fs = F(s);
+    if ((fp < 0) !== (fs < 0)) roots.push(fp === fs ? s : sp + ((s - sp) * fp) / (fp - fs));
+    sp = s;
+    fp = fs;
+  }
+  if (roots.length !== 2) return false;
+  // 두 근을 그 평면에 내린 발이 모두 t 안(반올림 허용)
+  return roots.every((s) => {
+    const X: V3 = [m[0]! + e[0]! * s, m[1]! + e[1]! * s, m[2]! + e[2]! * s];
+    const h = dot3(sub3(X, A), nt);
+    const w = barycentric([X[0] - nt[0] * h, X[1] - nt[1] * h, X[2] - nt[2] * h], t.corners[0]!, t.corners[1]!, t.corners[2]!);
+    return !!w && w[0] >= -1e-9 && w[1] >= -1e-9 && w[2] >= -1e-9;
+  });
 }
 
 /**
