@@ -124,6 +124,21 @@ export function annotationGeometry(an: Annotation3d): AnnotationGeometry | null 
 }
 
 /**
+ * 측정 글의 소수 자릿수(0.31.0 — 뷰어 기본 측정 글·덧그림 글과 같은 규칙, 순수): 범위 대각선 d에서 max(0, min(6, 5 − ⌊log10 d⌋)).
+ * 크기 0인 범위는 d = 1(5자리), 빈 범위(최소가 +∞)는 0자리. 뷰어는 장면 범위(Scene3d.bounds, 없으면 그물·선분·점 범위)를 준다
+ */
+export function measureDigits(box: { min: readonly number[]; max: readonly number[] }): number {
+  const diag = Math.max(length(sub(box.max, box.min)) || 1, 1e-9);
+  return Math.max(0, Math.min(6, 5 - Math.floor(Math.log10(diag))));
+}
+
+/** 측정 글의 수(0.31.0, 순수): 소수 digits자리(toFixed — 언어와 상관없이 소수점), 반올림해 "-0.000"이 되면 "0.000" */
+export function measureNumber(v: number, digits: number): string {
+  const s = v.toFixed(digits);
+  return s === `-${(0).toFixed(digits)}` ? (0).toFixed(digits) : s;
+}
+
+/**
  * 덧그림 글(label이 있으면 그것을 줄로 나눠). 없으면 값으로: distance = "12.5 mm", angle = "90.0°", radius = "R 6 mm",
  * point = "X … Y … Z …". fmt는 길이 숫자 꼴(뷰어의 장면 크기 맞춤 자릿수)
  */

@@ -45,7 +45,7 @@ import {
 } from './camera';
 import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
-import { type V3, dot, hasOrigin, length, mat4Mul, modelMatrix, placeMatrix, sub, transform4, transformPoint, translation } from './math';
+import { type V3, dot, hasOrigin, mat4Mul, modelMatrix, placeMatrix, transform4, transformPoint, translation } from './math';
 import { type PickDetail, type ScenePickItems, type ScenePickOptions, occludingDepth, pickScene, segmentsNear, trianglesNear } from './scenepick';
 import {
   type MeasurePointSnap,
@@ -142,7 +142,7 @@ import {
 } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
-import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText } from './annotate';
+import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText, measureDigits, measureNumber } from './annotate';
 import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
@@ -218,7 +218,8 @@ export interface Viewer3dOptions {
   maxPixelRatio?: number;
   /**
    * 측정 글 꼴(내장 측정과 글을 주지 않은 거리 덧그림): 거리·성분·두 점·장면 단위를 받아 글 줄들을 돌려준다.
-   * 앱이 단위(파일·mm·in)·자릿수·언어를 맞출 때 쓴다. 없으면 기본("거리 … mm" / "ΔX … ΔY … ΔZ …"). setMeasureFormat으로 바꾼다
+   * 앱이 단위(파일·mm·in)·자릿수·언어를 맞출 때 쓴다. 없으면 기본("거리 … mm" / "ΔX … ΔY … ΔZ …"). setMeasureFormat으로 바꾼다.
+   * 0.31.0: 둘째 인자로 코어 기본 꼴(MeasureFormatCore)을 받는다 — 이름표만 옮기는 앱은 수·자릿수·단위 글을 다시 세지 않는다
    */
   formatMeasure?: MeasureFormat | null;
   /** 무늬 그림 한 장의 긴 변 한도(화소, 기본 2048 — GPU 한도보다 크면 GPU 한도). 큰 그림은 풀면서 줄인다 */
@@ -615,8 +616,34 @@ export interface MarkerOptions {
   color?: Rgba;
 }
 
-/** 측정 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat): 받은 값으로 글 줄들을 만든다 */
-export type MeasureFormat = (m: MeasureResult & { units: Scene3d['units'] }) => string[];
+/**
+ * 측정 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat): 받은 값으로 글 줄들을 만든다.
+ * 0.31.0: 둘째 인자로 코어 기본 꼴(MeasureFormatCore — 기본 줄·수 꼴·자릿수·단위 글)을 받는다. 한 인자 함수는 그대로 된다(받은 것을 보지 않을 뿐)
+ */
+export type MeasureFormat = (m: MeasureResult & { units: Scene3d['units'] }, core: MeasureFormatCore) => string[];
+
+/**
+ * 측정 글 꼴의 둘째 인자(0.31.0): 글 꼴을 주지 않았을 때 코어가 그 글상자에 그릴 것. 앱이 이름표만 옮기고(번역) 수·자릿수·"-0" 처리·단위 글은
+ * 코어와 같게 쓸 수 있다 — 코어 규칙을 앱이 다시 세지 않는다. 그릴 때마다 새로 만든다(앱이 고쳐도 된다)
+ */
+export interface MeasureFormatCore {
+  /**
+   * 코어 기본 글 줄(글 꼴이 없을 때와 글자까지 같다): 내장 두 점 측정은 ["거리 12.345 mm", "ΔX 1.000  ΔY -2.000  ΔZ 0.000"](단위를 모르면 단위 없이),
+   * 글(label)을 주지 않은 거리 덧그림은 ["12.345 mm"]
+   */
+  lines: string[];
+  /** 코어 수 꼴: 소수 digits자리(toFixed — 언어와 상관없이 소수점), 반올림해 "-0.000"이 되면 "0.000"(순수 opencad-viewer3d/annotate measureNumber) */
+  num: (v: number) => string;
+  /**
+   * 소수 자릿수: 장면 범위(Scene3d.bounds, 없으면 그물·선분·점 범위 — setMesh로 바꾸면 바뀐 범위) 대각선 d에서 max(0, min(6, 5 − ⌊log10 d⌋))
+   * (순수 opencad-viewer3d/annotate measureDigits — 크기 0인 범위는 5자리, 빈 장면은 0자리)
+   */
+  digits: number;
+  /** 단위 글: 장면 단위 'mm' → "mm", 'inch' → "in", 'm' → "m", 모르면 "" */
+  unit: string;
+  /** 어느 글상자인지: 'measure' = 내장 두 점 측정(미리 보기·찍은 결과), 'annotation' = 글을 주지 않은 거리 덧그림(setAnnotations) */
+  source: 'measure' | 'annotation';
+}
 
 /** project() 결과: 세계 점의 캔버스 위치(CSS 화소, 왼쪽 위 원점)와 보이는지 */
 export interface ProjectedPoint {
@@ -3716,7 +3743,10 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  /** 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다 */
+  /**
+   * 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다.
+   * 0.31.0: fn(m, core)의 core는 그 글상자의 코어 기본 꼴(MeasureFormatCore — 기본 줄·수 꼴·자릿수·단위 글·어느 글상자인지)
+   */
   setMeasureFormat(fn: MeasureFormat | null): void {
     this.measureFmt = fn ?? null;
     this.invalidate();
@@ -5980,7 +6010,11 @@ export class Viewer3d {
       let lines: string[];
       if (fm && an.kind === 'distance' && an.label === undefined) {
         const [p, q] = g.dots as [V3, V3];
-        lines = fm({ a: [...p] as V3, b: [...q] as V3, distance: g.value, dx: q[0] - p[0], dy: q[1] - p[1], dz: q[2] - p[2], units: this.sceneRef?.units ?? 'unknown' });
+        // 0.31.0: 둘째 인자는 코어 기본 꼴(이 덧그림의 기본 한 줄과 수 꼴)
+        lines = fm(
+          { a: [...p] as V3, b: [...q] as V3, distance: g.value, dx: q[0] - p[0], dy: q[1] - p[1], dz: q[2] - p[2], units: this.sceneRef?.units ?? 'unknown' },
+          this.formatCore('annotation', annotationText(an, g, (v) => this.fmt(v), unit)),
+        );
       } else lines = annotationText(an, g, (v) => this.fmt(v), unit);
       const at = projectToScreen(f, g.labelAt);
       if (!lines.length || !at) return;
@@ -6117,11 +6151,15 @@ export class Viewer3d {
     ctx.restore();
   }
 
+  /** 측정 글의 수: 장면 범위 대각선에 맞춘 소수 자릿수(measureDigits — 0.31.0에 순수 함수로 뺐다, 셈은 그대로), "-0"은 "0" */
   private fmt(v: number): string {
-    const diag = Math.max(length(sub(this.allBox.max, this.allBox.min)) || 1, 1e-9);
-    const digits = Math.max(0, Math.min(6, 5 - Math.floor(Math.log10(diag))));
-    const s = v.toFixed(digits);
-    return s === `-${(0).toFixed(digits)}` ? (0).toFixed(digits) : s;
+    return measureNumber(v, measureDigits(this.allBox));
+  }
+
+  /** 0.31.0 측정 글 꼴의 둘째 인자: 이 글상자의 코어 기본 줄과 수 꼴·자릿수·단위 글(그릴 때마다 새로) */
+  private formatCore(source: MeasureFormatCore['source'], lines: string[]): MeasureFormatCore {
+    const digits = measureDigits(this.allBox);
+    return { lines, num: (v) => measureNumber(v, digits), digits, unit: UNIT_LABEL[this.sceneRef?.units ?? 'unknown'], source };
   }
 
   private drawMeasure(ctx: CanvasRenderingContext2D, f: ViewFrame, screen = false): void {
@@ -6298,11 +6336,16 @@ export class Viewer3d {
       const fm = this.measureFmt;
       // 글 꼴에는 onMeasure와 같은 결과를 준다(0.9.1 — 붙잡기를 켰으면 snapA·snapB·axisB도. 미리 보기의 B는 커서 아래 붙잡을 점)
       const snapB = pts[1] ? this.measureSnaps.get(pts[1]) : hover ? pointSnapOf(hover) : undefined;
+      const lines = (): string[] => [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`];
       label(
         mid,
+        // 0.31.0: 글 꼴의 둘째 인자는 코어 기본 꼴(기본 두 줄과 수 꼴 — 앱이 이름표만 옮길 수 있게)
         fm
-          ? fm({ ...measureResult([...a] as V3, [...b] as V3, this.snapOpt ? [this.measureSnaps.get(a), snapB] : null), units: this.sceneRef?.units ?? 'unknown' })
-          : [`거리 ${this.fmt(Math.hypot(dx, dy, dz))}${u}`, `ΔX ${this.fmt(dx)}  ΔY ${this.fmt(dy)}  ΔZ ${this.fmt(dz)}`],
+          ? fm(
+              { ...measureResult([...a] as V3, [...b] as V3, this.snapOpt ? [this.measureSnaps.get(a), snapB] : null), units: this.sceneRef?.units ?? 'unknown' },
+              this.formatCore('measure', lines()),
+            )
+          : lines(),
         sa && sb ? [sa, sb] : null,
       );
     }
