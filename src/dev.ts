@@ -53,7 +53,8 @@
  *   점 표식 비키기(setMeasureLabelAvoid({ points }) — 거리 글상자가 첫 점·미리 보기 점 표식을 덮는 자리도 옮긴다, 글상자 비키기와 함께도)
  * 0.32.0 단추: 부품 끌기(setPointerClaim — 작은 상자·구를 끌기 시작하면 앱이 포인터를 맡아 그 부품을 세계 XY 평면 안에서 옮긴다, 그냥 누르기는 고르기,
  *   빈 곳 끌기는 궤도, 둘째 손가락이면 앞 자리로 돌아가고 두 손가락 몸짓 — 상태 줄 "부품 끌기: …"·"부품 끌기 끝: … (up·pinch)"),
- *   분해(행렬 한꺼번에 — setItemMatrices로 모든 그물을 장면 가운데에서 바깥으로, 상태 줄에 건 수·시간)
+ *   분해(행렬 한꺼번에 — setItemMatrices로 모든 그물을 장면 가운데에서 바깥으로, 상태 줄에 건 수·시간),
+ *   안내 선 면 열린 교차(inference.trackDirs { meets: { openFaces } }와 refineFace — 끌어온 점의 안내 선이 구 그물을 비켜 가며 곡면만 뚫는 자리를 정확한 구 위로)
  * 자동 확인용으로 window.v3dDev(viewer, scene, bench, snapshot, diff, hideDemo, hiDemo …)를 둔다.
  */
 import { itemBounds } from './bounds';
@@ -734,6 +735,23 @@ toggle(
     showStatus();
   },
   '그물마다 장면 가운데에서 바깥으로 옮긴 행렬(끌어 옮긴 양을 더해)을 setItemMatrices 한 번으로 건다 — 상태 줄에 건 수와 시간',
+);
+toggle(
+  '안내 선 면 열린 교차',
+  (v) =>
+    viewer.setMeasureSnap(
+      v
+        ? {
+            midpoints: true,
+            edges: true,
+            points: demoSnapPoints(),
+            inference: { intersections: true, axes: true, parallel: true, lock: true, track: true, trackDirs: { edge: notCurve, meets: { guides: true, openFaces: true } }, parallelEdge: notCurve },
+            refineFace: demoSphereFace,
+          }
+        : null,
+    ),
+  '끌어온 점의 나란함·수직 선이 구 그물 삼각형은 비켜 가며 곡면만 뚫는 자리를 정확한 구 위 교차로 붙잡는다(inference.trackDirs { meets: { openFaces: true } } — 앱 refineFace axisFace open). ' +
+    '점에 머물러 끌어온 뒤 곧은 모서리를 지나가고 그 안내 선이 구 가장자리를 스치는 자리를 가리킨다 — 상태 줄 "… · 구 면과 만나는 점(다듬음)"',
 );
 toggle('그물 선 색', (v) => {
   viewer.setItemEdgeColor('상자', v ? '#e0245e' : null);
