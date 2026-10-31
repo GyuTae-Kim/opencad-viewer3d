@@ -77,6 +77,7 @@ import {
 } from './snap';
 import {
   MeasureTracker,
+  type OpenEdgeCandidate,
   type OpenEdgeSnap,
   type OpenFaceSnap,
   type TrackDirKind,
@@ -106,6 +107,7 @@ import {
   trackDirSnap,
   trackEdgeSnap,
   trackPairSnap,
+  vertexEdgeSnap,
 } from './track';
 import {
   LABEL_POINT_R,
@@ -489,6 +491,16 @@ export interface MeasureSnapOptions {
    * 0.24.0: setItemPickOpaque로 켠 그물에서는 멈춘다. 잠금·끌어온 점·찍은 점·다듬기 기억을 두고 이것만 바꾸려면 setMeasurePickThrough
    */
   throughTranslucent?: boolean;
+  /**
+   * 0.33.0(기본 꺼짐 — true이고 refine이 있을 때만): 켠 선(첫 점 축 — inference.axisEdges, 끌어온 축 — track, 끌어온 점 안내 선 — trackDirs { meets },
+   * 잠근 선 — lockEdges)이 곡선을 나눈 꺾은선 꼭짓점(토막 끝)을 그 깊이에서 화면 반 화소 안으로 지나면, 그 꼭짓점을 끝으로 둔 커서 둘레 토막마다
+   * 앱 refine을 'axisEdge'·open = true(point = 꼭짓점을 그 선에 내린 발, line = 그 선)로 불러 곡선과의 정확한 교차를 받는다.
+   * 받는 규칙·호출 한도·기억은 0.23.0 열린 교차와 같다(그 선 위로 내린 자리가 토막 범위 안·토막 끝에서 반 화소 넘게·현에서 0.1 × 토막 길이 안, 커서에서 붙잡기 거리 안, 가리지 않음).
+   * 받으면 그 꼭짓점의 끝점 붙잡기(잠근 동안이면 그 점을 잠근 선에 내린 자리)보다 먼저이고, 꼭짓점이 커서에서 붙잡기 거리 밖이면 다른 점 후보와 함께 견준다(열린 교차 뒤 차례).
+   * 값은 열린 교차와 같은 꼴(축이면 snap 'axis'·axis·segment·refined, 안내 선이면 안내 종류·trackFrom·edge·segment·refined, 잠근 선이면 잠근 선 위 점에 segment·refined).
+   * 곧은 꺾은선(앱이 null)과 꼭짓점에서 곡선을 가로지르는 선(앱 점이 꼭짓점과 반 화소 안)은 그대로 끝점이다. 주지 않거나 false면 0.32.0과 같다
+   */
+  refineEnds?: boolean;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
@@ -578,7 +590,8 @@ export interface MeasurePoint {
 export type { MeasureLabelRect, LabelSpotName, LabelFallback };
 
 /**
- * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리)
+ * 측정 거리 글상자가 비켜 그릴 자리(0.13.0, Viewer3d.setMeasureLabelAvoid). 화면 덧그림에만 쓴다(그림 저장 toBlob·renderImage는 기본 자리 —
+ * 0.33.0 snapshotPoints를 켜면 측정 점 표식만 비킨다)
  */
 export interface MeasureLabelAvoid {
   /** 피할 화면 영역(캔버스 왼쪽 위 기준 CSS 화소 — 앱이 그린 십자선·손가락·툴팁 자리). 수가 아니거나 너비·높이가 0 이하인 것은 버린다 */
@@ -593,6 +606,12 @@ export interface MeasureLabelAvoid {
    * rects·pointerRadius 없이 이것만 줘도 된다. 측정 거리 글상자에만 쓴다(앱 측정 덧그림 글상자는 0.30.0 그대로)
    */
   points?: boolean;
+  /**
+   * 0.33.0: points와 함께 true면 그림 저장(toBlob·renderImage)의 측정 거리 글상자도 두 측정 점 표식을 덮는 자리를 옮긴다(기본 꺼짐 — 둘 다 true일 때만).
+   * 규칙은 points와 같고(기본 자리 setMeasureLabelSpot부터, 표식을 덮으면 표식을 피할 원으로 보고 같은 차례로 다시 고른다), 그림에 없는 앱 영역(rects)·커서 둘레(pointerRadius)와
+   * 화면 덧그림 글상자끼리 비키기(0.24.0)는 보지 않는다 — 그것들이 화면 글상자를 옮기지 않았으면 화면 글상자와 같은 자리다. 끄면 0.32.0처럼 그림 저장은 기본 자리다
+   */
+  snapshotPoints?: boolean;
 }
 
 /**
@@ -691,6 +710,23 @@ export interface ItemLookState {
   pickOpaque?: boolean;
   /** 0.27.0: 반투명 그물 너머 고르기가 지나가는 이 그물의 삼각형 구간(setItemPickThrough — 합친 것, 복사본. 줬을 때만) */
   pickThrough?: IndexRange[];
+}
+
+/**
+ * 0.33.0 묶음 겉모습 한 번에(Viewer3d.setItemLooks)의 한 묶음 몫: 준 필드만 바꾸고(undefined·없는 필드는 그대로) null은 그 겉모습 되돌림 —
+ * 하나씩 부르는 함수와 같은 값을 받는다. opacity = setItemOpacity(pickable은 opacity가 수일 때 그 opts.pickable — null이면 함께 되돌린다),
+ * color = setItemColor, matrix = setItemMatrix, edgeColor = setItemEdgeColor, profileColor = setItemProfileColor, pickOpaque = setItemPickOpaque,
+ * pickThrough = setItemPickThrough
+ */
+export interface ItemLookInput {
+  opacity?: number | null;
+  pickable?: boolean;
+  color?: Rgba | string | null;
+  matrix?: ArrayLike<number> | null;
+  edgeColor?: Rgba | string | null;
+  profileColor?: Rgba | string | null;
+  pickOpaque?: boolean;
+  pickThrough?: readonly IndexRange[] | null;
 }
 
 interface LookState {
@@ -1270,6 +1306,8 @@ export class Viewer3d {
     ofMemo: { key: string; res: V3 | null } | null;
     /** 0.23.0 측정 점 고르기가 반투명 그물의 면을 지나는지(throughTranslucent) */
     through: boolean;
+    /** 0.33.0 선이 꺾은선 꼭짓점을 지나는 자리를 앱 refine에 묻는지(refineEnds — refine이 있을 때만 true) */
+    ends: boolean;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
@@ -1280,7 +1318,8 @@ export class Viewer3d {
   /** 마지막으로 화면에 그린 측정 거리 글상자(0.12.0 — CSS 화소, 그리지 않았으면 null) */
   private measureLabel: MeasureLabelRect | null = null;
   /** 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 사각형과 커서 둘레 반지름, 없으면 null = 0.12.0 그대로) */
-  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number; points: boolean } | null = null;
+  /** 0.13.0 측정 거리 글상자가 비켜 그릴 자리(0.31.0 points, 0.33.0 snapshot — 그림 저장도 표식 비키기, points일 때만 true) */
+  private labelAvoid: { rects: MeasureLabelRect[]; pointerRadius: number; points: boolean; snapshot: boolean } | null = null;
   /** 0.27.0 뷰어 글상자 기본 자리(setMeasureLabelSpot — 준 것만, 없으면 null = 0.26.0 그대로 오른쪽 위) */
   private labelSpot: MeasureLabelSpot | null = null;
   /** 마지막으로 화면에 그린 앱 측정 덧그림 글상자(0.23.0 — setAnnotations 차례, 그리지 않은 것은 null) */
@@ -3179,6 +3218,7 @@ export class Viewer3d {
         openMemo: new RefineMemo(),
         ofMemo: null,
         through: !!o.throughTranslucent,
+        ends: o.refineEnds === true && !!o.refine,
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
@@ -3541,6 +3581,7 @@ export class Viewer3d {
    * 뷰 큐브 자리는 viewCubeRect로 읽어 함께 넘긴다.
    * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다.
    * 0.31.0: points: true면 측정 거리 글상자가 두 측정 점 표식을 덮는 자리도 옮긴다(MeasureLabelAvoid.points — 이것만 줘도 켠다)
+   * 0.33.0: snapshotPoints도 true면 그림 저장(toBlob·renderImage)의 측정 거리 글상자도 표식만 같은 규칙으로 비킨다(MeasureLabelAvoid.snapshotPoints)
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
@@ -3551,9 +3592,10 @@ export class Viewer3d {
     }
     const pr = o?.pointerRadius;
     const pointerRadius = typeof pr === 'number' && Number.isFinite(pr) && pr > 0 ? pr : 0;
-    // 0.31.0: 측정 점 표식도 비키기(true일 때만 — 이것만 줘도 켠다)
+    // 0.31.0: 측정 점 표식도 비키기(true일 때만 — 이것만 줘도 켠다). 0.33.0: 그림 저장도 표식 비키기(points와 함께일 때만)
     const points = o?.points === true;
-    const next = rects.length || pointerRadius || points ? { rects, pointerRadius, points } : null;
+    const snapshot = points && o?.snapshotPoints === true;
+    const next = rects.length || pointerRadius || points ? { rects, pointerRadius, points, snapshot } : null;
     const prev = this.labelAvoid;
     const same =
       prev === next ||
@@ -3561,6 +3603,7 @@ export class Viewer3d {
         !!next &&
         prev.pointerRadius === next.pointerRadius &&
         prev.points === next.points &&
+        prev.snapshot === next.snapshot &&
         prev.rects.length === next.rects.length &&
         prev.rects.every((r, i) => {
           const s = next.rects[i]!;
@@ -3591,13 +3634,17 @@ export class Viewer3d {
     return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
-  /** 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null). 0.31.0: 측정 점 표식도 비키면 points: true */
+  /**
+   * 지금 측정 거리 글상자가 비켜 그릴 자리(0.13.0 — 고른 값의 복사본, 꺼져 있으면 null). 0.31.0: 측정 점 표식도 비키면 points: true.
+   * 0.33.0: 그림 저장도 표식을 비키면 snapshotPoints: true(points 없이 준 snapshotPoints는 버린다)
+   */
   get measureLabelAvoid(): MeasureLabelAvoid | null {
     const a = this.labelAvoid;
     if (!a) return null;
     const r: MeasureLabelAvoid = { rects: a.rects.map((x) => ({ ...x })) };
     if (a.pointerRadius) r.pointerRadius = a.pointerRadius;
     if (a.points) r.points = true;
+    if (a.snapshot) r.snapshotPoints = true;
     return r;
   }
 
@@ -3778,7 +3825,7 @@ export class Viewer3d {
    */
   setItemMatrices(entries: Iterable<readonly [string, ArrayLike<number> | null]>): number {
     if (this.disposed) return 0;
-    let n = 0;
+    const moved: string[] = [];
     for (const [id, matrix] of entries) {
       if (!this.items.has(id)) continue;
       const m = matrix === null ? null : matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
@@ -3787,9 +3834,75 @@ export class Viewer3d {
       if (m) l.matrix = m;
       else delete l.matrix;
       this.storeLook(id, l);
-      n++;
+      moved.push(id);
     }
-    if (n) this.lookChanged(true);
+    if (moved.length) this.lookChanged(moved);
+    return moved.length;
+  }
+
+  /**
+   * 0.33.0 여러 묶음 겉모습을 한 번에 건다: [묶음 id, 겉모습(ItemLookInput — 준 필드만, null 필드는 그 겉모습 되돌림) 또는 null(그 묶음의 겉모습을 모두 되돌림)] 목록
+   * (Map도 그대로 준다). 결과(그림·고르기·측정·범위·단면·최근접점·itemLook)는 목록 차례대로, 한 항목 안에서는 opacity(pickable과 함께) → color → matrix → edgeColor →
+   * profileColor → pickOpaque → pickThrough 차례로 하나씩 부른 것과 같다 — 같은 id가 둘이면 뒤의 것이 덮고, 없는 id·겉모습이 객체도 null도 아닌 항목은 건너뛰며,
+   * 앞 16개가 유한한 수가 아닌 행렬(배열이 아닌 값 포함)은 그 행렬만 건너뛴다(setItemMatrix와 같다). pickThrough는 그물에만.
+   * 그림자·고르기 목록·측정 미리 보기와 행렬을 바꾼 묶음의 범위·모형 행렬은 한 번만 버린다(setItemMatrices와 같다). 돌려주는 값: 건 항목 수(건너뛴 것 빼고)
+   */
+  setItemLooks(entries: Iterable<readonly [string, ItemLookInput | null]>): number {
+    if (this.disposed) return 0;
+    let n = 0;
+    const moved: string[] = [];
+    // 같은 색 글은 한 번만 푼다(묶음마다 새 배열 — 하나씩 부른 것처럼 겉모습끼리 배열을 함께 쓰지 않는다)
+    const parsed = new Map<string, Rgba>();
+    const col = (c: Rgba | string): Rgba => {
+      if (typeof c !== 'string') return [c[0], c[1], c[2], c[3] ?? 1] as Rgba;
+      let p = parsed.get(c);
+      if (!p) parsed.set(c, (p = this.rgba(c)));
+      return [p[0], p[1], p[2], p[3]] as Rgba;
+    };
+    for (const [id, look] of entries) {
+      const it = this.items.get(id);
+      if (!it || (look !== null && (!look || typeof look !== 'object'))) continue;
+      n++;
+      if (look === null) {
+        if (this.looks.has(id)) {
+          if (this.looks.get(id)!.matrix) moved.push(id);
+          this.storeLook(id, {});
+        }
+        continue;
+      }
+      const l = this.looks.get(id) ?? {};
+      const { opacity, color, matrix, edgeColor, profileColor, pickOpaque, pickThrough } = look;
+      if (opacity === null) {
+        delete l.alpha;
+        delete l.pickable;
+      } else if (opacity !== undefined) {
+        l.alpha = Math.min(1, Math.max(0, Number(opacity) || 0));
+        if (look.pickable !== undefined) l.pickable = look.pickable;
+      }
+      if (color === null) delete l.color;
+      else if (color !== undefined) l.color = col(color);
+      if (matrix === null) {
+        if (l.matrix) moved.push(id);
+        delete l.matrix;
+      } else if (matrix !== undefined) {
+        const m = matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
+        if (m) {
+          l.matrix = m;
+          moved.push(id);
+        }
+      }
+      if (edgeColor === null) delete l.edgeColor;
+      else if (edgeColor !== undefined) l.edgeColor = col(edgeColor);
+      if (profileColor === null) delete l.profileColor;
+      else if (profileColor !== undefined) l.profileColor = col(profileColor);
+      if (pickOpaque !== undefined) {
+        if (pickOpaque) l.pickOpaque = true;
+        else delete l.pickOpaque;
+      }
+      if (pickThrough !== undefined && it.kind === 'mesh') this.applyPickThrough(l, mergeRanges(pickThrough, primCount(it)));
+      this.storeLook(id, l);
+    }
+    if (n) this.lookChanged(moved.length ? moved : false);
     return n;
   }
 
@@ -3893,7 +4006,7 @@ export class Viewer3d {
   private setLook(id: string, l: LookState, moved: boolean): void {
     if (!this.items.has(id)) return;
     this.storeLook(id, l);
-    this.lookChanged(moved);
+    this.lookChanged(moved ? [id] : false);
   }
 
   /** 겉모습 하나를 둔다(빈 겉모습이면 지운다 — 다시 셀 것은 lookChanged가 버린다) */
@@ -3904,14 +4017,32 @@ export class Viewer3d {
     else this.lookMoved.delete(id);
   }
 
-  private lookChanged(moved: boolean): void {
+  /**
+   * 겉모습이 바뀐 뒤 다시 셀 것을 버린다. moved = 행렬이 바뀌었을 수 있는 묶음: true면 모든 묶음(0.32.0까지 — clearItemLooks), id 목록이면 그 묶음들만(0.33.0 —
+   * 범위·모형 행렬·숨긴 구간 범위는 묶음마다 그 묶음의 행렬로만 정해진다), false면 없음. 보이는 범위·단면 테두리·휠 기준은 하나라도 바뀌면 버린다
+   */
+  private lookChanged(moved: boolean | readonly string[]): void {
     this.shadowVer++;
     this.visLists = null;
-    if (moved) {
+    // 묶음 절반 넘게 옮겼으면 하나씩 지우기보다 통째로 버리는 편이 싸다(값은 같다)
+    if (moved !== true && moved && 2 * moved.length >= this.items.size) moved = true;
+    if (moved === true) {
       this.boxes = new WeakMap();
       this.models = new WeakMap();
       this.lineModels = new WeakMap();
       for (const r of this.rangeSel.values()) r.box = null;
+    } else if (moved)
+      for (const id of moved) {
+        const it = this.items.get(id);
+        if (it) {
+          this.boxes.delete(it.item);
+          if (it.kind === 'mesh') this.models.delete(it.item);
+          else this.lineModels.delete(it.item);
+        }
+        const r = this.rangeSel.get(id);
+        if (r) r.box = null;
+      }
+    if (moved === true || (moved && moved.length)) {
       this.visBox = null;
       this.cutDirty = true;
       this.wheelAnchor = null;
@@ -4625,15 +4756,26 @@ export class Viewer3d {
         : null;
     const cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app, open) : app;
     const r = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+    const lockOut = (p: V3): MeasurePick => {
+      const m: MeasurePick = { p, vertex: true, kind: lock!.kind, direction: [...lock!.direction] as V3, locked: true };
+      if (lock!.axis) m.axis = lock!.axis;
+      if (lock!.edge) m.edge = lock!.edge;
+      return m;
+    };
+    // 0.33.0 refineEnds: 점 붙잡기가 꺾은선 꼭짓점(끝점·꼭짓점)이고 켠 선이 그 꼭짓점을 반 화소 안으로 지나면 그 꼭짓점을 끝으로 둔 토막들로 앱 refine에 묻는다 —
+    // 받은 곡선 위 교차가 그 끝점(잠근 동안이면 그 점을 잠근 선에 내린 자리)보다 먼저다
+    if (so.ends && inf && r && (r.kind === 'endpoint' || r.kind === 'vertex') && !r.refined) {
+      const vis = (p: V3, sg: NearSegment): boolean => {
+        const sp = projectToScreen(f, p);
+        return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
+      };
+      const el = this.endLines(inf, f, first, lock, refsBefore);
+      const v = el.lines.length ? this.openLineEdge(so, f, x, y, snapPx, el.lines, first, nearSegs(), budget, vis, r.p) : null;
+      if (v) return this.openEdgePick(f, v, first, lock ? lockOut : null, el.ref, refsBefore);
+    }
     // 잠금(0.10.0): 첫 점을 지나는 잠근 선 위에만. 점 붙잡기가 있으면 그 점을 선에 수직으로 내린 자리
     if (lock && first) {
       const q = r && r.kind ? r : null;
-      const lockOut = (p: V3): MeasurePick => {
-        const m: MeasurePick = { p, vertex: true, kind: lock.kind, direction: [...lock.direction] as V3, locked: true };
-        if (lock.axis) m.axis = lock.axis;
-        if (lock.edge) m.edge = lock.edge;
-        return m;
-      };
       // 0.19.0: 점 붙잡기가 없으면 잠근 선이 커서 둘레 선분과 만나는 점(lockEdges)·커서 아래 면을 뚫는 점(lockFaces)이 커서에 가까운 선 위 점보다 먼저.
       // 0.21.0: 잠근 선이 끌어온 축과 만나는 점(lockTracks — 끌어온 점이 있을 때)도 — 그 셋보다 먼저 견준다
       const lockTracks = inf?.lockTracks && this.tracker?.size ? this.tracker.view : null;
@@ -4727,7 +4869,16 @@ export class Viewer3d {
         for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, openFaceRef)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
         if (ls.length) openGF = this.openLineFace(so, f, x, y, snapPx, ls, first, budget);
       }
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap, openGF?.snap]);
+      // 0.33.0 refineEnds: 끌어온 축·첫 점 축·안내 선이 커서 둘레 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리(선분 교차·열린 교차에서 빠지는 자리)의
+      // 앱 refine('axisEdge', open — point = 꼭짓점을 그 선에 내린 발)이 준 곡선 위 교차. 0.20.0 열린 교차와 같은 받는 규칙·한도·기억. 열한 후보 뒤 차례
+      let ends: { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null = null;
+      let endRef: [V3, V3] | null = null;
+      if (so.ends && (tracks || axisEdges)) {
+        const el = this.endLines(inf!, f, first, null, refsBefore);
+        endRef = el.ref;
+        if (el.lines.length) ends = this.openLineEdge(so, f, x, y, snapPx, el.lines, first, nearSegs(), budget, vis, null);
+      }
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap, openGF?.snap, ends?.snap]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       if (t && t === pair) {
         const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
@@ -4784,20 +4935,8 @@ export class Viewer3d {
         }
         return out;
       }
-      if (t && openE && t === openE.snap) {
-        // 0.20.0 열린 교차: 앱이 준 곡선 위 교차(축 위로 내린 자리 — 다듬은 점). 첫 점 축이면 그 축 방향(잠글 때), 끌어온 축이면 끌어온 점(그 축 선이 첫 점도 지나면 방향도)
-        const { snap: o, line: l } = openE;
-        const out: MeasurePick = { p: o.p, vertex: true, kind: 'axis', axis: l.axis! };
-        const sg = nearSegmentId(o.seg);
-        if (sg) out.segment = copySegment(sg);
-        if (l.track) {
-          out.trackFrom = [l.from[0], l.from[1], l.from[2]];
-          const dir = along(l.from, l.axis!);
-          if (dir) out.direction = dir;
-        } else out.direction = [l.dir[0], l.dir[1], l.dir[2]];
-        out.refined = true;
-        return out;
-      }
+      // 0.20.0 열린 교차: 앱이 준 곡선 위 교차(축 위로 내린 자리 — 다듬은 점). 첫 점 축이면 그 축 방향(잠글 때), 끌어온 축이면 끌어온 점(그 축 선이 첫 점도 지나면 방향도)
+      if (t && openE && t === openE.snap) return this.openEdgePick(f, openE, first, null, null, null);
       if (t && openF && t === openF.snap) {
         // 0.22.0 면의 열린 교차: 앱이 준 곡면 위 교차(축 위로 내린 자리 — 다듬은 점)와 그 삼각형(face — 0.18.0 축과 면의 교차와 같은 꼴). 방향·끌어온 점은 열린 교차와 같다
         const { snap: o, line: l } = openF;
@@ -4823,19 +4962,9 @@ export class Viewer3d {
         this.parallelOwn = refsBefore!.own;
         return { p: guide.p, vertex: true, kind: guide.kind, trackFrom: guide.from, edge: [[...guideRef![0]] as V3, [...guideRef![1]] as V3], trackGuide: copyDirLine(guide.other) };
       }
-      if (t && openG && t === openG.snap) {
-        // 0.31.0 안내 선의 열린 교차: 앱이 준 곡선 위 교차(그 안내 선 위로 내린 자리 — 다듬은 점)와 그 토막(segment). 0.29.0 만나는 점처럼 기준 선분을 되돌리고,
-        // 첫 점을 지나는 선이 아니라 잠글 방향이 없다(0.20.0 열린 교차처럼 선분 방향 잠금도 보지 않는다)
-        this.parallelRef = refsBefore!.parallel;
-        this.trackDirRef = refsBefore!.track;
-        this.parallelOwn = refsBefore!.own;
-        const { snap: o, line: l } = openG;
-        const out: MeasurePick = { p: o.p, vertex: true, kind: l.guide!, trackFrom: [l.from[0], l.from[1], l.from[2]], edge: [[...openRef![0]] as V3, [...openRef![1]] as V3] };
-        const sg = nearSegmentId(o.seg);
-        if (sg) out.segment = copySegment(sg);
-        out.refined = true;
-        return out;
-      }
+      // 0.31.0 안내 선의 열린 교차: 앱이 준 곡선 위 교차(그 안내 선 위로 내린 자리 — 다듬은 점)와 그 토막(segment). 0.29.0 만나는 점처럼 기준 선분을 되돌리고,
+      // 첫 점을 지나는 선이 아니라 잠글 방향이 없다(0.20.0 열린 교차처럼 선분 방향 잠금도 보지 않는다)
+      if (t && openG && t === openG.snap) return this.openEdgePick(f, openG, first, null, openRef, refsBefore);
       if (t && openGF && t === openGF.snap) {
         // 0.32.0 안내 선의 면의 열린 교차: 앱이 준 곡면 위 교차(그 안내 선 위로 내린 자리 — 다듬은 점)와 그 삼각형(face). 0.31.0 열린 교차처럼 기준 선분을 되돌리고 잠글 방향이 없다
         this.parallelRef = refsBefore!.parallel;
@@ -4852,6 +4981,8 @@ export class Viewer3d {
           refined: true,
         };
       }
+      // 0.33.0 꼭짓점을 지나는 선의 다듬은 교차: 축이면 열린 교차(0.20.0), 안내 선이면 안내 선의 열린 교차(0.31.0)와 같은 값
+      if (t && ends && t === ends.snap) return this.openEdgePick(f, ends, first, null, endRef, refsBefore);
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
     if (first && noPoint && (inf?.axes || inf?.parallel)) {
@@ -4906,6 +5037,72 @@ export class Viewer3d {
     // 0.21.0: 붙잡지 않은 그물 면 위 점(고르기가 맞은 삼각형 위 점 그대로)이면 앱 refineFace('onFace')가 준 곡면 위 점(커서 광선 위로 내린 자리)
     const rf = so.refineFace && !r.kind && !r.refined && d && r.p === d.snap ? this.onFaceRefined(so, f, x, y, snapPx, d, first) : null;
     return rf ? { ...r, p: rf, refined: true } : r;
+  }
+
+  /**
+   * 0.33.0 refineEnds가 보는 선: 잠근 동안(lock)이면 잠근 선(inference.lockEdges일 때만). 아니면 끌어온 점(첫 점과 같은 점은 뺀다)의 X·Y·Z 축(끌어온 점이 있을 때 —
+   * 0.17.0 끌어온 축과 선분의 교차), 첫 점 X·Y·Z 축(axisEdges — 끌어온 축과 같은 직선이면 한 번, 0.20.0 열린 교차와 같다), 끌어온 점의 나란함·수직 선
+   * (trackDirs { meets } — 이 고르기가 바꾸기 전의 기준 선분 refs에 대한 것, 0.29.0 만나는 점과 같다). ref는 그 안내 선의 기준 선분(없으면 null)
+   */
+  private endLines(
+    inf: NormalizedInference,
+    f: ViewFrame,
+    first: V3 | null,
+    lock: InferenceLock | null,
+    refs: { parallel: [V3, V3] | null; track: [V3, V3] | null; own: [V3, V3] | null } | null,
+  ): { lines: OpenRefineLine[]; ref: [V3, V3] | null } {
+    const ls: OpenRefineLine[] = [];
+    if (lock) {
+      if (first && inf.lockEdges) ls.push({ from: first, dir: lock.direction, ...(lock.axis ? { axis: lock.axis } : {}), track: false });
+      return { lines: ls, ref: null };
+    }
+    const tracks = this.tracker?.size ? this.tracker.view : null;
+    const axes: SnapAxis[] = ['x', 'y', 'z'];
+    if (tracks) for (const P of tracks) if (!first || !sameTrackPoint(P, first)) for (const axis of axes) ls.push({ from: P, dir: axisLock(axis).direction, axis, track: true });
+    if (first && inf.axisEdges)
+      for (const axis of axes) if (!ls.some((l) => l.axis === axis && trackAlongFirst(f, first, l.from, axis))) ls.push({ from: first, dir: axisLock(axis).direction, axis, track: false });
+    const ref = tracks && refs && inf.trackDirs && inf.trackDirs !== true && inf.trackDirs.meets ? this.trackDirBase(inf, refs) : null;
+    if (ref) for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, ref)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
+    return { lines: ls, ref };
+  }
+
+  /**
+   * 선과 꺾은선 토막의 열린 교차(0.20.0 openLineEdge — 0.33.0 꼭짓점을 지나는 선도) → 측정 점 고르기 결과. 다듬은 점(refined)과 그 토막(segment)에
+   * - 안내 선(line.guide — 0.31.0): 안내 종류·끌어온 점·기준 선분 ref(edge). 0.29.0 만나는 점처럼 기준 선분을 이 고르기 전(refs)으로 되돌린다. 잠글 방향이 없다
+   * - 잠근 동안(lockOut — 0.20.0 잠근 선의 열린 교차): 잠근 선 위 점
+   * - 축(0.20.0): snap 'axis'·axis. 첫 점 축이면 그 축 방향(잠글 때), 끌어온 축이면 끌어온 점(그 축 선이 첫 점도 지나면 방향도)
+   */
+  private openEdgePick(
+    f: ViewFrame,
+    o: { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine },
+    first: V3 | null,
+    lockOut: ((p: V3) => MeasurePick) | null,
+    ref: [V3, V3] | null,
+    refs: { parallel: [V3, V3] | null; track: [V3, V3] | null; own: [V3, V3] | null } | null,
+  ): MeasurePick {
+    const { snap: s, line: l } = o;
+    const guide = !!(l.guide && ref);
+    let out: MeasurePick;
+    if (guide) {
+      if (refs) {
+        this.parallelRef = refs.parallel;
+        this.trackDirRef = refs.track;
+        this.parallelOwn = refs.own;
+      }
+      out = { p: s.p, vertex: true, kind: l.guide!, trackFrom: [l.from[0], l.from[1], l.from[2]], edge: [[...ref![0]] as V3, [...ref![1]] as V3] };
+    } else out = lockOut ? lockOut(s.p) : { p: s.p, vertex: true, kind: 'axis', axis: l.axis! };
+    // 필드 차례는 0.32.0 값과 같게(토막 → 끌어온 점·방향 → 다듬음)
+    const sg = nearSegmentId(s.seg);
+    if (sg) out.segment = copySegment(sg);
+    if (!guide && !lockOut) {
+      if (l.track) {
+        out.trackFrom = [l.from[0], l.from[1], l.from[2]];
+        const dir = first ? trackAlongFirst(f, first, l.from, l.axis!) : null;
+        if (dir) out.direction = dir;
+      } else out.direction = [l.dir[0], l.dir[1], l.dir[2]];
+    }
+    out.refined = true;
+    return out;
   }
 
   /**
@@ -5191,7 +5388,9 @@ export class Viewer3d {
    * 그 활꼴을 지날 만큼 가까우면 앱 refine을 'axisEdge'·open = true로 불러(point = 선 위에서 토막에 가장 가까운 점, line = 그 선) 곡선과의 교차를 받는다.
    * 받는 규칙은 openEdgeSnap(그 선 위로 내린 자리, 코어 점·커서에서 붙잡기 거리 안, 그 토막의 곡선 조각 자리, 단면에서 남는 쪽, 가리지 않음).
    * 앱 함수는 미리 보기 한 번에 budget.calls(0.15.0 열린 후보와 함께 쓰는 OPEN_REFINE_CALLS)번까지만 새로 부르고, 결과는 커서 광선을 뺀 입력으로 기억한다
-   * (0.18.0 'axisEdge'와 같은 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다). 받은 것이 없으면 null
+   * (0.18.0 'axisEdge'와 같은 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다). 받은 것이 없으면 null.
+   * 0.33.0: at이 undefined가 아니면 열린 교차 대신 선이 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리(track.ts vertexEdgeSnap — refineEnds)를 같은 부르기·한도·기억으로 본다
+   * (at = 끝점 붙잡기가 고른 꼭짓점 — 그 자리만, null이면 커서 둘레 토막의 모든 끝)
    */
   private openLineEdge(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5204,6 +5403,7 @@ export class Viewer3d {
     segs: readonly NearSegment[],
     budget: { calls: number },
     vis: (p: V3, sg: NearSegment) => boolean,
+    at?: V3 | null,
   ): { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null {
     const refine = so.refine;
     if (!refine || !lines.length) return null;
@@ -5214,35 +5414,28 @@ export class Viewer3d {
     }
     if (!ids.size) return null;
     const ray = screenRay(f, x, y);
-    const r = openEdgeSnap(
-      f,
-      lines,
-      [...ids.keys()],
-      x,
-      y,
-      snapPx,
-      (c) => {
-        const input: SnapRefineInput = {
-          kind: 'axisEdge',
-          point: [c.p[0], c.p[1], c.p[2]],
-          segment: copySegment(ids.get(c.seg)!),
-          first: first ? [first[0], first[1], first[2]] : null,
-          ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
-          line: copyLine(refineLineOf(lines[c.line]!)),
-          open: true,
-        };
-        const key = openRefineKey(input);
-        let q = so.openMemo.get(key);
-        if (q === undefined) {
-          if (budget.calls <= 0) return null;
-          budget.calls--;
-          q = finitePoint(refine(input));
-          so.openMemo.set(key, q);
-        }
-        return q;
-      },
-      vis,
-    );
+    const ask = (c: OpenEdgeCandidate<NearSegment>): V3 | null => {
+      const input: SnapRefineInput = {
+        kind: 'axisEdge',
+        point: [c.p[0], c.p[1], c.p[2]],
+        segment: copySegment(ids.get(c.seg)!),
+        first: first ? [first[0], first[1], first[2]] : null,
+        ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
+        line: copyLine(refineLineOf(lines[c.line]!)),
+        open: true,
+      };
+      const key = openRefineKey(input);
+      let q = so.openMemo.get(key);
+      if (q === undefined) {
+        if (budget.calls <= 0) return null;
+        budget.calls--;
+        q = finitePoint(refine(input));
+        so.openMemo.set(key, q);
+      }
+      return q;
+    };
+    const list = [...ids.keys()];
+    const r = at === undefined ? openEdgeSnap(f, lines, list, x, y, snapPx, ask, vis) : vertexEdgeSnap(f, lines, list, x, y, snapPx, ask, vis, at);
     return r ? { snap: r, line: lines[r.line]! } : null;
   }
 
@@ -5386,8 +5579,11 @@ export class Viewer3d {
     const open = inf.lockEdges && so.refine ? this.openLineEdge(so, f, x, y, snapPx, [line], first, nearSegs(), budget, vis) : null;
     // 0.22.0 면의 열린 교차(lockFaces와 refineFace가 있을 때): 잠근 선이 커서 둘레 삼각형을 비켜 가며 곡면만 뚫는 자리 — 열린 교차 뒤 차례
     const openF = inf.lockFaces && so.refineFace ? this.openLineFace(so, f, x, y, snapPx, [line], first, budget) : null;
-    const t = chooseTrackPoint<{ distPx: number }>([trk, edge, face, open?.snap, openF?.snap]);
+    // 0.33.0 refineEnds: 잠근 선이 커서 둘레 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리(선분 교차에서 빠지는 자리)의 다듬은 교차 — 면의 열린 교차 뒤 차례
+    const ends = inf.lockEdges && so.ends ? this.openLineEdge(so, f, x, y, snapPx, [line], first, nearSegs(), budget, vis, null) : null;
+    const t = chooseTrackPoint<{ distPx: number }>([trk, edge, face, open?.snap, openF?.snap, ends?.snap]);
     if (!t) return null;
+    if (ends && t === ends.snap) return this.openEdgePick(f, ends, first, lockOut, null, null);
     if (t === trk) {
       const out = lockOut(trk.p);
       if (trk.axis) out.trackOther = { from: trk.from, axis: trk.axis };
@@ -6580,6 +6776,10 @@ export class Viewer3d {
         this.measureLabel = { x, y, width: w, height: h };
         const d = placeMeasureLabel(at, size, view, null, null, spot);
         if (d.x !== x || d.y !== y) this.labelsShifted = true;
+      } else if (seg && this.labelAvoid?.snapshot) {
+        // 0.33.0 그림 저장도 표식 비키기(setMeasureLabelAvoid의 points·snapshotPoints): 그림에 없는 앱 영역·커서 둘레 없이 두 측정 점 표식만(softBlocks — 화면과 같은 규칙)
+        const soft = seg.map((p) => ({ x: p[0], y: p[1], r: LABEL_POINT_R }));
+        ({ x, y } = placeMeasureLabel(at, size, view, { rects: [], circles: [], soft, softBlocks: true }, seg, spot));
       } else ({ x, y } = placeMeasureLabel(at, size, view, null, seg, spot));
       ctx.fillStyle = th.textBg;
       ctx.strokeStyle = th.measure;

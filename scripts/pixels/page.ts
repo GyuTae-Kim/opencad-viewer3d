@@ -27,9 +27,10 @@ type V = Viewer3d & Record<string, any>;
  * globe = base에 구 위에 선 기둥 선분((200, 28, 95) → (200, 28, 120))과 바닥의 12토막 원판(arc의 원판)을 더한 자료
  * (0.19.0 축이 곡면을 뚫는 점 다듬기 — 기둥 아래 끝의 Z축이 구를 뚫는다, 잠근 축과 원판 둘레의 교차 다듬기),
  * compact = tex와 같은 장면을 작은 배열(법선 Int8 정점 4값, 무늬 좌표 Int16 + uvTransform — syntheticScene compact)로 준 자료(0.26.0.
- * 그 선택이 없는 판의 syntheticScene은 Float32 그대로라 compactNeed로 건너뛴다)
+ * 그 선택이 없는 판의 syntheticScene은 Float32 그대로라 compactNeed로 건너뛴다),
+ * apex = 반지름 25 원호 33토막 꺾은선과 그 끝에서 (40, 25 − 0.001)까지 급속 이동 선분뿐인 자료(0.33.0 refineEnds — NC 23차 재현, 첫 점 X축이 원호 꼭대기를 스친다)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex';
 
 interface Ctx {
   v: V;
@@ -77,6 +78,7 @@ const scenes = new Map<Data, ReturnType<typeof syntheticScene>>();
 function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (d === 'edit' || d === 'edit-big') return editScene(d === 'edit-big' ? EDIT_BIG : EDIT_GRID, flatTop);
   let s = scenes.get(d);
+  if (!s && d === 'apex') scenes.set(d, (s = apexScene()));
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
@@ -6055,6 +6057,377 @@ const itemMatrixValues: ValueSet = {
   },
 };
 
+// ───────────── 0.33.0 꺾은선 꼭짓점을 지나는 선(refineEnds)·그림 저장의 표식 비키기·겉모습 한 번에 ─────────────
+const APEX_RAD = Math.PI / 180;
+/** apex 자료(NC 23차 재현 — tests/v0330ends.test.ts와 같은 원호): 시작·끝(소수 여섯째 자리), 반지름(반올림한 시작점과 중심 사이), 토막 수, 급속 이동 끝의 높이 25 − APEX_D */
+const APEX_S = [25 * Math.cos(152.5 * APEX_RAD), 25 * Math.sin(152.5 * APEX_RAD)].map((x) => +x.toFixed(6));
+const APEX_E = [25 * Math.cos(-12.49 * APEX_RAD), 25 * Math.sin(-12.49 * APEX_RAD)].map((x) => +x.toFixed(6));
+const APEX_R = Math.hypot(APEX_S[0]!, APEX_S[1]!);
+const APEX_N = 33;
+const APEX_D = 0.001;
+function apexScene(): Scene3d {
+  const a0 = Math.atan2(APEX_S[1]!, APEX_S[0]!), a1 = Math.atan2(APEX_E[1]!, APEX_E[0]!);
+  const at = (k: number): number[] => {
+    const a = a0 + ((a1 - a0) * k) / APEX_N;
+    return [APEX_R * Math.cos(a), APEX_R * Math.sin(a), 0];
+  };
+  const P: number[] = [];
+  for (let k = 0; k < APEX_N; k++) P.push(...at(k), ...at(k + 1));
+  return {
+    name: 'apex',
+    units: 'mm',
+    meshes: [],
+    lines: [
+      { id: '호', positions: new Float32Array(P), segmentIds: new Uint32Array(Array.from({ length: APEX_N }, (_, k) => k)), color: [0.4, 0.85, 1, 1] },
+      { id: '급속', positions: new Float32Array([APEX_E[0]!, APEX_E[1]!, 0, 40, 25 - APEX_D, 0]), color: [0.95, 0.6, 0.3, 1] },
+    ],
+    points: [],
+  };
+}
+/** apex 자료의 앱 refine(NC 앱과 같은 셈): 'axisEdge' 직선과 원(z 0)의 교차 가운데 힌트(point)에 가까운 근(토막 길이 안), 원호가 아니면 null. count.open = 열린 후보 호출 수 */
+function apexRefine(count?: { open: number }): (i: any) => number[] | null {
+  const d3 = (p: readonly number[], q: readonly number[]): number => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+  return (i) => {
+    if (i.open && count) count.open++;
+    if (i.kind !== 'axisEdge' || !i.line || i.segment.id !== '호') return null;
+    const o = i.line.origin, d = i.line.dir;
+    if (Math.abs(d[2]) > 1e-12 || Math.abs(o[2]) > 1e-9) return null;
+    const a = d[0] * d[0] + d[1] * d[1], b = o[0] * d[0] + o[1] * d[1], k = o[0] * o[0] + o[1] * o[1] - APEX_R * APEX_R;
+    const disc = b * b - a * k;
+    if (disc < 0) return null;
+    const ts = [(-b - Math.sqrt(disc)) / a, (-b + Math.sqrt(disc)) / a].map((t) => [o[0] + d[0] * t, o[1] + d[1] * t, o[2]]);
+    const q = d3(ts[0]!, i.point) <= d3(ts[1]!, i.point) ? ts[0]! : ts[1]!;
+    return d3(q, i.point) <= d3(i.segment.ends[0], i.segment.ends[1]) * (1 + 1e-6) ? q : null;
+  };
+}
+/** NC 앱의 추론 선택(measure.ts MEASURE_INFERENCE와 같다) */
+const APEX_INF = { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true };
+/** 1화소의 세계 길이 0.002~0.1 사이 12단(곱 비 약 1.43 — tests/v0330ends.test.ts와 같다) */
+const APEX_STEPS = Array.from({ length: 12 }, (_, k) => 0.002 * Math.pow(50, k / 11));
+/** 위에서 보고 붙잡기 선택(snap — refine을 주지 않으면 apexRefine)을 준 뒤 급속 이동 끝(끝점)을 첫 점으로 찍는다 */
+function apexFirst(c: Ctx, snap: Record<string, unknown>): void {
+  const { v } = c;
+  v.setView('top', false);
+  v.fit(false);
+  v.setMeasureMode(true);
+  v.setMeasureSnap({ inference: APEX_INF, refine: apexRefine(), ...snap });
+  v.renderNow();
+  const s = c.at([40, 25 - APEX_D, 0]);
+  if (s) {
+    c.hover(s.x + 1, s.y + 1);
+    c.click(s.x + 1, s.y + 1);
+  }
+  v.renderNow();
+}
+/** 꼭대기 둘레를 1화소 = w(세계)쯤으로(zoomToRect) */
+function apexZoom(c: Ctx, w: number): void {
+  const { v } = c;
+  const hw = (c.w / 2) * w;
+  const a = c.at([-hw, 25 - 0.75 * hw, 0]), b = c.at([hw, 25 + 0.75 * hw, 0]);
+  if (a && b) v.zoomToRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y), false);
+  v.renderNow();
+}
+/** 첫 점 높이의 X축과 원이 만나는 두 근(첫 점 쪽 +xi, 먼 쪽 −xi) */
+function apexRoots(v: V): [number[], number[]] {
+  const yl = v.measurePoints?.[0]?.point?.[1] ?? Math.fround(25 - APEX_D);
+  const xi = Math.sqrt(APEX_R * APEX_R - yl * yl);
+  return [
+    [xi, yl, 0],
+    [-xi, yl, 0],
+  ];
+}
+/** 확대 12단 × 두 근 둘레(근에서 (1, 2)화소)를 가리킨 미리 보기: 붙잡은 종류·점·다듬었는지·토막·원 위인지·축 */
+function apexSweep(c: Ctx, snap: Record<string, unknown>): unknown[] {
+  const { v } = c;
+  v.clearMeasure();
+  apexFirst(c, snap);
+  const rows: unknown[] = [['first', v.measurePoints.map((q: any) => [r10s(q.point), q.snap])]];
+  const [Qp, Qm] = apexRoots(v);
+  APEX_STEPS.forEach((w, k) => {
+    apexZoom(c, w);
+    for (const Q of [Qp, Qm]) {
+      const s = c.at(Q);
+      if (!s) {
+        rows.push([k, null]);
+        continue;
+      }
+      c.hover(s.x + 1, s.y + 2);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      rows.push([k, h ? [h.snap, r10s(h.point), !!h.refined, segRow(h.segment), Math.abs(Math.hypot(h.point[0], h.point[1]) - APEX_R) < 1e-9, h.axis ?? null, !!h.locked] : null]);
+    }
+  });
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setView('seIso', false);
+  v.fit(false);
+  return rows;
+}
+/** 0.33.0 refineEnds가 있는 판인지 — 꼭짓점이 커서에서 붙잡기 거리 안인 단(1화소 0.1)에서 첫 근 둘레를 가리켜 원 위 교차에 붙는지(없는 판은 끝점) */
+const v0330ends: Need = (v, c) => {
+  const why = fn('zoomToRect', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  apexFirst(c, { refineEnds: true });
+  apexZoom(c, APEX_STEPS[11]!);
+  const s = c.at(apexRoots(v)[0]);
+  if (s) c.hover(s.x + 1, s.y + 2);
+  v.renderNow();
+  const ok = !!v.measureHoverSnap?.refined;
+  v.setMeasureSnap(null);
+  v.clearMeasure();
+  v.setMeasureMode(false);
+  v.setView('seIso', false);
+  v.fit(false);
+  return ok ? null : '이 판에 없는 선택: 0.33.0 refineEnds(선이 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리를 앱 refine에 묻기)';
+};
+/** 꼭짓점이 커서에서 붙잡기 거리 안인 단(1화소 0.1)에서 첫 근 둘레를 가리킨 그림 — 끝점 대신 원 위 교차에 추론 표식(새 장면) */
+SHOTS.push({
+  name: 'apex-measure-ends',
+  data: 'apex',
+  needs: v0330ends,
+  setup: (c) => {
+    apexFirst(c, { refineEnds: true });
+    apexZoom(c, APEX_STEPS[11]!);
+    const s = c.at(apexRoots(c.v)[0]);
+    if (s) c.hover(s.x + 1, s.y + 2);
+  },
+});
+/** 0.33.0 refineEnds를 주지 않은 같은 차례(apex — 0.32.0과 같아야 한다): 확대 12단 × 두 근의 미리 보기, 앱 null도 */
+const apexOffValues: ValueSet = {
+  name: 'apex-measure-ends-off',
+  data: 'apex',
+  needs: fn('zoomToRect', 'project', 'setMeasureSnap', 'clearMeasure'),
+  run: (c) => [['refine', apexSweep(c, {})], ['null', apexSweep(c, { refine: () => null })]],
+};
+/**
+ * 0.33.0 refineEnds 값(apex — 새 값): 켠 미리 보기(확대 12단 × 두 근), 끈 것과 다른 자리가 모두 원 위 다듬은 교차인지, 앱 호출 수(열린 후보 — 기억으로 단마다 몇 번),
+ * 앱 null이면 끈 것과 같은지, 잠근 X축(lockEdges)의 같은 차례, 꼭짓점이 가까운 단에서 두 점째로 찍은 거리(정확한 값과 1e-9 안인지)
+ */
+const apexValues: ValueSet = {
+  name: 'apex-measure-ends',
+  data: 'apex',
+  needs: v0330ends,
+  run: (c) => {
+    const { v } = c;
+    const count = { open: 0 };
+    const on = apexSweep(c, { refineEnds: true, refine: apexRefine(count) });
+    const off = apexSweep(c, {});
+    const changed = on.filter((r, i) => JSON.stringify(r) !== JSON.stringify(off[i])).map((r) => {
+      const h = (r as unknown[])[1] as unknown[] | null;
+      return h ? [(r as unknown[])[0], h[0], h[2], h[4]] : null;
+    });
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+    const nul = same(apexSweep(c, { refineEnds: true, refine: () => null }), apexSweep(c, { refine: () => null }));
+    // 잠근 X축: 첫 점을 찍은 뒤 잠근다
+    v.clearMeasure();
+    apexFirst(c, { refineEnds: true });
+    v.setMeasureInferenceLock('x');
+    const [Qp] = apexRoots(v);
+    const lock: unknown[] = [];
+    for (const k of [8, 10, 11]) {
+      apexZoom(c, APEX_STEPS[k]!);
+      const s = c.at(Qp);
+      if (s) c.hover(s.x + 1, s.y + 2);
+      v.renderNow();
+      const h = v.measureHoverSnap;
+      lock.push([k, h ? [h.snap, r10s(h.point), !!h.refined, !!h.locked, segRow(h.segment), h.fromSnap ?? null] : null]);
+    }
+    v.setMeasureInferenceLock(false);
+    // 꼭짓점이 가까운 단에서 두 점째
+    apexZoom(c, APEX_STEPS[11]!);
+    const s = c.at(Qp);
+    if (s) c.click(s.x + 1, s.y + 2);
+    const m = v.measurement();
+    const want = 40 - Qp[0]!;
+    const second = [m ? [r10s(m.b), r10(m.distance), m.snapB ?? null] : null, !!m && Math.abs(m.distance - want) < 1e-9, v.measurePoints.map((q: any) => [q.snap, !!q.refined, segRow(q.segment)])];
+    v.setMeasureSnap(null);
+    v.clearMeasure();
+    v.setMeasureMode(false);
+    return [['on', on], ['changed', changed], ['calls', count.open], ['null-same', nul], ['lock', lock], ['second', second]];
+  },
+};
+
+/** 0.33.0 그림 저장의 표식 비키기(setMeasureLabelAvoid({ points, snapshotPoints }))가 있는 판인지 — 읽은 값에 snapshotPoints가 남는다 */
+const v0330snap: Need = (v, c) => {
+  const why = v0310points(v, c);
+  if (why) return why;
+  v.setMeasureLabelAvoid({ points: true, snapshotPoints: true });
+  const ok = v.measureLabelAvoid?.snapshotPoints === true;
+  v.setMeasureLabelAvoid(null);
+  return ok ? null : '이 판에 없는 선택: 0.33.0 그림 저장의 측정 점 표식 비키기(setMeasureLabelAvoid({ snapshotPoints }))';
+};
+/** POINTS_TARGETS 가운데 마우스 기본 자리가 첫 점 표식을 덮는 첫 자리(없으면 LABEL_TARGET) */
+function coveringTarget(c: Ctx): number[] {
+  const { v } = c;
+  const a = c.at(c.world([120, 0, 40]));
+  for (const t of POINTS_TARGETS) {
+    v.setMeasureLabelAvoid(null);
+    v.clearMeasure();
+    labelPreview(c, t);
+    v.renderNow();
+    const r = v.measureLabelRect;
+    if (a && r && coversDot(r, a)) {
+      v.clearMeasure();
+      return t;
+    }
+  }
+  v.clearMeasure();
+  return LABEL_TARGET;
+}
+/** 그림 저장(renderImage — 화소 회귀가 찍는 그림)의 거리 글상자가 첫 점 표식을 비킨 자리(새 장면) */
+SHOTS.push({
+  name: 'base-measure-label-points-image',
+  data: 'base',
+  needs: v0330snap,
+  setup: (c) => {
+    const t = coveringTarget(c);
+    c.v.setMeasureLabelAvoid({ points: true, snapshotPoints: true });
+    labelPreview(c, t);
+  },
+});
+/**
+ * 0.33.0 그림 저장의 표식 비키기 값(base — 새 값): POINTS_TARGETS마다(마우스) 피할 것 없이·points만·points와 snapshotPoints의 화면 글상자 자리, 그림 저장 화소가
+ * points만이면 피할 것 없이와 같고(0.32.0 규칙 — 다른 화소 0), snapshotPoints를 켜면 화면 글상자를 옮긴 자리에서만 달라지는지(옮기지 않았으면 0)
+ */
+const snapshotLabelValues: ValueSet = {
+  name: 'base-measure-label-snapshot',
+  data: 'base',
+  needs: v0330snap,
+  run: (c) => {
+    const { v } = c;
+    const rect = (r: any): number[] | null => (r ? [r.x, r.y, r.width, r.height].map(r10) : null);
+    const diff = (p: Uint8ClampedArray, q: Uint8ClampedArray): number => {
+      let d = 0;
+      for (let i = 0; i < p.length; i += 4) if (p[i] !== q[i] || p[i + 1] !== q[i + 1] || p[i + 2] !== q[i + 2]) d++;
+      return d;
+    };
+    const out: unknown[] = [];
+    for (const t of POINTS_TARGETS) {
+      v.setMeasureLabelAvoid(null);
+      v.clearMeasure();
+      const q = labelPreview(c, t);
+      v.renderNow();
+      const r0 = v.measureLabelRect;
+      if (!q || !r0) {
+        out.push([t, null]);
+        continue;
+      }
+      const img0 = v.renderImage({}).data;
+      v.setMeasureLabelAvoid({ points: true });
+      v.renderNow();
+      const r1 = v.measureLabelRect!;
+      const d1 = diff(img0, v.renderImage({}).data);
+      v.setMeasureLabelAvoid({ points: true, snapshotPoints: true });
+      v.renderNow();
+      const r2 = v.measureLabelRect!;
+      const d2 = diff(img0, v.renderImage({}).data);
+      const moved = JSON.stringify(r1) !== JSON.stringify(r0);
+      out.push([t, rect(r0), rect(r1), rect(r2), JSON.stringify(r2) === JSON.stringify(r1), d1, moved, d2 > 0 === moved, v.measureLabelAvoid]);
+    }
+    v.setMeasureLabelAvoid(null);
+    v.setMeasureMode(false);
+    v.renderNow();
+    return out;
+  },
+};
+
+/** 0.33.0 묶음 겉모습 목록(불투명도·고르기 빼기·색·행렬·윤곽선 색·외곽선 색·고르기 불투명·지나갈 면, 필드 null, 항목 null, 없는 id, 짧은 행렬, 같은 id 둘) */
+function itemLookList(): [string, any][] {
+  const T = (x: number, y: number, z: number): number[] => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+  return [
+    ['상자', { opacity: 0.45, color: '#e08a3c', matrix: T(0, 0, 10), edgeColor: '#20c060', pickThrough: [{ start: 2, count: 2 }] }],
+    ['구', { color: [0.2, 0.5, 0.95, 1], profileColor: '#e0245e', matrix: T(5, -20, 6) }],
+    ['작은 상자 1', { opacity: 0.6, pickable: false, matrix: T(0, 0, 25) }],
+    ['작은 상자 2', { pickOpaque: true, opacity: 0.5, matrix: [1, 2, 3] }],
+    ['작은 상자 3', null],
+    ['판', { opacity: 0.8, color: null, matrix: T(0, 0, -4) }],
+    ['공구 경로', { matrix: T(5, -5, 10), color: '#f0e040' }],
+    ['없는 묶음', { opacity: 0.1 }],
+    ['구멍', { matrix: T(0, 0, 8), opacity: 0.7 }],
+    ['작은 상자 3', { matrix: T(10, 0, 6), edgeColor: '#ff00ff' }],
+    ['구', { opacity: 0.9 }],
+  ];
+}
+/** 그 판에 setItemLooks가 있으면 한 번에, 없으면(0.32.0) 약속한 차례대로 하나씩 — 두 판의 그림·값이 같아야 한다 */
+function applyItemLooks(v: V): void {
+  const L = itemLookList();
+  if (typeof v.setItemLooks === 'function') {
+    v.setItemLooks(L);
+    return;
+  }
+  for (const [id, l] of L) {
+    if (l === null) {
+      v.setItemOpacity(id, null);
+      v.setItemColor(id, null);
+      v.setItemMatrix(id, null);
+      v.setItemEdgeColor(id, null);
+      v.setItemProfileColor(id, null);
+      v.setItemPickOpaque(id, false);
+      v.setItemPickThrough(id, null);
+      continue;
+    }
+    if (l.opacity !== undefined) v.setItemOpacity(id, l.opacity, l.pickable !== undefined ? { pickable: l.pickable } : {});
+    if (l.color !== undefined) v.setItemColor(id, l.color);
+    if (l.matrix !== undefined) v.setItemMatrix(id, l.matrix);
+    if (l.edgeColor !== undefined) v.setItemEdgeColor(id, l.edgeColor);
+    if (l.profileColor !== undefined) v.setItemProfileColor(id, l.profileColor);
+    if (l.pickOpaque !== undefined) v.setItemPickOpaque(id, l.pickOpaque);
+    if (l.pickThrough !== undefined) v.setItemPickThrough(id, l.pickThrough);
+  }
+}
+const lookNeed = fn('setItemOpacity', 'setItemColor', 'setItemMatrix', 'setItemEdgeColor', 'setItemProfileColor', 'setItemPickOpaque', 'setItemPickThrough');
+SHOTS.push({
+  name: 'base-item-looks',
+  data: 'base',
+  needs: all(lookNeed, fn('setLighting', 'setRenderOptions')),
+  setup: ({ v }) => {
+    v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true });
+    v.setRenderOptions({ profiles: true });
+    applyItemLooks(v);
+    v.fit(false);
+  },
+});
+/** 0.33.0 겉모습 한 번에 값(0.32.0과 견준다 — 그 판은 하나씩): 화면 격자 고르기(마우스·반투명 너머), itemLook, 전체 보기·묶음 보기 카메라, 최근접점 */
+const itemLookValues: ValueSet = {
+  name: 'base-item-looks',
+  data: 'base',
+  needs: all(lookNeed, fn('closestPoints', 'fitItems', 'itemLook')),
+  run: (c) => {
+    const { v, w, h } = c;
+    applyItemLooks(v);
+    const out: unknown[] = [];
+    for (const o of [{}, { throughTranslucent: true }])
+      for (let j = 0; j < 12; j++)
+        for (let i = 0; i < 16; i++) {
+          const p = v.pick(((i + 0.43) * w) / 16, ((j + 0.37) * h) / 12, o);
+          out.push(p ? [p.kind, p.id, p.index, r10s(p.point)] : null);
+        }
+    const ids = ['상자', '구', '작은 상자 1', '작은 상자 2', '작은 상자 3', '판', '공구 경로', '급속 이송', '구멍'];
+    out.push(
+      ids.map((id) => {
+        const l = v.itemLook(id);
+        return l ? { ...l, matrix: r10s(l.matrix ?? null), opacity: l.opacity === undefined ? null : r10(l.opacity) } : null;
+      }),
+    );
+    v.fit(false);
+    out.push(camKey(v));
+    v.fitItems(['상자', '구', '작은 상자 3'], false);
+    out.push(camKey(v));
+    out.push(
+      [
+        ['상자', '구'],
+        ['작은 상자 1', '판'],
+        ['구멍', '작은 상자 3'],
+      ].map(([a, b]) => {
+        const r = v.closestPoints(a, b);
+        return r ? [r10(r.distance), r10s(r.a), r10s(r.b)] : null;
+      }),
+    );
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -6132,6 +6505,10 @@ const VALUES: ValueSet[] = [
   gestureDeclinedValues,
   claimValues,
   itemMatrixValues,
+  apexOffValues,
+  apexValues,
+  snapshotLabelValues,
+  itemLookValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

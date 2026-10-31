@@ -29,6 +29,8 @@
  * - 0.28.0 그 선이 다른 것과 만나는 점(trackDirMeetSnap): 부르는 쪽이 준 직선(첫 점 축·첫 점의 나란함·다른 끌어온 점의 축)과의
  *   3D 교차(trackPairSnap과 같은 허용치), 선분과의 교차(trackEdgeSnap 규칙), 커서 아래 면을 뚫는 점(axisFaceSnap 규칙)
  *   (0.29.0부터 뷰어는 MeasureInference.trackDirs { meets: true }일 때 끌어온 점 후보 뒤 차례로 견준다)
+ * - 0.33.0 선이 꺾은선 꼭짓점을 지나는 자리(vertexEdgeCandidates·vertexEdgeSnap): 선이 토막 끝을 화면 반 화소 안으로 지나 선분 교차·열린 교차에서 빠지는 자리를
+ *   그 끝을 둔 토막마다 부르는 쪽(뷰어는 MeasureSnapOptions.refineEnds — 앱 refine 'axisEdge', open)에 물어 곡선과의 정확한 교차를 열린 교차와 같은 규칙으로 받는다
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -870,8 +872,25 @@ export function openEdgeSnap<S extends TrackSegment>(
   refine: (c: OpenEdgeCandidate<S>) => readonly number[] | null | undefined,
   visible?: ((p: V3, seg: S) => boolean) | null,
 ): OpenEdgeSnap<S> | null {
+  return acceptOpenEdges(f, lines, openEdgeCandidates(f, lines, segs, x, y, snapPx), x, y, snapPx, refine, visible);
+}
+
+/**
+ * 열린 교차 후보 cands(커서에 가까운 코어 점부터)마다 refine을 불러 받는 규칙(openEdgeSnap 머리글 — 0.23.0)으로 받은 것 가운데 커서에 가장 가까운 것.
+ * openEdgeSnap(0.20.0 열린 교차)·vertexEdgeSnap(0.33.0 꼭짓점을 지나는 선)이 함께 쓴다
+ */
+function acceptOpenEdges<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  cands: readonly OpenEdgeCandidate<S>[],
+  x: number,
+  y: number,
+  snapPx: number,
+  refine: (c: OpenEdgeCandidate<S>) => readonly number[] | null | undefined,
+  visible?: ((p: V3, seg: S) => boolean) | null,
+): OpenEdgeSnap<S> | null {
   let best: OpenEdgeSnap<S> | null = null;
-  for (const c of openEdgeCandidates(f, lines, segs, x, y, snapPx)) {
+  for (const c of cands) {
     // 받는 점은 커서에서 reachPx보다 가깝지 않다(코어 점 거리 차례라 끝내지 않고 건너뛴다)
     if (best && c.reachPx >= best.distPx) continue;
     const q = finitePoint(refine(c));
@@ -893,6 +912,75 @@ export function openEdgeSnap<S extends TrackSegment>(
     best = { p, core: c.p, line: c.line, seg: s, distPx: dist };
   }
   return best;
+}
+
+/**
+ * 선이 꺾은선 꼭짓점을 지나는 자리의 후보(0.33.0 refineEnds, 순수): 선 lines(지나는 점 from·방향 dir)가 토막 segs(커서 둘레 선분·윤곽선)의 끝 V를
+ * 그 깊이에서 화면 반 화소(meetTol — 0.9.0 교차점과 같은 허용치) 안으로 지나는 것. 그런 자리는 지금까지 선분 교차에서 빠지고(선분 끝점은 끝점 붙잡기가 맡는다 — 0.17.0)
+ * 열린 교차에서도 빠졌다(그 끝을 함께 쓰는 이웃 토막을 선이 3D로 지난다 — 0.20.0). 곡선을 나눈 꺾은선의 꼭짓점은 곡선 위이지만, 선이 곡선에 거의 닿듯 지나면
+ * 곡선과의 교차는 꼭짓점이 아니라 그 둘레 토막의 활꼴 안이다(원호 꼭대기를 스치는 축이 꼭대기 토막 끝 둘레를 지날 때).
+ * - V를 끝으로 둔 토막마다(꼭짓점을 함께 쓰는 두 토막이면 둘 모두) 후보 하나 — 코어 점 p는 V에서 그 선에 내린 발(세계 축이면 남은 두 좌표가 지나는 점 그대로),
+ *   gap은 V와 선 사이 거리, distPx는 커서와 p의 화면 거리, reachPx는 0.23.0 열린 교차와 같은 받는 범위(선에서 그 토막 범위인 조각)와 커서의 화면 거리
+ * - 빼는 것: 커서가 지나는 점의 화면 자리 snapPx 안인 선(axisEdgeSnap과 같다), 지나는 점 자리의 꼭짓점(첫 점·끌어온 점이 그 꼭짓점),
+ *   reachPx가 snapPx를 넘는 것(받을 수 없는 자리 — 앱에 묻지 않는다)
+ * - at을 주면 그 점(끝점 붙잡기가 고른 꼭짓점)과 같은 자리(그 깊이 화면 반 화소 안)의 끝만 본다
+ * 커서에 가까운 코어 점부터(같으면 선 → 토막 → 토막의 첫 끝 차례)
+ */
+export function vertexEdgeCandidates<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  at?: readonly number[] | null,
+): OpenEdgeCandidate<S>[] {
+  const out: OpenEdgeCandidate<S>[] = [];
+  if (!lines.length || !segs.length) return out;
+  const atTol = at ? meetTol(f, at) : 0;
+  for (let li = 0; li < lines.length; li++) {
+    const { from: P, dir } = lines[li]!;
+    const e = unitDir([0, 0, 0], dir);
+    if (!e || !P.every(Number.isFinite) || cursorOn(f, P, x, y, snapPx)) continue;
+    for (const s of segs) {
+      const len = dist3(s.a, s.b);
+      if (!(len > 0)) continue;
+      for (const V of [s.a, s.b]) {
+        if (at && !(dist3(V, at) <= atTol)) continue;
+        const m = lineFoot(P, e, V);
+        const tol = meetTol(f, m, s.wpp);
+        const gap = dist3(m, V);
+        if (!(gap <= tol) || dist3(m, P) <= tol) continue;
+        const span = segSlabSpan(P, e, s.a, s.b, OPEN_EDGE_CHORD * len + 2 * tol);
+        const reach = span && segmentReachPx(f, P, e, span, x, y);
+        if (reach == null || reach > snapPx) continue;
+        const d = screenDistance(f, m, x, y);
+        if (d === null) continue;
+        out.push({ p: m, line: li, seg: s, gap, distPx: d, reachPx: reach });
+      }
+    }
+  }
+  return out.sort((p, q) => p.distPx - q.distPx);
+}
+
+/**
+ * 선이 꺾은선 꼭짓점을 지나는 자리의 다듬은 교차(0.33.0 refineEnds, 순수): vertexEdgeCandidates의 후보마다(커서에 가까운 코어 점부터) refine(후보)을 불러
+ * 곡선과의 정확한 교차 q를 받고, 0.23.0 열린 교차와 같은 규칙(openEdgeSnap — 선 위로 내린 자리, 그 토막 범위 안·토막 끝에서 반 화소 넘게·현에서 OPEN_EDGE_CHORD × 토막 길이 안,
+ * 단면에서 남는 쪽, 커서에서 snapPx 안, visible)으로 받은 것 가운데 커서에 가장 가까운 것. 토막 끝 자리(선이 꼭짓점에서 곡선을 가로지른다 — 앱 점이 꼭짓점과 반 화소 안)는
+ * 받지 않는다(그 자리는 끝점이 곧 교차다). at은 vertexEdgeCandidates와 같다
+ */
+export function vertexEdgeSnap<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  refine: (c: OpenEdgeCandidate<S>) => readonly number[] | null | undefined,
+  visible?: ((p: V3, seg: S) => boolean) | null,
+  at?: readonly number[] | null,
+): OpenEdgeSnap<S> | null {
+  return acceptOpenEdges(f, lines, vertexEdgeCandidates(f, lines, segs, x, y, snapPx, at), x, y, snapPx, refine, visible);
 }
 
 /**
