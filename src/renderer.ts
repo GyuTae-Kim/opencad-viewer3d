@@ -24,6 +24,10 @@
  *
  * 0.28.0 GPU 버퍼 바이트: 버퍼는 모두 newBuffer로 만들고 dropBuffer로 지워 살아 있는 버퍼마다 성분(GpuBufferPart)과 bufferData로 잡은 크기를 적는다
  * (bufferStats — 나눠 올리기는 크기를 잡을 때 적고 그 배열의 성분으로 바꾼다, 문맥을 잃으면 비운다). GL 부르는 차례는 예전과 같다
+ *
+ * 0.43.0 PBR 그림: 그물 기록이 PBR 필드(pbr.ts PbrSource)를 기억하고, 그 그림 id도 무늬 표(textures)에 들어 무늬 그림과 같은 길(예산·놓기·pending·복구)로 올린다.
+ * 그리기마다 올라간 그림으로 상태(pbrState)를 정해 셰이더 변종(UV·NMAP·PBR)과 무늬 단위 6·7·8(없는 쪽은 흰 1화소 그림)을 건다. PBR 필드가 없는 그물은 늘 0.42.0 길이다.
+ * 인스턴싱(0.42.0)은 그림자·단면 하나일 때도 면을 모은다 — 자리 자료에 그림자 행렬·로컬 평면을 더 쓴다(instMeshes)
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
