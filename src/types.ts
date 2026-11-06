@@ -129,6 +129,13 @@ export interface Texture3d {
   height?: number;
   /** 투명한 화소를 쓰는 그림이면 true — 이 무늬를 칠한 그물은 반투명 차례에 그린다(아니면 그림의 알파는 무시) */
   alpha?: boolean;
+  /**
+   * 0.38.0: 앱이 그림을 장면을 올린 뒤에 준다(data·bitmap 없이 true). 코어는 풀지 않고 그 무늬를 기다리며(그동안 그 무늬를 칠한 그물은 color — 0.25.0 놓은 무늬를
+   * 되찾을 때와 같다, restoreNeed·stats.textures.missing에 든다), 앱이 Viewer3d.restoreTexture로 주면 풀어 올린다. 예: 앱이 원본을 손질한 그림(색 바꾸기·알파 재기)을
+   * 첫 그림 뒤에 만든다. 크기를 알면 width·height를 함께 준다(한 장 한도·전체 예산을 처음부터 나눈다). 코어는 받은 그림을 붙잡지 않으므로 문맥을 잃었다 되찾으면 다시 기다린다.
+   * data나 bitmap이 있으면 이 값은 보지 않는다(0.37.0과 같다)
+   */
+  pending?: boolean;
 }
 
 /** 선분 묶음(공구 경로·와이어프레임 등) */

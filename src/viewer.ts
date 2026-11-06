@@ -1814,7 +1814,7 @@ export class Viewer3d {
 
   /**
    * 코어가 놓은 배열·원본 가운데 지금 GPU에 없는 것(0.25.0 — 문맥 복구 뒤 앱이 다 주었는지 볼 때). 없으면 null.
-   * 나눠 올리는 중이면 아직 올리지 않은 그물도 차례가 왔을 때 없을 것으로 셈한다
+   * 나눠 올리는 중이면 아직 올리지 않은 그물도 차례가 왔을 때 없을 것으로 셈한다. 0.38.0: 앱이 아직 주지 않은 pending 무늬(Texture3d.pending)도 textures에 든다
    */
   get restoreNeed(): ContextRestoreNeed | null {
     if (this.disposed || this.lost) return null;
@@ -1840,7 +1840,9 @@ export class Viewer3d {
   /**
    * 코어가 놓은 무늬 원본을 다시 준다(0.25.0 — 문맥 복구 뒤, 그 무늬가 기다리는 동안만). 그림 파일 바이트(Uint8Array), 푼 그림(ImageBitmap — 다 쓰면 닫는다),
    * 또는 { data, bitmap, mime, width, height }. 처음 올릴 때와 같은 크기 한도로 풀어 올리고 다시 그린다. 원본은 붙잡지 않는다.
-   * 올렸으면 true로 풀리는 약속(기다리는 무늬가 아니거나 풀지 못하면 false — 풀지 못하면 다시 기다린다)
+   * 올렸으면 true로 풀리는 약속(기다리는 무늬가 아니거나 풀지 못하면 false — 풀지 못하면 다시 기다린다).
+   * 0.38.0: 장면에서 Texture3d.pending으로 둔 무늬(앱이 장면을 올린 뒤에 주는 그림 — 손질한 무늬 등)도 기다리는 무늬다. 문맥을 잃지 않아도 setScene 뒤 언제든 준다.
+   * 코어가 붙잡지 않으므로 문맥을 잃었다 되찾으면 다시 기다린다(onContextRestore의 need.textures에 든다). 이미 올린 무늬를 바꾸는 길은 아니다(그때는 false)
    */
   restoreTexture(id: string, src: TextureSource): Promise<boolean> {
     if (!this.gpu) return Promise.resolve(false);
