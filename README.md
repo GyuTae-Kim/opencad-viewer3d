@@ -3112,7 +3112,8 @@ viewer.setMeasureSnap({
 - 표식은 동그라미 테(반지름 6화소)와 그 꼭대기에 닿는 가로선(양옆 10화소 — AutoCAD 접점 표식 꼴), 바탕 테 위 측정 색이다. 점은 동그라미 가운데다
 - 머무르기로 끌어올 수 있는 점 붙잡기이고(0.16.0), 다듬기(`refine`)에 넘기지 않으며(앱이 준 점), 차례는 다른 앱 점과 같다(화면에서 가까운 것). 기존 종류의 그림·차례는 그대로다
 - 코어 측정 거리 글(“거리 …”·ΔX ΔY ΔZ)에는 종류 이름이 없다 — 이름표(“접점”)는 앱이 상태 줄·측정 띠·글 꼴(`setMeasureFormat`)에서 `snapB === 'tangent'`로 붙인다.
-  `SnapKind`가 늘었으므로 종류마다 이름을 고르는 앱 `switch`는 `'tangent'`를 더한다(`default`가 있으면 컴파일은 그대로다)
+  `SnapKind`가 늘었으므로 종류마다 이름을 고르는 앱 `switch`는 `'tangent'`를 더한다(`default`가 있으면 컴파일은 그대로다).
+  `Record<SnapKind, …>`처럼 모든 종류를 채워야 하는 표는 `'tangent'` 항목이 없으면 typecheck가 깨진다 — 올릴 때 한 줄씩 더한다
 
 ### 현을 얕게 가로지르는 선의 곡선 교점(`acceptEdgePatch` — 37차 남은 꼴)
 
@@ -3181,7 +3182,8 @@ for await (const t of trimmed) await viewer.restoreTexture(t.id, t.bitmap);
   접점은 `kind: 'tangent'`로 달고 `snapLabel`에 `'tangent'`(“접점”)를 더한다(`'point'`를 “접점”으로 읽던 것은 뺀다). 곡선 계산 조각을 나중에 받을 때 `syncMeasureSnap` 대신
   `clearMeasurePointsFor()`로 잠금·끌어온 점을 둘 수 있다. B-rep 곡선 모서리 현을 얕게 가로지르는 선 둘레가 곡선 위 교차로 바뀐다
 - SKP: 코어를 0.38.0으로 올린다. 큰 모형에서 손질할 무늬를 `pending`(`width`·`height`·`alpha`와 함께)으로 두고 장면부터 올린 뒤 워커가 손질한 그림을 `restoreTexture`로 준다.
-  문맥 복구 때 이미 `restoreTexture`로 다시 주는 길(`release.ts`)이 pending 무늬도 맡는다(need.textures에 든다). 측정은 코어 측정을 쓰지 않아 할 일이 없다
+  문맥 복구 때 이미 `restoreTexture`로 다시 주는 길(`release.ts`)이 pending 무늬도 맡는다(need.textures에 든다). 측정 붙잡기 이름표·색 표(`SNAP_LABELS`·`SNAP_COLORS` —
+  `Record<SnapKind, string>`)에 `'tangent'` 항목을 더해야 typecheck가 지난다(SKP는 접점을 주지 않으므로 화면에 나오지는 않는다)
 - DWG: 3D 뷰어 코어를 쓰지 않는다
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
