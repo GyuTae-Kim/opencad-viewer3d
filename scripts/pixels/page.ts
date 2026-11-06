@@ -507,6 +507,21 @@ const extraShots: Shot[] = [
       v.setView('front', false);
     },
   },
+  // 0.44.0 손가락으로 큐브 가운데를 누르면 편 큐브(224화소 — 띠 경계·바탕). 마우스 큐브(위 둘)는 0.43.0과 같아야 한다
+  {
+    name: 'base-cube-touch',
+    data: 'base',
+    capture: 'cube',
+    needs: fn('setViewCubeTouch'),
+    setup: ({ host }) => {
+      const el = host.querySelector<HTMLCanvasElement>('canvas.v3d-cube')!;
+      const r = el.getBoundingClientRect();
+      const ev = (type: string): PointerEvent =>
+        new PointerEvent(type, { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerId: 7, pointerType: 'touch', button: 0, buttons: type === 'pointerup' ? 0 : 1, bubbles: true, cancelable: true, isPrimary: true });
+      el.dispatchEvent(ev('pointerdown'));
+      el.dispatchEvent(ev('pointerup'));
+    },
+  },
 ];
 
 /** 0.10.0 붙잡기 한도(setMeasureSnapLimit): 한도 밖이던 상자 윗면 중심이 한도를 늘리면 그 커서 자리에서 다시 붙잡힌다 */
@@ -8040,6 +8055,8 @@ function reset(v: V, d: Data): void {
   call('setMeasureFormat', null);
   // 0.32.0: 앱이 포인터를 맡는 처리기도 남는다
   call('setPointerClaim', null);
+  // 0.44.0: 손가락으로 편 뷰 큐브는 접는다(선택은 기본으로)
+  call('setViewCubeTouch', true);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
   // 0.42.0 instancing·0.43.0 pbr은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
