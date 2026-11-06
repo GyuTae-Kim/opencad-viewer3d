@@ -202,6 +202,31 @@ describe('setSections items의 묶음 안 구간(0.44.0)', () => {
     expect(w.v.pick(ax, ay)).toEqual(before[0]);
   });
 
+  it('측정: 잘린 B 위를 찍으면 잘린 면 위 점, A 윗면 구석은 꼭짓점(B의 잘린 윗면 구석은 붙잡지 않는다)', () => {
+    const w = view();
+    w.v.setSections([{ ...CUT_B, caps: 'all' }]);
+    w.v.setMeasureMode(true);
+    const canvas = w.v.canvas as unknown as FakeElement;
+    const click = (p: readonly number[]): void => {
+      const [x, y] = at(w, p);
+      const e = { clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', button: 0, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false };
+      canvas.fire('pointerdown', { ...e, buttons: 1 });
+      canvas.fire('pointerup', { ...e, buttons: 0 });
+    };
+    click([70.3, 30.2, 20]);
+    click([39.2, 38.9, 20]);
+    const pts = w.v.measurePoints;
+    expect(pts.length).toBe(2);
+    expect(pts[0]!.point[2]).toBeCloseTo(10, 6);
+    expect(pts[1]).toMatchObject({ point: [40, 40, 20], snap: 'vertex' });
+    // B 윗면 구석(60, 40, 20)은 잘린 쪽 — 그 자리를 찍으면 꼭짓점이 아니라 잘린 면(z = 10) 아래 B 안쪽
+    w.v.clearMeasure();
+    click([61.2, 37.1, 20]);
+    const b = w.v.measurePoints[0]!;
+    expect(b.snap).not.toBe('vertex');
+    expect(b.point[2]).toBeLessThan(10 + 1e-6);
+  });
+
   it('선분 묶음 구간: 기둥 1(B 위)만 z > 10이 잘린다 — 고르기·그리기', () => {
     const w = view();
     w.v.setRenderMode('shaded');
