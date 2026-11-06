@@ -1342,7 +1342,7 @@ function drawSnapMark(
   }
 }
 /** 끌어온 축 하나의 복사본(0.17.0) */
-const copyGuide =(g: TrackGuide): TrackGuide => ({ from: [g.from[0], g.from[1], g.from[2]], axis: g.axis });
+const copyGuide = (g: TrackGuide): TrackGuide => ({ from: [g.from[0], g.from[1], g.from[2]], axis: g.axis });
 /** 끌어온 점 안내 선 하나의 복사본(0.30.0) */
 const copyDirLine = (g: TrackDirLine): TrackDirLine => ({ from: [g.from[0], g.from[1], g.from[2]], kind: g.kind, dir: [g.dir[0], g.dir[1], g.dir[2]] });
 /** 그물 면의 복사본(0.18.0) */
