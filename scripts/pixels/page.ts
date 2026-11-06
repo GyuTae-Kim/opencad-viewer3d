@@ -7194,11 +7194,26 @@ const ringExactValues: ValueSet = {
     return out;
   },
 };
+/** 0.39.0 refineSnapToExact가 있는 판인지(lowcyl 자료) — 높이 5·거리 15에서 첫 점 X축이 그물을 뚫는 X 쪽(Q에서 먼 쪽 3화소)을 가리켜 원기둥 위 교차인지 */
+const v0390exactCell: Need = (v, c) => {
+  const why = fn('setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { refineFace: lcRefine, refineSnapToExact: true }, [-45, -LS_D, 5]);
+  const Q = [-30 * Math.sin(LS_W), -LS_D, 5];
+  lsCamera(c, Q, 15);
+  const s = beyondX(c, lsPierce(5, Q), Q, 3);
+  if (s) c.hover(s[0], s[1]);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && Math.abs(Math.hypot(h.point[0], h.point[1]) - 30) < 1e-9;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.39.0 refineSnapToExact(커서가 X 쪽이어도 같은 교차의 정확한 자리)';
+};
 /** 0.39.0 값(lowcyl — 새 값): refineSnapToExact를 켜고 높이 5·21의 첫 점 X축이 이웃 칸을 얕게 뚫는 두 X 둘레 5 × 5(2.5화소 칸) 미리 보기(거리 15·40) */
 const lowExactValues: ValueSet = {
   name: 'lowcyl-measure-exact',
   data: 'lowcyl',
-  needs: v0390exact,
+  needs: v0390exactCell,
   run: (c) => {
     const out: unknown[] = [];
     for (const z of [5, 21]) {
