@@ -7622,8 +7622,53 @@ const manyInstValues: ValueSet = {
 };
 
 // ───────────── 0.43.0 PBR 그림(법선·거칠기·금속) ─────────────
-/** 0.43.0 PBR 선택(renderOptions.pbr)이 있는 판인지 */
+/** 0.43.0 PBR 선택(renderOptions.pbr)이 있는 판인지(0.43.0 판 — 단면 하나·그림자 인스턴싱도 이 판부터) */
 const v0430pbr: Need = (v) => (typeof v.setRenderOptions === 'function' && typeof v.renderOptions?.pbr === 'boolean' ? null : '이 판에 없는 선택: 0.43.0 PBR 그림(setRenderOptions({ pbr }))');
+
+/**
+ * 0.43.0 단면 하나·그림자를 켠 인스턴싱(같은 판 head): 켬·끔 그림이 바이트까지 같은지(면은 0.43.0부터 모은다 — 자리마다 로컬 평면·그림자 행렬을 자리 자료에)와
+ * 그리기 호출·모아 그린 그리기·자리 수. 0.42.0 판에는 없는 경우라 head만
+ */
+const manyInst43Values: ValueSet = {
+  name: 'many-instancing-43',
+  data: 'many',
+  needs: v0430pbr,
+  run: async ({ v }) => {
+    const out: unknown[] = [];
+    const cases: [string, (v: V) => void][] = [
+      ['shadows', (x) => x.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true })],
+      ['shadows-edges', (x) => (x.setRenderMode('shadedEdges'), x.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true }))],
+      ['section-caps', (x) => x.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' })],
+      ['section-profiles', (x) => (x.setRenderOptions({ profiles: true }), x.setSection({ normal: [0, 1, 0], offset: 120 }, { caps: 'none' }))],
+      ['section-shadows-fog', (x) => {
+        x.setLighting({ sun: { direction: [0.3, -0.5, 0.8] }, shadows: true });
+        const cam = x.getCamera();
+        x.setFog({ start: cam.distance * 0.8, end: cam.distance * 1.4 });
+        x.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' });
+      }],
+      ['section-hidden', (x) => (x.setRenderMode('hiddenLine'), x.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' }))],
+    ];
+    const snap = async (): Promise<{ st: unknown[]; img: ImageData }> => {
+      await texturesReady(v);
+      v.renderNow();
+      await instancingReady(v);
+      v.renderNow();
+      const s = v.stats;
+      const img = v.renderImage({});
+      return { st: [s.drawCalls, s.triangles, s.segments, s.instanced.draws, s.instanced.items], img };
+    };
+    for (const [name, set] of cases) {
+      reset(v, 'many');
+      set(v);
+      const on = await snap();
+      v.setRenderOptions({ instancing: false });
+      const off = await snap();
+      v.setRenderOptions({ instancing: true });
+      out.push([name, on.st, off.st, pixelDiff(on.img, off.img), await sha16(on.img.data)]);
+    }
+    return out;
+  },
+};
 /** 둘째 빛 방향(해 — 왼쪽 앞 낮게): 첫째는 고정 조명(시점 공간 주광이 오른쪽 위 뒤에서) */
 const PBR_SUN: [number, number, number] = [-0.7, -0.45, 0.55];
 
@@ -7841,6 +7886,7 @@ const VALUES: ValueSet[] = [
   manyPickValues('many'),
   manyPickValues('many-off'),
   manyInstValues,
+  manyInst43Values,
   pbrValues,
 ];
 
