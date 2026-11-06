@@ -109,6 +109,8 @@ export interface LinePick {
   point: V3;
   distPx: number;
   depth: number;
+  /** 0.40.0 segmentCandidates의 chord 모으기: 커서와 그 선분 띠(현 ± chord × 선분 길이를 화면에 비춘 것) 사이 화면 거리의 아래 한계(띠 안이면 0) */
+  bandPx?: number;
 }
 
 export interface LinePickOpts {
@@ -324,6 +326,9 @@ export function normBound3(m: ArrayLike<number>): number {
  * 모형 행렬(로컬 → 세계)이 걸린 선분 배열에서 커서 tolPx 안의 선분을 모두 모은다(세계 좌표 결과). 그물 윤곽선(Mesh3d.edges) 고르기에 쓴다.
  * BVH 질의는 광선을 로컬로 옮겨 하고(반지름은 역행렬 노름 한계만큼 넉넉히), 후보마다 끝점을 세계로 옮겨 화면 거리를 정확히 잰다.
  * clips(세계 평면들)가 있으면 잘린 쪽 부분은 빼고 잰다. skip(선분 번호)이 true면 건너뛴다.
+ * chord(0.40.0 — 0보다 크면): 선분 대신 그 띠(현의 직선에서 chord × 선분 길이 안 — 꺾은선 토막의 활꼴이 놓일 수 있는 자리)가 커서 tolPx 안에 닿을 수 있는 선분을 모은다.
+ * 띠의 화면 폭은 선분의 가장 가까운 끝 깊이(띠 폭만큼 더 앞, 원근이면 가까운 면 안쪽)의 화소 세계 길이로 보수적으로 잰다. 결과의 distPx는 그대로 현과 커서의 거리이고
+ * bandPx가 띠와의 거리(아래 한계)다. BVH 질의는 마디 상자를 chord × 대각선만큼 부풀린다(queryCone grow)
  */
 export function segmentCandidates(
   f: ViewFrame,
@@ -333,13 +338,14 @@ export function segmentCandidates(
   cx: number,
   cy: number,
   tolPx: number,
-  opts: { clips?: readonly Readonly<Plane4>[] | null; skip?: ((i: number) => boolean) | null } = {},
+  opts: { clips?: readonly Readonly<Plane4>[] | null; skip?: ((i: number) => boolean) | null; chord?: number } = {},
 ): LinePick[] {
   const n = Math.floor(positions.length / 6);
   const P = positions;
   const M = model ?? null;
   const clips = opts.clips ?? null;
   const skip = opts.skip ?? null;
+  const chord = opts.chord && opts.chord > 0 ? opts.chord : 0;
   const out: LinePick[] = [];
   const test = (i: number): void => {
     if (i >= n || (skip && skip(i))) return;
@@ -360,14 +366,25 @@ export function segmentCandidates(
     const ax = a[0] + (b[0] - a[0]) * s0, ay = a[1] + (b[1] - a[1]) * s0, az = a[2] + (b[2] - a[2]) * s0;
     const bx = a[0] + (b[0] - a[0]) * s1, by = a[1] + (b[1] - a[1]) * s1, bz = a[2] + (b[2] - a[2]) * s1;
     const h = segmentScreenPick(f, ax, ay, az, bx, by, bz, cx, cy);
-    if (!h || !(h.distPx <= tolPx)) return;
+    if (!h) return;
+    // 0.40.0 chord: 띠의 화면 폭(현에서 chord × 선분 길이 — 가장 가까운 끝보다 그 폭만큼 앞 깊이의 화소 세계 길이로)
+    let band = 0;
+    if (chord) {
+      const w = chord * Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+      const near = Math.min(viewDepth(f, [ax, ay, az]), viewDepth(f, [bx, by, bz])) - w;
+      const wpp = f.projection === 'perspective' ? Math.max(near, f.near) * f.pixelPerDepth : f.pixelConst;
+      band = wpp > 0 ? w / wpp : Infinity;
+    }
+    if (!(h.distPx <= tolPx + band)) return;
     if (f.projection === 'perspective' && h.depth < f.near * 0.999) return;
-    out.push({ index: i, t: s0 + (s1 - s0) * h.t, point: h.point, distPx: h.distPx, depth: h.depth });
+    const o2: LinePick = { index: i, t: s0 + (s1 - s0) * h.t, point: h.point, distPx: h.distPx, depth: h.depth };
+    if (chord) o2.bandPx = Math.max(0, h.distPx - band);
+    out.push(o2);
   };
   if (bvh) {
     const ray = screenRay(f, cx, cy);
     const c = pickCone(f, ray.origin, tolPx);
-    let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k;
+    let lo: V3 = ray.origin, ld: V3 = ray.dir, r0 = c.r0, k = c.k, grow = chord;
     if (M) {
       const inv = mat4Invert(M);
       if (!inv) return out;
@@ -380,10 +397,21 @@ export function segmentCandidates(
       ld = [d[0] / l, d[1] / l, d[2] / l];
       r0 = c.r0 * s;
       k = (c.k * s) / l;
+      // 세계 띠 폭 chord × 세계 길이 ≤ chord × ‖M‖ × 로컬 길이 → 로컬로 ‖M⁻¹‖배
+      grow = chord * normBound3(M) * s;
     }
-    queryCone(bvh, lo, ld, r0, k, Infinity, (i) => {
-      test(i);
-    });
+    queryCone(
+      bvh,
+      lo,
+      ld,
+      r0,
+      k,
+      Infinity,
+      (i) => {
+        test(i);
+      },
+      grow,
+    );
   } else for (let i = 0; i < n; i++) test(i);
   return out;
 }
