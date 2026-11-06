@@ -26,7 +26,8 @@
  *   CPU가 예전과 같은 double 곱으로 만들어 float32로 자리 자료 그림(u_inst — RGBA32F, 폭 1024 텍셀)에 쓰고, 셰이더가 gl_InstanceID로 그 텍셀을 읽어
  *   같은 이름의 지역 변수로 둔다(아래 식은 그대로 — 같은 float 값에 같은 연산이라 그림이 바이트까지 같다). 그물 자리 하나 = 11텍셀(u_mvp 4·u_mv 4·u_nmat 3),
  *   선 자리 하나 = 5텍셀(u_mvp 4·u_mvz 1). 굵은 선은 인스턴스 = 선분 × 자리(선분 속성은 나눔 수 = 자리 수, 자리 = gl_InstanceID % u_instN).
- *   단면(CLIP·CLIPN)·그림자(SHADOW)·뒷면(BACK)과 함께 쓰지 않는다(그때는 렌더러가 그물마다 그린다)
+ *   여러 단면(CLIPN)·뒷면(BACK)과 함께 쓰지 않는다(그때는 렌더러가 그물마다 그린다). 0.43.0 그물: 그림자(SHADOW)면 자리마다 u_shadowM 4텍셀(11~14),
+ *   단면 하나(CLIP)면 자리마다 로컬 평면 u_clip 1텍셀(맨 끝)을 더 읽는다 — 자리 텍셀 수 u_instStride(12·15·16). 예전 균일 변수와 같은 이름의 지역 변수로 두어 식은 그대로다
  * - PBR 그림(0.43.0 — 그물 변종, PBR 필드를 준 그물만. 주지 않은 그물은 아래 정의가 없어 0.42.0 셰이더와 전처리 뒤 글자까지 같다):
  *   UV = 무늬 그림 없이도 무늬 좌표 a_uv·v_uv를 읽는다(TEX와 같은 줄). NMAP = 법선 그림(u_nmap — 접선 공간 RGB, X·Y 배율 u_nscale): 접선 틀은 시점 위치·무늬 좌표의
  *   화면 미분(dFdx·dFdy)으로 풀어(∂p/∂u·∂p/∂v) 법선에 맞춰 곧게 펴고, 손잡이는 ∂p/∂v 쪽으로 맞춘다(접선 속성이 늘지 않는다). PBR = 거칠기(u_rough 초록)·금속성(u_metal 파랑)
@@ -49,8 +50,15 @@ layout(location=2) in vec4 a_col;
 #ifdef INST
 uniform highp sampler2D u_inst;
 uniform int u_instBase;
+#if defined(SHADOW) || defined(CLIP)
+uniform int u_instStride;
+#endif
 vec4 instAt(int j) {
+#if defined(SHADOW) || defined(CLIP)
+  int k = u_instBase + gl_InstanceID * u_instStride + j;
+#else
   int k = u_instBase + gl_InstanceID * 11 + j;
+#endif
   return texelFetch(u_inst, ivec2(k & 1023, k >> 10), 0);
 }
 #else
@@ -64,7 +72,9 @@ out vec3 v_vpos;
 out vec3 v_nrm;
 out vec4 v_col;
 #ifdef CLIP
+#ifndef INST
 uniform vec4 u_clip;
+#endif
 out float v_clip;
 #endif
 #if defined(TEX) || defined(UV)
@@ -77,7 +87,9 @@ out vec3 v_uv;
 out vec3 v_lpos;
 #endif
 #ifdef SHADOW
+#ifndef INST
 uniform mat4 u_shadowM;
+#endif
 out vec4 v_spos;
 #endif
 #ifdef BACKTEX
@@ -91,6 +103,12 @@ void main() {
   mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));
   mat4 u_mv = mat4(instAt(4), instAt(5), instAt(6), instAt(7));
   mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);
+#ifdef SHADOW
+  mat4 u_shadowM = mat4(instAt(11), instAt(12), instAt(13), instAt(14));
+#endif
+#ifdef CLIP
+  vec4 u_clip = instAt(u_instStride - 1);
+#endif
 #endif
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;

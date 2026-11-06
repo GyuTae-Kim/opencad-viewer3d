@@ -683,6 +683,8 @@ export class Renderer3d {
   private m3 = new Float32Array(9);
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
+  /** 0.43.0 자리 자료의 그림자 행렬(빛 · 모형) 셈 자리 */
+  private d4c = new Float64Array(16);
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
   /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
   private pending: { scene: Scene3d; mi: number; li: number; pi: number; chunk?: ChunkedUpload<WebGLBuffer> | null } | null = null;
@@ -1254,17 +1256,25 @@ export class Renderer3d {
 
   /**
    * 0.42.0 그물 자리 자료: 자리마다 setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로 instBuf에 11텍셀씩.
+   * 0.43.0: shadow(빛 투영·시점)를 주면 setMeshMatrix의 u_shadowM과 같은 식(빛 · 모형을 double로 곱해 [0, 1]로 맞춘 행렬)을 4텍셀(11~14),
+   * clip(모형 → 로컬 평면)을 주면 setMeshMatrix의 u_clip과 같은 로컬 평면을 맨 끝 1텍셀에 더 쓴다(자리 텍셀 수 = instStride)
    * 올린 첫 텍셀 번호(자리 자료 그림이 모자라면 −1 — 그때는 그물마다 그린다)
    */
-  private instMeshes(f: ViewFrame, models: readonly (ArrayLike<number> | undefined)[]): number {
+  private instMeshes(
+    f: ViewFrame,
+    models: readonly (ArrayLike<number> | undefined)[],
+    extra: { shadow?: ArrayLike<number> | null; clip?: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null } = {},
+  ): number {
     const n = models.length;
-    if (!this.instReserve(n * INST_MESH)) return -1;
+    const shadow = extra.shadow ?? null, clip = extra.clip ?? null;
+    const stride = Renderer3d.instStride(!!shadow, !!clip);
+    if (!this.instReserve(n * stride)) return -1;
     const d = this.instBuf, m3 = this.instM3;
     for (let i = 0; i < n; i++) {
       const model = models[i];
       const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
       const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
-      const o = i * INST_MESH * 4;
+      const o = i * stride * 4;
       for (let k = 0; k < 16; k++) {
         d[o + k] = mvp[k]!;
         d[o + 16 + k] = mv[k]!;
@@ -1277,8 +1287,27 @@ export class Renderer3d {
         d[o + 34 + c * 4] = m3[c * 3 + 2]!;
         d[o + 35 + c * 4] = 0;
       }
+      if (shadow) {
+        // setMeshMatrix의 u_shadowM: 빛 · 모형(double)을 그대로, 앞 세 행은 (행 + w 행) × 0.5를 double로 셈한 뒤 float32로
+        const lv = model ? mat4Mul(shadow, model, this.d4c) : shadow;
+        for (let k = 0; k < 16; k++) d[o + 44 + k] = lv[k]!;
+        for (let j = 0; j < 4; j++) for (let r = 0; r < 3; r++) d[o + 44 + j * 4 + r] = lv[j * 4 + r]! * 0.5 + lv[j * 4 + 3]! * 0.5;
+      }
+      if (clip) {
+        const c = clip(model) ?? NO_CLIP;
+        const q = o + (stride - 1) * 4;
+        d[q] = c[0];
+        d[q + 1] = c[1];
+        d[q + 2] = c[2];
+        d[q + 3] = c[3];
+      }
     }
-    return this.instPut(n * INST_MESH);
+    return this.instPut(n * stride);
+  }
+
+  /** 0.43.0 그물 자리 하나의 텍셀 수: 11(행렬) + 그림자 행렬 4 + 단면 평면 1 — 셰이더 u_instStride */
+  private static instStride(shadow: boolean, clip: boolean): number {
+    return INST_MESH + (shadow ? 4 : 0) + (clip ? 1 : 0);
   }
 
   /** 0.42.0 선 자리 자료: 자리마다 drawLines와 같은 시점·투영 · 모형(그리고 안개면 setLineFog와 같은 시점 · 모형의 z 행)을 5텍셀씩. 올린 첫 텍셀 번호(−1 = 못 올림) */
@@ -3294,9 +3323,11 @@ export class Renderer3d {
           const r0 = b.list[0]!;
           const cull = r0.src.doubleSided === false;
           for (const r of b.list) if (r.parts) this.dropParts(r);
-          // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림)
-          const p = this.instVariant('mesh', [...meshExtra, ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
-          const base = p ? this.instMeshes(f, b.list.map(mm)) : -1;
+          // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
+          // 0.43.0 그림자(SHADOW)·단면 하나(CLIP)도 — 자리마다 그림자 행렬·로컬 평면을 자리 자료에 더 쓴다(그물마다 그릴 때의 균일 변수와 같은 값)
+          const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
+          const p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
+          const base = p ? this.instMeshes(f, b.list.map(mm), { shadow: shadowVp, clip: sec ? clipOf : null }) : -1;
           if (!p || base < 0) {
             for (const r of b.list) {
               const q = progFor(r, usePbr);
@@ -3307,6 +3338,7 @@ export class Renderer3d {
           }
           if (p !== cur) meshUse(p);
           gl.uniform1i(this.loc(p, 'u_instBase'), base);
+          if (p.shadow || p.clip1) gl.uniform1i(this.loc(p, 'u_instStride'), Renderer3d.instStride(!!p.shadow, !!p.clip1));
           instState(r0, b.color, 1, b.tint, cull, b.vcol);
           if (p.uv) this.pbrBind(p, r0, pbrOf(r0));
           gl.bindVertexArray(r0.vao);
@@ -3385,16 +3417,19 @@ export class Renderer3d {
     const instMin = Math.max(2, Math.floor(this.instancing.min) || INSTANCE_MIN);
     let geoN: Map<string, number> | null = null;
     let edgeN: Map<WebGLBuffer, number> | null = null;
-    if (this.instancing.on && !sec && !multi) {
+    // 0.43.0: 단면 하나(sec)·그림자일 때도 면은 모은다(자리마다 로컬 평면·그림자 행렬을 자리 자료에). 선(윤곽선·삼각형 변·숨은 점선)은 단면이 있으면 그물마다(0.42.0 그대로)
+    if (this.instancing.on && !multi) {
       geoN = new Map();
-      edgeN = new Map();
+      if (!sec) edgeN = new Map();
       for (const r of visibleMeshes) {
         geoN.set(r.geo, (geoN.get(r.geo) ?? 0) + 1);
-        if (r.edges) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
+        if (edgeN && r.edges) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
       }
     }
-    /** 면을 모아 그릴 자리인지(같은 그물이 하한 이상 보이고, 묶음 안 구간이 없고, 그림자를 쓰지 않을 때) */
-    const meshInst = (r: MeshRec): boolean => !!geoN && !shadowOn && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id);
+    /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
+    const wireGeoN = sec ? null : geoN;
+    /** 면을 모아 그릴 자리인지(같은 그물이 하한 이상 보이고, 묶음 안 구간이 없을 때 — 0.43.0부터 단면 하나·그림자도) */
+    const meshInst = (r: MeshRec): boolean => !!geoN && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id);
     const pend = new Map<string, MeshRec[]>();
 
     // 1) 불투명 면(무늬 없는 것 먼저, 그다음 올린 무늬가 있는 것 — 프로그램을 한 번씩만 바꾼다). 0.42.0: 모아 그릴 자리는 그 뒤에 묶음마다
@@ -3557,7 +3592,7 @@ export class Renderer3d {
           }
         } else if (meshLineKind(r.src, mode) === 'triangles') {
           // 윤곽선이 없는 그물: 와이어프레임·숨은 선에서 삼각형 변(X-ray에서는 반투명 면만, triangleEdges: false면 선 없음)
-          if (geoN && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id)) {
+          if (wireGeoN && (wireGeoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id)) {
             if (r.parts) this.dropParts(r);
             addLineBatch(lineBatches, `w${r.geo}`, r, col, 1, alphaOf(r.src.id), model);
             continue;
