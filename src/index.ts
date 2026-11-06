@@ -39,6 +39,7 @@ export type {
   PointerHoldHandler,
   PointsForContext,
   ProjectedPoint,
+  ProjectOptions,
   RangeSelection,
   ReleaseOptions,
   SectionCaps,
@@ -70,7 +71,7 @@ export type {
   TrackDirEdgeFilter,
 } from './inference';
 export type { SnapFace, SnapRefineFaceInput, SnapRefineFaceKind, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
-export { LOW_PRIORITY_YIELD_PX } from './snap';
+export { LOW_PRIORITY_YIELD_PX, snapRaw } from './snap';
 export type {
   AxisEdgeSnap,
   AxisFaceSnap,

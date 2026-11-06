@@ -63,6 +63,9 @@ export interface SnapCandidate {
   core?: V3;
   /** 0.41.0 앱 점의 우선(SnapPoint.priority — 'normal'이면 이 필드가 없다) */
   priority?: 'low' | 'fallback';
+  /** 0.45.0 앱 점이 놓인 기본 도형 번호(SnapPoint.raw — pointsFor 점은 고른 것의 raw도, 없으면 이 필드가 없다)와 그것이 윤곽선 번호인지 */
+  raw?: number;
+  rawEdges?: boolean;
 }
 
 /**
@@ -74,6 +77,11 @@ export const LOW_PRIORITY_YIELD_PX = 0.5;
 /** SnapPoint.priority 값 고르기(0.41.0): 'low'·'fallback'만 그대로, 그 밖('normal'·없음·모르는 값)은 null(보통 점 — 0.40.0 그대로) */
 export function snapPriority(v: unknown): 'low' | 'fallback' | null {
   return v === 'low' || v === 'fallback' ? v : null;
+}
+
+/** SnapPoint.raw 값 고르기(0.45.0): 0 이상 정수(2³¹ 아래)만 그대로, 그 밖(없음·음수·소수·수 아님)은 null(기본 도형을 모르는 점 — 0.44.0 그대로) */
+export function snapRaw(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 2 ** 31 ? v : null;
 }
 
 /**
@@ -200,7 +208,8 @@ export type SnapRefineFaceKind = 'axisFace' | 'onFace';
  * 원근에서 가까운 면(near)보다 앞의 점(눈 뒤 포함)은 뺀다.
  * 0.41.0 우선(SnapCandidate.priority): 'low' 후보는 다른 후보(base 포함)보다 LOW_PRIORITY_YIELD_PX 넘게 가까울 때만, 'fallback' 후보는 다른 후보가 하나도 없을 때만
  * (그 안에서는 가장 가까운 것, 같으면 앞의 것). 둘 다 없으면 0.40.0과 같은 차례로 같은 점을 묻는다(보이는지 묻는 횟수도 같다).
- * 뷰어는 'fallback' 점을 여기에 넘기지 않고 다른 붙잡기(축 등)가 모두 없을 때 따로 이 함수로 고른다
+ * 뷰어는 'fallback' 점을 여기에 넘기지 않고 다른 붙잡기(축 등)가 모두 없을 때 따로 이 함수로 고른다.
+ * 0.45.0: visible의 다섯째 인자로 후보 자체를 넘긴다(앱 점의 기본 도형 번호 raw — 구간 단면 판정)
  */
 export function chooseMeasureSnap(
   f: ViewFrame,
@@ -209,7 +218,7 @@ export function chooseMeasureSnap(
   snapPx: number,
   base: { p: V3; kind: SnapKind | null } | null,
   cands: Iterable<SnapCandidate>,
-  visible: (p: V3, sx: number, sy: number, id: string | undefined) => boolean,
+  visible: (p: V3, sx: number, sy: number, id: string | undefined, c: SnapCandidate) => boolean,
 ): MeasureSnapPick | null {
   let best: { dist: number; c: SnapCandidate } | null = null;
   // 0.41.0: 'low'·'fallback' 후보는 따로 가장 가까운 것을 둔다
@@ -232,7 +241,7 @@ export function chooseMeasureSnap(
       if (best || low || (fb && dist >= fb.dist)) continue;
     } else if (best && dist >= best.dist) continue;
     if (f.projection === 'perspective' && s[2] < f.near * 0.999) continue;
-    if (!visible(c.p, s[0], s[1], c.id)) continue;
+    if (!visible(c.p, s[0], s[1], c.id, c)) continue;
     if (pr === 'low') low = { c, dist };
     else if (pr === 'fallback') fb = { c, dist };
     else best = { c, dist };

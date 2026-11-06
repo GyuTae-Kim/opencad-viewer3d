@@ -74,6 +74,7 @@ import {
   samePick,
   snapLimit,
   snapPriority,
+  snapRaw,
   snapSegmentsOf,
   withinSnapLimit,
 } from './snap';
@@ -804,6 +805,19 @@ export interface ProjectedPoint {
   visible: boolean;
 }
 
+/**
+ * Viewer3d.project 선택: occlusion = 음영 모드에서 불투명 면에 가렸는지도 따진다.
+ * 0.45.0 id = 그 점이 놓인 묶음(주면 그 묶음을 자르는 평면으로 잘림을 판정 — setSections items로 범위를 정한 평면도. 없는 id면 주지 않은 것과 같다),
+ * raw = 그 묶음의 기본 도형 번호(SnapPoint.raw와 같은 뜻 — 주면 그 도형이 든 구간 단면의 평면도), edges = raw가 그물 윤곽선 번호인지.
+ * 숨김(setGroupVisible·setHiddenRanges)은 보지 않는다(0.44.0과 같다)
+ */
+export interface ProjectOptions {
+  occlusion?: boolean;
+  id?: string;
+  raw?: number;
+  edges?: boolean;
+}
+
 /** 묶음 겉모습(itemLook): 바꾼 것만 있다 */
 export interface ItemLookState {
   /** 불투명도 0~1 */
@@ -1472,6 +1486,9 @@ export class Viewer3d {
     orders: Float64Array | null;
     /** 0.41.0 우선(점마다 0 = 보통, 1 = 'low', 2 = 'fallback' — 한 점도 우선이 없으면 null) */
     prios: Uint8Array | null;
+    /** 0.45.0 기본 도형 번호(SnapPoint.raw — 점마다, 없는 점은 −1. id와 함께 준 점이 하나도 없으면 null)와 윤곽선 번호인지(edges — 하나도 없으면 null) */
+    raws: Int32Array | null;
+    rawEdges: Uint8Array | null;
     limit: number | null;
     /** 0.10.0: 바로 앞 pointsFor 호출의 고르기(복사본)와 결과 — 같은 고르기면 다시 부르지 않는다. 0.38.0: 그때의 첫 점(복사본 — pfFirst면 열쇠에 든다) */
     pfMemo: { pick: Pick3d; first: V3 | null; res: readonly SnapPoint[] | null | undefined } | null;
@@ -3614,6 +3631,7 @@ export class Viewer3d {
       // 차례 값(0.10.0): 한 점이라도 있으면 점마다 둔다(없는 점은 −Infinity — 어떤 한도에도 든다)
       let ord: Float64Array | null = null;
       let prio: Uint8Array | null = null;
+      let raws: Int32Array | null = null, rawEdges: Uint8Array | null = null;
       let n = 0;
       for (const sp of pts) {
         const q = sp.point;
@@ -3633,6 +3651,13 @@ export class Viewer3d {
         if (pr) {
           prio ??= new Uint8Array(pts.length);
           prio[n] = pr === 'low' ? 1 : 2;
+        }
+        // 기본 도형 번호(0.45.0): id와 함께 준 점이 하나라도 있으면 점마다 둔다(없는 점은 −1)
+        const r = sp.id !== undefined ? snapRaw(sp.raw) : null;
+        if (r !== null) {
+          raws ??= new Int32Array(pts.length).fill(-1);
+          raws[n] = r;
+          if (sp.edges === true) (rawEdges ??= new Uint8Array(pts.length))[n] = 1;
         }
         n++;
       }
@@ -3657,6 +3682,8 @@ export class Viewer3d {
         index: null as SnapPointIndex | null,
         orders,
         prios: prio ? prio.subarray(0, n) : null,
+        raws: raws ? raws.subarray(0, n) : null,
+        rawEdges: rawEdges ? rawEdges.subarray(0, n) : null,
         limit,
         pfMemo: null,
         pfFirst: o.pointsForFirst === true,
@@ -4197,8 +4224,10 @@ export class Viewer3d {
   /**
    * 세계 점 → 캔버스 위치(CSS 화소, 왼쪽 위 원점)·깊이·보이는지. 앱이 화면 위에 자기 표시(글자·단추)를 붙일 때 쓴다.
    * occlusion이면 음영 모드에서 그 점이 불투명 면에 가렸는지도 따진다(고르기와 같은 광선 — 점이 면 위에 있으면 보인다).
+   * 0.45.0 id·raw·edges(ProjectOptions): 그 점이 놓인 묶음(과 기본 도형)을 주면 잘림을 앱 붙잡기 점(SnapPoint)과 같은 규칙으로 판정한다 —
+   * 그 묶음을 자르는 평면(setSections items로 범위를 정한 평면도), raw가 있으면 그 도형이 든 구간 단면의 평면. 주지 않으면 0.44.0 그대로(모든 묶음을 자르는 평면만)
    */
-  project(p: readonly number[], opts: { occlusion?: boolean } = {}): ProjectedPoint | null {
+  project(p: readonly number[], opts: ProjectOptions = {}): ProjectedPoint | null {
     if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) return null;
     const f = this.frame();
     const depth = viewDepth(f, p);
@@ -4209,7 +4238,11 @@ export class Viewer3d {
     const behind = f.projection === 'perspective' && c[3] <= 0;
     const front = f.projection === 'orthographic' || (!behind && depth >= f.near * 0.999);
     const onScreen = front && x >= 0 && x <= this.cssW && y >= 0 && y <= this.cssH;
-    const cut = this.pointCut(p);
+    let cut: boolean;
+    if (typeof opts.id === 'string') {
+      const r = snapRaw(opts.raw);
+      cut = this.clippedAway([p[0]!, p[1]!, p[2]!], opts.id, r ?? undefined, opts.edges === true);
+    } else cut = this.pointCut(p);
     const occluded = !!opts.occlusion && onScreen && !cut && this.occludedAt(f, p, x, y, true);
     return { x, y, depth, behind, onScreen, occluded, visible: onScreen && !cut && !occluded };
   }
@@ -5325,10 +5358,12 @@ export class Viewer3d {
         ? (): SnapCandidate[] => refineOpen(openCandidates(nearSegs(), first, inf, snapPx), first, screenRay(f, x, y), refine, so.openMemo, budget)
         : null;
     const cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app, open) : app;
-    let r: MeasureSnapPick | null = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+    // 0.45.0: 앱 점의 기본 도형 번호(raw — 구간 단면·숨긴 구간)도 넘긴다
+    const appVisible = (p: V3, sx: number, sy: number, id: string | undefined, c: SnapCandidate): boolean => this.snapVisible(f, p, sx, sy, id, c.raw, c.rawEdges === true);
+    let r: MeasureSnapPick | null = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, appVisible);
     // 0.41.0: 모아 둔 'fallback' 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것(같으면 앞의 것 — 0.8.0 규칙), 없으면 null
     const fallbackAt = (): MeasureSnapPick | null =>
-      fb.length ? chooseMeasureSnap(f, x, y, snapPx, null, fb, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id)) : null;
+      fb.length ? chooseMeasureSnap(f, x, y, snapPx, null, fb, appVisible) : null;
     const lockOut = (p: V3): MeasurePick => {
       const m: MeasurePick = { p, vertex: true, kind: lock!.kind, direction: [...lock!.direction] as V3, locked: true };
       if (lock!.axis) m.axis = lock!.axis;
@@ -5341,7 +5376,7 @@ export class Viewer3d {
       if (!(so.ends && inf && r && (r.kind === 'endpoint' || r.kind === 'vertex') && !r.refined)) return null;
       const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
-        return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
+        return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id, sg.raw, sg.kind === 'edge');
       };
       const el = this.endLines(inf, f, first, lock, refsBefore);
       const v = el.lines.length ? this.openLineEdge(so, f, x, y, snapPx, el.lines, first, nearSegs(), budget, vis, r.p) : null;
@@ -5386,7 +5421,7 @@ export class Viewer3d {
     if ((tracks || axisEdges || under || openFaces) && noPoint) {
       const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
-        return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
+        return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id, sg.raw, sg.kind === 'edge');
       };
       const cross = tracks && first ? trackCrossSnap(f, first, tracks, x, y, snapPx) : null;
       const pair = tracks ? trackPairSnap(f, tracks, x, y, snapPx, first) : null;
@@ -5874,7 +5909,7 @@ export class Viewer3d {
     }
     if (!q) return null;
     const p = acceptOnFace(f, core, q, ray, d.corners, snapPx);
-    return p && !this.clippedAway(p, hit.id) ? p : null;
+    return p && !this.clippedAway(p, hit.id, hit.index) ? p : null;
   }
 
   /**
@@ -5906,7 +5941,8 @@ export class Viewer3d {
       q = finitePoint(so.refine(make()));
       so.rfMemo = { input, res: q };
     }
-    if (!q || !acceptRefined(f, r.p, q, snapPx) || this.clippedAway(q, t.segment.id) || (t.other && this.clippedAway(q, t.other.id))) return null;
+    const sg = t.segment, o = t.other;
+    if (!q || !acceptRefined(f, r.p, q, snapPx) || this.clippedAway(q, sg.id, sg.raw, sg.kind === 'edge') || (o && this.clippedAway(q, o.id, o.raw, o.kind === 'edge'))) return null;
     return [q[0], q[1], q[2]];
   }
 
@@ -5949,14 +5985,14 @@ export class Viewer3d {
     }
     if (!q) return null;
     const p = acceptOnLine(f, core, q, line, snapPx);
-    if (p) return this.clippedAway(p, sg.id) ? null : p;
+    if (p) return this.clippedAway(p, sg.id, sg.raw, sg.kind === 'edge') ? null : p;
     // 0.38.0: 현을 얕게 가로지르는 선 — 앱 점이 그 토막 곡선 조각 자리이고 커서에서 붙잡기 거리 안이면 받는다(코어 점에서는 붙잡기 거리 밖).
     // 코어 점에서 멀 수 있으므로 열린 교차와 같은 가림(snapVisible)을 본다. 0.39.0 refineSnapToExact: 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면
     // EXACT_SNAP_SCALE × 붙잡기 거리·토막 길이 안이면(같은 교차의 정확한 자리) 받는다
     const w = acceptEdgePatch(f, core, q, line, sg.ends, x, y, snapPx, so.exact ? EXACT_SNAP_SCALE * snapPx : null);
-    if (!w || this.clippedAway(w.p, sg.id)) return null;
+    if (!w || this.clippedAway(w.p, sg.id, sg.raw, sg.kind === 'edge')) return null;
     const sp = projectToScreen(f, w.p);
-    return sp && this.snapVisible(f, w.p, sp[0], sp[1], sg.id) ? w.p : null;
+    return sp && this.snapVisible(f, w.p, sp[0], sp[1], sg.id, sg.raw, sg.kind === 'edge') ? w.p : null;
   }
 
   /**
@@ -5999,7 +6035,7 @@ export class Viewer3d {
     }
     if (!q) return null;
     const p = acceptOnLine(f, core, q, line, snapPx);
-    if (p) return this.clippedAway(p, face.id) ? null : { p, face };
+    if (p) return this.clippedAway(p, face.id, face.index) ? null : { p, face };
     // 0.37.0: 칸을 얕게 뚫는 선 — 앱 점이 그 칸 위 곡면 조각 자리이고 커서에서 붙잡기 거리 안이면 받는다(코어 점에서는 붙잡기 거리 밖)
     if (!hit?.corners || hit.id !== face.id || hit.index !== face.index) return null;
     const t: NearTriangle = { corners: hit.corners, wpp: worldPerPixel(f, viewDepth(f, core)), id: face.id, index: face.index, normal: [face.normal[0], face.normal[1], face.normal[2]] };
@@ -6008,7 +6044,7 @@ export class Viewer3d {
     const w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx, so.exact ? EXACT_SNAP_SCALE * snapPx : null);
     if (!w) return null;
     const on = w.cell ? mates[w.cell - 1]! : t;
-    if (this.clippedAway(w.p, on.id) || !this.openFaceVisible(f, w.p, on)) return null;
+    if (this.clippedAway(w.p, on.id, on.index) || !this.openFaceVisible(f, w.p, on)) return null;
     return { p: w.p, face: w.cell ? copyFace(on) : face };
   }
 
@@ -6020,7 +6056,7 @@ export class Viewer3d {
   private openFaceVisible(f: ViewFrame, p: V3, t: NearTriangle): boolean {
     const sp = projectToScreen(f, p);
     if (!sp) return false;
-    if (this.snapVisible(f, p, sp[0], sp[1], t.id)) return true;
+    if (this.snapVisible(f, p, sp[0], sp[1], t.id, t.index)) return true;
     if (!this.shadedMode) return false;
     const d = this.pickDetail(sp[0], sp[1], true, undefined, false, false, true, true);
     const k = d?.pick;
@@ -6244,7 +6280,7 @@ export class Viewer3d {
   ): MeasurePick | null {
     const vis = (p: V3, sg: NearSegment): boolean => {
       const sp = projectToScreen(f, p);
-      return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
+      return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id, sg.raw, sg.kind === 'edge');
     };
     const trk = tracks ? lockTrackSnap(f, first, lock.direction, tracks, x, y, snapPx) : null;
     const edge = inf.lockEdges ? lockEdgeSnap(f, first, lock.direction, nearSegs(), x, y, snapPx, vis) : null;
@@ -6304,11 +6340,41 @@ export class Viewer3d {
     return out;
   }
 
-  /** 세계 점 p가 묶음 id의 단면 평면(여러 단면이면 그 묶음을 자르는 것, 없는 묶음이면 모든 묶음을 자르는 평면)에 잘린 쪽인지 */
-  private clippedAway(p: V3, id: string): boolean {
-    if (!this.items.has(id)) return this.pointCut(p);
+  /**
+   * 세계 점 p가 묶음 id의 단면 평면(여러 단면이면 그 묶음을 자르는 것, 없는 묶음이면 모든 묶음을 자르는 평면)에 잘린 쪽인지.
+   * 0.45.0: raw(그 묶음의 기본 도형 번호 — rawEdges면 윤곽선 번호)를 주면 그 도형이 든 구간 단면(0.44.0)의 평면도 본다
+   */
+  private clippedAway(p: V3, id: string, raw?: number, rawEdges = false): boolean {
+    const it = this.items.get(id);
+    if (!it) return this.pointCut(p);
     for (const c of this.clipsFor(id)) if (planeValue(c, p[0], p[1], p[2]) > 1e-9 * (Math.abs(c[3]) + 1)) return true;
+    return raw !== undefined && this.rangeCut(p, it, raw, rawEdges);
+  }
+
+  /**
+   * 0.45.0 구간 단면: 묶음 it의 기본 도형 raw(rawEdges면 그물 윤곽선 선분)가 든 구간을 자르는 평면(그 묶음을 통째로 자르는 평면은 clipsFor가 본다)
+   * 가운데 하나라도 p를 잘린 쪽에 두는지. 구간 단면이 없으면 곧바로 false(0.44.0 그대로)
+   */
+  private rangeCut(p: readonly number[], it: Item, raw: number, rawEdges: boolean): boolean {
+    const cut = this.secCutOf(it);
+    if (!cut || (rawEdges && !(it.kind === 'mesh' && it.item.edges))) return false;
+    const mask = rawEdges ? cut.edgeMask(raw) : cut.primMask(raw);
+    if (!mask) return false;
+    const all = this.allSecs();
+    for (const k of cutBits(mask)) {
+      const s = all[k];
+      if (!s) continue;
+      const c = this.planeOf(s);
+      if (planeValue(c, p[0]!, p[1]!, p[2]!) > 1e-9 * (Math.abs(c[3]) + 1)) return true;
+    }
     return false;
+  }
+
+  /** 0.45.0: 묶음 id의 기본 도형 raw(rawEdges면 윤곽선 선분)를 숨겼는지(setHiddenRanges) */
+  private rawHidden(id: string, raw: number, rawEdges: boolean): boolean {
+    const r = this.rangeSel.get(id);
+    const t = rawEdges ? r?.eTest : r?.test;
+    return !!t && t(raw);
   }
 
   /**
@@ -6388,15 +6454,37 @@ export class Viewer3d {
         extra = so.pointsFor(pick, ctx);
         so.pfMemo = { pick: { ...pick, point: [...pick.point] as V3, ...(pick.normal ? { normal: [...pick.normal] as V3 } : {}) }, first, res: extra };
       }
-      if (extra)
+      if (extra) {
+        // 0.45.0: 점의 기본 도형 번호(SnapPoint.raw), 없으면 고른 묶음의 점은 고른 것의 번호(잘린 면을 고른 것이면 없음)
+        const pr = snapRaw(pick.raw);
         for (const sp of extra) {
           const q = sp.point;
           if (q && Number.isFinite(q[0]) && Number.isFinite(q[1]) && Number.isFinite(q[2]) && withinSnapLimit(sp.order, lim)) {
-            const c = at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', sp.id ?? pick.id);
+            const id = sp.id ?? pick.id;
+            const c = at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', id);
+            const r = snapRaw(sp.raw);
+            if (r !== null) {
+              c.raw = r;
+              if (sp.edges === true) c.rawEdges = true;
+            } else if (pr !== null && id === pick.id) {
+              c.raw = pr;
+              if (pick.kind === 'edge') c.rawEdges = true;
+            }
             if (ranked(c, snapPriority(sp.priority))) yield c;
           }
         }
+      }
     }
+    // 0.45.0 늘 후보인 점의 기본 도형 번호(한 점도 없으면 null — 0.44.0 그대로)
+    const RW = so.raws, RE = so.rawEdges;
+    const rawAt = (c: SnapCandidate, i: number): SnapCandidate => {
+      const r = RW![i]!;
+      if (r >= 0) {
+        c.raw = r;
+        if (RE && RE[i]) c.rawEdges = true;
+      }
+      return c;
+    };
     const P = so.pts;
     const n = P.length / 3;
     // 차례 한도(0.10.0): 한도와 차례 값이 모두 있을 때만 거른다
@@ -6405,6 +6493,7 @@ export class Viewer3d {
       for (let i = 0; i < n; i++)
         if (!ord || ord[i]! < lim!) {
           const c = at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+          if (RW) rawAt(c, i);
           if (!PR || ranked(c, prAt(i))) yield c;
         }
       return;
@@ -6414,17 +6503,22 @@ export class Viewer3d {
     for (const [id, l] of this.looks) if (l.matrix) moved.push(id);
     for (const i of so.index.near(f, x, y, snapPx, (id) => this.looks.get(id)?.matrix, moved, ord ? lim : null)) {
       const c = at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+      if (RW) rawAt(c, i);
       if (!PR || ranked(c, prAt(i))) yield c;
     }
   }
 
-  /** 앱 붙잡기 점이 보이는지: 묶음(id)이 보이고, 단면에 잘리지 않고(id면 그 묶음 평면, 아니면 모든 묶음을 자르는 평면), 음영 계열에서 가리지 않음 */
-  private snapVisible(f: ViewFrame, p: V3, sx: number, sy: number, id: string | undefined): boolean {
+  /**
+   * 앱 붙잡기 점이 보이는지: 묶음(id)이 보이고, 단면에 잘리지 않고(id면 그 묶음 평면, 아니면 모든 묶음을 자르는 평면), 음영 계열에서 가리지 않음.
+   * 0.45.0: raw(그 묶음의 기본 도형 번호 — rawEdges면 윤곽선 번호)를 주면 그 도형을 숨겼으면(setHiddenRanges) 빼고, 그 도형이 든 구간 단면의 평면으로도 자른다
+   */
+  private snapVisible(f: ViewFrame, p: V3, sx: number, sy: number, id: string | undefined, raw?: number, rawEdges = false): boolean {
     if (id !== undefined) {
       const it = this.items.get(id);
       if (it && (!this.visible(it.item.id, it.item.group) || this.looks.get(id)?.pickable === false)) return false;
       if (it) {
         for (const c of this.clipsFor(id)) if (planeValue(c, p[0], p[1], p[2]) > 1e-9 * (Math.abs(c[3]) + 1)) return false;
+        if (raw !== undefined && (this.rawHidden(id, raw, rawEdges) || this.rangeCut(p, it, raw, rawEdges))) return false;
       } else if (this.pointCut(p)) return false;
     } else if (this.pointCut(p)) return false;
     return !this.occludedAt(f, p, sx, sy, true);

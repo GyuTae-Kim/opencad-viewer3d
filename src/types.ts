@@ -247,6 +247,15 @@ export interface SnapPoint {
    */
   id?: string;
   /**
+   * 이 점이 놓인 기본 도형의 배열 안 번호(0.45.0, 선택 — id와 함께 줄 때만 쓴다). Pick3d.raw·setHiddenRanges·setSections items의 { id, start, count }와 같은 번호
+   * (그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점, edges면 그물 윤곽선 Mesh3d.edges의 선분). 주면 그 기본 도형이 든 구간 단면(0.44.0)의 평면으로도 자르고,
+   * 그 기본 도형을 숨겼으면(setHiddenRanges) 뺀다. 없으면 0.44.0 그대로 — 묶음 통째를 자르는 평면으로만 자른다(구간 단면은 그 구간만 자르므로 어느 구간인지 모르는 점은 자르지 않는다).
+   * pointsFor 점은 주지 않으면 고른 것(Pick3d — id가 없거나 고른 것과 같을 때)의 raw·윤곽선 여부를 받는다
+   */
+  raw?: number;
+  /** raw가 그물 윤곽선(Mesh3d.edges)의 선분 번호인지(0.45.0 — setSections items의 edges와 같은 뜻) */
+  edges?: boolean;
+  /**
    * 차례 값(0.10.0, 선택). 붙잡기 한도(Viewer3d.setMeasureSnapLimit·setMeasureSnap({ limit }))를 두면 차례 < 한도인 점만 붙잡는다.
    * 예: NC 재생에서 그 원호 중심을 처음 그린 이동 번호 — 그린 이동이 늘 때 한도만 바꾸면 되고 점 목록·색인을 다시 만들지 않는다.
    * 없으면 한도와 상관없이 늘 후보다
