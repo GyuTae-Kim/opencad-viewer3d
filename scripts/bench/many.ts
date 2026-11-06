@@ -4,7 +4,8 @@
  * 인스턴싱을 끈다(setRenderOptions({ instancing: false }) — 그 선택이 없는 판은 무시한다).
  *  - open: setScene(incremental { budgetMs }) → 다 올릴 때까지 프레임 수·벽시계·주 스레드 몫(프레임 JS 합·가장 긴 프레임·긴 작업 합)
  *  - steady: 다 올린 뒤 모드마다 조금씩 돌려 renderNow JS 시간·GPU 마침(1화소 읽기)까지·그리기 호출 수·GL 호출 수
- *    (0.43.0 모드 꼬리: +section = x 가운데 단면 하나(채우기 없음), +shadows = 해 그림자)
+ *    (0.43.0 모드 꼬리: +section = x 가운데 단면 하나(채우기 없음), +shadows = 해 그림자.
+ *    0.44.0: +items = 그 평면이 열째 자리마다(300곳) 그물 통째, +secrange = 같은 자리의 앞 절반 삼각형 구간만)
  */
 import { checkerBmp } from '../../src/synth';
 import type { Mesh3d } from '../../src/types';
@@ -185,7 +186,14 @@ async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
     else v.highlight(null);
     // 0.43.0: 단면 하나(채우기 없음 — 면 그리기만 견준다)·해 그림자
     if (opt === 'section') v.setSectionAxis('x', 0.5, { caps: 'none' });
-    else v.setSection(null);
+    else if (opt === 'items' || opt === 'secrange') {
+      // 0.44.0: x 가운데 평면(채우기 없음)이 열째 자리마다 그 그물 통째(items) 또는 앞 절반 삼각형 구간(secrange — 0.43.0 판은 구간을 몰라 아무것도 자르지 않는다)
+      const ms = (v.scene!.meshes as Mesh3d[]).filter((_, i) => i % 10 === 0);
+      const r = v.sectionRange('x');
+      const tris = (m: Mesh3d): number => (m.indices ? m.indices.length / 3 : m.positions.length / 9);
+      const items = opt === 'items' ? ms.map((m) => m.id) : ms.map((m) => ({ id: m.id, start: 0, count: Math.floor(tris(m) / 2) }));
+      v.setSections([{ normal: [1, 0, 0], offset: (r.min + r.max) / 2, caps: 'none', items }]);
+    } else v.setSection(null);
     v.setLighting(opt === 'shadows' ? { sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true } : null);
     v.fit(false);
     for (let i = 0; i < 2; i++) {
