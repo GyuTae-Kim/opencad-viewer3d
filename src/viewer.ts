@@ -1502,6 +1502,11 @@ interface RangeState {
 }
 
 /** 쓸 수 있는 마주 보기 설정인지(origin이 수 셋 이상 — 배열·형식 배열 모두) */
+/** 0.50.0 탭(문서)이 숨었는지 — 브라우저가 requestAnimationFrame을 멈춘다 */
+function docHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
 /** 0.50.0 앱이 준 점이 유한한 수 셋(한도 COORD_LIMIT 안)인지 */
 function okPoint3(p: readonly number[] | ArrayLike<number> | null | undefined): boolean {
   return !!p && p.length >= 3 && okCoord(p[0]!) && okCoord(p[1]!) && okCoord(p[2]!);
@@ -1691,6 +1696,8 @@ export class Viewer3d {
   private bvhTasks: { n: number; run: () => void }[] = [];
   /** 0.50.0 bvhTasks에서 이미 한 일 수(앞 자리 번호 — shift 대신) */
   private bvhHead = 0;
+  /** 0.50.0 문서 visibilitychange를 듣는지(움직임을 처음 시작할 때 건다 — listenHidden) */
+  private hiddenOn = false;
   /** 그물마다 단면 교선(로컬 좌표) — 평면·숨긴 구간이 같으면 다시 쓴다(0.11.0: 그물 하나를 바꿔도 다른 그물은 다시 자르지 않는다) */
   private cutCache = new WeakMap<Mesh3d, { plane: Plane4; test: ((i: number) => boolean) | null | undefined; segs: Float32Array }[]>();
   /** 그물 바꾸기 나눠 올리기의 프레임 몫(ms, setMesh의 incremental.budgetMs) */
@@ -5582,7 +5589,9 @@ export class Viewer3d {
     if (this.disposed) return Promise.resolve(false);
     this.wheelAnchor = null;
     this.dropAnim();
-    if (animate && ms > 0) {
+    // 0.50.0: 탭이 숨었거나(브라우저가 그림을 멈춘다) 문맥을 잃은 동안은 움직이지 않고 바로 끝 자리로 옮긴다(곧바로 true — 0.49.0은 보일 때까지 풀리지 않았다)
+    if (animate && ms > 0 && !this.lost && !docHidden()) {
+      this.listenHidden();
       const from = this.getCamera();
       const p = new Promise<boolean>((done) => {
         this.anim = { from, to: c, t0: performance.now(), dur: ms, done };
@@ -5601,6 +5610,18 @@ export class Viewer3d {
     if (!a) return;
     this.anim = null;
     a.done(false);
+  }
+
+  /**
+   * 0.50.0 움직임을 처음 시작할 때 한 번 문서 visibilitychange를 듣는다(뷰어가 없어질 때까지): 탭이 숨으면 옮기던 움직임을 끝 자리로 마친다(true — 다시 보이면 그 자리를 그린다).
+   * 움직임을 쓰지 않는 뷰어는 듣지 않는다(0.49.0과 같은 듣기)
+   */
+  private listenHidden(): void {
+    if (this.hiddenOn || typeof document === 'undefined') return;
+    this.hiddenOn = true;
+    this.on(document, 'visibilitychange', () => {
+      if (docHidden()) this.finishAnim();
+    });
   }
 
   /** 옮기던 움직임을 끝 자리로 마친다(0.49.0 그 Promise는 true) */
@@ -7666,6 +7687,8 @@ export class Viewer3d {
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
+      // 0.50.0: 잃은 동안은 그리지 않으므로 옮기던 움직임은 끝 자리로 마친다(true — 되찾으면 그 자리를 그린다. 0.49.0은 되찾을 때까지 풀리지 않았다)
+      this.finishAnim();
       // 0.29.0: 되찾은 뒤 다시 올리기가 끝날 때까지(onContextRestoreDone·restorePending)
       if (!this.disposed) this.restoreWait = true;
       this.renderer.forget();
