@@ -8422,7 +8422,8 @@ const aoFlyEndValues: ValueSet = {
 /**
  * 0.50.0 값(기존 secrange 자료를 다시 쓴다 — 새 장면 없음): 앱이 깨진 파일에서 만들 수 있는 값을 secrange 그물('판재')·선분('기준선')의 사본에 넣거나,
  * 깨진 그물 하나를 판 옆에 더해 실제 WebGL2(SwiftShader)로 그린다. 바꾼 것마다
- * [이름, GL 오류(getError로 비운 값들), 예외(없으면 null), 카메라가 유한한지, 멀쩡한 장면 그림과 다른 화소 수, 바탕이 아닌 화소 수, 장면 알림(sceneIssues가 있는 판 — 코드:조치 목록, 없으면 'no-api')].
+ * [이름, GL 오류(getError로 비운 값들), 예외(없으면 null), 카메라가 유한한지, 멀쩡한 장면 그림과 다른 화소 수, 바탕이 아닌 화소 수, 그 평균 상대 휘도(× 1000),
+ *  장면 알림(sceneIssues가 있는 판 — 코드:조치 목록, 없으면 'no-api')].
  * 0.49.0까지는 깨진 값을 거르지 않는다 — 이 묶음은 base와 값이 다른 것이 의도한 변화다(pixels-changed)
  */
 const inputFuzzValues: ValueSet = {
@@ -8441,11 +8442,16 @@ const inputFuzzValues: ValueSet = {
       for (let e = gl.getError(), k = 0; e !== gl.NO_ERROR && k < 8; e = gl.getError(), k++) o.push(e);
       return o;
     };
-    const fg = (img: ImageData): number => {
+    // 바탕이 아닌 화소 수와 그 평균 상대 휘도(× 1000 — 검게 칠한 그물이 보이게)
+    const fg = (img: ImageData): [number, number] => {
       const [r, g, b] = commonColor(img);
-      let n = 0;
-      for (let i = 0; i < img.data.length; i += 4) if (img.data[i] !== r || img.data[i + 1] !== g || img.data[i + 2] !== b) n++;
-      return n;
+      let n = 0, s = 0;
+      for (let i = 0; i < img.data.length; i += 4)
+        if (img.data[i] !== r || img.data[i + 1] !== g || img.data[i + 2] !== b) {
+          n++;
+          s += lum255(img.data, i);
+        }
+      return [n, n ? Math.round((s / n) * 1000) : 0];
     };
     const diff = (p: ImageData, q: ImageData): number => {
       let n = 0;
@@ -8517,7 +8523,7 @@ const inputFuzzValues: ValueSet = {
         }
         if (name === 'clean') ref = img;
         const issues = Array.isArray(v.sceneIssues) ? (v.sceneIssues as { code: string; action: string }[]).map((i) => `${i.code}:${i.action}`) : 'no-api';
-        out.push([name, e, threw, finiteCam(), img && ref ? diff(img, ref) : -1, img ? fg(img) : -1, issues]);
+        out.push([name, e, threw, finiteCam(), img && ref ? diff(img, ref) : -1, ...(img ? fg(img) : [-1, -1]), issues]);
       }
     } finally {
       v.setScene(clean);
