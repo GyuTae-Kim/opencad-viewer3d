@@ -7784,6 +7784,18 @@ const pbrValues: ValueSet = {
     const est = [v.stats.drawCalls, v.stats.triangles, v.stats.instanced.draws, v.stats.instanced.items];
     v.setRenderOptions({ instancing: true });
     out.push(['instancing', ist, est, pixelDiff(inst.img, each.img), inst.hash]);
+    // ④ DirectX 꼴(초록 뒤집은 그림 + normalFlipY) = OpenGL 꼴 그림: 구 D만 바꿔 같은 자리에서 찍은 두 그림의 다른 화소 수·가장 큰 차(그림 값 반올림 차이만)
+    const dx = pbrScene();
+    const gl = pbrScene();
+    const d = gl.meshes.find((m) => m.id === '구 D')!;
+    gl.meshes = gl.meshes.map((m) => (m === d ? { ...m, normalTexture: '법선', normalFlipY: false } : m));
+    v.setScene(dx);
+    v.setView('top', false);
+    v.fit(false);
+    const a = await snap();
+    v.setScene(gl, { keepView: true });
+    const b = await snap();
+    out.push(['flipY', pixelDiff(a.img, b.img)]);
     return out;
   },
 };
