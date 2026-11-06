@@ -35,7 +35,7 @@ import { type ViewFrame, viewMatrix } from './camera';
 import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
 import { type V3, cross, hasOrigin, mat4Mul, modelMatrix, normalMatrix, normalize, orthographic, translation } from './math';
-import { boxCenter, boxIsEmpty, boxSphere, meshBounds, transformBox, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, meshBounds, offsetBox, rangesBox, transformBox, unionBox } from './bounds';
 import { DEPTH_FS, DEPTH_VS, FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, SKY_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { contrastLineColor } from './theme';
@@ -475,6 +475,8 @@ interface PartCache {
   lists: Map<string, DrawList>;
   /** 0.44.0 구간 단면 갈래 값들(partCuts — 처음 필요할 때). 0 하나뿐이면 null(0.43.0 길) */
   cuts?: number[] | null;
+  /** 0.44.0 갈래마다 그 구간 정점의 범위(그물 positions 좌표 + 묶음 원점·matrix — 잘린 면 채우기 단위 범위) */
+  cutBoxes?: Map<number, Box3>;
 }
 
 /** 0.44.0 구간 단면 갈래 하나의 그릴 목록(보통·강조) */
@@ -3615,8 +3617,22 @@ export class Renderer3d {
       // 1b) 잘린 면 채우기
       if (capsOn) {
         // 반투명·범위·색은 겉모습·모드(숨은 선·단색)를 반영한 값으로(겉모습이 없고 예전 모드면 장면 값 그대로)
-        // 0.44.0 구간 단면 갈래가 있는 그물은 갈래마다 따로(그 갈래의 삼각형만 홀짝을 세고 그 갈래의 다른 평면으로 채운 면을 자른다)
-        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null });
+        // 0.44.0 구간 단면 갈래가 있는 그물은 갈래마다 따로(그 갈래의 삼각형만 홀짝을 세고 그 갈래의 다른 평면으로 채운 면을 자른다 — 단위 범위는 그 갈래 정점의 범위)
+        const cutBox = (r: MeshRec, cut: number): Box3 => {
+          const p = st.parts?.(r.src.id);
+          if (!p) return boxOf(r);
+          const c = this.partCache(r, p.ver);
+          let b = (c.cutBoxes ??= new Map()).get(cut);
+          if (!b) {
+            const runs = [...partsOf(p.prims, false, cut), ...partsOf(p.prims, true, cut)];
+            b = offsetBox(rangesBox('triangle', r.src.positions, r.src.indices, runs), r.src.origin);
+            if (r.src.matrix) b = transformBox(b, r.src.matrix);
+            c.cutBoxes.set(cut, b);
+          }
+          const lm = lookOf(r.src.id)?.matrix;
+          return lm ? transformBox(b, lm) : b;
+        };
+        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox });
         const plain = meshExtra.length ? this.variant('mesh', [...meshExtra, ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('mesh', ['CLIPN']) : this.mesh;
         const capLists = (r: MeshRec, cut: number | undefined): DrawList[] | null => {
           if (cut === undefined) return meshLists(r);
@@ -4168,8 +4184,9 @@ export class Renderer3d {
       trans: (r: MeshRec) => boolean;
       box: (r: MeshRec) => Box3;
       color: (r: MeshRec) => Rgba;
-      /** 0.44.0 그물의 구간 단면 갈래들(없으면 null — 통째 그물) */
+      /** 0.44.0 그물의 구간 단면 갈래들(없으면 null — 통째 그물)과 갈래 정점의 세계 범위 */
       cuts?: (r: MeshRec) => readonly number[] | null;
+      cutBox?: (r: MeshRec, cut: number) => Box3;
     } | null,
   ): CapUnit[] {
     const out: CapUnit[] = [];
@@ -4183,6 +4200,9 @@ export class Renderer3d {
       /** 단위에 그물 하나(cut은 0.44.0 구간 단면 갈래 — undefined면 통째, key는 capGroup 묶음 열쇠에 더할 갈래) */
       const add = (r: MeshRec, oth: Plane4[], cut: number | undefined, key: string | undefined): void => {
         const g = r.src.capGroup;
+        // 갈래 단위의 범위는 그 갈래 정점의 범위(그물 통째 범위면 걸치지 않는 갈래도 단위가 되고 채운 다각형이 커진다)
+        const box = cut !== undefined && lk?.cutBox ? lk.cutBox(r, cut) : boxOf(r);
+        if (cut !== undefined && boxIsEmpty(box)) return;
         if (g !== undefined) {
           const gk = key === undefined ? g : `${g}\u0000${key}`;
           const u = groups.get(gk);
@@ -4190,17 +4210,17 @@ export class Renderer3d {
             if (cut !== undefined && !u.cuts) u.cuts = u.meshes.map(() => undefined);
             u.meshes.push(r);
             u.cuts?.push(cut);
-            u.box = unionBox(u.box, boxOf(r));
+            u.box = unionBox(u.box, box);
           } else {
-            const nu: CapUnit = { meshes: [r], box: boxOf(r), plane, others: oth, color: colOf(r), group: true };
+            const nu: CapUnit = { meshes: [r], box, plane, others: oth, color: colOf(r), group: true };
             if (cut !== undefined) nu.cuts = [cut];
             groups.set(gk, nu);
             out.push(nu);
           }
           return;
         }
-        if ((caps === 'all' || r.src.closed === true) && boxStraddles(boxOf(r), plane)) {
-          const nu: CapUnit = { meshes: [r], box: boxOf(r), plane, others: oth, color: colOf(r), group: false };
+        if ((caps === 'all' || r.src.closed === true) && boxStraddles(box, plane)) {
+          const nu: CapUnit = { meshes: [r], box, plane, others: oth, color: colOf(r), group: false };
           if (cut !== undefined) nu.cuts = [cut];
           out.push(nu);
         }

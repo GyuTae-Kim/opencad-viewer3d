@@ -261,12 +261,11 @@ describe('setSections items의 묶음 안 구간(0.44.0)', () => {
       [36, 144, 2],
     ]);
     const d = frame(w);
-    // 평면 0(x > 90): 갈래 0(A)·갈래 1(B) 단위 둘(단위 범위는 그물 통째 — A 갈래는 홀짝이 0이라 칠해지는 화소가 없다) / 평면 1(z > 10): B 갈래 하나
-    expect(d.filter((e) => e.op === 'drawArrays' && e.args[0] === K(w, 'TRIANGLE_FAN')).length).toBe(3);
-    // 홀짝 그리기: 평면 0 — A 갈래(0~11)·B 갈래(12~23), 평면 1 — B 갈래
+    // 갈래 단위의 범위는 그 갈래 정점의 범위: 평면 0(x > 90)은 A 갈래(x 0~40)에 걸치지 않아 B 갈래만, 평면 1(z > 10)도 B 갈래 — 채운 면 둘
+    expect(d.filter((e) => e.op === 'drawArrays' && e.args[0] === K(w, 'TRIANGLE_FAN')).length).toBe(2);
+    // 홀짝 그리기: 평면마다 B 갈래(12~23)만
     const stencil = d.filter((e) => e.op === 'drawElements' && uni(e, 'u_clip') !== undefined && uni(e, 'u_nclip') === undefined);
     expect(stencil.map((e) => [e.args[1], e.args[3], (uni(e, 'u_clip') as number[]).join()])).toEqual([
-      [36, 0, '1,0,0,-90'],
       [36, 144, '1,0,0,-90'],
       [36, 144, '0,0,1,-10'],
     ]);
