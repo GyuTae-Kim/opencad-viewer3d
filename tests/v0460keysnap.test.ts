@@ -226,7 +226,12 @@ describe('뷰어 — 측정 후보 목록(measureCandidates·commitMeasureCandid
     expect(r6(v.measurePoints[0]!.point)).toEqual(r6(A));
     expect(v.commitMeasureCandidate(400, 300, 9)).toBe(false);
     expect(v.commitMeasureCandidate(400, 300, -1)).toBe(false);
+    // 가상 커서가 켜져 있으면 찍은 뒤 그 자리 미리 보기를 다시 구한다
+    withKeys(v);
+    key(v, 'ArrowRight');
     expect(v.commitMeasureCandidate(400, 300, 0)).toBe(true);
+    expect(v.measureHoverSnap).not.toBeNull();
+    expect(v.keyboardCursor).toMatchObject({ index: 0 });
     expect(got.length).toBe(1);
     expect((got[0] as { snapA: string; snapB: string }).snapA).toBe('center');
     expect((got[0] as { snapA: string; snapB: string }).snapB).toBe('intersection');

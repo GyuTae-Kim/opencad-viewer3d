@@ -4111,6 +4111,8 @@ export class Viewer3d {
     if (!e) return false;
     this.refsSet(e.after);
     this.commitMeasure(e.pick);
+    // 가상 커서가 켜져 있으면 그 자리 미리 보기를 다시 구한다(Enter로 찍은 뒤와 같다 — 알리지 않는다)
+    if (this.keyCur) this.keyRecompute();
     return true;
   }
 
