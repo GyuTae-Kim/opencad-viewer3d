@@ -1,7 +1,8 @@
 /**
  * 0.43.0 PBR 그림(법선·거칠기·금속 — SKP 40차 요청):
  * - 순수 계산(pbr.ts): 필드 정리(그림 id 차례·값 자르기), 올라간 그림만 쓰기, 거칠기·금속성 기본값(그림이 있으면 배율 1, 없으면 0.42.0 반사광·금속성 0), 반사광 지수
- * - 셰이더: PBR 정의가 없는 변종(예전 정의 10개의 부분 집합 1,024가지)은 전처리 뒤 0.42.0(e4780f4) 원본과 글자까지 같다(해시)
+ * - 셰이더: 0.42.0 렌더러가 쓰던 변종(예전 정의 10개의 부분 집합 — INST는 단면·그림자·뒷면 없이)은 전처리 뒤 0.42.0(e4780f4) 원본과 글자까지 같다(해시).
+ *   0.43.0이 더한 INST+CLIP·INST+SHADOW 변종의 자리 자료 읽기(시험은 v0430inst)
  * - 뷰어(가짜 WebGL2·가짜 그림 풀기): PBR 그림도 무늬 예산·stats.textures에 들고, 무늬 그림이 없어도 무늬 좌표를 올린다. 그물마다 맞는 변종(NMAP·PBR·UV)과
  *   균일 변수·무늬 단위 6·7·8, 다른 그물의 그리기는 PBR 필드가 없을 때와 같다. 끔(setRenderOptions({ pbr: false }))·무늬 없음 모드·색 바꾸기는 0.42.0 변종.
  *   나중에 주는 그림(pending) 여럿을 각각 기다리고 받고, 놓기(release) 뒤 문맥 복구에서 다시 받는다. 같은 그물 12자리는 PBR 변종으로 모아 그린다
@@ -86,19 +87,33 @@ function preprocess(src: string, defs: readonly string[]): string {
   return out.join('\n');
 }
 const LEGACY = ['CLIP', 'CLIPN', 'TEX', 'SUN', 'SHADOW', 'FOG', 'BACK', 'BACKTEX', 'FLAT', 'INST'];
+/** 0.42.0 렌더러가 INST와 함께 쓰지 않던 정의(0.43.0이 INST+CLIP·INST+SHADOW를 더한다) */
+const NOT_WITH_INST = ['CLIP', 'CLIPN', 'SHADOW', 'BACK', 'BACKTEX'];
 const hashAll = (src: string): string => {
   const parts: string[] = [];
   for (let k = 0; k < 1 << LEGACY.length; k++) {
     const defs = LEGACY.filter((_, i) => k & (1 << i));
+    if (defs.includes('INST') && defs.some((x) => NOT_WITH_INST.includes(x))) continue;
     parts.push(preprocess(withDefines(src, ...defs), defs));
   }
   return fnv(new TextEncoder().encode(parts.join('\n\u0000\n')));
 };
 
-describe('그물 셰이더 변종(0.43.0 UV·NMAP·PBR)', () => {
-  it('PBR 정의가 없는 변종은 전처리 뒤 0.42.0 원본과 글자까지 같다(예전 정의 10개의 부분 집합 1,024가지 — e4780f4에서 같은 식으로 잰 해시)', () => {
-    expect(hashAll(MESH_VS)).toBe('b804fbcf');
-    expect(hashAll(MESH_FS)).toBe('381a85af');
+describe('그물 셰이더 변종(0.43.0 UV·NMAP·PBR, INST+CLIP·INST+SHADOW)', () => {
+  it('0.42.0 렌더러가 쓰던 변종(예전 정의 10개의 부분 집합 — INST는 단면·그림자·뒷면 없이)은 전처리 뒤 0.42.0 원본과 글자까지 같다(e4780f4에서 같은 식으로 잰 해시)', () => {
+    expect(hashAll(MESH_VS)).toBe('d3db9caf');
+    expect(hashAll(MESH_FS)).toBe('c50375cf');
+  });
+
+  it('INST+CLIP·INST+SHADOW는 자리 자료에서 u_clip(맨 끝 텍셀)·u_shadowM(11~14)을 읽는 지역 변수(균일 변수 선언 없이), 텍셀 수는 u_instStride', () => {
+    const vs = preprocess(withDefines(MESH_VS, 'INST', 'CLIP', 'SHADOW'), ['INST', 'CLIP', 'SHADOW']);
+    expect(vs).toContain('int k = u_instBase + gl_InstanceID * u_instStride + j;');
+    expect(vs).toContain('mat4 u_shadowM = mat4(instAt(11), instAt(12), instAt(13), instAt(14));');
+    expect(vs).toContain('vec4 u_clip = instAt(u_instStride - 1);');
+    expect(vs).not.toContain('uniform vec4 u_clip;');
+    expect(vs).not.toContain('uniform mat4 u_shadowM;');
+    expect(vs).toContain('v_clip = dot(u_clip, vec4(a_pos, 1.0));');
+    expect(preprocess(withDefines(MESH_VS, 'INST'), ['INST'])).toContain('gl_InstanceID * 11 + j');
   });
 
   it('PBR 정의가 있으면 무늬 좌표·법선 그림·거칠기·금속 그림 줄이 들어간다', () => {

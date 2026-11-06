@@ -1,7 +1,8 @@
 /**
  * 0.42.0 같은 그물 자리 모아 그리기(인스턴싱): 같은 배열을 함께 쓰는 자리가 하한(8) 이상이면 그리기 한 번(drawElementsInstanced·drawArraysInstanced),
  * 자리 자료 그림의 자리마다 값이 그물마다 그릴 때의 균일 행렬(u_mvp·u_mv·u_nmat, 선은 u_mvp)과 같은 float인지, 굵은 선은 선분 나눔 수를 자리 수로 걸었다가
- * 되돌리는지, 그물마다로 돌아가는 경우(단면·그림자 면·묶음 안 구간·반투명·끔·하한)와 묶음 나누기(자리 색·강조), 켬·끔 삼각형·선분 수, 병렬 번역을 기다리는 동안
+ * 되돌리는지, 그물마다로 돌아가는 경우(여러 단면·단면의 선·묶음 안 구간·반투명·끔·하한 — 0.43.0부터 단면 하나·그림자의 면은 모은다: v0430inst)와
+ * 묶음 나누기(자리 색·강조), 켬·끔 삼각형·선분 수, 병렬 번역을 기다리는 동안
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
@@ -129,7 +130,7 @@ describe('0.42.0 같은 그물 자리 모아 그리기', () => {
     for (const e of per) expect(e.attribs.filter((a) => /^[12]:/.test(a)).map((a) => a.split(':')[1])).toEqual(['3/24/0/1', '3/24/12/1']);
   });
 
-  it('그물마다로 돌아가는 경우: 단면·그림자(면만)·묶음 안 구간·반투명·끔·하한, 자리 색은 묶음을 나눈다', () => {
+  it('그물마다로 돌아가는 경우: 여러 단면·단면의 선·묶음 안 구간·반투명·끔·하한, 자리 색은 묶음을 나눈다(0.43.0: 단면 하나·그림자의 면은 모은다)', () => {
     const w = view(scene(), 'shadedEdges');
     // [면 묶음 자리 수…] | [선 묶음 자리 수…](각각 작은 차례로)
     const n = (): string => {
@@ -139,12 +140,17 @@ describe('0.42.0 같은 그물 자리 모아 그리기', () => {
       return `${f.sort((x, y) => x - y).join(',')}|${l.sort((x, y) => x - y).join(',')}`;
     };
     expect(n()).toBe('12|12');
+    // 0.43.0 단면 하나: 면은 모으고(자리마다 로컬 평면을 자리 자료에), 윤곽선은 그물마다(0.42.0 그대로)
     w.v.setSection({ normal: [1, 0, 0], offset: 40 });
-    expect(n()).toBe('|');
+    expect(n()).toBe('12|');
     w.v.setSection(null);
+    // 여러 단면은 모두 그물마다
+    w.v.setSections([{ normal: [1, 0, 0], offset: 40 }, { normal: [0, 1, 0], offset: 30 }]);
+    expect(n()).toBe('|');
+    w.v.setSections(null);
     w.v.setLighting({ sun: { direction: [0, -0.5, 1] }, shadows: true });
-    // 그림자: 면은 그물마다(자리마다 그림자 행렬), 윤곽선은 모아서
-    expect(n()).toBe('|12');
+    // 0.43.0 그림자: 면도 모은다(자리마다 그림자 행렬을 자리 자료에), 윤곽선은 0.42.0처럼 모아서
+    expect(n()).toBe('12|12');
     w.v.setLighting(null);
     // 묶음 안 구간이 있는 a0은 면·윤곽선 모두 그물마다, 반투명 a1은 면이 반투명 차례(그물마다)·윤곽선은 불투명도가 달라 따로 한 묶음
     w.v.setHiddenRanges('a0', [{ start: 0, count: 2 }]);
