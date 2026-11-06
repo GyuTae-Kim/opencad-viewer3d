@@ -28,6 +28,11 @@
  * 0.43.0 PBR 그림: 그물 기록이 PBR 필드(pbr.ts PbrSource)를 기억하고, 그 그림 id도 무늬 표(textures)에 들어 무늬 그림과 같은 길(예산·놓기·pending·복구)로 올린다.
  * 그리기마다 올라간 그림으로 상태(pbrState)를 정해 셰이더 변종(UV·NMAP·PBR)과 무늬 단위 6·7·8(없는 쪽은 흰 1화소 그림)을 건다. PBR 필드가 없는 그물은 늘 0.42.0 길이다.
  * 인스턴싱(0.42.0)은 그림자·단면 하나일 때도 면을 모은다 — 자리 자료에 그림자 행렬·로컬 평면을 더 쓴다(instMeshes)
+ *
+ * 0.44.0 묶음 안 구간 단면: 뷰어가 묶음 안 구간(ItemParts.prims·edges)에 그 구간만 더 자르는 평면 비트(RangePart.cut)를 붙여 넘긴다.
+ * 그리기는 갈래(cut 값)마다 묶음 평면(SectionsDraw.of) ∪ 갈래 비트 평면을 u_clips로 올리고 그 갈래 구간만 그린다(면·깊이 그림·삼각형 변·윤곽선·
+ * 숨은 점선·선분·점 — 구간이 24개를 넘으면 0.7.0처럼 모은 색인·복사본). 잘린 면 채우기는 갈래마다 단위(그 갈래 삼각형만 홀짝, 범위는 그 갈래 정점).
+ * 갈래가 없는 묶음(cut이 모두 0)은 0.43.0 길 그대로다
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
