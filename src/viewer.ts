@@ -170,7 +170,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
-import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
+import { type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import { type PointerHold, PointerHolds, takesBackTouches } from './claim';
 import {
   AXIS_DIRS,
@@ -207,7 +207,7 @@ import {
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
-import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
+import { CUBE_TOUCH_BAND, CUBE_TOUCH_SIZE, cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
   /** 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다 */
@@ -220,6 +220,13 @@ export interface Viewer3dOptions {
   viewCube?: boolean;
   /** 뷰 큐브 한 변(CSS 화소, 기본 112 — 64~160으로 자른다). 좁은 화면에서 줄여 쓴다 */
   viewCubeSize?: number;
+  /**
+   * 0.44.0 손가락 뷰 큐브(기본 켬 — 바뀐 기본 동작): 손가락(pointerType 'touch')으로 큐브를 누르면 고르지 않고 큐브를 CUBE_TOUCH_SIZE(224) 화소로 펴서
+   * 띠 경계를 보이고, 편 큐브를 다시 누르면 그 자리(띠 CUBE_TOUCH_BAND 0.3)의 뷰로 간 뒤 접는다. 편 큐브 밖을 누르거나 Esc면 고르지 않고 접는다.
+   * false면 0.43.0처럼 손가락도 바로 고른다. { size, band }로 편 크기(이 큐브 크기보다 커야 편다 — 뷰어 짧은 변 − 16으로 자른다)·띠를 바꾼다.
+   * 마우스·펜은 늘 0.43.0 그대로다
+   */
+  viewCubeTouch?: boolean | ViewCubeTouchOptions;
   /** 왼쪽 아래 좌표축(기본 true) */
   axes?: boolean;
   /** 키 입력(기본 true, 캔버스에 초점이 있을 때만) */
@@ -320,6 +327,14 @@ export interface SectionItemRange {
 
 /** 0.44.0 setSections items 하나: 묶음 id(통째로 자른다) 또는 묶음 안 구간 */
 export type SectionItem = string | SectionItemRange;
+
+/** 0.44.0 손가락 뷰 큐브 선택(Viewer3dOptions.viewCubeTouch·setViewCubeTouch) */
+export interface ViewCubeTouchOptions {
+  /** 편 큐브 한 변(CSS 화소, 기본 CUBE_TOUCH_SIZE 224) */
+  size?: number;
+  /** 편 큐브의 면 가장자리 띠 폭(면 한 변 대비 0.1~0.4, 기본 CUBE_TOUCH_BAND 0.3) */
+  band?: number;
+}
 
 /** setSections의 평면 하나: normal·p = offset의 법선 쪽을 잘라 낸다 */
 export interface SectionPlane extends SectionOptions {
@@ -1303,6 +1318,14 @@ const TEXTURE_REDRAW_POLL_MS = 50;
 /** 0.30.0 그 울타리를 이만큼(ms) 넘게 기다리면 끝난 것으로 본다(끝났다는 알림이 오지 않는 드라이버에서도 첫 무늬가 나타나게) */
 const TEXTURE_REDRAW_FENCE_MAX_MS = 5000;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
+/** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
+function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
+  if (t === false) return false;
+  const o: ViewCubeTouchOptions = typeof t === 'object' && t ? t : {};
+  const size = typeof o.size === 'number' && Number.isFinite(o.size) ? Math.max(64, Math.min(480, Math.round(o.size))) : CUBE_TOUCH_SIZE;
+  const band = typeof o.band === 'number' && Number.isFinite(o.band) ? Math.max(0.1, Math.min(0.4, o.band)) : CUBE_TOUCH_BAND;
+  return { size, band };
+}
 /** 표준 뷰 키 — 0.10.0부터 작은 모듈 camera.ts에 두고 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
 export { VIEW_KEYS };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
@@ -1395,7 +1418,9 @@ export class Viewer3d {
   private touch: { dist: number; cx: number; cy: number } | null = null;
   private lastMiddle = { t: 0, x: 0, y: 0 };
   private cubeHover: V3 | null = null;
-  private cubeDrag: { sx: number; sy: number; lx: number; ly: number; moved: boolean } | null = null;
+  private cubeDrag: { sx: number; sy: number; lx: number; ly: number; moved: boolean; touch: boolean } | null = null;
+  /** 0.44.0 손가락 뷰 큐브를 편 한 변(CSS 화소, 0 = 접힘) */
+  private cubeZoom = 0;
 
   private measuring = false;
   private measurePts: V3[] = [];
@@ -1576,6 +1601,7 @@ export class Viewer3d {
       gridZ: opts.gridZ ?? 'min',
       viewCube: opts.viewCube ?? true,
       viewCubeSize: cubeSize(opts.viewCubeSize ?? CUBE_CSS),
+      viewCubeTouch: cubeTouchOpts(opts.viewCubeTouch),
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
       animate: opts.animate ?? true,
@@ -2603,8 +2629,59 @@ export class Viewer3d {
   }
 
   setViewCubeVisible(on: boolean): void {
+    if (!on) this.foldCube();
     this.opts.viewCube = on;
     this.cube.style.display = on ? '' : 'none';
+    this.invalidate();
+  }
+
+  /**
+   * 0.44.0 손가락 뷰 큐브 선택(Viewer3dOptions.viewCubeTouch와 같다 — false = 0.43.0처럼 손가락도 바로 고르기, true = 기본, { size, band }). 편 큐브는 접는다
+   */
+  setViewCubeTouch(t: boolean | ViewCubeTouchOptions): void {
+    this.foldCube();
+    this.opts.viewCubeTouch = cubeTouchOpts(t);
+  }
+
+  /** 0.44.0 손가락 뷰 큐브 선택(끔이면 false, 아니면 편 한 변·띠) */
+  get viewCubeTouch(): false | Required<ViewCubeTouchOptions> {
+    const t = this.opts.viewCubeTouch;
+    return t === false ? false : { ...(t as Required<ViewCubeTouchOptions>) };
+  }
+
+  /** 0.44.0 손가락으로 뷰 큐브를 편 동안 true(viewCubeRect도 편 자리) */
+  get viewCubeExpanded(): boolean {
+    return this.cubeZoom > 0;
+  }
+
+  /** 0.44.0 지금 큐브 한 변(편 동안은 편 크기)과 누르는 자리 띠(편 동안만 손가락 띠 — 아니면 undefined = 0.43.0 띠) */
+  private cubeSizeNow(): number {
+    return this.cubeZoom || this.opts.viewCubeSize;
+  }
+  private cubeBandNow(): number | undefined {
+    const t = this.opts.viewCubeTouch;
+    return this.cubeZoom && t ? (t as Required<ViewCubeTouchOptions>).band : undefined;
+  }
+
+  /** 0.44.0 손가락 큐브를 편다(편 크기가 지금 큐브보다 크지 않으면 펴지 않고 false) */
+  private unfoldCube(): boolean {
+    const t = this.opts.viewCubeTouch;
+    if (t === false || !this.opts.viewCube) return false;
+    const z = Math.round(Math.min((t as Required<ViewCubeTouchOptions>).size, Math.min(this.cssW, this.cssH) - 2 * CUBE_INSET));
+    if (!(z > this.opts.viewCubeSize)) return false;
+    this.cubeZoom = z;
+    this.cube.style.width = this.cube.style.height = `${z}px`;
+    this.cubeHover = null;
+    this.invalidate();
+    return true;
+  }
+
+  /** 0.44.0 편 손가락 큐브를 접는다 */
+  private foldCube(): void {
+    if (!this.cubeZoom) return;
+    this.cubeZoom = 0;
+    this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
+    this.cubeHover = null;
     this.invalidate();
   }
 
@@ -2623,6 +2700,7 @@ export class Viewer3d {
 
   /** 뷰 큐브 한 변(CSS 화소, 64~160으로 자른다) */
   setViewCubeSize(px: number): void {
+    this.foldCube();
     this.opts.viewCubeSize = cubeSize(px);
     this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
     this.invalidate();
@@ -4017,7 +4095,8 @@ export class Viewer3d {
    */
   get viewCubeRect(): MeasureLabelRect | null {
     if (!this.opts.viewCube) return null;
-    const s = this.opts.viewCubeSize;
+    // 0.44.0 손가락으로 편 동안은 편 자리
+    const s = this.cubeSizeNow();
     return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
@@ -6545,7 +6624,8 @@ export class Viewer3d {
       const p = this.local(e, cube);
       const cd = this.cubeDrag;
       if (cd) {
-        if (!cd.moved && Math.hypot(p.x - cd.sx, p.y - cd.sy) < 3) return;
+        // 0.44.0 손가락은 끌기 시작 거리 10화소(마우스·펜은 0.43.0 그대로 3화소) — 누르다 조금 밀린 손가락이 큐브를 돌리지 않게
+        if (!cd.moved && Math.hypot(p.x - cd.sx, p.y - cd.sy) < (cd.touch ? TOUCH_DRAG_START_PX : 3)) return;
         cd.moved = true;
         this.finishAnim();
         this.wheelAnchor = null;
@@ -6555,7 +6635,7 @@ export class Viewer3d {
         this.invalidate();
         return;
       }
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
       const d = h ? h.dir : null;
       if ((d === null) !== (this.cubeHover === null) || (d && this.cubeHover && dot(d, this.cubeHover) < 0.9999)) {
         this.cubeHover = d;
@@ -6571,17 +6651,25 @@ export class Viewer3d {
     this.on<PointerEvent>(cube, 'pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
-      cube.setPointerCapture(e.pointerId);
+      try {
+        cube.setPointerCapture(e.pointerId);
+      } catch {
+        /* 이미 놓친 포인터·앱이 보낸 합성 사건(0.44.0 — 잡지 못해도 누르기는 이어 간다) */
+      }
       const p = this.local(e, cube);
-      this.cubeDrag = { sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false };
+      this.cubeDrag = { sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, touch: isTouch(e.pointerType) };
     });
     const cubeUp = (e: PointerEvent, cancel: boolean): void => {
       const cd = this.cubeDrag;
       this.cubeDrag = null;
       if (!cd || cd.moved || cancel) return;
+      // 0.44.0 손가락으로 접힌 큐브를 누르면 고르지 않고 편다(편 큐브를 다시 눌러 고른다)
+      if (cd.touch && !this.cubeZoom && this.unfoldCube()) return;
       const p = this.local(e, cube);
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
       if (h) this.setViewDir(h.dir);
+      // 편 큐브는 고르거나 큐브 밖을 누르면 접는다
+      this.foldCube();
     };
     this.on<PointerEvent>(cube, 'pointerup', (e) => cubeUp(e, false));
     this.on<PointerEvent>(cube, 'pointercancel', (e) => cubeUp(e, true));
@@ -6590,6 +6678,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
+    // 0.44.0 편 손가락 뷰 큐브는 3D 보기를 누르면 접는다(누르기는 그대로 이어 간다)
+    this.foldCube();
     // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.1 — 키보드로 이미 초점이 있던 캔버스도 data-v3d-focus="pointer"로 감춘다)
     pointerFocus(this.canvas);
     try {
@@ -6851,6 +6941,8 @@ export class Viewer3d {
     }
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
+    // 0.44.0: 손가락으로 편 뷰 큐브를 먼저 접는다
+    else if (e.key === 'Escape' && this.cubeZoom) this.foldCube();
     // 0.16.0: 첫 점 전이라도 끌어온 점이 있으면 Esc가 지운다
     else if (e.key === 'Escape' && (this.measurePts.length || (this.measuring && this.tracker?.size))) this.clearMeasure();
     else return false;
@@ -7065,7 +7157,8 @@ export class Viewer3d {
 
   private drawCube(): void {
     const dpr = this.dpr;
-    const size = this.opts.viewCubeSize;
+    // 0.44.0 손가락으로 편 동안은 편 크기(띠 경계를 옅게 — 바탕을 깔아 3D 보기 위에서도 읽힌다)
+    const size = this.cubeSizeNow();
     const n = Math.round(size * dpr);
     if (this.cube.width !== n || this.cube.height !== n) {
       this.cube.width = n;
@@ -7076,7 +7169,24 @@ export class Viewer3d {
     ctx.clearRect(0, 0, n, n);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const th = this.theme;
-    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover }, this.cubeHover, `600 ${((27 * size) / CUBE_CSS).toFixed(1)}px ${FONT}`);
+    const colors = { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover };
+    const font = `600 ${((27 * size) / CUBE_CSS).toFixed(1)}px ${FONT}`;
+    if (!this.cubeZoom) {
+      drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(size), colors, this.cubeHover, font);
+      return;
+    }
+    ctx.save();
+    ctx.globalAlpha = 0.86;
+    ctx.fillStyle = th.background;
+    ctx.beginPath();
+    ctx.roundRect(0.5, 0.5, size - 1, size - 1, 10);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = th.cubeEdge;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(size), colors, this.cubeHover, font, { band: this.cubeBandNow(), grid: true });
   }
 
   private drawOverlay(f: ViewFrame): void {
