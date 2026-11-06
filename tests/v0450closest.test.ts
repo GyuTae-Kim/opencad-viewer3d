@@ -166,6 +166,22 @@ describe('면별 최근접점(0.45.0)', () => {
       expect(n).toBe(9);
     });
 
+  it('큰 그물의 작은 구간(쓰는 정점이 적다 — 세계 정점을 Map에)도 행렬과 함께 앱이 따로 만든 그물과 바이트까지 같다', () => {
+    for (const [ra, rb] of [
+      [{ start: 5, count: 2 }, { start: 40, count: 3 }],
+      [[{ start: 5, count: 2 }, { start: 300, count: 4 }], { start: 700, count: 6 }],
+    ] as [IndexRange | IndexRange[], IndexRange][]) {
+      const ma = ROT(0.03, -0.02, 0.5), mb = ROT(-0.1, 0.2, 0);
+      const r = closestBetween(partShape(PIN.mesh, ra, ma), partShape(HOLE.mesh, rb, mb), { indices: true })!;
+      const list = Array.isArray(ra) ? ra : [ra];
+      // 앱 길: 구간마다 따로 잰 가장 가까운 것(같은 거리)
+      const each = list.map((x) => closestBetween(shape(faceMesh(PIN.mesh, x, 'a'), ma), shape(faceMesh(HOLE.mesh, rb, 'b'), mb), { indices: true })!);
+      const best = each.reduce((p, q) => (q.distance < p.distance ? q : p));
+      if (!Array.isArray(ra)) expect(bytes({ ...r, rawA: r.rawA! - ra.start, rawB: r.rawB! - rb.start })).toBe(bytes(best));
+      else expect(r.distance).toBe(best.distance);
+    }
+  });
+
   it('구간 없이 부른 결과는 그대로 — 묶음 통째 구간을 준 것과도 바이트까지 같다(같은 나무)', () => {
     const nA = PIN.mesh.indices!.length / 3, nB = HOLE.mesh.indices!.length / 3;
     for (const [ma, mb] of [[undefined, undefined], [ROT(0.03, -0.02, 0.5), undefined]] as const) {

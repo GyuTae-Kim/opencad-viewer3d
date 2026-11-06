@@ -276,15 +276,25 @@ class WorldShape {
   private boxDone: Uint8Array;
   private verts: Float64Array | null;
   private vertDone: Uint8Array | null;
+  /**
+   * 0.45.0 구간 모양이 큰 그물의 정점 배열을 함께 쓰고 쓰는 정점이 적으면(번호 수 × 4 < 정점 수) 세계 정점을 정점 수만큼의 배열 대신 Map에 둔다
+   * (작은 면 하나를 잴 때마다 그물 정점 수만큼 잡지 않게 — 값은 같은 셈이다)
+   */
+  private sparse: Map<number, V3> | null = null;
   readonly perPrim: number;
   constructor(s: ClosestShape) {
     this.s = s;
     this.boxes = new Float64Array(s.bvh.nodeCount * 6);
     this.boxDone = new Uint8Array(s.bvh.nodeCount);
     const nv = Math.floor(s.positions.length / 3);
-    this.verts = s.model ? new Float64Array(nv * 3) : null;
-    this.vertDone = s.model ? new Uint8Array(nv) : null;
     this.perPrim = s.kind === 'triangle' ? 3 : s.kind === 'segment' ? 2 : 1;
+    if (s.model && (s.offset !== undefined || s.map) && s.indices && s.indices.length * 4 < nv) {
+      this.sparse = new Map();
+      this.verts = this.vertDone = null;
+    } else {
+      this.verts = s.model ? new Float64Array(nv * 3) : null;
+      this.vertDone = s.model ? new Uint8Array(nv) : null;
+    }
   }
 
   /** 마디 ni의 세계 상자(out 안 o부터 [min xyz, max xyz]) */
@@ -326,6 +336,16 @@ class WorldShape {
     const P = this.s.positions;
     const M = this.s.model;
     if (!M) return [P[v * 3]!, P[v * 3 + 1]!, P[v * 3 + 2]!];
+    const S = this.sparse;
+    if (S) {
+      let w = S.get(v);
+      if (!w) {
+        const x = P[v * 3]!, y = P[v * 3 + 1]!, z = P[v * 3 + 2]!;
+        w = [M[0]! * x + M[4]! * y + M[8]! * z + M[12]!, M[1]! * x + M[5]! * y + M[9]! * z + M[13]!, M[2]! * x + M[6]! * y + M[10]! * z + M[14]!];
+        S.set(v, w);
+      }
+      return [w[0], w[1], w[2]];
+    }
     const W = this.verts!;
     if (!this.vertDone![v]) {
       const x = P[v * 3]!, y = P[v * 3 + 1]!, z = P[v * 3 + 2]!;
