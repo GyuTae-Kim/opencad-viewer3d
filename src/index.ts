@@ -138,7 +138,7 @@ export {
   type ClosestPart,
   closestPart,
 } from './closest';
-export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
+export { type Annotation3d, type AnnotationKind, HIDDEN_LABEL_DASH, angleAt, annotationGeometry, annotationLabelLook, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cubeTargets } from './viewcube';

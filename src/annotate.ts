@@ -138,6 +138,24 @@ export function measureNumber(v: number, digits: number): string {
   return s === `-${(0).toFixed(digits)}` ? (0).toFixed(digits) : s;
 }
 
+/** 가려진 덧그림 글상자의 테두리 점선(0.47.0 — 제도의 숨은선처럼 점선: 선 4·틈 3 CSS 화소) */
+export const HIDDEN_LABEL_DASH: readonly number[] = [4, 3];
+
+/**
+ * 덧그림 글상자를 그리는 꼴(0.47.0, 순수): hidden = 글자 상자 자리가 앞 면에 가려졌는지, opacity = setAnnotations의 hidden(가려진 부분 불투명도 0~1).
+ * - 보이면 실선 테두리(dash 빈 배열 — 0.46.0 그대로)
+ * - 가려졌고 opacity ≤ 0이면 그리지 않는다(null — 0.46.0 그대로)
+ * - 가려졌고 opacity ≥ 1이면 보이는 것과 같다(앱이 가려짐을 가르지 않게 했다 — 0.46.0 그대로)
+ * - 그 밖에는 상자 바탕·글을 보이는 것처럼 불투명하게 그리고 테두리만 점선(HIDDEN_LABEL_DASH)으로 가려짐을 알린다.
+ *   0.46.0까지는 상자·글 전체를 불투명도 max(opacity, 0.5)로 그려 글이 바탕과 4.5:1에 못 미쳤다(WCAG 1.4.3 — 기본 hidden 0.35, 테마 바탕 위에서 밝은 테마 3.1:1, 어두운 테마 4.4:1).
+ *   점선은 투명도·색이 아닌 모양으로 가려짐을 가른다(WCAG 1.4.1, 제도의 숨은선 관례). 점 표식과 GL 선은 글이 아니므로 그대로 opacity다
+ */
+export function annotationLabelLook(hidden: boolean, opacity: number): { dash: readonly number[] } | null {
+  if (!hidden) return { dash: [] };
+  if (!(opacity > 0)) return null;
+  return opacity >= 1 ? { dash: [] } : { dash: HIDDEN_LABEL_DASH };
+}
+
 /**
  * 덧그림 글(label이 있으면 그것을 줄로 나눠). 없으면 값으로: distance = "12.5 mm", angle = "90.0°", radius = "R 6 mm",
  * point = "X … Y … Z …". fmt는 길이 숫자 꼴(뷰어의 장면 크기 맞춤 자릿수)

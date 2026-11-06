@@ -157,7 +157,7 @@ import {
 } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
-import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText, measureDigits, measureNumber } from './annotate';
+import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationLabelLook, annotationText, measureDigits, measureNumber } from './annotate';
 import {
   type ClosestPart,
   type ClosestResult,
@@ -1105,7 +1105,11 @@ export interface PointerClaimHandler extends PointerHoldHandler {
 
 /** 측정 덧그림 전체 선택(setAnnotations 두 번째 인자) */
 export interface AnnotationOptions {
-  /** 가려진 부분(선·점·글자)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 그리지 않는다) */
+  /**
+   * 가려진 부분(선·점)의 불투명도 0~1(기본 0.35, 0이면 가려진 부분은 글자 상자까지 그리지 않는다).
+   * 0.47.0: 가려진 글자 상자는 이 값으로 흐리게 하지 않고 바탕·글을 보이는 글상자처럼 불투명하게 그린 뒤 테두리를 점선으로 그린다(글 대비 4.5:1 — WCAG 1.4.3).
+   * 1이면 가려진 것도 보이는 것과 같다(실선). 0.46.0까지는 글자 상자를 불투명도 max(이 값, 0.5)로 그렸다
+   */
   hidden?: number;
   /** 선 굵기(화면 화소, 기본 2) */
   width?: number;
@@ -7952,7 +7956,7 @@ export class Viewer3d {
   }
 
   /**
-   * 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점·글자는 흐리게.
+   * 앱 측정 덧그림의 점·글자(선은 GL에서 깊이를 따져 그린다). 가려진 점은 흐리게, 가려진 글상자는 불투명한 바탕·글에 점선 테두리(0.47.0 — annotationLabelLook).
    * 0.23.0: screen(화면 덧그림)이고 setMeasureLabelAvoid의 사각형이 있으면 글상자도 측정 거리 글상자와 같은 차례(placeMeasureLabel)로 비켜 그린다 —
    * 기준점은 글자 상자를 붙일 자리, 거리·반지름이면 두 점을 잇는 선분을 따라서도, 옮길 때는 그 덧그림의 점 표식도 될 수 있으면 가리지 않는다.
    * 커서 둘레(pointerRadius)는 보지 않는다(커서를 따라다니지 않는 글상자다). 그림 저장은 기본 자리.
@@ -8004,8 +8008,10 @@ export class Viewer3d {
       const at = projectToScreen(f, g.labelAt);
       if (!lines.length || !at) return;
       const hid = occl && this.occludedAt(f, g.labelAt, at[0], at[1], false);
-      if (hid && hiddenA <= 0) return;
-      ctx.globalAlpha = hid ? Math.max(hiddenA, 0.5) : 1;
+      // 0.47.0: 가려진 글상자도 바탕·글은 불투명(글 대비 — WCAG 1.4.3), 가려짐은 점선 테두리(annotationLabelLook). 0.46.0은 globalAlpha max(hidden, 0.5)
+      const look = annotationLabelLook(hid, hiddenA);
+      if (!look) return;
+      ctx.globalAlpha = 1;
       ctx.font = `12px ${FONT}`;
       const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 14;
       const h = lines.length * 16 + 8;
@@ -8037,7 +8043,11 @@ export class Viewer3d {
       ctx.beginPath();
       ctx.rect(x, y, w, h);
       ctx.fill();
-      ctx.stroke();
+      if (look.dash.length) {
+        ctx.setLineDash(look.dash as number[]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else ctx.stroke();
       ctx.fillStyle = th.text;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
