@@ -5,10 +5,33 @@
  * - false: 바로 옮긴다
  * - 'auto': 사용자의 움직임 줄이기 선호(CSS 미디어 질의 prefers-reduced-motion: reduce — OS·브라우저 설정)면 바로, 아니면 부드럽게.
  *   뷰어를 연 뒤 설정을 바꿔도 matchMedia의 change 사건으로 따라간다(WCAG 2.3.3 상호 작용으로 생긴 움직임 끄기)
+ *
+ * 0.49.0: 카메라를 날리는 함수(flyTo·fit·fitItems·setView·setViewDir·zoomToRect)가 끝 알림 Promise<boolean>을 돌려주고, flyTo는 길이(ms)를 고를 수 있다
  */
 
 /** 카메라 움직임 설정 */
 export type AnimateSetting = boolean | 'auto';
+
+/** 0.49.0 코어 카메라 움직임의 기본 길이(ms — 0.48.0까지 고정이던 0.32초) */
+export const CAMERA_MOVE_MS = 320;
+
+/** 0.49.0 flyTo 길이의 위 한도(ms) — 앱이 큰 값을 주어도 카메라가 1분 넘게 붙잡히지 않게 */
+export const CAMERA_MOVE_MAX_MS = 60_000;
+
+/** 0.49.0 flyTo의 선택(셋째 인자) */
+export interface FlyToOptions {
+  /**
+   * 움직이는 길이(ms, 기본 CAMERA_MOVE_MS = 320 — 0.48.0 그대로). 0 이하면 바로 옮긴다. 유한한 수가 아니면 기본, CAMERA_MOVE_MAX_MS에서 자른다.
+   * 움직이지 않는 설정(animate false·'auto'에서 줄이기 선호)이면 길이와 상관없이 바로 옮긴다
+   */
+  duration?: number;
+}
+
+/** flyTo 길이를 읽는다(ms): 주지 않거나 유한한 수가 아니면 320, 0 이하면 0(바로), 60초에서 자른다 */
+export function moveDuration(ms: unknown): number {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return CAMERA_MOVE_MS;
+  return ms <= 0 ? 0 : Math.min(ms, CAMERA_MOVE_MAX_MS);
+}
 
 /** 움직임 줄이기 선호 미디어 질의 */
 export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';

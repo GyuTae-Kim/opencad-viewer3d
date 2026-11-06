@@ -154,9 +154,13 @@ export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export {
   type AnimateSetting,
+  CAMERA_MOVE_MAX_MS,
+  CAMERA_MOVE_MS,
+  type FlyToOptions,
   type MotionMatchMedia,
   type MotionQueryList,
   REDUCED_MOTION_QUERY,
+  moveDuration,
   normalizeAnimate,
   resolveAnimate,
   watchReducedMotion,

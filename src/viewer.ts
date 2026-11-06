@@ -193,7 +193,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
-import { type AnimateSetting, normalizeAnimate, resolveAnimate, watchReducedMotion } from './motion';
+import { type AnimateSetting, CAMERA_MOVE_MS, type FlyToOptions, moveDuration, normalizeAnimate, resolveAnimate, watchReducedMotion } from './motion';
 import { DRAG_START_PX, type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import { type PointerHold, PointerHolds, takesBackTouches } from './claim';
 import {
@@ -1669,7 +1669,8 @@ export class Viewer3d {
   private usesOrigin = false;
   private mode: RenderMode;
   private cam: CameraState;
-  private anim: { from: CameraState; to: CameraState; t0: number; dur: number } | null = null;
+  /** 옮기는 중인 카메라 움직임(0.49.0 done — 그 움직임을 시작한 호출이 돌려준 Promise를 푼다: 끝 자리에 닿으면 true, 닿기 전에 끊기면 false) */
+  private anim: { from: CameraState; to: CameraState; t0: number; dur: number; done: (arrived: boolean) => void } | null = null;
   private allBox: Box3 = emptyBox();
   private visBox: Box3 | null = null;
   private grid: GridSpec | null = null;
@@ -2095,7 +2096,7 @@ export class Viewer3d {
     this.rebuildGrid();
     if (!opts.keepView) {
       const a = dirToAngles(VIEW_DIRS.seIso);
-      this.anim = null;
+      this.dropAnim();
       this.cam = fitCamera({ ...this.cam, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH);
       this.pendingFit = !this.sizeKnown;
     }
@@ -2557,7 +2558,8 @@ export class Viewer3d {
     this.cutCache = new WeakMap();
     this.bvhTasks = [];
     this.visLists = null;
-    this.anim = null;
+    // 0.49.0: 옮기던 움직임의 Promise는 false로 푼다(앱이 기다리던 끝 알림이 남지 않게)
+    this.dropAnim();
     this.drag = null;
     this.touch = null;
     this.pointers.clear();
@@ -2579,20 +2581,25 @@ export class Viewer3d {
     return { ...this.cam, target: [...this.cam.target] as V3 };
   }
 
-  /** 카메라를 바로 바꾼다(움직임 없음 — 옮기던 움직임은 그만둔다). 저장된 보기로 날아가려면 flyTo */
+  /** 카메라를 바로 바꾼다(움직임 없음 — 옮기던 움직임은 그만둔다: 그 Promise는 false). 저장된 보기로 날아가려면 flyTo */
   setCamera(c: CameraState): void {
-    this.anim = null;
+    this.dropAnim();
     this.wheelAnchor = null;
     this.cam = { ...c, target: [...c.target] as V3 };
     this.invalidate();
   }
 
   /**
-   * 0.48.0 주어진 카메라로 날아간다(앱의 홈 보기·저장된 보기·장면 탭): 다른 카메라 길과 같은 움직임(0.32초, 같은 고르기 곡선)이고 animate 설정을 따른다
-   * (주지 않으면 지금 animate — 'auto'면 움직임 줄이기 선호). 끌기·휠·다른 카메라 호출이 오면 옮기던 움직임을 끝 자리로 마치거나 바꾼다
+   * 0.48.0 주어진 카메라로 날아간다(앱의 홈 보기·저장된 보기·장면 탭): 다른 카메라 길과 같은 움직임(기본 0.32초, 같은 고르기 곡선)이고 animate 설정을 따른다
+   * (주지 않으면 지금 animate — 'auto'면 움직임 줄이기 선호). 끌기·휠·다른 카메라 호출이 오면 옮기던 움직임을 끝 자리로 마치거나 바꾼다.
+   *
+   * 0.49.0 끝 알림과 길이: 돌려준 Promise는 카메라가 끝 자리에 닿으면 true로 풀린다 — 다 옮긴 그림을 그린 뒤, 움직이지 않으면(animate false·'auto'에서 줄이기 선호·
+   * duration 0 이하) 곧바로, 끌기·휠·굴림·움직임 끄기가 옮기던 것을 끝 자리로 마치면 그때. 닿기 전에 다른 카메라 길(flyTo·fit·setView·뷰 큐브·키 등)·setCamera·
+   * 새 장면 맞춤(setScene)·걷기 이동이 카메라를 바꾸거나 dispose하면 false로 풀린다(dispose 뒤 부르면 바로 false). 실패(reject)하지 않는다.
+   * opts.duration: 움직이는 길이(ms, 기본 320 — 0.48.0 그대로, 60초에서 자름)
    */
-  flyTo(c: CameraState, animate = this.animate): void {
-    this.goto({ ...c, target: [...c.target] as V3 }, animate);
+  flyTo(c: CameraState, animate = this.animate, opts?: FlyToOptions): Promise<boolean> {
+    return this.goto({ ...c, target: [...c.target] as V3 }, animate, moveDuration(opts?.duration));
   }
 
   /**
@@ -2641,33 +2648,33 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  /** 보이는 것 전체 보기 */
-  fit(animate = this.animate): void {
-    this.goto(fitCamera(this.cam, this.visibleBox(), this.cssW / this.cssH), animate);
+  /** 보이는 것 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다 — 끝 자리에 닿으면 true, 닿기 전에 끊기면 false) */
+  fit(animate = this.animate): Promise<boolean> {
+    return this.goto(fitCamera(this.cam, this.visibleBox(), this.cssW / this.cssH), animate);
   }
 
-  /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기 */
-  fitItems(ids: readonly string[], animate = this.animate): void {
+  /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다) */
+  fitItems(ids: readonly string[], animate = this.animate): Promise<boolean> {
     let b = emptyBox();
     for (const id of new Set(ids)) {
       const it = this.items.get(id);
       if (it && this.visible(id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     }
     if (boxIsEmpty(b)) return this.fit(animate);
-    this.goto(fitCamera(this.cam, b, this.cssW / this.cssH), animate);
+    return this.goto(fitCamera(this.cam, b, this.cssW / this.cssH), animate);
   }
 
-  /** 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기 */
-  setView(name: ViewName, animate = this.animate): void {
-    this.setViewDir(VIEW_DIRS[name], animate);
+  /** 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다) */
+  setView(name: ViewName, animate = this.animate): Promise<boolean> {
+    return this.setViewDir(VIEW_DIRS[name], animate);
   }
 
-  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로) */
-  setViewDir(dir: readonly number[], animate = this.animate): void {
+  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로). 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다) */
+  setViewDir(dir: readonly number[], animate = this.animate): Promise<boolean> {
     const a = dirToAngles(dir, 0);
     const { roll: _r, shiftX: _x, shiftY: _y, ...base } = this.cam;
     void _r, _x, _y;
-    this.goto(fitCamera({ ...base, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
+    return this.goto(fitCamera({ ...base, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
   }
 
   /** 카메라 굴림(라디안, 0.7.0): 화면 위 방향을 보는 축 둘레로(+면 카메라가 반시계로 기울어 장면은 시계로). 0이면 없앤다 */
@@ -2971,7 +2978,7 @@ export class Viewer3d {
     const dt = this.walkT ? Math.min(0.1, Math.max(0, (now - this.walkT) / 1000)) : 1 / 60;
     this.walkT = now;
     const v = this.walkSpeed() * (this.walkFast ? 3 : 1) * dt;
-    this.anim = null;
+    this.dropAnim();
     if (fw || rt || up) this.walkMove(fw * v, rt * v, up * v);
     if (tn || lk) this.cam = lookCamera(this.cam, tn * dt * (Math.PI / 2), lk * dt * (Math.PI / 2));
     this.invalidate();
@@ -5408,16 +5415,17 @@ export class Viewer3d {
 
   /**
    * 창 확대: 화면 사각형(캔버스 CSS 화소 두 구석)이 화면을 채우게 한다. 사각형 가운데 아래 점(없으면 대상점 깊이)을 화면 가운데로 옮기고
-   * 그 깊이에서 사각형이 꼭 맞게 확대한다. 너무 작은 사각형(2화소 미만)은 무시한다
+   * 그 깊이에서 사각형이 꼭 맞게 확대한다. 너무 작은 사각형(2화소 미만)은 무시한다.
+   * 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다). 무시한 사각형·dispose 뒤에는 옮기지 않으므로 바로 false
    */
-  zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.animate): void {
-    if (this.disposed || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return;
+  zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.animate): Promise<boolean> {
+    if (this.disposed || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return Promise.resolve(false);
     this.finishAnim();
     const f = this.frame();
     const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
     const hit = this.pickDetail(cx, cy, true);
     const depth = hit ? viewDepth(f, hit.pick.point) : viewDepth(f, this.cam.target);
-    this.goto(rectZoomCamera(this.cam, f, x0, y0, x1, y1, depth, this.zoomLimits()), animate);
+    return this.goto(rectZoomCamera(this.cam, f, x0, y0, x1, y1, depth, this.zoomLimits()), animate);
   }
 
   /** 기다리지 않고 바로 그린다 */
@@ -5484,21 +5492,42 @@ export class Viewer3d {
     return { min: Math.max(r * 1e-6, 1e-9), max: r * 1e4 };
   }
 
-  private goto(c: CameraState, animate: boolean): void {
+  /**
+   * 카메라를 날리는 길 모두가 지난다. 0.49.0: 끝 알림 Promise를 돌려준다 — 옮기던 앞 움직임은 끝 자리에 닿기 전에 바뀌므로 false로 풀고,
+   * 바로 옮기면(animate false·길이 0) 곧바로 true, 움직이면 끝 자리를 그린 그림 뒤(draw)·끝 자리로 마칠 때(finishAnim) true, 끊기면(dropAnim) false
+   */
+  private goto(c: CameraState, animate: boolean, ms = CAMERA_MOVE_MS): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
     this.wheelAnchor = null;
-    if (animate) {
-      this.anim = { from: this.getCamera(), to: c, t0: performance.now(), dur: 320 };
-    } else {
-      this.anim = null;
-      this.cam = c;
+    this.dropAnim();
+    if (animate && ms > 0) {
+      const from = this.getCamera();
+      const p = new Promise<boolean>((done) => {
+        this.anim = { from, to: c, t0: performance.now(), dur: ms, done };
+      });
+      this.invalidate();
+      return p;
     }
+    this.cam = c;
     this.invalidate();
+    return Promise.resolve(true);
   }
 
-  private finishAnim(): void {
-    if (!this.anim) return;
-    this.cam = this.anim.to;
+  /** 옮기던 움직임을 끝 자리에 닿기 전에 그만둔다(카메라는 그 자리 그대로 — 0.49.0 그 Promise는 false) */
+  private dropAnim(): void {
+    const a = this.anim;
+    if (!a) return;
     this.anim = null;
+    a.done(false);
+  }
+
+  /** 옮기던 움직임을 끝 자리로 마친다(0.49.0 그 Promise는 true) */
+  private finishAnim(): void {
+    const a = this.anim;
+    if (!a) return;
+    this.cam = a.to;
+    this.anim = null;
+    a.done(true);
   }
 
   private applyTheme(): void {
@@ -7985,8 +8014,11 @@ export class Viewer3d {
       const t = Math.min(1, (now - a.t0) / a.dur);
       const e = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
       this.cam = t >= 1 ? a.to : lerpCamera(a.from, a.to, e);
-      if (t >= 1) this.anim = null;
-      else this.invalidate();
+      if (t >= 1) {
+        this.anim = null;
+        // 0.49.0 끝 알림: Promise 처리기는 이 그림(끝 자리)을 다 그린 뒤에 돈다
+        a.done(true);
+      } else this.invalidate();
     }
     // 크기·화소 비율
     const dpr = Math.max(0.5, Math.min(window.devicePixelRatio || 1, this.opts.maxPixelRatio));
