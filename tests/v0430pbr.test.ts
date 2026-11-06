@@ -379,6 +379,24 @@ describe('뷰어의 PBR 그림(0.43.0)', () => {
     expect(w.v.stats.instanced.pending).toBe(0);
   });
 
+  it('번역을 기다리던 변종을 다시 부르지 않게 되어도(그림이 하나씩 올라와 변종 정의가 바뀜) 다음 그리기에서 기다림이 끝난다 — 프레임마다 다시 그리지 않는다', async () => {
+    const w = view(scene({ pending: true }));
+    await until(() => w.v.stats.textures.ready === 1);
+    const r = (w.v as unknown as { renderer: { parallel: object | null } }).renderer;
+    r.parallel = {};
+    w.gl.compileDone = false;
+    frame(w);
+    // 판 b(무늬·뒷면·값)·판 c(값)의 PBR 변종
+    expect(w.v.stats.instanced.pending).toBe(2);
+    expect(await w.v.restoreTexture('nrm', fakeBitmap('nrm', 64, 64) as unknown as ImageBitmap)).toBe(true);
+    frame(w);
+    // 법선 그림이 오면 판 a·b의 변종 정의가 바뀐다(판 b의 앞 변종은 다시 부르지 않는다)
+    expect(w.v.stats.instanced.pending).toBe(4);
+    w.gl.compileDone = true;
+    frame(w);
+    expect(w.v.stats.instanced.pending).toBe(0);
+  });
+
   it('같은 PBR 그물 12자리는 PBR 인스턴싱 변종으로 모아 그리고, 색을 바꾼 자리는 PBR 없이 따로 묶인다', async () => {
     const s = scene();
     const b = s.meshes[2]!;

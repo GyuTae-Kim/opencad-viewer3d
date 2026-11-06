@@ -1126,6 +1126,12 @@ export class Renderer3d {
     }
     // COMPLETION_STATUS_KHR(0x91B1): 기다리지 않고 묻는다
     if (!gl.getProgramParameter(q.p, 0x91b1)) return null;
+    return this.finishPending(key, q);
+  }
+
+  /** 번역이 끝난 변종을 변종 표로 옮긴다(연결에 실패했으면 지우고 false — 문맥을 잃었으면 null) */
+  private finishPending(key: string, q: { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader; defs: readonly string[] }): Prog | null | false {
+    const gl = this.gl;
     this.pendingProgs.delete(key);
     const ok = !!gl.getProgramParameter(q.p, gl.LINK_STATUS);
     gl.deleteShader(q.vs);
@@ -1134,9 +1140,25 @@ export class Renderer3d {
       gl.deleteProgram(q.p);
       return gl.isContextLost() ? null : false;
     }
-    const prog: Prog = { p: q.p, u: new Map(), ...progFlags(all) };
+    const prog: Prog = { p: q.p, u: new Map(), ...progFlags(q.defs) };
     this.variants.set(key, prog);
     return prog;
+  }
+
+  /**
+   * 0.43.0 그리기마다 번역을 기다리는 변종을 모두 묻는다. 그 변종을 다시 부르지 않게 된 경우(무늬가 하나씩 올라와 PBR 변종 정의가 바뀌었거나 모드를 바꿈)에도
+   * 기다림이 끝나게 — 남아 있으면 instPending이 0이 되지 않아 뷰어가 프레임마다 다시 그린다(0.42.0에도 모드를 바꾸면 생길 수 있던 일)
+   */
+  private pollPending(): void {
+    if (!this.pendingProgs.size) return;
+    const gl = this.gl;
+    for (const [key, q] of [...this.pendingProgs]) {
+      if (!gl.getProgramParameter(q.p, 0x91b1)) continue;
+      if (this.finishPending(key, q) === false) {
+        if (q.defs.includes('INST')) this.instBroken = true;
+        else this.pbrBroken = true;
+      }
+    }
   }
 
   /** 여러 단면 평면(로컬)을 지금 프로그램에 올린다(u_clips·u_nclip) */
@@ -2939,6 +2961,7 @@ export class Renderer3d {
     this.stats = stats;
     this.instRow = 0;
     this.instStats = { draws: 0, items: 0 };
+    this.pollPending();
     const multi = st.sections ?? null;
     const sec = multi ? null : (st.section ?? null);
     const capsOn =
