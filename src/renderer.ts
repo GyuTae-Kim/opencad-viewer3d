@@ -41,7 +41,7 @@ import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponent
 import { contrastLineColor } from './theme';
 import { type BufferSink, type BufferTarget, CHUNK_BYTES, CHUNK_MIN_BYTES, ChunkedUpload, type UploadArray, newArrays } from './upload';
 import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
-import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
+import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, cutBits, partCuts, partsOf, rangesTotal } from './ranges';
 import { type MeshArrays, type MeshLayout, type MeshMiss, type ReleaseFlags, type RestoreNeed, arraysMiss, layoutMiss, takeArrays } from './release';
 import { type PbrSource, type PbrState, pbrDefines, pbrNeedsUv, pbrSource, pbrState, pbrTextureIds } from './pbr';
 
@@ -229,6 +229,7 @@ export interface SectionsDraw {
 export interface ItemParts {
   /** 바뀔 때마다 새 값(GPU 캐시 열쇠) */
   ver: number;
+  /** 0.44.0: 구간 단면이 있으면 구간마다 cut(그 구간만 더 자르는 평면 비트 — SectionsDraw.planes 번호) */
   prims: readonly RangePart[];
   edges?: readonly RangePart[] | null;
 }
@@ -472,6 +473,24 @@ interface PartCache {
   vaos: WebGLVertexArrayObject[];
   bufs: WebGLBuffer[];
   lists: Map<string, DrawList>;
+  /** 0.44.0 구간 단면 갈래 값들(partCuts — 처음 필요할 때). 0 하나뿐이면 null(0.43.0 길) */
+  cuts?: number[] | null;
+}
+
+/** 0.44.0 구간 단면 갈래 하나의 그릴 목록(보통·강조) */
+interface CutLists {
+  cut: number;
+  n: DrawList;
+  h: DrawList;
+}
+
+/** 0.44.0 구간 목록의 구간 단면 갈래(0 하나뿐이면 null — 갈래가 없는 묶음은 0.43.0 길 그대로). 구간 캐시에 기억한다 */
+function cacheCuts(c: PartCache, parts: readonly RangePart[]): number[] | null {
+  if (c.cuts === undefined) {
+    const k = parts.some((p) => !!p.cut) ? partCuts(parts) : null;
+    c.cuts = k;
+  }
+  return c.cuts;
 }
 
 /** 구간이 이보다 많으면 모은 자료(색인·복사본)를 만들어 그리기 한 번으로 그린다 */
@@ -550,6 +569,10 @@ interface CapUnit {
   /** 채운 면 바탕색(첫 그물 색) */
   color: Rgba;
   group: boolean;
+  /**
+   * 0.44.0 그물마다(meshes 차례) 홀짝을 셀 구간 단면 갈래(undefined면 그물 통째 — 묶음 안 숨김·강조 구간은 그대로). 구간 단면이 없으면 두지 않는다
+   */
+  cuts?: (number | undefined)[];
 }
 
 /**
@@ -2825,12 +2848,12 @@ export class Renderer3d {
     return (rec.parts = { ver, vaos: [], bufs: [], lists: new Map() });
   }
 
-  /** 그물의 한 종류 구간(삼각형 번호). wire면 와이어프레임용(삼각형마다 변 셋) */
-  private meshList(r: MeshRec, c: PartCache, parts: readonly RangePart[], hi: boolean, wire: boolean): DrawList {
-    const key = `${wire ? 'w' : 'f'}${hi ? 'h' : 'n'}`;
+  /** 그물의 한 종류 구간(삼각형 번호). wire면 와이어프레임용(삼각형마다 변 셋). 0.44.0: cut을 주면 그 구간 단면 갈래만 */
+  private meshList(r: MeshRec, c: PartCache, parts: readonly RangePart[], hi: boolean, wire: boolean, cut?: number): DrawList {
+    const key = `${wire ? 'w' : 'f'}${hi ? 'h' : 'n'}${cut ?? ''}`;
     let l = c.lists.get(key);
     if (l) return l;
-    const runs = partsOf(parts, hi);
+    const runs = partsOf(parts, hi, cut);
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (runs.length > RUN_LIMIT && total > 0) {
@@ -2855,11 +2878,11 @@ export class Renderer3d {
   }
 
   /** 선분 묶음(또는 그물 윤곽선)의 한 종류 구간(선분 번호). 구간이 많으면 위치·색을 모은 복사본을 만든다 */
-  private lineList(rec: LineRec, c: PartCache, parts: readonly RangePart[], hi: boolean, positions: Float32Array, colors: Float32Array | undefined): DrawList {
-    const key = hi ? 'h' : 'n';
+  private lineList(rec: LineRec, c: PartCache, parts: readonly RangePart[], hi: boolean, positions: Float32Array, colors: Float32Array | undefined, cut?: number): DrawList {
+    const key = `${hi ? 'h' : 'n'}${cut ?? ''}`;
     let l = c.lists.get(key);
     if (l) return l;
-    const runs = partsOf(parts, hi);
+    const runs = partsOf(parts, hi, cut);
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (runs.length > RUN_LIMIT && total > 0) {
@@ -2877,11 +2900,11 @@ export class Renderer3d {
   }
 
   /** 점 묶음의 한 종류 구간(점 번호): 늘 모은 복사본으로 그린다(점 묶음은 대개 작다) */
-  private pointList(r: PointRec, c: PartCache, parts: readonly RangePart[], hi: boolean): DrawList {
-    const key = hi ? 'h' : 'n';
+  private pointList(r: PointRec, c: PartCache, parts: readonly RangePart[], hi: boolean, cut?: number): DrawList {
+    const key = `${hi ? 'h' : 'n'}${cut ?? ''}`;
     let l = c.lists.get(key);
     if (l) return l;
-    const runs = partsOf(parts, hi);
+    const runs = partsOf(parts, hi, cut);
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (total > 0) {
@@ -3010,6 +3033,14 @@ export class Renderer3d {
     const clipOf = (model: ArrayLike<number> | undefined): Plane4 | null => (sec ? planeToLocal(sec.plane, model) : null);
     /** 여러 단면: 묶음 id를 자르는 평면들(로컬). 여러 단면이 아니면 null */
     const clipsOf = (id: string, model: ArrayLike<number> | undefined): Plane4[] | null => (multi ? multi.of(id).map((i) => planeToLocal(multi.planes[i]!.plane, model)) : null);
+    /** 0.44.0 구간 단면 갈래(cut — 그 구간만 더 자르는 평면 비트)를 더한 묶음 평면들(로컬, 번호 오름차순). cut이 0이면 clipsOf와 같다 */
+    const clipsOfCut = (id: string, model: ArrayLike<number> | undefined, cut: number): Plane4[] => {
+      if (!multi) return [];
+      if (!cut) return clipsOf(id, model)!;
+      const s = new Set(multi.of(id));
+      for (const k of cutBits(cut)) if (k < multi.planes.length) s.add(k);
+      return [...s].sort((a, b) => a - b).map((i) => planeToLocal(multi.planes[i]!.plane, model));
+    };
     // 묶음별 겉모습(없으면 모두 장면 그대로 — 아래 함수들은 예전 값을 그대로 돌려준다)
     const look = st.look ?? null;
     const lookOf = (id: string): ItemLook | undefined => (look ? look(id) : undefined);
@@ -3137,17 +3168,21 @@ export class Renderer3d {
     };
     /** 여러 단면 변종이면 그물의 평면들을 올린다(묶음·행렬이 바뀔 때만) */
     let clipMat: ArrayLike<number> | null | undefined;
-    const meshClips = (r: MeshRec, matrix: ArrayLike<number> | undefined): void => {
+    const meshClips = (r: MeshRec, matrix: ArrayLike<number> | undefined, cut = 0): void => {
       const p = cur;
       if (!multi || !p.clipN) return;
-      const key = multi.of(r.src.id).join(',');
+      // 0.44.0 구간 단면 갈래는 열쇠에 갈래를 더한다(갈래가 없으면 0.43.0 열쇠 그대로)
+      const key = cut ? `${multi.of(r.src.id).join(',')}/${cut}` : multi.of(r.src.id).join(',');
       if (key === lastClip && clipMat === (matrix ?? null)) return;
       lastClip = key;
       clipMat = matrix ?? null;
-      this.setClips(p, clipsOf(r.src.id, matrix)!);
+      this.setClips(p, clipsOfCut(r.src.id, matrix, cut));
     };
-    /** 그물 그리기. list를 주면 그 구간만(묶음 안 숨김·강조). 무늬 프로그램이면 그물의 무늬를 건다 */
-    const meshDraw = (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null): void => {
+    /**
+     * 그물 그리기. list를 주면 그 구간만(묶음 안 숨김·강조). 무늬 프로그램이면 그물의 무늬를 건다.
+     * 0.44.0: cut은 그 목록의 구간 단면 갈래(여러 단면이면 그 갈래 평면들을 올린다 — 없으면 0)
+     */
+    const meshDraw = (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null, cut = 0): void => {
       if (list && !list.total) return;
       const p = cur;
       if (p.tex) {
@@ -3189,7 +3224,7 @@ export class Renderer3d {
         lastMat = m;
         setMeshMatrix(matrix);
       }
-      if (multi) meshClips(r, matrix);
+      if (multi) meshClips(r, matrix, cut);
       const ck = `${color[0]},${color[1]},${color[2]},${color[3]}`;
       if (ck !== lastCol) {
         lastCol = ck;
@@ -3275,8 +3310,44 @@ export class Renderer3d {
       const c = this.partCache(r, p.ver);
       return [this.meshList(r, c, p.prims, false, wire), this.meshList(r, c, p.prims, true, wire)];
     };
-    /** 보통·강조로 나눠 그물 그리기(구간이 없으면 통째로) */
+    /**
+     * 0.44.0 구간 단면 갈래마다 [보통, 강조] 그릴 목록(갈래 차례 — 작은 비트 합부터). 구간 단면 갈래가 없는 묶음(구간이 없거나 갈래 0뿐)은 null(meshLists 길 그대로)
+     */
+    const meshCuts = (r: MeshRec, wire = false): CutLists[] | null => {
+      if (!multi) return null;
+      const p = st.parts?.(r.src.id);
+      if (!p) return null;
+      const c = this.partCache(r, p.ver);
+      const cuts = cacheCuts(c, p.prims);
+      if (!cuts) return null;
+      return cuts.map((k) => ({ cut: k, n: this.meshList(r, c, p.prims, false, wire, k), h: this.meshList(r, c, p.prims, true, wire, k) }));
+    };
+    /** 0.44.0 선분(그물 윤곽선·선분 묶음) 구간 목록의 구간 단면 갈래마다 [보통, 강조] 목록과 그 갈래 평면들(로컬). 갈래가 없으면 null(0.43.0 길) */
+    const lineCuts = (
+      rec: LineRec,
+      c: PartCache,
+      parts: readonly RangePart[],
+      id: string,
+      model: ArrayLike<number> | undefined,
+      positions: Float32Array,
+      colors: Float32Array | undefined,
+    ): { clips: Plane4[]; n: DrawList; h: DrawList }[] | null => {
+      if (!multi) return null;
+      const cuts = cacheCuts(c, parts);
+      if (!cuts) return null;
+      return cuts.map((k) => ({ clips: clipsOfCut(id, model, k), n: this.lineList(rec, c, parts, false, positions, colors, k), h: this.lineList(rec, c, parts, true, positions, colors, k) }));
+    };
+    /** 보통·강조로 나눠 그물 그리기(구간이 없으면 통째로). 0.44.0: 구간 단면 갈래가 있으면 갈래마다 그 평면들로 */
     const meshDrawParts = (r: MeshRec, color: Rgba, alpha: number, tint: number, cull: boolean): void => {
+      const C = meshCuts(r);
+      if (C) {
+        const model = mm(r);
+        for (const k of C) {
+          meshDraw(r, model, color, alpha, tint, cull, k.n, k.cut);
+          meshDraw(r, model, color, alpha, 0.5, cull, k.h, k.cut);
+        }
+        return;
+      }
       const L = meshLists(r);
       const model = mm(r);
       if (!L) meshDraw(r, model, color, alpha, tint, cull);
@@ -3441,6 +3512,16 @@ export class Renderer3d {
             const c = clipOf(model)!;
             gl.uniform4f(this.loc(dp, 'u_clip'), c[0], c[1], c[2], c[3]);
           }
+          // 0.44.0 구간 단면 갈래마다 그 평면들로
+          const C = meshCuts(r);
+          if (C) {
+            for (const k of C) {
+              this.setClips(dp, clipsOfCut(r.src.id, model, k.cut));
+              this.drawMeshGeometry(r, k.n);
+              this.drawMeshGeometry(r, k.h);
+            }
+            continue;
+          }
           if (multi) this.setClips(dp, clipsOf(r.src.id, model)!);
           const L = meshLists(r);
           if (!L) this.drawMeshGeometry(r, null);
@@ -3534,9 +3615,15 @@ export class Renderer3d {
       // 1b) 잘린 면 채우기
       if (capsOn) {
         // 반투명·범위·색은 겉모습·모드(숨은 선·단색)를 반영한 값으로(겉모습이 없고 예전 모드면 장면 값 그대로)
-        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf });
+        // 0.44.0 구간 단면 갈래가 있는 그물은 갈래마다 따로(그 갈래의 삼각형만 홀짝을 세고 그 갈래의 다른 평면으로 채운 면을 자른다)
+        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null });
         const plain = meshExtra.length ? this.variant('mesh', [...meshExtra, ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('mesh', ['CLIPN']) : this.mesh;
-        if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, (r) => meshLists(r), (pl) => (capPlane = pl), mm, plain);
+        const capLists = (r: MeshRec, cut: number | undefined): DrawList[] | null => {
+          if (cut === undefined) return meshLists(r);
+          const k = meshCuts(r)?.find((x) => x.cut === cut);
+          return k ? [k.n, k.h] : [];
+        };
+        if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, capLists, (pl) => (capPlane = pl), mm, plain);
       }
     }
 
@@ -3578,6 +3665,36 @@ export class Renderer3d {
         if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
         if (wclips) this.setClips(p, wclips);
         if (fog) this.setLineFog(p, f, model, fog);
+        const wireList = (list: DrawList): void => {
+          if (list.compact) {
+            gl.bindVertexArray(list.compact.vao);
+            gl.drawElements(gl.LINES, list.compact.count, gl.UNSIGNED_INT, 0);
+            stats.drawCalls++;
+          } else {
+            gl.bindVertexArray(w.vao);
+            for (const run of list.runs) {
+              gl.drawElements(gl.LINES, run.count * 6, gl.UNSIGNED_INT, run.start * 24);
+              stats.drawCalls++;
+            }
+          }
+          stats.segments += list.total * 3;
+        };
+        // 0.44.0 구간 단면 갈래마다 그 평면들로(보통 → 강조)
+        const C = meshCuts(r, true);
+        if (C) {
+          for (const k of C) {
+            this.setClips(p, clipsOfCut(r.src.id, model, k.cut));
+            if (k.n.total) {
+              gl.uniform4f(this.loc(p, 'u_color'), col[0], col[1], col[2], col[3]);
+              wireList(k.n);
+            }
+            if (k.h.total) {
+              gl.uniform4f(this.loc(p, 'u_color'), hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
+              wireList(k.h);
+            }
+          }
+          return;
+        }
         const L = meshLists(r, true);
         if (!L) {
           gl.bindVertexArray(w.vao);
@@ -3588,18 +3705,7 @@ export class Renderer3d {
           L.forEach((list, k) => {
             if (!list.total) return;
             if (k === 1) gl.uniform4f(this.loc(p, 'u_color'), hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
-            if (list.compact) {
-              gl.bindVertexArray(list.compact.vao);
-              gl.drawElements(gl.LINES, list.compact.count, gl.UNSIGNED_INT, 0);
-              stats.drawCalls++;
-            } else {
-              gl.bindVertexArray(w.vao);
-              for (const run of list.runs) {
-                gl.drawElements(gl.LINES, run.count * 6, gl.UNSIGNED_INT, run.start * 24);
-                stats.drawCalls++;
-              }
-            }
-            stats.segments += list.total * 3;
+            wireList(list);
           });
       };
       // 0.42.0 모아 그릴 윤곽선(열쇠 = 함께 쓰는 윤곽선 버퍼)·삼각형 변(열쇠 = 'w' + 그물 열쇠) 묶음
@@ -3632,8 +3738,16 @@ export class Renderer3d {
           } else {
             // 윤곽선 구간(숨김·강조)
             const c = this.partCache(r.edges, ep.ver);
-            this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
-            this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
+            const EC = lineCuts(r.edges, c, eparts, r.src.id, model, r.src.edges!, undefined);
+            if (EC)
+              for (const k of EC) {
+                this.drawLineList(f, r.edges, model, k.n, 0, r.edges.n, { ...eo, clips: k.clips }, st, stats);
+                this.drawLineList(f, r.edges, model, k.h, 0, r.edges.n, { ...eo, clips: k.clips, color: hiTint, width: 2 }, st, stats);
+              }
+            else {
+              this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, false, r.src.edges!, undefined), 0, r.edges.n, eo, st, stats);
+              this.drawLineList(f, r.edges, model, this.lineList(r.edges, c, eparts, true, r.src.edges!, undefined), 0, r.edges.n, { ...eo, color: hiTint, width: 2 }, st, stats);
+            }
           }
         } else if (meshLineKind(r.src, mode) === 'triangles') {
           // 윤곽선이 없는 그물: 와이어프레임·숨은 선에서 삼각형 변(X-ray에서는 반투명 면만, triangleEdges: false면 선 없음)
@@ -3677,6 +3791,12 @@ export class Renderer3d {
           return;
         }
         const c = this.partCache(rec, ver);
+        // 0.44.0 구간 단면 갈래마다 그 평면들로
+        const LC = lineCuts(rec, c, parts, id, model, positions, colors);
+        if (LC) {
+          for (const k of LC) for (const l of [k.n, k.h]) this.drawLineList(f, rec, model, l, 0, count, { ...o, clips: k.clips }, st, stats);
+          return;
+        }
         for (const hi of [false, true]) this.drawLineList(f, rec, model, this.lineList(rec, c, parts, hi, positions, colors), 0, count, o, st, stats);
       };
       // 0.42.0 같은 윤곽선 버퍼 자리가 하한 이상이면 묶음마다(점선은 같은 색·같은 불투명도 겹침이라 차례와 상관없다)
@@ -3746,6 +3866,16 @@ export class Renderer3d {
             gl.uniform4f(this.loc(dp, 'u_pcol'), ic[0], ic[1], ic[2], ic[3]);
             if (r.src.doubleSided === false) gl.enable(gl.CULL_FACE);
             else gl.disable(gl.CULL_FACE);
+            // 0.44.0 구간 단면 갈래마다 그 평면들로
+            const C = meshCuts(r);
+            if (C) {
+              for (const k of C) {
+                this.setClips(dp, clipsOfCut(r.src.id, model, k.cut));
+                this.drawMeshGeometry(r, k.n);
+                this.drawMeshGeometry(r, k.h);
+              }
+              continue;
+            }
             const L = meshLists(r);
             if (!L) this.drawMeshGeometry(r, null);
             else for (const l of L) this.drawMeshGeometry(r, l);
@@ -3840,18 +3970,22 @@ export class Renderer3d {
       } else {
         // 묶음 안 구간: 숨긴 구간은 빼고, 강조 구간은 강조색·굵게(그리기 범위·흐린 나머지와 함께)
         const c = this.partCache(r, p.ver);
-        const ln = this.lineList(r, c, p.prims, false, l.positions, l.colors);
-        const lh = this.lineList(r, c, p.prims, true, l.positions, l.colors);
         const hiBase = { ...base, color: hiTint, vcol: false, width: (l.width ?? 1) + 1 };
-        if (count > 0) {
-          this.drawLineList(f, r, model, ln, 0, count, { ...base, alpha: la }, st, stats);
-          this.drawLineList(f, r, model, lh, 0, count, { ...hiBase, alpha: la }, st, stats);
-        }
+        // 0.44.0 구간 단면 갈래마다 그 평면들로(갈래가 없으면 0.43.0 그대로 보통·강조 한 벌)
+        const LC = lineCuts(r, c, p.prims, l.id, model, l.positions, l.colors);
+        const sets = LC ? LC.map((k) => ({ ln: k.n, lh: k.h, clips: k.clips })) : [{ ln: this.lineList(r, c, p.prims, false, l.positions, l.colors), lh: this.lineList(r, c, p.prims, true, l.positions, l.colors), clips: base.clips }];
+        if (count > 0)
+          for (const s of sets) {
+            this.drawLineList(f, r, model, s.ln, 0, count, { ...base, clips: s.clips, alpha: la }, st, stats);
+            this.drawLineList(f, r, model, s.lh, 0, count, { ...hiBase, clips: s.clips, alpha: la }, st, stats);
+          }
         if (range && range.ghost > 0 && count < r.n) {
           gl.enable(gl.BLEND);
           gl.depthMask(false);
-          this.drawLineList(f, r, model, ln, count, r.n, { ...base, alpha: range.ghost * la }, st, stats);
-          this.drawLineList(f, r, model, lh, count, r.n, { ...hiBase, alpha: range.ghost * la }, st, stats);
+          for (const s of sets) {
+            this.drawLineList(f, r, model, s.ln, count, r.n, { ...base, clips: s.clips, alpha: range.ghost * la }, st, stats);
+            this.drawLineList(f, r, model, s.lh, count, r.n, { ...hiBase, clips: s.clips, alpha: range.ghost * la }, st, stats);
+          }
           gl.depthMask(true);
         }
       }
@@ -3903,9 +4037,20 @@ export class Renderer3d {
         } else {
           // 묶음 안 구간: 숨긴 점은 빼고 강조 점은 강조색·크게
           const pc = this.partCache(r, pp.ver);
-          const ln = this.pointList(r, pc, pp.prims, false), lh = this.pointList(r, pc, pp.prims, true);
-          if (ln.compact) draw(ln.compact.vao, ln.total, c, hi);
-          if (lh.compact) draw(lh.compact.vao, lh.total, hiTint, true);
+          // 0.44.0 구간 단면 갈래마다 그 평면들로
+          const PC = multi ? cacheCuts(pc, pp.prims) : null;
+          if (PC)
+            for (const k of PC) {
+              this.setClips(p, clipsOfCut(r.src.id, model, k));
+              const ln = this.pointList(r, pc, pp.prims, false, k), lh = this.pointList(r, pc, pp.prims, true, k);
+              if (ln.compact) draw(ln.compact.vao, ln.total, c, hi);
+              if (lh.compact) draw(lh.compact.vao, lh.total, hiTint, true);
+            }
+          else {
+            const ln = this.pointList(r, pc, pp.prims, false), lh = this.pointList(r, pc, pp.prims, true);
+            if (ln.compact) draw(ln.compact.vao, ln.total, c, hi);
+            if (lh.compact) draw(lh.compact.vao, lh.total, hiTint, true);
+          }
         }
       }
     }
@@ -4019,31 +4164,67 @@ export class Renderer3d {
     meshes: readonly MeshRec[],
     sec: SectionDraw | null,
     multi: SectionsDraw | null,
-    lk: { trans: (r: MeshRec) => boolean; box: (r: MeshRec) => Box3; color: (r: MeshRec) => Rgba } | null,
+    lk: {
+      trans: (r: MeshRec) => boolean;
+      box: (r: MeshRec) => Box3;
+      color: (r: MeshRec) => Rgba;
+      /** 0.44.0 그물의 구간 단면 갈래들(없으면 null — 통째 그물) */
+      cuts?: (r: MeshRec) => readonly number[] | null;
+    } | null,
   ): CapUnit[] {
     const out: CapUnit[] = [];
     const trans = (r: MeshRec): boolean => (lk ? lk.trans(r) : r.transparent);
     const boxOf = (r: MeshRec): Box3 => (lk ? lk.box(r) : r.box);
     const colOf = (r: MeshRec): Rgba => (lk ? lk.color(r) : r.src.color);
-    const build = (plane: Plane4, caps: 'closed' | 'all' | 'none', inScope: (r: MeshRec) => boolean, others: (r: MeshRec) => Plane4[]): void => {
+    const cutsOf = multi ? (lk?.cuts ?? null) : null;
+    const build = (plane: Plane4, caps: 'closed' | 'all' | 'none', inScope: (r: MeshRec) => boolean, others: (r: MeshRec) => Plane4[], k = -1): void => {
       if (caps === 'none') return;
       const groups = new Map<string, CapUnit>();
-      for (const r of meshes) {
-        if (trans(r) || !inScope(r)) continue;
+      /** 단위에 그물 하나(cut은 0.44.0 구간 단면 갈래 — undefined면 통째, key는 capGroup 묶음 열쇠에 더할 갈래) */
+      const add = (r: MeshRec, oth: Plane4[], cut: number | undefined, key: string | undefined): void => {
         const g = r.src.capGroup;
         if (g !== undefined) {
-          const u = groups.get(g);
+          const gk = key === undefined ? g : `${g}\u0000${key}`;
+          const u = groups.get(gk);
           if (u) {
+            if (cut !== undefined && !u.cuts) u.cuts = u.meshes.map(() => undefined);
             u.meshes.push(r);
+            u.cuts?.push(cut);
             u.box = unionBox(u.box, boxOf(r));
           } else {
-            const nu: CapUnit = { meshes: [r], box: boxOf(r), plane, others: others(r), color: colOf(r), group: true };
-            groups.set(g, nu);
+            const nu: CapUnit = { meshes: [r], box: boxOf(r), plane, others: oth, color: colOf(r), group: true };
+            if (cut !== undefined) nu.cuts = [cut];
+            groups.set(gk, nu);
             out.push(nu);
+          }
+          return;
+        }
+        if ((caps === 'all' || r.src.closed === true) && boxStraddles(boxOf(r), plane)) {
+          const nu: CapUnit = { meshes: [r], box: boxOf(r), plane, others: oth, color: colOf(r), group: false };
+          if (cut !== undefined) nu.cuts = [cut];
+          out.push(nu);
+        }
+      };
+      for (const r of meshes) {
+        if (trans(r)) continue;
+        // 0.44.0 구간 단면 갈래가 있는 그물: 이 평면이 드는 갈래마다(그 갈래의 삼각형만 홀짝 — 채운 면은 그 갈래의 다른 평면들로 자른다).
+        // 갈래 0(묶음 통째 평면만)은 통째 그물과 같은 capGroup 묶음에 든다
+        const C = k >= 0 && cutsOf ? cutsOf(r) : null;
+        if (C && multi) {
+          for (const c of C) {
+            const idx = new Set(multi.of(r.src.id));
+            for (const b of cutBits(c)) if (b < multi.planes.length) idx.add(b);
+            if (!idx.has(k)) continue;
+            const oth = [...idx]
+              .filter((i) => i !== k)
+              .sort((a, b) => a - b)
+              .map((i) => multi.planes[i]!.plane);
+            add(r, oth, c, c ? String(c) : undefined);
           }
           continue;
         }
-        if ((caps === 'all' || r.src.closed === true) && boxStraddles(boxOf(r), plane)) out.push({ meshes: [r], box: boxOf(r), plane, others: others(r), color: colOf(r), group: false });
+        if (!inScope(r)) continue;
+        add(r, others(r), undefined, undefined);
       }
       // 묶음 단위는 합친 범위가 평면을 걸칠 때만
       for (let i = out.length - 1; i >= 0; i--) if (out[i]!.group && out[i]!.plane === plane && !boxStraddles(out[i]!.box, plane)) out.splice(i, 1);
@@ -4055,6 +4236,7 @@ export class Renderer3d {
           q.caps,
           (r) => multi.of(r.src.id).includes(k),
           (r) => multi.of(r.src.id).filter((i) => i !== k).map((i) => multi.planes[i]!.plane),
+          k,
         ),
       );
     else if (sec) build(sec.plane, sec.caps, () => true, () => []);
@@ -4076,7 +4258,8 @@ export class Renderer3d {
     meshUse: (p: Prog) => void,
     meshDraw: (r: MeshRec, matrix: ArrayLike<number> | undefined, color: Rgba, alpha: number, tint: number, cull: boolean, list?: DrawList | null) => void,
     current: () => Prog,
-    lists: (r: MeshRec) => [DrawList, DrawList] | null,
+    /** 그물의 [보통, 강조] 구간 목록(구간이 없으면 null — 통째). 0.44.0: cut을 주면 그 구간 단면 갈래만 */
+    lists: (r: MeshRec, cut: number | undefined) => readonly DrawList[] | null,
     setCapPlane: (p: Plane4 | null) => void,
     modelOf: (r: MeshRec) => ArrayLike<number> | undefined,
     plainP: Prog,
@@ -4105,11 +4288,11 @@ export class Renderer3d {
       if (current() !== clipP) meshUse(clipP);
       // 화면에 보이는 그리기가 아니므로 통계에서 뺀다
       const dc = stats.drawCalls, tr = stats.triangles;
-      for (const r of u.meshes) {
-        const L = lists(r);
+      u.meshes.forEach((r, i) => {
+        const L = lists(r, u.cuts?.[i]);
         if (!L) meshDraw(r, modelOf(r), r.src.color, 1, 0, false);
         else for (const l of L) meshDraw(r, modelOf(r), r.src.color, 1, 0, false, l);
-      }
+      });
       stats.drawCalls = dc;
       stats.triangles = tr;
       if (multi) setCapPlane(null);

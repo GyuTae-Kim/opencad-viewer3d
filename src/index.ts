@@ -43,6 +43,8 @@ export type {
   ReleaseOptions,
   SectionCaps,
   SectionHandle,
+  SectionItem,
+  SectionItemRange,
   SectionOptions,
   SectionPlane,
   SectionState,
