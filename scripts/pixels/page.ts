@@ -14,6 +14,7 @@ import type { LineSet3d, Mesh3d, Scene3d } from '../../src/types';
 import { Viewer3d } from '../../src/viewer';
 import { type GridSpec, cutBy, fillGrid, gridMesh, gridX, gridY } from './grid';
 import { type ManySpec, manyScene } from './many';
+import { pbrImages, pbrScene, plateMesh } from './pbr';
 
 /** 판마다 있을 수도 없을 수도 있는 메서드를 부르려고 느슨하게 본 뷰어 */
 type V = Viewer3d & Record<string, any>;
@@ -40,7 +41,9 @@ type V = Viewer3d & Record<string, any>;
  * (0.37.0 긴 칸을 따라가는 안내 선의 비켜 가는 삼각형 힌트 — tests/v0370shallow.test.ts와 같은 장면),
  * ring50 = 50토막 원 꺾은선(반지름 30, z 0 — 토막 0이 −90°를 가운데에)뿐인 자료(0.38.0 현을 얕게 가로지르는 첫 점 X축의 닫힌 선분 교차 넓힌 받기 — tests/v0380edge.test.ts와 같은 꼴),
  * many = 같은 그물 자리가 많은 장면(scripts/pixels/many.ts — 정의 12개 × 자리 120, 셋째 정의마다 바둑판 무늬. 0.42.0 인스턴싱: base 판은 그물마다 그리므로
- * base·head 같은 그림이 곧 인스턴싱 켬·끔 같은 그림이다), many-off = 같은 장면을 묶음 원점(1e6대)으로 준 자료(큰 좌표에서도 자리 행렬이 같은 float 값)
+ * base·head 같은 그림이 곧 인스턴싱 켬·끔 같은 그림이다), many-off = 같은 장면을 묶음 원점(1e6대)으로 준 자료(큰 좌표에서도 자리 행렬이 같은 float 값),
+ * pbr = PBR 그림 장면(scripts/pixels/pbr.ts — 법선 그림 판·바둑판에 법선·금속 거칠기 그림 판·금속 구·매끈함 그림 구. 0.43.0: base 판은 PBR 필드를 모르므로
+ * PBR을 끈 head(setRenderOptions({ pbr: false }))·무늬 없음 모드가 base와 같은 그림이어야 한다)
  */
 type Data =
   | 'base'
@@ -62,7 +65,8 @@ type Data =
   | 'lying12'
   | 'ring50'
   | 'many'
-  | 'many-off';
+  | 'many-off'
+  | 'pbr';
 
 interface Ctx {
   v: V;
@@ -118,6 +122,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (!s && d === 'lowcyl') scenes.set(d, (s = lowCylScene()));
   if (!s && d === 'lying12') scenes.set(d, (s = lying12Scene()));
   if (!s && d === 'ring50') scenes.set(d, (s = ring50Scene()));
+  if (!s && d === 'pbr') scenes.set(d, (s = pbrScene()));
   if (!s && (d === 'many' || d === 'many-off')) {
     s = manyScene({ ...MANY, texture: '바둑판', ...(d === 'many-off' ? { origin: OFFSET } : {}) });
     s.textures = [{ id: '바둑판', data: checkerBmp(), mime: 'image/bmp', width: 64, height: 64 }];
@@ -7616,6 +7621,128 @@ const manyInstValues: ValueSet = {
   },
 };
 
+// ───────────── 0.43.0 PBR 그림(법선·거칠기·금속) ─────────────
+/** 0.43.0 PBR 선택(renderOptions.pbr)이 있는 판인지 */
+const v0430pbr: Need = (v) => (typeof v.setRenderOptions === 'function' && typeof v.renderOptions?.pbr === 'boolean' ? null : '이 판에 없는 선택: 0.43.0 PBR 그림(setRenderOptions({ pbr }))');
+/** 둘째 빛 방향(해 — 왼쪽 앞 낮게): 첫째는 고정 조명(시점 공간 주광이 오른쪽 위 뒤에서) */
+const PBR_SUN: [number, number, number] = [-0.7, -0.45, 0.55];
+
+/**
+ * PBR 장면 화면: 켠 그림(새 장면 — base 판은 PBR 필드를 모른다)은 빛 방향 둘(고정 조명·왼쪽 앞 해)과 해 그림자·X-ray·위에서 본 판.
+ * 끈 그림(setRenderOptions({ pbr: false }))·무늬 없음 모드는 base와 바이트까지 같아야 한다(PBR 필드를 준 그물도 0.42.0 셰이더 그대로)
+ */
+const pbrShots: Shot[] = [
+  { name: 'pbr-light-a', data: 'pbr', needs: v0430pbr, setup: () => undefined },
+  { name: 'pbr-light-b', data: 'pbr', needs: v0430pbr, setup: ({ v }) => v.setLighting({ sun: { direction: PBR_SUN } }) },
+  { name: 'pbr-sun-shadows', data: 'pbr', needs: v0430pbr, setup: ({ v }) => v.setLighting({ sun: { direction: [0.3, -0.5, 0.8] }, shadows: true }) },
+  {
+    name: 'pbr-top',
+    data: 'pbr',
+    needs: v0430pbr,
+    setup: ({ v }) => {
+      v.setView('top', false);
+      v.fit(false);
+    },
+  },
+  { name: 'pbr-xray', data: 'pbr', needs: v0430pbr, setup: ({ v }) => v.setRenderMode('xray') },
+  { name: 'pbr-off', data: 'pbr', needs: fn('setRenderOptions'), setup: ({ v }) => v.setRenderOptions({ pbr: false }) },
+  {
+    name: 'pbr-off-sun',
+    data: 'pbr',
+    needs: fn('setRenderOptions', 'setLighting'),
+    setup: ({ v }) => {
+      v.setRenderOptions({ pbr: false });
+      v.setLighting({ sun: { direction: PBR_SUN } });
+    },
+  },
+  { name: 'pbr-noTexture', data: 'pbr', setup: ({ v }) => v.setRenderMode('noTexture') },
+];
+SHOTS.push(...pbrShots);
+
+/** 판 B를 같은 배열로 12자리 놓은 장면(인스턴싱 하한 8을 넘는다 — 모은 PBR 그리기와 그물마다 그리기가 같은 그림인지) */
+function pbrManyScene(): Scene3d {
+  const s = pbrScene();
+  const b = s.meshes.find((m) => m.id === '판 B')!;
+  const meshes: Mesh3d[] = [];
+  for (let i = 0; i < 12; i++) {
+    const x = (i % 4) * 120 - 180, y = Math.floor(i / 4) * 120 - 120;
+    meshes.push({ ...b, id: `판 ${i}`, matrix: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, 0, 1]) });
+  }
+  // 하나는 색을 바꾸고(PBR이 꺼져 따로 묶인다) 하나는 판 A(법선 그림만 — 다른 그물)
+  meshes.push({ ...plateMesh('판 하나', [300, 0, 0], 100, [0.62, 0.64, 0.68, 1]), normalTexture: '법선' });
+  return { ...s, meshes };
+}
+
+/** 화소가 다른 수·가장 큰 차 */
+function pixelDiff(a: ImageData, b: ImageData): [number, number] {
+  let n = 0, mx = 0;
+  for (let i = 0; i < a.data.length; i += 4) {
+    let m = 0;
+    for (let k = 0; k < 4; k++) m = Math.max(m, Math.abs(a.data[i + k]! - b.data[i + k]!));
+    if (m) n++;
+    mx = Math.max(mx, m);
+  }
+  return [n, mx];
+}
+
+/**
+ * 0.43.0 PBR 값(head만): ① 앱이 나중에 주는 PBR 그림(pending) 셋을 하나씩 restoreTexture로 줄 때마다 기다림·그림이 바뀌고, 다 준 그림이 처음부터 그림을 준
+ * 장면과 바이트까지 같은지, ② 끔·켬과 무늬 상태, ③ 같은 PBR 판 12자리를 모아 그린 그림이 인스턴싱 끔(그물마다)과 같은지·그리기 호출 수
+ */
+const pbrValues: ValueSet = {
+  name: 'pbr-values',
+  data: 'pbr',
+  needs: v0430pbr,
+  run: async ({ v }) => {
+    const out: unknown[] = [];
+    const snap = async (): Promise<{ img: ImageData; hash: string }> => {
+      await texturesReady(v);
+      v.renderNow();
+      await instancingReady(v);
+      v.renderNow();
+      const img = v.renderImage({});
+      return { img, hash: await sha16(img.data) };
+    };
+    // ① 나중에 주는 그림
+    v.setScene(pbrScene({ pending: true }), { keepView: true });
+    loaded = null;
+    const steps: unknown[] = [];
+    const s0 = await snap();
+    steps.push(['pending', v.restoreNeed, { ...v.stats.textures, bytes: 0 }, s0.hash]);
+    const imgs = pbrImages();
+    let prev = s0;
+    for (const id of ['법선', '금속 거칠기', '매끈함']) {
+      const ok = await v.restoreTexture(id, imgs[id]!);
+      const s = await snap();
+      steps.push([id, ok, v.restoreNeed, { ...v.stats.textures, bytes: 0 }, s.hash, pixelDiff(prev.img, s.img)[0] > 0]);
+      prev = s;
+    }
+    v.setScene(pbrScene(), { keepView: true });
+    const full = await snap();
+    steps.push(['full-same', full.hash === prev.hash, pixelDiff(full.img, prev.img)]);
+    out.push(steps);
+    // ② 끔·켬
+    v.setRenderOptions({ pbr: false });
+    const off = await snap();
+    v.setRenderOptions({ pbr: true });
+    const on = await snap();
+    out.push(['off-on', v.renderOptions.pbr, off.hash !== on.hash, on.hash === full.hash, pixelDiff(off.img, on.img)[0] > 1000]);
+    // ③ 인스턴싱
+    v.setScene(pbrManyScene());
+    v.setView('top', false);
+    v.fit(false);
+    v.setItemColor('판 3', '#e0245e');
+    const inst = await snap();
+    const ist = [v.stats.drawCalls, v.stats.triangles, v.stats.instanced.draws, v.stats.instanced.items];
+    v.setRenderOptions({ instancing: false });
+    const each = await snap();
+    const est = [v.stats.drawCalls, v.stats.triangles, v.stats.instanced.draws, v.stats.instanced.items];
+    v.setRenderOptions({ instancing: true });
+    out.push(['instancing', ist, est, pixelDiff(inst.img, each.img), inst.hash]);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -7714,6 +7841,7 @@ const VALUES: ValueSet[] = [
   manyPickValues('many'),
   manyPickValues('many-off'),
   manyInstValues,
+  pbrValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -7769,8 +7897,8 @@ function reset(v: V, d: Data): void {
   call('setPointerClaim', null);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
-  // 0.42.0 instancing은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
-  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true });
+  // 0.42.0 instancing·0.43.0 pbr은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
+  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true });
   call('setSections', null);
   call('setSection', null);
   call('setTheme', 'dark');
