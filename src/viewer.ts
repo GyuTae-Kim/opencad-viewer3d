@@ -73,6 +73,7 @@ import {
   sameRefineInput,
   samePick,
   snapLimit,
+  snapPriority,
   snapSegmentsOf,
   withinSnapLimit,
 } from './snap';
@@ -1344,6 +1345,8 @@ export class Viewer3d {
     index: SnapPointIndex | null;
     /** 0.10.0 차례 값(점마다, 차례가 없는 점은 −Infinity — 한 점도 차례가 없으면 null)과 붙잡기 한도(없으면 null) */
     orders: Float64Array | null;
+    /** 0.41.0 우선(점마다 0 = 보통, 1 = 'low', 2 = 'fallback' — 한 점도 우선이 없으면 null) */
+    prios: Uint8Array | null;
     limit: number | null;
     /** 0.10.0: 바로 앞 pointsFor 호출의 고르기(복사본)와 결과 — 같은 고르기면 다시 부르지 않는다. 0.38.0: 그때의 첫 점(복사본 — pfFirst면 열쇠에 든다) */
     pfMemo: { pick: Pick3d; first: V3 | null; res: readonly SnapPoint[] | null | undefined } | null;
@@ -3234,6 +3237,7 @@ export class Viewer3d {
       const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
       // 차례 값(0.10.0): 한 점이라도 있으면 점마다 둔다(없는 점은 −Infinity — 어떤 한도에도 든다)
       let ord: Float64Array | null = null;
+      let prio: Uint8Array | null = null;
       let n = 0;
       for (const sp of pts) {
         const q = sp.point;
@@ -3247,6 +3251,12 @@ export class Viewer3d {
         if (typeof k === 'number' && !Number.isNaN(k)) {
           ord ??= new Float64Array(pts.length).fill(-Infinity);
           ord[n] = k;
+        }
+        // 우선(0.41.0): 한 점이라도 'low'·'fallback'이면 점마다 둔다(없는 점은 0 = 보통)
+        const pr = snapPriority(sp.priority);
+        if (pr) {
+          prio ??= new Uint8Array(pts.length);
+          prio[n] = pr === 'low' ? 1 : 2;
         }
         n++;
       }
@@ -3270,6 +3280,7 @@ export class Viewer3d {
         inference,
         index: null as SnapPointIndex | null,
         orders,
+        prios: prio ? prio.subarray(0, n) : null,
         limit,
         pfMemo: null,
         pfFirst: o.pointsForFirst === true,
@@ -4825,7 +4836,9 @@ export class Viewer3d {
     // 0.40.0 openEdgeLens: 활꼴 띠가 커서 붙잡기 거리 안에 닿는 토막(필요할 때 한 번만)
     let lensList: NearSegment[] | null = null;
     const lensSegs = (): NearSegment[] => (lensList ??= this.segmentsAround(f, x, y, snapPx, edges, OPEN_EDGE_CHORD));
-    const app = this.snapCandidates(f, x, y, snapPx, d?.pick ?? null);
+    // 0.41.0 'fallback' 앱 점(SnapPoint.priority)은 후보에서 빼 모은다 — 다른 붙잡기가 모두 없을 때만 fallbackAt으로 고른다
+    const fb: SnapCandidate[] = [];
+    const app = this.snapCandidates(f, x, y, snapPx, d?.pick ?? null, fb);
     const lock = first ? this.inferLock : null;
     // 열린 후보(0.15.0): 다듬기가 있고 잠그지 않았을 때만 — 토막 밖 수직 발·넓힌 교차점을 앱이 다듬은 점으로(받을 수 있는 것만).
     // 미리 보기 한 번에 앱 함수를 새로 부르는 한도(OPEN_REFINE_CALLS)는 0.20.0 선과 토막의 열린 교차와 함께 쓴다(이 열린 후보가 먼저 쓴다)
@@ -4836,7 +4849,10 @@ export class Viewer3d {
         ? (): SnapCandidate[] => refineOpen(openCandidates(nearSegs(), first, inf, snapPx), first, screenRay(f, x, y), refine, so.openMemo, budget)
         : null;
     const cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app, open) : app;
-    const r = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+    let r: MeasureSnapPick | null = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id));
+    // 0.41.0: 모아 둔 'fallback' 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것(같으면 앞의 것 — 0.8.0 규칙), 없으면 null
+    const fallbackAt = (): MeasureSnapPick | null =>
+      fb.length ? chooseMeasureSnap(f, x, y, snapPx, null, fb, (p, sx, sy, id) => this.snapVisible(f, p, sx, sy, id)) : null;
     const lockOut = (p: V3): MeasurePick => {
       const m: MeasurePick = { p, vertex: true, kind: lock!.kind, direction: [...lock!.direction] as V3, locked: true };
       if (lock!.axis) m.axis = lock!.axis;
@@ -4844,25 +4860,33 @@ export class Viewer3d {
       return m;
     };
     // 0.33.0 refineEnds: 점 붙잡기가 꺾은선 꼭짓점(끝점·꼭짓점)이고 켠 선이 그 꼭짓점을 반 화소 안으로 지나면 그 꼭짓점을 끝으로 둔 토막들로 앱 refine에 묻는다 —
-    // 받은 곡선 위 교차가 그 끝점(잠근 동안이면 그 점을 잠근 선에 내린 자리)보다 먼저다
-    if (so.ends && inf && r && (r.kind === 'endpoint' || r.kind === 'vertex') && !r.refined) {
+    // 받은 곡선 위 교차가 그 끝점(잠근 동안이면 그 점을 잠근 선에 내린 자리)보다 먼저다. 0.41.0: 'fallback' 앱 점이 이길 때도 같은 판정
+    const endsAt = (r: MeasureSnapPick | null): MeasurePick | null => {
+      if (!(so.ends && inf && r && (r.kind === 'endpoint' || r.kind === 'vertex') && !r.refined)) return null;
       const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
         return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id);
       };
       const el = this.endLines(inf, f, first, lock, refsBefore);
       const v = el.lines.length ? this.openLineEdge(so, f, x, y, snapPx, el.lines, first, nearSegs(), budget, vis, r.p) : null;
-      if (v) return this.openEdgePick(f, v, first, lock ? lockOut : null, el.ref, refsBefore);
-    }
+      return v ? this.openEdgePick(f, v, first, lock ? lockOut : null, el.ref, refsBefore) : null;
+    };
+    const e0 = endsAt(r);
+    if (e0) return e0;
     // 잠금(0.10.0): 첫 점을 지나는 잠근 선 위에만. 점 붙잡기가 있으면 그 점을 선에 수직으로 내린 자리
     if (lock && first) {
-      const q = r && r.kind ? r : null;
+      let q = r && r.kind ? r : null;
       // 0.19.0: 점 붙잡기가 없으면 잠근 선이 커서 둘레 선분과 만나는 점(lockEdges)·커서 아래 면을 뚫는 점(lockFaces)이 커서에 가까운 선 위 점보다 먼저.
       // 0.21.0: 잠근 선이 끌어온 축과 만나는 점(lockTracks — 끌어온 점이 있을 때)도 — 그 셋보다 먼저 견준다
       const lockTracks = inf?.lockTracks && this.tracker?.size ? this.tracker.view : null;
       if (!q && (inf?.lockEdges || inf?.lockFaces || lockTracks)) {
         const m = this.lockedMeet(so, inf!, f, x, y, snapPx, first, lock, d, nearSegs, pointerType, lockOut, budget, lockTracks, lensSegs);
         if (m) return m;
+      }
+      // 0.41.0: 점 붙잡기·잠근 선이 만나는 점이 없으면 'fallback' 앱 점을 잠근 선에 내린 자리(커서를 내린 자리보다 먼저)
+      if (!q && (q = fallbackAt())) {
+        const e = endsAt(q);
+        if (e) return e;
       }
       const l = lockedSnap(f, first, lock.direction, x, y, q ? q.p : null);
       if (!l) return null;
@@ -5094,6 +5118,16 @@ export class Viewer3d {
       const g = ref ? trackDirSnap(f, tracks, ref, x, y, snapPx, first) : null;
       if (g && (!t || g.distPx < t.distPx)) return { p: g.p, vertex: true, kind: g.kind, trackFrom: g.from, edge: ref! };
       if (t) return { p: t.p, vertex: true, kind: 'axis', axis: t.axis, trackFrom: t.from };
+    }
+    // 0.41.0: 다른 붙잡기가 하나도 없으면(점 붙잡기와 위의 선 붙잡기 모두) 'fallback' 앱 점 — 붙잡지 않은 자리(선분·면 위 점)보다 먼저.
+    // 그 뒤는 앱 점이 이긴 것과 같은 길(수직 발 방향·선분 방향 잠금)
+    if (noPoint) {
+      const q = fallbackAt();
+      if (q) {
+        const e = endsAt(q);
+        if (e) return e;
+        r = q;
+      }
     }
     // 그 점이 놓인 선분 식별자(0.16.0): 아래 점 붙잡기·선분 위 점에 싣는다(다듬은 점도 같은 선분)
     const sg = snapSegmentsOf(r, d);
@@ -5844,15 +5878,26 @@ export class Viewer3d {
 
   /**
    * 앱 붙잡기 후보: pointsFor(고른 것) 점(id가 없으면 고른 묶음), 늘 후보인 점. id가 있으면 묶음 행렬(분해도)을 따라 옮긴다.
-   * 늘 후보인 점이 SNAP_INDEX_MIN개 이상이면(0.9.0) 색인에서 커서 둘레(붙잡기 거리 안일 수 있는 것)만 번호 차례로 — 결과는 모두 훑을 때와 같다
+   * 늘 후보인 점이 SNAP_INDEX_MIN개 이상이면(0.9.0) 색인에서 커서 둘레(붙잡기 거리 안일 수 있는 것)만 번호 차례로 — 결과는 모두 훑을 때와 같다.
+   * 0.41.0 우선(SnapPoint.priority): 'low'는 후보에 실어 보내고, 'fallback'은 fb에 모은다(내보내지 않는다 — measureAt이 다른 붙잡기가 모두 없을 때 따로 고른다)
    */
-  private *snapCandidates(f: ViewFrame, x: number, y: number, snapPx: number, pick: Pick3d | null): Generator<SnapCandidate> {
+  private *snapCandidates(f: ViewFrame, x: number, y: number, snapPx: number, pick: Pick3d | null, fb: SnapCandidate[]): Generator<SnapCandidate> {
     const so = this.snapOpt;
     if (!so) return;
     const at = (x: number, y: number, z: number, kind: SnapKind, id: string | undefined): SnapCandidate => {
       const m = id !== undefined ? this.looks.get(id)?.matrix : undefined;
       return { p: m ? transformPoint(m, [x, y, z]) : [x, y, z], kind, id };
     };
+    // 우선이 있는 점: 'low'면 필드를 달아 내보내고 'fallback'이면 fb에 모은다(false = 내보내지 않음)
+    const ranked = (c: SnapCandidate, pr: 'low' | 'fallback' | null): boolean => {
+      if (!pr) return true;
+      c.priority = pr;
+      if (pr === 'low') return true;
+      fb.push(c);
+      return false;
+    };
+    const PR = so.prios;
+    const prAt = (i: number): 'low' | 'fallback' | null => (!PR || !PR[i] ? null : PR[i] === 1 ? 'low' : 'fallback');
     const lim = so.limit;
     if (pick && so.pointsFor) {
       // 0.10.0: 바로 앞과 같은 고르기(같은 자리 — 미리 본 뒤 누르기, 붙잡기 한도·잠금이 바뀌어 다시 구하기)면 앞 결과를 다시 쓴다.
@@ -5870,7 +5915,10 @@ export class Viewer3d {
       if (extra)
         for (const sp of extra) {
           const q = sp.point;
-          if (q && Number.isFinite(q[0]) && Number.isFinite(q[1]) && Number.isFinite(q[2]) && withinSnapLimit(sp.order, lim)) yield at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', sp.id ?? pick.id);
+          if (q && Number.isFinite(q[0]) && Number.isFinite(q[1]) && Number.isFinite(q[2]) && withinSnapLimit(sp.order, lim)) {
+            const c = at(q[0]!, q[1]!, q[2]!, sp.kind ?? 'point', sp.id ?? pick.id);
+            if (ranked(c, snapPriority(sp.priority))) yield c;
+          }
         }
     }
     const P = so.pts;
@@ -5878,13 +5926,20 @@ export class Viewer3d {
     // 차례 한도(0.10.0): 한도와 차례 값이 모두 있을 때만 거른다
     const ord = lim !== null ? so.orders : null;
     if (n < SNAP_INDEX_MIN) {
-      for (let i = 0; i < n; i++) if (!ord || ord[i]! < lim!) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+      for (let i = 0; i < n; i++)
+        if (!ord || ord[i]! < lim!) {
+          const c = at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+          if (!PR || ranked(c, prAt(i))) yield c;
+        }
       return;
     }
     so.index ??= new SnapPointIndex(P, so.ids, so.orders);
     const moved: string[] = [];
     for (const [id, l] of this.looks) if (l.matrix) moved.push(id);
-    for (const i of so.index.near(f, x, y, snapPx, (id) => this.looks.get(id)?.matrix, moved, ord ? lim : null)) yield at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+    for (const i of so.index.near(f, x, y, snapPx, (id) => this.looks.get(id)?.matrix, moved, ord ? lim : null)) {
+      const c = at(P[i * 3]!, P[i * 3 + 1]!, P[i * 3 + 2]!, so.kinds[i]!, so.ids[i]);
+      if (!PR || ranked(c, prAt(i))) yield c;
+    }
   }
 
   /** 앱 붙잡기 점이 보이는지: 묶음(id)이 보이고, 단면에 잘리지 않고(id면 그 묶음 평면, 아니면 모든 묶음을 자르는 평면), 음영 계열에서 가리지 않음 */

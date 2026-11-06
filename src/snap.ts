@@ -61,6 +61,19 @@ export interface SnapCandidate {
   other?: SnapSegment;
   refined?: boolean;
   core?: V3;
+  /** 0.41.0 앱 점의 우선(SnapPoint.priority — 'normal'이면 이 필드가 없다) */
+  priority?: 'low' | 'fallback';
+}
+
+/**
+ * 'low' 앱 점(0.41.0 SnapPoint.priority)이 다른 점 붙잡기를 이기려면 화면에서 이만큼(CSS 화소) 넘게 더 가까워야 한다 — 같은 화면 거리(겹친 점·반올림만큼 다른 점)면 뒤.
+ * 0.8.0 가운데 점의 MIDPOINT_YIELD_PX(2)·0.17.0 끌어온 점 후보의 TRACK_YIELD_PX(1)와 같은 꼴의 양보 거리다
+ */
+export const LOW_PRIORITY_YIELD_PX = 0.5;
+
+/** SnapPoint.priority 값 고르기(0.41.0): 'low'·'fallback'만 그대로, 그 밖('normal'·없음·모르는 값)은 null(보통 점 — 0.40.0 그대로) */
+export function snapPriority(v: unknown): 'low' | 'fallback' | null {
+  return v === 'low' || v === 'fallback' ? v : null;
 }
 
 /**
@@ -184,7 +197,10 @@ export type SnapRefineFaceKind = 'axisFace' | 'onFace';
 /**
  * base = 고르기 결과(붙잡은 점이면 kind가 있다, 아무것도 고르지 않았으면 null), cands = 앱 붙잡기 후보,
  * visible(p, 화면 x, y, id) = 그 점이 보이는지(단면에 잘리지 않고 가리지 않음).
- * 원근에서 가까운 면(near)보다 앞의 점(눈 뒤 포함)은 뺀다
+ * 원근에서 가까운 면(near)보다 앞의 점(눈 뒤 포함)은 뺀다.
+ * 0.41.0 우선(SnapCandidate.priority): 'low' 후보는 다른 후보(base 포함)보다 LOW_PRIORITY_YIELD_PX 넘게 가까울 때만, 'fallback' 후보는 다른 후보가 하나도 없을 때만
+ * (그 안에서는 가장 가까운 것, 같으면 앞의 것). 둘 다 없으면 0.40.0과 같은 차례로 같은 점을 묻는다(보이는지 묻는 횟수도 같다).
+ * 뷰어는 'fallback' 점을 여기에 넘기지 않고 다른 붙잡기(축 등)가 모두 없을 때 따로 이 함수로 고른다
  */
 export function chooseMeasureSnap(
   f: ViewFrame,
@@ -196,6 +212,9 @@ export function chooseMeasureSnap(
   visible: (p: V3, sx: number, sy: number, id: string | undefined) => boolean,
 ): MeasureSnapPick | null {
   let best: { dist: number; c: SnapCandidate } | null = null;
+  // 0.41.0: 'low'·'fallback' 후보는 따로 가장 가까운 것을 둔다
+  let low: { dist: number; c: SnapCandidate } | null = null;
+  let fb: { dist: number; c: SnapCandidate } | null = null;
   if (base && base.kind) {
     const s = projectToScreen(f, base.p);
     best = { c: { p: base.p, kind: base.kind }, dist: s ? Math.hypot(s[0] - x, s[1] - y) : 0 };
@@ -204,11 +223,22 @@ export function chooseMeasureSnap(
     const s = projectToScreen(f, c.p);
     if (!s || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) continue;
     const dist = Math.hypot(s[0] - x, s[1] - y);
-    if (dist > snapPx || (best && dist >= best.dist)) continue;
+    if (dist > snapPx) continue;
+    const pr = c.priority;
+    if (pr === 'low') {
+      // 보통 후보는 줄기만 하므로 지금 이미 양보 거리 안이면 끝까지 진다
+      if ((low && dist >= low.dist) || (best && dist >= best.dist - LOW_PRIORITY_YIELD_PX)) continue;
+    } else if (pr === 'fallback') {
+      if (best || low || (fb && dist >= fb.dist)) continue;
+    } else if (best && dist >= best.dist) continue;
     if (f.projection === 'perspective' && s[2] < f.near * 0.999) continue;
     if (!visible(c.p, s[0], s[1], c.id)) continue;
-    best = { c, dist };
+    if (pr === 'low') low = { c, dist };
+    else if (pr === 'fallback') fb = { c, dist };
+    else best = { c, dist };
   }
+  if (low && (!best || low.dist < best.dist - LOW_PRIORITY_YIELD_PX)) best = low;
+  else if (!best && !low && fb) best = fb;
   if (best) {
     const c = best.c;
     const r: MeasureSnapPick = { p: c.p, vertex: true, kind: c.kind };
