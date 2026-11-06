@@ -538,12 +538,13 @@ export interface MeasureSnapOptions {
    */
   refineSnapToExact?: boolean;
   /**
-   * 0.40.0(refine이 있을 때만): 선(첫 점 축 — inference.axisEdges, 끌어온 축 — track, 끌어온 점 안내 선 — trackDirs { meets: { open } }, 잠근 선 — lockEdges)과
-   * 꺾은선 토막의 열린 교차(0.20.0 'axisEdge', open)를, 현이 커서에서 붙잡기 거리 밖이어도 그 토막의 활꼴 띠(현에서 0.1 × 토막 길이 안 — 0.23.0 받는 범위)가
-   * 화면에서 커서 붙잡기 거리 안에 닿으면 본다(아주 가까이 확대해 처짐이 화면에서 붙잡기 거리보다 커진 자리 — 0.35.0 남은 한계).
-   * 받는 규칙·기억 열쇠·값은 0.23.0 열린 교차와 같다(받는 점은 그 선 위·그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 호출은 앞의 열린 후보들이 다 쓴 뒤 남은 한도로 하고
-   * (미리 보기 한 번 OPEN_REFINE_CALLS — 넘지 않는다), 다른 점 후보보다 뒤 차례다(1화소 넘게 가까워야 이긴다). 모으는 토막은 LENS_SEGMENTS(24)개까지이고,
-   * 커서가 그 선들 가운데 하나의 화면 붙잡기 거리 안일 때만 모은다. false면 0.39.0과 같다(아래 기본값 — README 0.40.0)
+   * 0.40.0(기본 켜짐 — refine이 있을 때만, false면 0.39.0과 결과·앱 호출 수가 같다): 아주 가까이 확대해 처짐이 화면에서 붙잡기 거리보다 커진 꺾은선 토막의 교차(0.35.0 남은 한계).
+   * 선(첫 점 축 — inference.axisEdges, 끌어온 축 — track, 끌어온 점 안내 선 — trackDirs { meets: { open } }, 잠근 선 — lockEdges) 가운데 화면에서 커서 붙잡기 거리 안을
+   * 지나는 것만 보고, 토막의 활꼴 띠(현에서 활꼴 높이 어림 안 — 배열에서 앞·뒤로 이어진 토막과 꺾인 각으로 어림, 0.1 × 토막 길이를 넘지 않고 곧은 토막은 0)가
+   * 화면에서 커서 붙잡기 거리 안에 닿는 토막을 LENS_SEGMENTS(24)개까지 모아 (1) 현이 커서에서 붙잡기 거리 밖인 토막의 열린 교차, (2) 선이 현을 가로지르는 자리가
+   * 커서에서 붙잡기 거리 밖인 교차(가로지르는 자리를 힌트로)를 앱 refine에 'axisEdge'·open = true로 묻는다.
+   * 받는 규칙·기억 열쇠·값은 0.23.0 열린 교차와 같다(받는 점은 그 선 위·그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 호출은 앞의 열린 후보들이 쓰고 남은 한도로 하고
+   * (미리 보기 한 번 OPEN_REFINE_CALLS — 넘지 않는다), 다른 점 후보보다 뒤 차례다(1화소 넘게 가까워야 이긴다)
    */
   openEdgeLens?: boolean;
 }
@@ -1363,7 +1364,7 @@ export class Viewer3d {
     ends: boolean;
     /** 0.39.0 닫힌 선분·면 교차의 앱 점이 커서에서 붙잡기 거리 밖이어도 같은 교차의 정확한 자리면 옮기는지(refineSnapToExact — refine·refineFace가 있을 때만 true) */
     exact: boolean;
-    /** 0.40.0 현이 커서에서 붙잡기 거리 밖이어도 활꼴 띠가 닿는 토막의 열린 교차를 보는지(openEdgeLens — refine이 있을 때만 true) */
+    /** 0.40.0 현이 커서에서 붙잡기 거리 밖이어도 활꼴 띠가 닿는 토막의 교차를 보는지(openEdgeLens — 기본 켜짐, refine이 있을 때만 true) */
     lens: boolean;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
@@ -3280,7 +3281,7 @@ export class Viewer3d {
         through: !!o.throughTranslucent,
         ends: o.refineEnds === true && !!o.refine,
         exact: o.refineSnapToExact === true && !!(o.refine || o.refineFace),
-        lens: o.openEdgeLens === true && !!o.refine,
+        lens: o.openEdgeLens !== false && !!o.refine,
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {

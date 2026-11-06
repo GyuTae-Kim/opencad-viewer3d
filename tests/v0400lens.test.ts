@@ -1,5 +1,5 @@
 /**
- * 0.40.0 아주 가까이 확대한 꺾은선 토막의 교차(MeasureSnapOptions.openEdgeLens — track.ts lensEdgeSnap·piercedEdgeCandidates·lineScreenGap,
+ * 0.40.0 아주 가까이 확대한 꺾은선 토막의 교차(MeasureSnapOptions.openEdgeLens — refine을 준 앱은 기본 켜짐, track.ts lensEdgeSnap·piercedEdgeCandidates·lineScreenGap,
  * pick.ts segmentCandidates·scenepick.ts segmentsNear의 chord, bvh.ts queryCone의 grow):
  * 처짐이 화면에서 붙잡기 거리보다 커지도록 확대하면 현이 커서에서 붙잡기 거리 밖이라 커서 둘레 선분이 아니게 되고(0.35.0 남은 한계),
  * 선이 현을 가로지르는 자리도 커서에서 멀다. 0.23.0 받는 범위(현에서 0.1 × 토막 길이 안)의 띠가 커서에 닿는 토막을 따로 모아 그 활꼴의 열린 교차와
@@ -218,18 +218,18 @@ describe('Viewer3d: 꼭대기 활꼴을 지나는 첫 점 X축(0.35.0 남은 한
   const XI = Math.sqrt(900 - 29.5 * 29.5);
 
   for (const w of [0.02, 0.005])
-    it(`1화소 ${w}(틈 ${Math.round(0.52 / w)}화소): 끄면 축 위 커서 자리, 켜면 두 근 둘레가 원 위 교차(꼭대기 토막·다듬음)이고 새 호출은 미리 보기 한 번 한도 안`, () => {
+    it(`1화소 ${w}(틈 ${Math.round(0.52 / w)}화소): 끄면(openEdgeLens: false) 축 위 커서 자리, 기본(켬)은 두 근 둘레가 원 위 교차(꼭대기 토막·다듬음)이고 새 호출은 미리 보기 한 번 한도 안`, () => {
       for (const sgn of [-1, 1]) {
         const Q: V3 = [sgn * XI, 29.5, 0];
         const off = counted(['원']);
-        const w0 = view(RING, A0, { refine: off.refine }, Q, w);
+        const w0 = view(RING, A0, { refine: off.refine, openEdgeLens: false }, Q, w);
         const s0 = at(w0, Q);
         hoverXY(w0, s0.x + 1, s0.y + 2);
         expect(w0.v.measureHoverSnap!.snap).toBe('axis');
         expect(w0.v.measureHoverSnap).not.toHaveProperty('refined');
         w0.v.dispose();
         const on = counted(['원']);
-        const w1 = view(RING, A0, { refine: on.refine, openEdgeLens: true }, Q, w);
+        const w1 = view(RING, A0, { refine: on.refine }, Q, w);
         const s = at(w1, Q);
         for (const [dx, dy] of [
           [1, 2],
@@ -286,16 +286,17 @@ describe('Viewer3d: 아래 토막 현을 가로지르는 자리가 근에서 먼
   const A0: V3 = [-40, -29, 0];
   const Q: V3 = [Math.sqrt(900 - 29 * 29), -29, 0];
 
-  it('1화소 0.05(X와 Q 사이 79화소): 끄면 축 위 커서 자리, 켜면 Q(토막 9·다듬음 — 앱에 가로지르는 자리를 힌트로 한 번 묻는다)', () => {
+  it('1화소 0.05(X와 Q 사이 79화소): 끄면(openEdgeLens: false) 축 위 커서 자리, 기본(켬)은 Q(토막 9·다듬음 — 앱에 가로지르는 자리를 힌트로 한 번 묻는다)', () => {
     const off = counted(['원']);
-    const w0 = view(RING, A0, { refine: off.refine }, Q, 0.05);
+    const w0 = view(RING, A0, { refine: off.refine, openEdgeLens: false }, Q, 0.05);
     const s0 = at(w0, Q);
     hoverXY(w0, s0.x + 1, s0.y + 2);
     expect(w0.v.measureHoverSnap!.snap).toBe('axis');
     expect(w0.v.measureHoverSnap).not.toHaveProperty('refined');
+    expect(off.calls).toEqual([]);
     w0.v.dispose();
     const on = counted(['원']);
-    const w1 = view(RING, A0, { refine: on.refine, openEdgeLens: true }, Q, 0.05);
+    const w1 = view(RING, A0, { refine: on.refine }, Q, 0.05);
     const s = at(w1, Q);
     hoverXY(w1, s.x + 1, s.y + 2);
     const h = w1.v.measureHoverSnap!;
