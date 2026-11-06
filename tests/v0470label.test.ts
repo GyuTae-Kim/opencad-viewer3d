@@ -6,7 +6,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { installDom } from './fakedom';
-import { HIDDEN_LABEL_DASH, annotationLabelLook } from '../src/annotate';
+import { HIDDEN_LABEL_DASH, annotationLabelLook, dashedRectSegments } from '../src/annotate';
 import { boxMesh } from '../src/synth';
 import { DARK_THEME, LIGHT_THEME, type Viewer3dTheme, contrastRatio, overBackground, parseColor } from '../src/theme';
 import type { Rgba, Scene3d } from '../src/types';
@@ -21,6 +21,25 @@ describe('annotationLabelLook(0.47.0 — 가려진 글상자 꼴)', () => {
     expect(annotationLabelLook(true, 0)).toBeNull();
     expect(annotationLabelLook(true, Number.NaN)).toBeNull();
     expect(annotationLabelLook(true, 1)).toEqual({ dash: [] });
+  });
+
+  it('dashedRectSegments: 왼쪽 위에서 시계 방향, 선·틈을 모서리 너머로 이어 가고 모서리에서 토막을 나눈다', () => {
+    const s = dashedRectSegments(0, 0, 10, 5, [4, 3]);
+    expect(s.slice(0, 3)).toEqual([
+      [0, 0, 4, 0],
+      [7, 0, 10, 0],
+      [10, 0, 10, 1],
+    ]);
+    // 선 길이 합 = 둘레 30 중 선 몫(4 + 3 + 4 + 3 + … — 마지막 토막은 둘레에서 끊긴다)
+    const len = s.reduce((a, [x0, y0, x1, y1]) => a + Math.hypot(x1 - x0, y1 - y0), 0);
+    expect(len).toBeCloseTo(18, 9);
+    // 모든 토막이 테두리 위 한 변 안
+    for (const [x0, y0, x1, y1] of s) expect((x0 === x1 && (x0 === 0 || x0 === 10)) || (y0 === y1 && (y0 === 0 || y0 === 5))).toBe(true);
+    // 홀수 길이 무늬는 두 번 이어 쓴다(캔버스 setLineDash와 같은 뜻), 잘못된 입력은 빈 목록
+    expect(dashedRectSegments(0, 0, 9, 9, [2])).toEqual(dashedRectSegments(0, 0, 9, 9, [2, 2]));
+    expect(dashedRectSegments(0, 0, 0, 5, [4, 3])).toEqual([]);
+    expect(dashedRectSegments(0, 0, 5, 5, [])).toEqual([]);
+    expect(dashedRectSegments(0, 0, 5, 5, [0, -1, Number.NaN])).toEqual([]);
   });
 });
 
@@ -82,10 +101,14 @@ afterAll(() => {
 });
 
 interface Op {
-  op: 'fillText' | 'stroke' | 'fill';
+  /** 'dash' = 점선 테두리 토막 사각형 칠하기(fillRect)를 이어 모은 것 — n개 */
+  op: 'fillText' | 'stroke' | 'fill' | 'dash';
   alpha: number;
   dash: string;
   style: string;
+  n?: number;
+  /** 토막 사각형들(dash) */
+  rects?: [number, number, number, number][];
   text?: string;
 }
 
@@ -101,6 +124,14 @@ function record(v: Viewer3d): Op[] {
       if (k === 'fillText') return (s: string) => void ops.push({ op: 'fillText', alpha: t.globalAlpha as number, dash, style: String(t.fillStyle), text: s });
       if (k === 'stroke') return () => void ops.push({ op: 'stroke', alpha: t.globalAlpha as number, dash, style: String(t.strokeStyle) });
       if (k === 'fill') return () => void ops.push({ op: 'fill', alpha: t.globalAlpha as number, dash, style: String(t.fillStyle) });
+      if (k === 'fillRect')
+        return (x: number, y: number, w: number, h: number) => {
+          const last = ops.at(-1);
+          if (last?.op === 'dash' && last.style === String(t.fillStyle)) {
+            last.n!++;
+            last.rects!.push([x, y, w, h]);
+          } else ops.push({ op: 'dash', alpha: t.globalAlpha as number, dash, style: String(t.fillStyle), n: 1, rects: [[x, y, w, h]] });
+        };
       if (k === 'save' || k === 'restore') return () => void (dash = k === 'restore' ? '' : dash);
       return t[k];
     },
@@ -132,17 +163,24 @@ describe('Viewer3d: 가려진 덧그림 글상자(0.47.0)', () => {
     return ops.slice(i - 2, i + 1);
   };
 
-  it('기본(hidden 0.35): 가려진 글상자는 불투명 바탕·글에 [4, 3] 점선 테두리, 보이는 글상자는 실선(0.46.0과 같은 호출)', () => {
+  it('기본(hidden 0.35): 가려진 글상자는 불투명 바탕·글에 [4, 3] 점선 테두리(토막마다 1화소 사각형 칠하기 — 경로 점선 없이), 보이는 글상자는 실선(0.46.0과 같은 호출)', () => {
     for (const theme of ['dark', 'light'] as const) {
       const v = make(theme);
       v.setAnnotations([HID, VIS]);
       const ops = record(v);
       v.renderNow();
       const th = theme === 'dark' ? DARK_THEME : LIGHT_THEME;
+      const r = v.annotationLabelRects[0]!;
       const [hf, hs, ht] = labelOps(ops, '안');
       expect(hf).toMatchObject({ op: 'fill', alpha: 1, style: th.textBg });
-      expect(hs).toMatchObject({ op: 'stroke', alpha: 1, dash: '4,3', style: th.measure });
+      const segs = dashedRectSegments(r.x, r.y, r.width, r.height, [4, 3]);
+      expect(hs).toMatchObject({ op: 'dash', alpha: 1, dash: '', style: th.measure, n: segs.length });
+      expect(segs.length).toBeGreaterThan(8);
+      // 토막 = 테두리 선을 가운데로 한 굵기 1 사각형
+      const [x0, y0, x1] = segs[0]!;
+      expect(hs!.rects![0]).toEqual([x0, y0 - 0.5, x1 - x0, 1]);
       expect(ht).toMatchObject({ op: 'fillText', alpha: 1, dash: '', style: th.text });
+      expect(ops.some((o) => o.dash !== '')).toBe(false);
       const [vf, vs, vt] = labelOps(ops, '위');
       expect(vf).toMatchObject({ op: 'fill', alpha: 1, style: th.textBg });
       expect(vs).toMatchObject({ op: 'stroke', alpha: 1, dash: '', style: th.measure });
@@ -174,8 +212,8 @@ describe('Viewer3d: 가려진 덧그림 글상자(0.47.0)', () => {
     v.setAnnotations([HID, VIS]);
     const ops = record(v);
     v.renderNow();
-    expect(labelOps(ops, '안')[1]).toMatchObject({ dash: '' });
-    expect(labelOps(ops, '위')[1]).toMatchObject({ dash: '' });
+    expect(labelOps(ops, '안')[1]).toMatchObject({ op: 'stroke', dash: '' });
+    expect(labelOps(ops, '위')[1]).toMatchObject({ op: 'stroke', dash: '' });
     v.dispose();
   });
 });

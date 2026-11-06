@@ -157,6 +157,45 @@ export function annotationLabelLook(hidden: boolean, opacity: number): { dash: r
 }
 
 /**
+ * 사각형 테두리를 점선 토막으로(0.47.0, 순수): 왼쪽 위에서 시계 방향으로 둘레를 따라 dash(선·틈 길이 되풀이)대로 자른 선 토막 [x0, y0, x1, y1] 목록.
+ * 모서리를 지나는 토막은 모서리에서 나눈다(홀수 길이 무늬는 두 번 이어 쓴다 — 캔버스 setLineDash와 같은 뜻). 뷰어는 토막마다 선 굵기의 작은 사각형을 칠한다 —
+ * 점선 경로 스트로크(setLineDash·여러 토막 경로)는 Chrome 2D 캔버스에서 같은 캔버스의 다른 선·점의 경계 화소(안티에일리어싱)까지 몇 단계 바꿨다(화소 회귀로 보았다)
+ */
+export function dashedRectSegments(x: number, y: number, w: number, h: number, dash: readonly number[]): [number, number, number, number][] {
+  const out: [number, number, number, number][] = [];
+  const pat = dash.filter((d) => Number.isFinite(d) && d > 0);
+  if (!(w > 0) || !(h > 0) || !pat.length) return out;
+  const pattern = pat.length % 2 ? [...pat, ...pat] : pat;
+  const corners: [number, number][] = [
+    [x, y],
+    [x + w, y],
+    [x + w, y + h],
+    [x, y + h],
+    [x, y],
+  ];
+  let k = 0, left = pattern[0]!;
+  for (let e = 0; e < 4; e++) {
+    const [ax, ay] = corners[e]!, [bx, by] = corners[e + 1]!;
+    const len = Math.hypot(bx - ax, by - ay);
+    let t = 0;
+    while (t < len - 1e-9) {
+      const step = Math.min(left, len - t);
+      if (k % 2 === 0) {
+        const s0 = t / len, s1 = (t + step) / len;
+        out.push([ax + (bx - ax) * s0, ay + (by - ay) * s0, ax + (bx - ax) * s1, ay + (by - ay) * s1]);
+      }
+      t += step;
+      left -= step;
+      if (left <= 1e-9) {
+        k = (k + 1) % pattern.length;
+        left = pattern[k]!;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * 덧그림 글(label이 있으면 그것을 줄로 나눠). 없으면 값으로: distance = "12.5 mm", angle = "90.0°", radius = "R 6 mm",
  * point = "X … Y … Z …". fmt는 길이 숫자 꼴(뷰어의 장면 크기 맞춤 자릿수)
  */

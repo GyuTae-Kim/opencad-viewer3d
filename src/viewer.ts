@@ -168,7 +168,16 @@ import {
 } from './inference';
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
-import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationLabelLook, annotationText, measureDigits, measureNumber } from './annotate';
+import {
+  type Annotation3d,
+  type AnnotationGeometry,
+  annotationGeometry,
+  annotationLabelLook,
+  annotationText,
+  dashedRectSegments,
+  measureDigits,
+  measureNumber,
+} from './annotate';
 import {
   type ClosestPart,
   type ClosestResult,
@@ -8244,9 +8253,13 @@ export class Viewer3d {
       ctx.rect(x, y, w, h);
       ctx.fill();
       if (look.dash.length) {
-        ctx.setLineDash(look.dash as number[]);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        // 점선 테두리는 토막마다 선 굵기 1의 작은 사각형으로 칠한다(dashedRectSegments). 점선 경로 스트로크(setLineDash나 여러 토막 경로)는
+        // Chrome 2D 캔버스가 같은 캔버스의 다른 덧그림(좌표축·점 표식·다른 글상자 테두리)의 경계 화소까지 바꿨다(화소 회귀 — 사각형 칠하기는 바꾸지 않는다)
+        ctx.fillStyle = color;
+        for (const [x0, y0, x1, y1] of dashedRectSegments(x, y, w, h, look.dash)) {
+          if (y0 === y1) ctx.fillRect(Math.min(x0, x1), y0 - 0.5, Math.abs(x1 - x0), 1);
+          else ctx.fillRect(x0 - 0.5, Math.min(y0, y1), 1, Math.abs(y1 - y0));
+        }
       } else ctx.stroke();
       ctx.fillStyle = th.text;
       ctx.textAlign = 'left';
