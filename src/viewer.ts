@@ -201,6 +201,7 @@ import {
   type RenderStats,
   type TextureSource,
   type TextureStats,
+  INSTANCE_MIN,
   Renderer3d,
 } from './renderer';
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
@@ -975,9 +976,19 @@ export interface AnnotationOptions {
 
 /**
  * 뷰어 통계(stats). 0.28.0 buffers: GPU 버퍼 바이트(bufferData로 잡은 크기, 살아 있는 버퍼만) — 성분별(위치·법선·정점 색·무늬 좌표·뒷면 무늬 좌표·색인·윤곽선·
- * 선분 위치·선분 색·점·와이어프레임 색인·구간 모음·덧그림)과 합(bytes)·버퍼 수(count). 같은 배열은 처음 올린 성분으로 한 번만 센다(GpuBufferStats)
+ * 선분 위치·선분 색·점·와이어프레임 색인·구간 모음·덧그림)과 합(bytes)·버퍼 수(count). 같은 배열은 처음 올린 성분으로 한 번만 센다(GpuBufferStats).
+ * 0.42.0 instanced: 지난 그리기에서 같은 그물 자리를 모아 그린(인스턴싱) 그리기 호출 수(draws — drawCalls에 든다, 외곽선 깊이 그림은 drawCalls처럼 빼고)·
+ * 그렇게 그린 자리 수(items — 면·선 차례마다 센다)·번역을 기다리는 인스턴싱 변종 수(pending — 0이 아니면 그동안 그물마다 그리고 다 되면 다시 그린다)
  */
-export type Viewer3dStats = RenderStats & { frameMs: number; width: number; height: number; dpr: number; textures: TextureStats; buffers: GpuBufferStats };
+export type Viewer3dStats = RenderStats & {
+  frameMs: number;
+  width: number;
+  height: number;
+  dpr: number;
+  textures: TextureStats;
+  buffers: GpuBufferStats;
+  instanced: { draws: number; items: number; pending: number };
+};
 
 /** Viewer3d.setMesh 선택(0.11.0) */
 export interface SetMeshOptions {
@@ -2251,11 +2262,17 @@ export class Viewer3d {
    * profiles.color·edgeColor에 'contrast'를 주면 바탕(setBackground 색 또는 테마 바탕)과 대비 3:1이 되는 색을 고른다.
    * edgeColor = 그물 윤곽선(Mesh3d.edges)·삼각형 변 선 색: 색을 주면 선을 그리는 모든 모드에서 그 색(강조색은 그대로),
    * 'contrast'면 와이어프레임·X-ray·숨은 선에서 모드 색(그물 색·테마 선 색)이 바탕과 3:1이 안 될 때만 테마 선 색(그것도 모자라면 검정·흰색)
+   * 0.42.0 instancing(기본 켬, 하한 INSTANCE_MIN = 8): 같은 그물(positions·normals·indices 등 같은 배열 객체를 함께 쓰는 Mesh3d — 자리 행렬·id·색만 다른 같은 정의의 자리)이
+   * 하한 이상 보이면 자리마다 그리지 않고 균일 변수가 같은 자리끼리 그리기 한 번에 그린다(WebGL2 인스턴싱 — 자리 행렬은 예전과 같은 double 곱을 float32로 자리 자료 그림에 써서
+   * 같은 그림). 불투명 면·외곽선 깊이·윤곽선·삼각형 변·숨은 점선을 모으고, 단면이 있을 때·반투명 면·묶음 안 구간(setHiddenRanges·highlightRanges)이 있는 그물·
+   * 그림자를 쓸 때의 면은 0.41.0처럼 그물마다다. false면 끄고, { min }이면 하한(2 이상)을 바꾸고, true면 기본으로 켠다. 모은 묶음은 장면 차례와 다른 차례로 그리므로
+   * 서로 다른 그물이 같은 깊이로 겹치는 곳(맞닿은 면, 반투명 모서리 선이 엇갈린 몇 화소)은 보이는 쪽·섞임이 끔과 다를 수 있다
    */
   setRenderOptions(o: {
     profiles?: boolean | { width?: number; color?: Rgba | string } | null;
     hiddenEdges?: boolean | number | { opacity?: number; shaded?: boolean; color?: Rgba | string | null } | null;
     edgeColor?: Rgba | string | null;
+    instancing?: boolean | { min?: number } | null;
   }): void {
     if ('profiles' in o) {
       const p = o.profiles;
@@ -2274,6 +2291,11 @@ export class Viewer3d {
       }
     }
     if ('edgeColor' in o) this.renderOpts.edgeColor = o.edgeColor ?? null;
+    if ('instancing' in o) {
+      const i = o.instancing;
+      const min = i && typeof i === 'object' && typeof i.min === 'number' && Number.isFinite(i.min) ? Math.max(2, Math.floor(i.min)) : INSTANCE_MIN;
+      this.renderer.instancing = { on: i !== false && i !== null, min };
+    }
     this.invalidate();
   }
 
@@ -2321,16 +2343,24 @@ export class Viewer3d {
     return this.fogOpt ? { ...this.fogOpt } : null;
   }
 
-  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도) */
+  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }) */
   get renderOptions(): {
     profiles: { width: number; color: Rgba | string | null } | null;
     hiddenEdges: number;
     hiddenEdgesShaded: boolean;
     hiddenEdgeColor: Rgba | string | null;
     edgeColor: Rgba | string | null;
+    instancing: { on: boolean; min: number };
   } {
     const r = this.renderOpts;
-    return { profiles: r.profiles ? { ...r.profiles } : null, hiddenEdges: r.hiddenEdges, hiddenEdgesShaded: r.hiddenEdgesShaded, hiddenEdgeColor: r.hiddenEdgeColor, edgeColor: r.edgeColor };
+    return {
+      profiles: r.profiles ? { ...r.profiles } : null,
+      hiddenEdges: r.hiddenEdges,
+      hiddenEdgesShaded: r.hiddenEdgesShaded,
+      hiddenEdgeColor: r.hiddenEdgeColor,
+      edgeColor: r.edgeColor,
+      instancing: { ...this.renderer.instancing },
+    };
   }
 
   /**
@@ -4546,6 +4576,7 @@ export class Viewer3d {
       dpr: this.dpr,
       textures: this.renderer.textureStats,
       buffers: this.renderer.bufferStats,
+      instanced: { ...this.renderer.instStats, pending: this.renderer.instPending },
     };
   }
 
@@ -6678,6 +6709,8 @@ export class Viewer3d {
       }
     }
     this.renderer.render(f, w, h, this.renderState(f, dpr));
+    // 0.42.0 인스턴싱 변종을 아직 번역 중이면(그동안 그물마다 그렸다) 다음 프레임에 다시 그린다 — 다 되면 모아 그린다
+    if (this.renderer.instPending) this.invalidate();
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
     this.frameMs = performance.now() - t0;

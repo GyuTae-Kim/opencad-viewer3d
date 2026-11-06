@@ -22,6 +22,11 @@
  *   u_tex(REPEAT·밉맵)를 읽어 rgb를 바꾼다. u_texAlpha가 1이면 그림 알파를 불투명도에 곱한다(반투명 차례). 무늬가 없는 그물은 예전 셰이더 그대로.
  *   0.26.0: 무늬 좌표 축척·이동 u_uvt(뒷면 u_uvt2) = (su, sv, ou, ov)로 (u·q, v·q, q) → (su·u·q + ou·q, sv·v·q + ov·q, q) — 정수 무늬 좌표(정규화 값)를 편다.
  *   변환이 없으면 (1, 1, 0, 0)이라 값이 그대로다. 정수 법선(Int8·Int16 정규화)은 속성 꼴로 −1~1로 읽혀 조각에서 길이를 맞추므로 셰이더는 그대로다.
+ * - 인스턴싱(INST, 0.42.0 — 그물·굵은 선·가는 선): 같은 그물 자리 여럿을 그리기 한 번에. 자리마다의 균일 행렬(u_mvp·u_mv·u_nmat, 선은 u_mvp·안개 u_mvz)을
+ *   CPU가 예전과 같은 double 곱으로 만들어 float32로 자리 자료 그림(u_inst — RGBA32F, 폭 1024 텍셀)에 쓰고, 셰이더가 gl_InstanceID로 그 텍셀을 읽어
+ *   같은 이름의 지역 변수로 둔다(아래 식은 그대로 — 같은 float 값에 같은 연산이라 그림이 바이트까지 같다). 그물 자리 하나 = 11텍셀(u_mvp 4·u_mv 4·u_nmat 3),
+ *   선 자리 하나 = 5텍셀(u_mvp 4·u_mvz 1). 굵은 선은 인스턴스 = 선분 × 자리(선분 속성은 나눔 수 = 자리 수, 자리 = gl_InstanceID % u_instN).
+ *   단면(CLIP·CLIPN)·그림자(SHADOW)·뒷면(BACK)과 함께 쓰지 않는다(그때는 렌더러가 그물마다 그린다)
  */
 
 /** 셰이더 원본에 #define들을 넣은 변종 */
@@ -36,9 +41,18 @@ precision highp float;
 layout(location=0) in vec3 a_pos;
 layout(location=1) in vec3 a_nrm;
 layout(location=2) in vec4 a_col;
+#ifdef INST
+uniform highp sampler2D u_inst;
+uniform int u_instBase;
+vec4 instAt(int j) {
+  int k = u_instBase + gl_InstanceID * 11 + j;
+  return texelFetch(u_inst, ivec2(k & 1023, k >> 10), 0);
+}
+#else
 uniform mat4 u_mvp;
 uniform mat4 u_mv;
 uniform mat3 u_nmat;
+#endif
 uniform vec4 u_color;
 uniform float u_vcol;
 out vec3 v_vpos;
@@ -68,6 +82,11 @@ uniform vec4 u_uvt2;
 out vec3 v_uv2;
 #endif
 void main() {
+#ifdef INST
+  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));
+  mat4 u_mv = mat4(instAt(4), instAt(5), instAt(6), instAt(7));
+  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);
+#endif
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;
 #ifdef SHADOW
@@ -217,7 +236,17 @@ layout(location=1) in vec3 a_p0;
 layout(location=2) in vec3 a_p1;
 layout(location=3) in vec4 a_c0;
 layout(location=4) in vec4 a_c1;
+#ifdef INST
+uniform highp sampler2D u_inst;
+uniform int u_instBase;
+uniform int u_instN;
+vec4 instAt(int j) {
+  int k = u_instBase + (gl_InstanceID % u_instN) * 5 + j;
+  return texelFetch(u_inst, ivec2(k & 1023, k >> 10), 0);
+}
+#else
 uniform mat4 u_mvp;
+#endif
 uniform vec2 u_viewport;
 uniform float u_width;
 uniform vec4 u_color;
@@ -234,10 +263,18 @@ uniform vec4 u_clips[6];
 uniform int u_nclip;
 #endif
 #ifdef FOG
+#ifndef INST
 uniform vec4 u_mvz;
+#endif
 out float v_fd;
 #endif
 void main() {
+#ifdef INST
+  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));
+#ifdef FOG
+  vec4 u_mvz = instAt(4);
+#endif
+#endif
   vec3 p0 = a_p0;
   vec3 p1 = a_p1;
 #ifdef CLIPN
@@ -337,7 +374,17 @@ export const THIN_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 a_pos;
 layout(location=1) in vec4 a_col;
+#ifdef INST
+uniform highp sampler2D u_inst;
+uniform int u_instBase;
+uniform int u_instN;
+vec4 instAt(int j) {
+  int k = u_instBase + (gl_InstanceID % u_instN) * 5 + j;
+  return texelFetch(u_inst, ivec2(k & 1023, k >> 10), 0);
+}
+#else
 uniform mat4 u_mvp;
+#endif
 uniform vec4 u_color;
 uniform float u_vcol;
 uniform float u_alpha;
@@ -352,10 +399,18 @@ out float v_clip;
 out vec3 v_lpos;
 #endif
 #ifdef FOG
+#ifndef INST
 uniform vec4 u_mvz;
+#endif
 out float v_fd;
 #endif
 void main() {
+#ifdef INST
+  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));
+#ifdef FOG
+  vec4 u_mvz = instAt(4);
+#endif
+#endif
   vec4 c = u_mvp * vec4(a_pos, 1.0);
   c.z -= u_bias * c.w;
   gl_Position = c;
