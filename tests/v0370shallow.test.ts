@@ -7,14 +7,20 @@
  * - 뷰어(가짜 DOM — 실제 포인터 사건): 낮은 원기둥을 바깥 거리 15에서 본 안내 선(STEP 42차 꼴 — 칸 반각의 4.4배로 스친다)·첫 점 X축·잠근 X축,
  *   세운 구멍 안 거리 2의 안내 선에서 X와 Q 사이를 가리키면 원기둥 위·그 선 위 다듬은 교차, refineFace가 null이면 X 그대로, Q가 같은 평면 짝 위면 face가 그 삼각형,
  *   Q 둘레 화면 격자에서 남은 "다듬지 않은 면 위 만나는 점"은 모두 Q가 커서에서 붙잡기 거리 밖인 자리
+ * 0.37.0 비켜 가는 삼각형의 힌트(track.ts openFaceCandidates — 36차 남은 한계): 누운 작은 구멍(반지름 2.5·12토막) 옆면의 긴 칸을 따라가는 안내 선이 칸의 한 삼각형을 뚫고
+ * 커서 아래 같은 평면 짝 위 곡면을 지나면, 그 짝의 힌트(선 위에서 무게중심에 가장 가까운 점)가 칸을 따라 멀어 다른 근에 더 가까워 붙지 않았다.
+ * 이제 무게중심 쪽 자리가 선에서 그 삼각형 위 곡면 조각 자리인 조각 밖이면 힌트는 그 조각의 가운데다.
+ * - 순수: openFaceCandidates(힌트가 선 위·그 삼각형 위이고 앱 근이 M — 0.36.0 힌트는 다른 근에 가깝다)
+ * - 뷰어: 거리 1~4에서 M± 둘레가 원기둥 위·그 안내 선 위 다듬은 교차
  * 장면: 낮은 원기둥(반지름 30·높이 60·50토막, 옆면만 — 칸 0의 가운데가 −63°(현이 기준 27°와 나란) 또는 −90°(첫 점 X축)), 기준 선분(27°),
- * 판 400 × 300 × 18(반투명)의 세운 구멍 (150, 150) 반지름 5 z 6~18(20토막). 앱 refineFace = 그 직선과 원기둥(높이 안)의 교차 가운데 point에 가까운 근.
+ * 판 400 × 300 × 18(반투명)의 세운 구멍 (150, 150) 반지름 5 z 6~18(20토막), 판 600 × 400 × 18의 누운 작은 구멍 (0, 372, 9) X 방향 반지름 2.5 길이 12(12토막).
+ * 앱 refineFace = 그 직선과 원기둥(높이 안)의 교차 가운데 point에 가까운 근.
  * 화면 좌표로 가리킬 때는 선·그물의 경계를 정확히 가리키지 않고 몇 분의 일 화소 옆을 가리킨다(Node 판마다 마지막 자리 반올림이 다르다).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
-import { type CameraState, type ViewFrame, computeFrame, defaultCamera, dirToAngles, projectToScreen } from '../src/camera';
-import { acceptFacePatch } from '../src/track';
+import { type CameraState, type ViewFrame, computeFrame, defaultCamera, dirToAngles, projectToScreen, screenRay, viewDepth, worldPerPixel } from '../src/camera';
+import { acceptFacePatch, openFaceCandidates, rayHitsTriangle } from '../src/track';
 import { acceptOnLine } from '../src/snap';
 import { boxMesh } from '../src/synth';
 import { type MeasureSnapOptions, Viewer3d } from '../src/viewer';
@@ -406,5 +412,116 @@ describe('Viewer3d: 칸을 얕게 뚫는 선의 면 위 만나는 점을 앱 곡
       }
     expect(refined).toBeGreaterThan(300);
     expect(left).toBeGreaterThan(0);
+  });
+});
+
+// ───────────── 0.37.0 비켜 가는 삼각형의 힌트 — 무게중심 쪽 자리가 선의 그 삼각형 조각 밖이면 조각 가운데 ─────────────
+/** 누운 작은 구멍: (0, 372, 9)에서 X 방향 길이 12, 반지름 2.5, 12토막(0.34.0 시험의 원기둥 고체와 같은 틀 — 꼭대기가 꼭짓점, 칸마다 두 삼각형, 두 뚜껑) */
+const LY = { c: [0, 372, 9] as V3, r: 2.5, len: 12, seg: 12 };
+function lyingHole(): Mesh3d {
+  const e1: V3 = [0, -1, 0], e2: V3 = [0, 0, -1];
+  const ring = (x: number, k: number): number[] => {
+    const th = (k / LY.seg) * Math.PI * 2;
+    return [x, LY.c[1] + LY.r * (Math.cos(th) * e1[1] + Math.sin(th) * e2[1]), LY.c[2] + LY.r * (Math.cos(th) * e1[2] + Math.sin(th) * e2[2])];
+  };
+  const P: number[] = [], I: number[] = [];
+  for (let k = 0; k <= LY.seg; k++) P.push(...ring(0, k), ...ring(LY.len, k));
+  for (let k = 0; k < LY.seg; k++) I.push(2 * k, 2 * k + 2, 2 * k + 1, 2 * k + 1, 2 * k + 2, 2 * k + 3);
+  for (const [x, sgn] of [
+    [0, -1],
+    [LY.len, 1],
+  ] as const) {
+    const cb = P.length / 3;
+    P.push(x, LY.c[1], LY.c[2]);
+    for (let k = 0; k < LY.seg; k++) P.push(...ring(x, k));
+    for (let k = 0; k < LY.seg; k++) {
+      const i1 = cb + 1 + k, i2 = cb + 1 + ((k + 1) % LY.seg);
+      if (sgn > 0) I.push(cb, i1, i2);
+      else I.push(cb, i2, i1);
+    }
+  }
+  return { id: '작은 구멍', positions: new Float32Array(P), indices: new Uint32Array(I), color: [0.8, 0.35, 0.2, 1], closed: true };
+}
+const LYM = lyingHole();
+const LG0: V3 = [380, 300, 18];
+const LREF: LineSet3d = { id: '기준', name: '기준', positions: new Float32Array([...LG0, ...add(LG0, mul([Math.cos(DEG * D), Math.sin(DEG * D), 0], 100))]), color: [0.2, 0.6, 0.9, 1] };
+const LGD = norm([LREF.positions[3]! - LREF.positions[0]!, LREF.positions[4]! - LREF.positions[1]!, LREF.positions[5]! - LREF.positions[2]!]);
+const LSC: Scene3d = { name: 'lying', units: 'mm', meshes: [boxMesh('판', [0, 0, 0], [600, 400, 18], [0.86, 0.74, 0.55, 0.35]), LYM], lines: [LREF], points: [] };
+/** 축(X)에 수직인 단면의 원과 직선(o, d)의 교차 가운데 near에 가까운 근 */
+function lyingRoot(o: readonly number[], d: readonly number[], near: readonly number[]): V3 | null {
+  const ou = o[1]! - LY.c[1], ov = o[2]! - LY.c[2];
+  const A = d[1]! * d[1]! + d[2]! * d[2]!, B = ou * d[1]! + ov * d[2]!, C = ou * ou + ov * ov - LY.r * LY.r;
+  const disc = B * B - A * C;
+  if (!(A > 1e-12) || disc < 0) return null;
+  const qs = [(-B - Math.sqrt(disc)) / A, (-B + Math.sqrt(disc)) / A].map((s): V3 => [o[0]! + d[0]! * s, o[1]! + d[1]! * s, o[2]! + d[2]! * s]);
+  const q = dist(qs[0]!, near) <= dist(qs[1]!, near) ? qs[0]! : qs[1]!;
+  return q[0] >= -1e-9 && q[0] <= LY.len + 1e-9 ? q : null;
+}
+/** 꼭대기 아래 δ 0.15(반지름의 6 %)를 지나 기준과 나란한 안내 선: 끌어온 점 T와 sgn 쪽 근 M */
+function lyingCase(sgn: number): { T: V3; M: V3 } {
+  const P0: V3 = [6, LY.c[1], LY.c[2] + LY.r - 0.15];
+  const T = sub(P0, mul(LGD, 3 * LY.r + 10));
+  return { T, M: lyingRoot(T, LGD, add(P0, mul(LGD, sgn * LY.r)))! };
+}
+/** 구멍 안에서 벽 점 M을 보는 방향(단면에서 축 쪽 + 입구(x 0) 쪽 0.3) */
+const lyingLook = (M: readonly number[]): V3 => norm([-0.3, -(M[1]! - LY.c[1]) / LY.r, -(M[2]! - LY.c[2]) / LY.r]);
+const onLying = (p: readonly number[]): boolean => Math.abs(Math.hypot(p[1]! - LY.c[1], p[2]! - LY.c[2]) - LY.r) < 1e-9;
+
+describe('openFaceCandidates(0.37.0 — 비켜 가는 삼각형의 무게중심 쪽 자리가 선의 그 삼각형 조각 밖이면 힌트는 조각 가운데)', () => {
+  it('누운 작은 구멍 δ 0.15 거리 2: 선은 커서 아래 삼각형을 비켜 가고 같은 칸의 짝을 뚫는다 — 힌트는 선에서 그 삼각형 위 조각의 가운데라 앱 근이 M(0.36.0의 무게중심 쪽 자리는 다른 근에 가깝다)', () => {
+    for (const sgn of [-1, 1]) {
+      const { T, M } = lyingCase(sgn);
+      const f = computeFrame(camAt(M, lyingLook(M), 2), 800, 600, { center: [300, 200, 9], radius: 370 });
+      const s = scr(f, M);
+      const x = s[0] + 1.3, y = s[1] + 2.1;
+      const ray = screenRay(f, x, y);
+      const side = Array.from({ length: 2 * LY.seg }, (_, i) => i);
+      const under = side.filter((i) => rayHitsTriangle(ray, triOf(LYM, i)));
+      expect(under.length, `${sgn}`).toBe(1);
+      const A = under[0]!, B = A ^ 1;
+      const wpp = worldPerPixel(f, viewDepth(f, M));
+      // 전제: 선은 커서 아래 삼각형 A는 비켜 가고 같은 칸의 짝 B를 뚫으며, M은 A 위 곡면 조각 자리다
+      expect(pierce(LYM, T, LGD, M).tri, `${sgn}`).toBe(B);
+      expect(footIn(M, triOf(LYM, A)), `${sgn}`).toBe(true);
+      const tA = { corners: triOf(LYM, A), wpp };
+      const cands = openFaceCandidates(f, [{ from: T, dir: LGD }], [tA], x, y, SNAP).filter((c) => !c.twin);
+      expect(cands.length, `${sgn}`).toBe(1);
+      const p = cands[0]!.p;
+      // 힌트는 선 위이고 그 발이 A 안(선이 A 위를 지나는 조각 안)이다 — 앱이 그 둘레에서 줄 근은 M
+      expect(lineGap(p, T, LGD), `${sgn}`).toBeLessThan(1e-9);
+      expect(footIn(p, triOf(LYM, A)), `${sgn}`).toBe(true);
+      expect(dist(lyingRoot(T, LGD, p)!, M), `${sgn}`).toBeLessThan(1e-9);
+      // 0.36.0의 힌트(선 위에서 A 무게중심에 가장 가까운 점)는 칸을 따라 멀어 다른 근에 더 가깝다
+      const c = triOf(LYM, A);
+      const g: V3 = [(c[0]![0] + c[1]![0] + c[2]![0]) / 3, (c[0]![1] + c[1]![1] + c[2]![1]) / 3, (c[0]![2] + c[1]![2] + c[2]![2]) / 3];
+      const foot = add(T, mul(LGD, dot(sub(g, T), LGD)));
+      expect(footIn(foot, c), `${sgn}`).toBe(false);
+      expect(dist(lyingRoot(T, LGD, foot)!, lyingCase(-sgn).M), `${sgn}`).toBeLessThan(1e-6);
+    }
+  });
+});
+
+describe('Viewer3d: 누운 작은 구멍 옆면의 긴 칸을 따라가는 안내 선(0.37.0 — 36차 남은 한계)', () => {
+  it('거리 1·2·3·4에서 M± 둘레를 가리키면 원기둥 위·그 안내 선 위 다듬은 교차(0.36.0은 안내 선 위 커서 자리)', () => {
+    for (const d of [1, 2, 3, 4])
+      for (const sgn of [-1, 1]) {
+        const { T, M } = lyingCase(sgn);
+        const w = view(LSC, (c) => (c.face.id === '작은 구멍' && Math.abs(c.face.normal[0]) < 1e-3 ? lyingRoot(c.line.origin, c.line.dir, c.point) : null), camAt(M, lyingLook(M), d), {
+          tracks: [T],
+          refAt: add(LG0, mul(LGD, 50.013)),
+        });
+        const s = at(w, M);
+        hover(w, s[0] + 1.3, s[1] + 2.1);
+        const h = w.v.measureHoverSnap!;
+        const k = `d${d} ${sgn}`;
+        expect(h, k).toMatchObject({ snap: 'parallel', refined: true, face: { id: '작은 구멍' } });
+        expect(h.trackFrom, k).toEqual(T);
+        expect(onLying(h.point), k).toBe(true);
+        expect(lineGap(h.point, T, LGD), k).toBeLessThan(1e-9);
+        expect(dist(h.point, M), k).toBeLessThan(1e-6);
+        // face는 M 아래 삼각형
+        expect(footIn(M, triOf(LYM, h.face!.index)), k).toBe(true);
+        w.v.dispose();
+      }
   });
 });
