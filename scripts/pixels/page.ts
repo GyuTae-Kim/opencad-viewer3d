@@ -8418,6 +8418,118 @@ const aoFlyEndValues: ValueSet = {
   },
 };
 
+// ───────────── 0.50.0 깨진 장면 입력(실제 WebGL2) ─────────────
+/**
+ * 0.50.0 값(기존 secrange 자료를 다시 쓴다 — 새 장면 없음): 앱이 깨진 파일에서 만들 수 있는 값을 secrange 그물('판재')·선분('기준선')의 사본에 넣거나,
+ * 깨진 그물 하나를 판 옆에 더해 실제 WebGL2(SwiftShader)로 그린다. 바꾼 것마다
+ * [이름, GL 오류(getError로 비운 값들), 예외(없으면 null), 카메라가 유한한지, 멀쩡한 장면 그림과 다른 화소 수, 바탕이 아닌 화소 수, 장면 알림(sceneIssues가 있는 판 — 코드:조치 목록, 없으면 'no-api')].
+ * 0.49.0까지는 깨진 값을 거르지 않는다 — 이 묶음은 base와 값이 다른 것이 의도한 변화다(pixels-changed)
+ */
+const inputFuzzValues: ValueSet = {
+  name: 'input-fuzz-values',
+  data: 'secrange',
+  needs: fn('renderImage', 'renderNow', 'setScene'),
+  run: (c) => {
+    const v = c.v;
+    const gl = (v as unknown as { gl: WebGL2RenderingContext }).gl;
+    const clean = secRangeScene();
+    const M = clean.meshes[0]!;
+    const L = clean.lines[0]!;
+    const nv = M.positions.length / 3;
+    const errs = (): number[] => {
+      const o: number[] = [];
+      for (let e = gl.getError(), k = 0; e !== gl.NO_ERROR && k < 8; e = gl.getError(), k++) o.push(e);
+      return o;
+    };
+    const fg = (img: ImageData): number => {
+      const [r, g, b] = commonColor(img);
+      let n = 0;
+      for (let i = 0; i < img.data.length; i += 4) if (img.data[i] !== r || img.data[i + 1] !== g || img.data[i + 2] !== b) n++;
+      return n;
+    };
+    const diff = (p: ImageData, q: ImageData): number => {
+      let n = 0;
+      for (let i = 0; i < p.data.length; i += 4) if (p.data[i] !== q.data[i] || p.data[i + 1] !== q.data[i + 1] || p.data[i + 2] !== q.data[i + 2]) n++;
+      return n;
+    };
+    const finiteCam = (): boolean => {
+      const k = v.getCamera();
+      return [...k.target, k.distance, k.yaw, k.pitch].every(Number.isFinite);
+    };
+    const withM = (o: Partial<Mesh3d>): Scene3d => ({ ...clean, meshes: [{ ...M, ...o }] });
+    const withL = (o: Partial<LineSet3d>): Scene3d => ({ ...clean, lines: [{ ...L, ...o }] });
+    // 판 옆(x 320~360)에 놓는 작은 상자(그물 하나) — 깨진 행렬·원점 등을 붙여 더한다
+    const side = (o: Partial<Mesh3d>): Scene3d => ({ ...clean, meshes: [M, { ...boxMesh('곁', [320, 0, 0], [360, 40, 40], [0.9, 0.4, 0.3, 1]), ...o }] });
+    const poke = (a: Float32Array, at: number[], x: number): Float32Array => {
+      const b = a.slice();
+      for (const i of at) b[i] = x;
+      return b;
+    };
+    const idx = (at: number, x: number): Uint32Array => {
+      const b = M.indices!.slice();
+      b[at] = x;
+      return b;
+    };
+    const cases: [string, Scene3d][] = [
+      ['clean', clean],
+      ['idx-range', withM({ indices: idx(0, nv + 5) })],
+      ['idx-0xffffffff', withM({ indices: idx(40, 0xffffffff) })],
+      ['pos-short', withM({ positions: M.positions.slice(0, M.positions.length - 3) })],
+      ['pos-nan', withM({ positions: poke(M.positions, [0], NaN) })],
+      ['pos-inf', withM({ positions: poke(M.positions, [4], Infinity) })],
+      ['pos-1e38', withM({ positions: poke(M.positions, [8], 1e38) })],
+      ['color-nan', withM({ color: [NaN, NaN, NaN, 1] })],
+      ['color-short', withM({ color: [0.5, 0.5, 0.5] as unknown as Mesh3d['color'] })],
+      ['normals-zero', withM({ normals: new Float32Array(nv * 3) })],
+      ['normals-nan', withM({ normals: new Float32Array(nv * 3).fill(NaN) })],
+      ['colors-nan', withM({ colors: new Float32Array(nv * 4).fill(NaN) })],
+      ['edges-1e38', withM({ edges: poke(M.edges!, [0, 1], 1e38) })],
+      ['side-origin-nan', side({ origin: [NaN, 0, 0] })],
+      ['side-matrix-nan', side({ matrix: Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, NaN, 0, 0, 1]) })],
+      ['side-matrix-short', side({ matrix: Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]) })],
+      ['side-matrix-1e30', side({ matrix: Float64Array.from([1e30, 0, 0, 0, 0, 1e30, 0, 0, 0, 0, 1e30, 0, 0, 0, 0, 1]) })],
+      ['side-origin-1e38', side({ origin: [1e38, 0, 0] })],
+      ['line-width-nan', withL({ width: NaN })],
+      ['line-1e38', withL({ positions: poke(L.positions, [3], 1e38) })],
+      ['line-nan', withL({ positions: poke(L.positions, [0], NaN) })],
+      ['points-size-nan', { ...clean, points: [{ id: '점', positions: new Float32Array([10, 10, 30, 100, 100, 100]), size: NaN, color: [1, 1, 0, 1] }] }],
+      ['bounds-inf', { ...clean, bounds: { min: [-Infinity, 0, 0], max: [Infinity, 200, 90] } }],
+      ['bounds-nan', { ...clean, bounds: { min: [NaN, 0, 0], max: [300, NaN, 90] } }],
+    ];
+    const out: unknown[] = [];
+    let ref: ImageData | null = null;
+    try {
+      for (const [name, sc] of cases) {
+        errs();
+        let threw: string | null = null;
+        let img: ImageData | null = null;
+        let e: number[] = [];
+        try {
+          v.setScene(sc);
+          v.setView('seIso', false);
+          v.fit(false);
+          v.renderNow();
+          e = errs();
+          img = v.renderImage({});
+        } catch (x) {
+          threw = x instanceof Error ? x.name : String(x);
+          e = errs();
+        }
+        if (name === 'clean') ref = img;
+        const issues = Array.isArray(v.sceneIssues) ? (v.sceneIssues as { code: string; action: string }[]).map((i) => `${i.code}:${i.action}`) : 'no-api';
+        out.push([name, e, threw, finiteCam(), img && ref ? diff(img, ref) : -1, img ? fg(img) : -1, issues]);
+      }
+    } finally {
+      v.setScene(clean);
+      v.setView('seIso', false);
+      v.fit(false);
+      v.renderNow();
+      errs();
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8524,6 +8636,7 @@ const VALUES: ValueSet[] = [
   hiddenLabelCycleValues,
   themeMotionValues,
   aoFlyEndValues,
+  inputFuzzValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
