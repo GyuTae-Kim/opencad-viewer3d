@@ -88,6 +88,7 @@ import {
   type TrackGuide,
   type TrackLine,
   type TrackTriangle,
+  acceptFacePatch,
   axisEdgeSnap,
   axisFaceSnap,
   chooseTrackPoint,
@@ -1031,8 +1032,10 @@ const refineLineOf = (l: OpenRefineLine): SnapRefineLine => (l.axis ? { origin: 
 type MeetTag = { kind: 'axis'; axis: SnapAxis } | { kind: 'parallel'; dir: V3; edge: [V3, V3] } | { kind: 'track'; from: V3; axis: SnapAxis };
 /** 기준 선분 거르기에 바로 앞에 물은 선분과 답(0.28.0 trackDirs edge, 0.29.0 parallelEdge — 물은 함수도) */
 type EdgeAsked = { fn: TrackDirEdgeFilter; item: object; kind: string; raw: number; ends: [V3, V3]; ok: boolean };
+/** 축과 면의 교차가 보는 그물 면 맞음(0.18.0 faceHitOf): 그물 id·삼각형 번호와, 있으면 맞은 삼각형의 세계 꼭짓점(0.37.0 — 닫힌 면 교차 다듬기의 넓힌 받기) */
+type FaceHit = TrackFaceHit & SnapFace & { corners?: [V3, V3, V3] };
 /** 끌어온 점 안내 선이 만나는 점(0.29.0): 순수 결과와 그 안내의 기준 선분 */
-type TrackDirMeet = { snap: TrackDirMeetSnap<NearSegment, TrackFaceHit & SnapFace, MeetTag>; ref: [V3, V3] };
+type TrackDirMeet = { snap: TrackDirMeetSnap<NearSegment, FaceHit, MeetTag>; ref: [V3, V3] };
 /** 커서 둘레 그물 삼각형(0.22.0 선과 삼각형의 열린 교차): 세계 꼭짓점 셋·커서 쪽 깊이의 화소 세계 길이·남는 쪽 판정과 그 면(그물 id·삼각형 번호·눈 쪽 법선) */
 type NearTriangle = TrackTriangle & SnapFace & { corners: [V3, V3, V3] };
 /**
@@ -1056,15 +1059,19 @@ function lineNearCursor(f: ViewFrame, ray: { origin: V3; dir: V3 }, from: readon
 }
 /**
  * 그물 면 고르기 결과 → 축과 면의 교차가 보는 면 맞음(0.18.0): 광선 맞은 점, 단위 법선, 평면 위 점은 맞은 삼각형의 첫 꼭짓점(광선 맞은 점의 셈 오차 없이 —
- * 축과 수직인 면이면 교차의 그 좌표가 꼭짓점 좌표 그대로), 그물 id·삼각형 번호. 그물 면(잘린 면 아님)이 아니면 null
+ * 축과 수직인 면이면 교차의 그 좌표가 꼭짓점 좌표 그대로), 그물 id·삼각형 번호. 그물 면(잘린 면 아님)이 아니면 null.
+ * 0.37.0: 맞은 삼각형의 세계 꼭짓점(corners)도 싣는다(닫힌 면 교차 다듬기의 넓힌 받기가 그 칸 위 곡면 조각 자리를 본다 — 값으로 내보내지 않는다)
  */
-const faceHitOf = (d: PickDetail | null): (TrackFaceHit & SnapFace) | null => {
+const faceHitOf = (d: PickDetail | null): FaceHit | null => {
   const k = d?.pick;
   if (!k || k.kind !== 'mesh' || k.section || !k.normal) return null;
   const n = k.normal;
   const l = Math.hypot(n[0], n[1], n[2]) || 1;
-  const r: TrackFaceHit & SnapFace = { point: k.point, normal: [n[0] / l, n[1] / l, n[2] / l], id: k.id, index: k.index };
-  if (d!.corners) r.origin = d!.corners[0];
+  const r: FaceHit = { point: k.point, normal: [n[0] / l, n[1] / l, n[2] / l], id: k.id, index: k.index };
+  if (d!.corners) {
+    r.origin = d!.corners[0];
+    r.corners = d!.corners;
+  }
   return r;
 };
 /** 점 붙잡기(머무르기로 끌어올 수 있는 점 — 0.16.0)인지: 꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발이고 잠근 선 위 점이 아님 */
@@ -4927,10 +4934,12 @@ export class Viewer3d {
           const dir = along(face.from, face.axis);
           if (dir) out.direction = dir;
         }
-        // 0.19.0 다듬기: 앱이 그 축 직선과 정확한 곡면의 교차를 주면 그 점(축 위로 내린 자리). 잠글 방향은 코어 점으로 정했다(0.14.0 규칙)
-        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, axisRefineLine(face.from, face.axis), first) : null;
+        // 0.19.0 다듬기: 앱이 그 축 직선과 정확한 곡면의 교차를 주면 그 점(축 위로 내린 자리). 잠글 방향은 코어 점으로 정했다(0.14.0 규칙).
+        // 0.37.0: 칸을 얕게 뚫는 축은 넓힌 받기(그 칸 위 곡면 조각 자리·커서에서 붙잡기 거리 안 — 같은 평면 짝 위면 face가 그 삼각형)
+        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, axisRefineLine(face.from, face.axis), first, h) : null;
         if (rp) {
-          out.p = rp;
+          out.p = rp.p;
+          out.face = rp.face;
           out.refined = true;
         }
         return out;
@@ -5153,7 +5162,7 @@ export class Viewer3d {
       for (const axis of axes) if (!(first && trackAlongFirst(f, first, Q, axis))) lines.push({ from: Q, dir: axisLock(axis).direction, tag: { kind: 'track', from: Q, axis } });
     }
     const under = faceHitOf(d);
-    const snap = trackDirMeetSnap<NearSegment, TrackFaceHit & SnapFace, MeetTag>(f, tracks, ref, x, y, snapPx, {
+    const snap = trackDirMeetSnap<NearSegment, FaceHit, MeetTag>(f, tracks, ref, x, y, snapPx, {
       skip: first,
       lines,
       segs: nearSegs(),
@@ -5201,9 +5210,11 @@ export class Viewer3d {
     }
     const h = k.hit;
     out.face = copyFace(h);
-    const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, s.p, out.face, line, first) : null;
+    // 0.37.0: 칸을 얕게 뚫는 안내 선은 넓힌 받기(axisFaceRefined — 같은 평면 짝 위면 face가 그 삼각형)
+    const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, s.p, out.face, line, first, h) : null;
     if (rp) {
-      out.p = rp;
+      out.p = rp.p;
+      out.face = rp.face;
       out.refined = true;
     }
     return out;
@@ -5347,8 +5358,11 @@ export class Viewer3d {
 
   /**
    * 축이 면을 뚫는 점 다듬기(0.19.0, 'axisFace'): 코어 점 core(축과 삼각형 평면의 교차), 그 면 face, 축 직선 line(0.20.0부터 잠근 선이면 축이 아닌 직선도)을 앱 refineFace에 넘겨
-   * 받을 수 있는 점이면 그 자리. 받는 규칙·기억은 axisEdgeRefined와 같다(acceptOnLine, 그 그물 단면에서 남는 쪽, 커서 광선을 뺀 입력으로 RefineMemo — 열쇠의 선분 자리에 면).
-   * 가림은 다시 따지지 않는다(곡면 위 점은 삼각형으로 만든 면에서 처짐만큼 벗어나 면 깊이와 어긋날 수 있다 — 코어 점이 보이므로 그 바로 둘레다)
+   * 받을 수 있는 점이면 그 자리와 면. 받는 규칙·기억은 axisEdgeRefined와 같다(acceptOnLine, 그 그물 단면에서 남는 쪽, 커서 광선을 뺀 입력으로 RefineMemo — 열쇠의 선분 자리에 면).
+   * 가림은 다시 따지지 않는다(곡면 위 점은 삼각형으로 만든 면에서 처짐만큼 벗어나 면 깊이와 어긋날 수 있다 — 코어 점이 보이므로 그 바로 둘레다).
+   * 0.37.0: 앱 점이 코어 점에서 화면 붙잡기 거리 밖이면(선이 칸을 얕게 뚫는다) 열린 면 교차와 같은 규칙으로 한 번 더 본다(track.ts acceptFacePatch — 그 선 위·그 칸 위 곡면 조각 자리·
+   * 커서에서 붙잡기 거리 안, hit의 꼭짓점과 같은 평면 짝은 그 세 변 가운데 자리에서 모은다 — edgeNeighbors). 그때는 열린 면 교차와 같은 가림(openFaceVisible)을 보고,
+   * 앱 점이 같은 평면 짝 위면 face가 그 삼각형이다. hit이 없거나 꼭짓점이 없으면 0.36.0 그대로
    */
   private axisFaceRefined(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5360,7 +5374,8 @@ export class Viewer3d {
     face: SnapFace,
     line: SnapRefineLine,
     first: V3 | null,
-  ): V3 | null {
+    hit?: FaceHit | null,
+  ): { p: V3; face: SnapFace } | null {
     const refine = so.refineFace;
     if (!refine) return null;
     const ray = screenRay(f, x, y);
@@ -5380,7 +5395,32 @@ export class Viewer3d {
     }
     if (!q) return null;
     const p = acceptOnLine(f, core, q, line, snapPx);
-    return p && !this.clippedAway(p, face.id) ? p : null;
+    if (p) return this.clippedAway(p, face.id) ? null : { p, face };
+    // 0.37.0: 칸을 얕게 뚫는 선 — 앱 점이 그 칸 위 곡면 조각 자리이고 커서에서 붙잡기 거리 안이면 받는다(코어 점에서는 붙잡기 거리 밖)
+    if (!hit?.corners || hit.id !== face.id || hit.index !== face.index) return null;
+    const t: NearTriangle = { corners: hit.corners, wpp: worldPerPixel(f, viewDepth(f, core)), id: face.id, index: face.index, normal: [face.normal[0], face.normal[1], face.normal[2]] };
+    const mates = this.edgeNeighbors(f, t);
+    const w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx);
+    if (!w) return null;
+    const on = w.cell ? mates[w.cell - 1]! : t;
+    if (this.clippedAway(w.p, on.id) || !this.openFaceVisible(f, w.p, on)) return null;
+    return { p: w.p, face: w.cell ? copyFace(on) : face };
+  }
+
+  /**
+   * 면의 열린 교차가 받는 앱 점 p가 보이는지(0.22.0 openLineFace의 가림 — 0.37.0부터 닫힌 면 교차의 넓힌 받기도): 그 화면 자리에서 가리지 않거나(snapVisible),
+   * 0.23.0: 곡면이 오목하게 보이는 자리(구멍 안쪽 벽)는 앱 점이 그 삼각형(과 이웃) 뒤라 그 조각에 가린다 — 그 자리 광선이 처음 맞은 불투명 면이
+   * 그 삼각형이나 꼭짓점을 함께 쓰는 이웃이고 앱 점이 그 면에서 처짐 한도 안이면 보인다고 본다(track.ts hiddenByOwnPatch). 음영 계열에서만 가린다
+   */
+  private openFaceVisible(f: ViewFrame, p: V3, t: NearTriangle): boolean {
+    const sp = projectToScreen(f, p);
+    if (!sp) return false;
+    if (this.snapVisible(f, p, sp[0], sp[1], t.id)) return true;
+    if (!this.shadedMode) return false;
+    const d = this.pickDetail(sp[0], sp[1], true, undefined, false, false, true, true);
+    const k = d?.pick;
+    if (!k || k.kind !== 'mesh' || k.section || k.id !== t.id || !k.normal || !d!.corners) return false;
+    return hiddenByOwnPatch(t.corners, { corners: d!.corners, point: k.point, normal: k.normal }, p, 2 * t.wpp);
   }
 
   /**
@@ -5492,18 +5532,7 @@ export class Viewer3d {
         }
         return q;
       },
-      (p, t) => {
-        const sp = projectToScreen(f, p);
-        if (!sp) return false;
-        if (this.snapVisible(f, p, sp[0], sp[1], t.id)) return true;
-        // 0.23.0: 곡면이 오목하게 보이는 자리(구멍 안쪽 벽)는 앱 점이 그 삼각형(과 이웃) 뒤라 그 조각에 가린다 — 그 자리 광선이 처음 맞은 불투명 면이
-        // 그 삼각형이나 꼭짓점을 함께 쓰는 이웃이고 앱 점이 그 면에서 처짐 한도 안이면 보인다고 본다(track.ts hiddenByOwnPatch). 음영 계열에서만 가린다
-        if (!this.shadedMode) return false;
-        const d = this.pickDetail(sp[0], sp[1], true, undefined, false, false, true, true);
-        const k = d?.pick;
-        if (!k || k.kind !== 'mesh' || k.section || k.id !== t.id || !k.normal || !d!.corners) return false;
-        return hiddenByOwnPatch(t.corners, { corners: d!.corners, point: k.point, normal: k.normal }, p, 2 * t.wpp);
-      },
+      (p, t) => this.openFaceVisible(f, p, t),
       // 0.24.0 둘째 힌트를 둘지 볼 이웃: 커서 둘레 삼각형(붙잡기 거리 안)에 없을 수 있어 그 삼각형 세 변 가운데의 화면 자리에서 모은다(같은 그물만)
       (t) => this.edgeNeighbors(f, t),
     );
@@ -5602,7 +5631,12 @@ export class Viewer3d {
       const h = face.hit;
       out = lockOut(face.p);
       out.face = { id: h.id, index: h.index, normal: h.normal };
-      if (so.refineFace) rp = this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first);
+      // 0.37.0: 칸을 얕게 뚫는 잠근 선은 넓힌 받기(axisFaceRefined — 같은 평면 짝 위면 face가 그 삼각형)
+      const r = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first, h) : null;
+      if (r) {
+        rp = r.p;
+        out.face = r.face;
+      }
     } else if (open && t === open.snap) {
       out = lockOut(open.snap.p);
       const sg = nearSegmentId(open.snap.seg);

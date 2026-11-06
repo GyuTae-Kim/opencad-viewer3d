@@ -33,9 +33,12 @@ type V = Viewer3d & Record<string, any>;
  * (0.34.0 구멍 안에서 아주 가까이 본 벽의 면의 열린 교차 — NC 35차 재현, tests/v0340hole.test.ts와 같은 장면. 0.36.0 중간 거리에서 칸을 얕게 뚫는 선 —
  * tests/v0360pierce.test.ts),
  * ring12 = 12토막 원(반지름 30, z 0)뿐인 자료(0.35.0 아주 가까이 본 꺾은선 활꼴 — tests/v0350edge.test.ts와 같은 장면),
- * lowcyl = 낮은 원기둥 옆면(반지름 30, 높이 60, 50토막 — 칸 0이 −90°를 가운데에)뿐인 자료(0.35.0 한 칸의 두 삼각형 위 두 번 스침 — tests/v0350twice.test.ts와 같은 장면)
+ * lowcyl = 낮은 원기둥 옆면(반지름 30, 높이 60, 50토막 — 칸 0이 −90°를 가운데에)뿐인 자료(0.35.0 한 칸의 두 삼각형 위 두 번 스침 — tests/v0350twice.test.ts와 같은 장면.
+ * 0.37.0 칸을 얕게 뚫는 첫 점 X축의 닫힌 면 교차 넓힌 받기 — tests/v0370shallow.test.ts),
+ * lying12 = 반투명 판(600 × 400 × 18)에 누운 작은 구멍(반지름 2.5, 길이 12, 12토막 원기둥 고체)과 판 윗면의 기운 기준 선분(27°)뿐인 자료
+ * (0.37.0 긴 칸을 따라가는 안내 선의 비켜 가는 삼각형 힌트 — tests/v0370shallow.test.ts와 같은 장면)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole' | 'ring12' | 'lowcyl';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole' | 'ring12' | 'lowcyl' | 'lying12';
 
 interface Ctx {
   v: V;
@@ -87,6 +90,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (!s && d === 'hole') scenes.set(d, (s = holeScene()));
   if (!s && d === 'ring12') scenes.set(d, (s = ring12Scene()));
   if (!s && d === 'lowcyl') scenes.set(d, (s = lowCylScene()));
+  if (!s && d === 'lying12') scenes.set(d, (s = lying12Scene()));
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
@@ -6911,6 +6915,164 @@ const lowCellValues: ValueSet = {
   },
 };
 
+// ───────────── 0.37.0 칸을 얕게 뚫는 선의 닫힌 면 교차 넓힌 받기·긴 칸을 따라가는 안내 선의 힌트 ─────────────
+/** 낮은 원기둥 칸 0의 현과 나란히 칸 반각의 4.4배로 스치는 첫 점 X축(y = −30·cos(w)) — 두 근은 이웃 칸을 그 현과 얕게 뚫는다(STEP 42차 꼴) */
+const LS_W = 4.4 * (LC_STEP / 2);
+const LS_D = 30 * Math.cos(LS_W);
+/** 첫 점 X축(높이 z)이 50각형(lowcyl 옆면)을 뚫는 자리 가운데 near에 가장 가까운 것 — 칸은 세로라 단면 현과의 교차다 */
+function lsPierce(z: number, near: readonly number[]): number[] {
+  let best: number[] | null = null;
+  for (let k = 0; k < 50; k++) {
+    const a = -90 * R12_RAD - LC_STEP / 2 + LC_STEP * k;
+    const p = [30 * Math.cos(a), 30 * Math.sin(a)], q = [30 * Math.cos(a + LC_STEP), 30 * Math.sin(a + LC_STEP)];
+    const u = (-LS_D - p[1]!) / (q[1]! - p[1]!);
+    if (!(u >= 0 && u <= 1)) continue;
+    const X = [p[0]! + (q[0]! - p[0]!) * u, -LS_D, z];
+    if (!best || Math.abs(X[0]! - near[0]!) < Math.abs(best[0]! - near[0]!)) best = X;
+  }
+  return best!;
+}
+/** 근 Q를 바깥(그 자리 반지름 방향 + 위 0.25)에서 거리 d로 본다 */
+function lsCamera(c: Ctx, Q: readonly number[], d: number): void {
+  const { v } = c;
+  const n = [Q[0]! / 30, Q[1]! / 30, 0.25];
+  const l = Math.hypot(n[0]!, n[1]!, n[2]!);
+  v.setCamera({ ...v.getCamera(), yaw: Math.atan2(n[0]! / l, -n[1]! / l), pitch: Math.asin(n[2]! / l), target: [Q[0]!, Q[1]!, Q[2]!], distance: d, projection: 'perspective' });
+  v.renderNow();
+}
+/** 0.37.0 닫힌 면 교차의 넓힌 받기가 있는 판인지 — 높이 5·거리 15에서 X(그물을 뚫는 자리)와 Q(원기둥 위 근) 사이를 가리켜 원기둥 위 교차인지(없는 판은 X 그대로) */
+const v0370shallow: Need = (v, c) => {
+  const why = fn('setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { refineFace: lcRefine }, [-45, -LS_D, 5]);
+  const Q = [-30 * Math.sin(LS_W), -LS_D, 5];
+  lsCamera(c, Q, 15);
+  const a = c.at(lsPierce(5, Q)), b = c.at(Q);
+  if (a && b) c.hover((a.x + b.x) / 2 + 0.31, (a.y + b.y) / 2 + 0.17);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && Math.abs(Math.hypot(h.point[0], h.point[1]) - 30) < 1e-9;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.37.0 칸을 얕게 뚫는 선의 닫힌 면 교차 넓힌 받기(커서에서 붙잡기 거리 안인 곡면 위 근)';
+};
+/** 높이 5·거리 15에서 X와 Q 사이를 가리킨 그림 — 원기둥 위 다듬은 교차에 측정 미리 보기 표식(새 장면) */
+SHOTS.push({
+  name: 'lowcyl-measure-shallow',
+  data: 'lowcyl',
+  needs: v0370shallow,
+  setup: (c) => {
+    r12First(c, { refineFace: lcRefine }, [-45, -LS_D, 5]);
+    const Q = [-30 * Math.sin(LS_W), -LS_D, 5];
+    lsCamera(c, Q, 15);
+    const a = c.at(lsPierce(5, Q)), b = c.at(Q);
+    if (a && b) c.hover((a.x + b.x) / 2 + 0.31, (a.y + b.y) / 2 + 0.17);
+  },
+});
+/** 0.37.0 값(lowcyl — 새 값): 높이 5·21의 첫 점 X축이 이웃 칸을 얕게 뚫는 두 근 둘레 5 × 5(2.5화소 칸) 미리 보기(거리 15·40) */
+const lowShallowValues: ValueSet = {
+  name: 'lowcyl-measure-shallow',
+  data: 'lowcyl',
+  needs: v0370shallow,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const z of [5, 21]) {
+      r12First(c, { refineFace: lcRefine }, [-45, -LS_D, z]);
+      for (const d of [15, 40])
+        for (const sgn of [-1, 1]) {
+          const Q = [sgn * 30 * Math.sin(LS_W), -LS_D, z];
+          lsCamera(c, Q, d);
+          out.push([z, d, sgn, r12Grid(c, Q, 2, 2.5)]);
+        }
+      r12Done(c.v);
+    }
+    return out;
+  },
+};
+/** 누운 작은 구멍: (0, 372, 9)에서 X 방향 길이 12, 반지름 2.5, 12토막(꼭대기가 꼭짓점 — 칸마다 두 삼각형, 대각선이 칸을 따라 길다) */
+const LY_W: HoleWall = { id: '작은 구멍', a0: 1, a1: 2, a2: 0, cu: 372, cv: 9, r: 2.5, lo: 0, hi: 12 };
+const LY_G0 = [380, 300, 18];
+const LY_G1 = [380 + 100 * HOLE_DIR[0]!, 300 + 100 * HOLE_DIR[1]!, 18];
+const LY_MID = [(LY_G0[0]! + LY_G1[0]!) / 2 + 0.013, (LY_G0[1]! + LY_G1[1]!) / 2 + 0.011, 18];
+function lying12Scene(): Scene3d {
+  return {
+    name: 'lying12',
+    units: 'mm',
+    meshes: [boxMesh('판', [0, 0, 0], [600, 400, 18], [0.86, 0.74, 0.55, 0.35]), holeCylinder(LY_W.id, [0, 372, 9], [1, 0, 0], 12, 2.5, 12, [0.15, 0.35, 0.8, 1])],
+    lines: [{ id: '기준', name: '기준', positions: new Float32Array([...LY_G0, ...LY_G1]), color: [0.2, 0.6, 0.9, 1] }],
+    points: [],
+  };
+}
+/** lying12 자료의 앱 refineFace: 작은 구멍 옆면 삼각형이면 그 직선과 원기둥(길이 안)의 교차 가운데 point에 가까운 근 */
+function lyRefineFace(c: any): number[] | null {
+  if ((c.kind !== 'axisFace' && c.kind !== 'onFace') || c.face.id !== LY_W.id || Math.abs(c.face.normal[LY_W.a2]) > 1e-3) return null;
+  const q = holeRoot(LY_W, c.line.origin, c.line.dir, c.point);
+  return q && q[0]! >= LY_W.lo - 1e-9 && q[0]! <= LY_W.hi + 1e-9 ? q : null;
+}
+/** 꼭대기 아래 δ 0.15(반지름의 6 %)를 지나 기준과 나란한 안내 선(x 6 자리를 지난다): 끌어온 점 T와 sgn 쪽 근 M */
+function lyCase(sgn: number): { T: number[]; M: number[] } {
+  const P0 = [6, 372, 9 + 2.5 - 0.15];
+  const T = [P0[0]! - 17.5 * HOLE_DIR[0]!, P0[1]! - 17.5 * HOLE_DIR[1]!, P0[2]!];
+  return { T, M: holeRoot(LY_W, T, HOLE_DIR, [P0[0]! + sgn * 2.5 * HOLE_DIR[0]!, P0[1]! + sgn * 2.5 * HOLE_DIR[1]!, P0[2]!])! };
+}
+/** 끌어온 점 T를 두고 기준 선분을 지나간 뒤 구멍 안에서 M을 거리 d로 본다(단면에서 축 쪽 + 입구 쪽 0.3) */
+function lyView(c: Ctx, T: number[], M: readonly number[], d: number): void {
+  const { v } = c;
+  v.setMeasureMode(true);
+  v.setMeasureSnap(holeSnap(lyRefineFace));
+  v.setMeasureTrackPoints([T]);
+  v.renderNow();
+  const s = c.at(LY_MID);
+  if (s) c.hover(s.x + 0.3, s.y + 0.2);
+  v.renderNow();
+  const n = [-0.3, -(M[1]! - LY_W.cu) / LY_W.r, -(M[2]! - LY_W.cv) / LY_W.r];
+  const l = Math.hypot(n[0]!, n[1]!, n[2]!);
+  v.setCamera({ ...v.getCamera(), yaw: Math.atan2(n[0]! / l, -n[1]! / l), pitch: Math.asin(n[2]! / l), target: [M[0]!, M[1]!, M[2]!], distance: d, projection: 'perspective' });
+  v.renderNow();
+}
+const lyOnWall = (p: readonly number[]): boolean => Math.abs(Math.hypot(p[1]! - LY_W.cu, p[2]! - LY_W.cv) - LY_W.r) < 1e-9 && p[0]! >= LY_W.lo && p[0]! <= LY_W.hi;
+/** 0.37.0 긴 칸을 따라가는 안내 선의 힌트가 있는 판인지 — 거리 2에서 M+ 둘레를 가리켜 원기둥 위 교차인지(없는 판은 안내 선 위 커서 자리) */
+const v0370cell: Need = (v, c) => {
+  const why = holeNeed(v, c);
+  if (why) return why;
+  const { T, M } = lyCase(1);
+  lyView(c, T, M, 2);
+  const s = c.at(M);
+  if (s) c.hover(s.x + 1.3, s.y + 2.1);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && h.face?.id === LY_W.id;
+  holeDone(v);
+  return ok ? null : '이 판에 없는 동작: 0.37.0 비켜 가는 삼각형의 힌트(무게중심 쪽 자리가 선의 그 삼각형 조각 밖이면 조각 가운데)';
+};
+/** 0.37.0 값(lying12 — 새 값): 누운 작은 구멍 꼭대기 아래 δ 0.15의 안내 선 M± 둘레 3 × 3(4화소 칸)을 거리 1·2·3·4에서 본 미리 보기 */
+const lyingCellValues: ValueSet = {
+  name: 'lying12-measure-cell',
+  data: 'lying12',
+  needs: v0370cell,
+  run: (c) => {
+    const { v } = c;
+    const out: unknown[] = [];
+    for (const d of [1, 2, 3, 4])
+      for (const sgn of [-1, 1]) {
+        const { T, M } = lyCase(sgn);
+        lyView(c, T, M, d);
+        const s = c.at(M);
+        const rows: unknown[] = [];
+        if (s)
+          for (let j = -1; j <= 1; j++)
+            for (let i = -1; i <= 1; i++) {
+              c.hover(s.x + i * 4 + 0.31, s.y + j * 4 + 0.17);
+              v.renderNow();
+              const h = v.measureHoverSnap;
+              rows.push(h ? [h.snap ?? null, r10s(h.point), h.face ? `${h.face.id}#${h.face.index}` : null, !!h.refined, lyOnWall(h.point)] : null);
+            }
+        out.push([d, sgn, rows]);
+        holeDone(v);
+      }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -6997,6 +7159,8 @@ const VALUES: ValueSet[] = [
   ringLensValues,
   lowCellValues,
   holeMidValues,
+  lowShallowValues,
+  lyingCellValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
