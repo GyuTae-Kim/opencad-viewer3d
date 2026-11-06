@@ -33,6 +33,10 @@ export type {
   PickEvent,
   PickOptions,
   HeldPointer,
+  KeyboardCursorState,
+  KeyboardSnapAnnouncement,
+  KeyboardSnapOptions,
+  MeasureCandidatesOptions,
   PointerClaimHandler,
   PointerClaimQuery,
   PointerHoldEnd,
@@ -103,6 +107,23 @@ export type {
   TrackTriangle,
 } from './track';
 export { MAX_SECTION_PLANES } from './section';
+export {
+  KEY_BIG_STEP_PX,
+  KEY_CANDIDATES_MAX,
+  KEY_POINTER,
+  KEY_SNAP_KEYS,
+  KEY_STEP_PX,
+  type KeyDesc,
+  type KeySnapAction,
+  type KeySnapKeys,
+  SNAP_KIND_LABELS,
+  keyLabel,
+  keySnapAction,
+  keySnapHint,
+  normalizeKeySnapKeys,
+  parseKeyDesc,
+  snapKindText,
+} from './keysnap';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
 export {
