@@ -7,14 +7,14 @@ import type { Rgba } from '../src/types';
 
 const MODES: RenderMode[] = ['shaded', 'shadedEdges', 'wireframe', 'xray', 'hiddenLine', 'monochrome', 'noTexture'];
 
-/** 이 셰이더에 쓰는 꼴(#ifdef 이름 · #else · #endif)만 정의 여부대로 펼친다 */
+/** 이 셰이더에 쓰는 꼴(#ifdef 이름 · #ifndef 이름(0.42.0) · #else · #endif)만 정의 여부대로 펼친다 */
 const preprocess = (src: string, defs: readonly string[]): string => {
   const out: string[] = [];
   const stack: boolean[] = [];
   for (const line of src.split('\n')) {
     const t = line.trim();
-    const m = /^#ifdef (\w+)$/.exec(t);
-    if (m) stack.push(defs.includes(m[1]!));
+    const m = /^#if(n?)def (\w+)$/.exec(t);
+    if (m) stack.push(defs.includes(m[2]!) !== (m[1] === 'n'));
     else if (t === '#else') stack.push(!stack.pop());
     else if (t === '#endif') stack.pop();
     else if (/^#define \w+$/.test(t)) continue;

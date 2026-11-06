@@ -66,6 +66,10 @@ export interface FakeTexture {
   /** texImage2D 횟수 */
   uploads: number;
   deleted: boolean;
+  /** 0.42.0: 크기만 잡은(9인자) 그림의 가로·세로와 texSubImage2D로 올린 실수 텍셀(RGBA — 자리 자료 그림 시험용) */
+  w?: number;
+  h?: number;
+  floats?: Float32Array;
 }
 
 /** FNV-1a 32비트(바이트) */
@@ -226,7 +230,11 @@ export class FakeGL {
   getShaderParameter(): boolean {
     return true;
   }
-  getProgramParameter(): boolean {
+  /** 0.42.0: KHR_parallel_shader_compile 흉내(parallel이 켜졌을 때만 확장을 준다) — COMPLETION_STATUS_KHR(0x91B1)는 compileDone */
+  parallel = false;
+  compileDone = true;
+  getProgramParameter(_p: unknown, pname?: number): boolean {
+    if (pname === 0x91b1) return this.compileDone;
     return true;
   }
   createProgram(): FakeProgram {
@@ -284,8 +292,8 @@ export class FakeGL {
   getContextAttributes(): { stencil: boolean } {
     return { stencil: true };
   }
-  getExtension(): null {
-    return null;
+  getExtension(name?: string): object | null {
+    return this.parallel && name === 'KHR_parallel_shader_compile' ? { COMPLETION_STATUS_KHR: 0x91b1 } : null;
   }
   isContextLost(): boolean {
     return false;
@@ -317,6 +325,18 @@ export class FakeGL {
     const src = a.length === 6 ? (a[5] as { tag?: string; width?: number; height?: number } | null) : null;
     t.src = src ? (src.tag ?? `${src.width}x${src.height}`) : 'empty';
     t.uploads++;
+    if (a.length === 9) {
+      t.w = a[3] as number;
+      t.h = a[4] as number;
+      t.floats = undefined;
+    }
+  }
+  /** 0.42.0: 실수 배열(Float32Array)을 올리면 그 영역 텍셀을 무늬에 적는다(자리 자료 그림 — RGBA 4값) */
+  texSubImage2D(_t: number, _l: number, x: number, y: number, w: number, h: number, _f: number, _ty: number, src: unknown, srcOffset = 0): void {
+    const t = this.texUnits.get(this.unit ?? this.C('TEXTURE0'));
+    if (!t || !(src instanceof Float32Array) || !t.w || !t.h) return;
+    t.floats ??= new Float32Array(t.w * t.h * 4);
+    for (let j = 0; j < h; j++) t.floats.set(src.subarray(srcOffset + j * w * 4, srcOffset + (j + 1) * w * 4), ((y + j) * t.w + x) * 4);
   }
   createFramebuffer(): object {
     return { id: ++this.ids };
@@ -359,6 +379,13 @@ export class FakeGL {
   }
   drawArraysInstanced(mode: number, first: number, count: number, n: number): void {
     this.log('drawArraysInstanced', [mode, first, count, n]);
+  }
+  drawElementsInstanced(mode: number, count: number, type: number, offset: number, n: number): void {
+    this.log('drawElementsInstanced', [mode, count, type, offset, n]);
+  }
+  /** 0.42.0: 지금 무늬 단위에 묶인 무늬(자리 자료 그림 — 단위 5) */
+  textureAt(unit: number): FakeTexture | null {
+    return this.texUnits.get(this.C('TEXTURE0') + unit) ?? null;
   }
 
   /**
