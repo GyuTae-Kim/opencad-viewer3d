@@ -737,6 +737,8 @@ export class Renderer3d {
   private pendingProgs = new Map<string, { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader; defs: readonly string[] }>();
   /** 인스턴싱 변종을 만들지 못했으면 true(그 문맥에서는 끄고 그물마다 그린다) */
   private instBroken = false;
+  /** 0.43.0 PBR 변종을 만들지 못했으면 true(그 문맥에서는 PBR 그림 없이 0.42.0 셰이더로 그린다) */
+  private pbrBroken = false;
   /** 0.42.0 지난 그리기의 인스턴싱: 모아 그린 그리기 호출 수·그 자리 수(차례마다 센다 — 면·외곽선 깊이·선을 모두) */
   instStats = { draws: 0, items: 0 };
 
@@ -763,6 +765,7 @@ export class Renderer3d {
     this.aniso = an ? { ext: an, max: Number(gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 1 } : null;
     this.parallel = gl.getExtension('KHR_parallel_shader_compile');
     this.instBroken = false;
+    this.pbrBroken = false;
     this.quadWide = this.newBuffer(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW, 'overlay');
     this.quadPoint = this.newBuffer(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW, 'overlay');
     this.capBuf = this.newBuffer(gl.ARRAY_BUFFER, this.capData.byteLength, gl.DYNAMIC_DRAW, 'overlay');
@@ -1082,7 +1085,16 @@ export class Renderer3d {
    */
   private instVariant(base: 'mesh' | 'wide' | 'thin', defs: readonly string[]): Prog | null {
     if (this.instBroken) return null;
-    const all = [...defs, 'INST'];
+    const p = this.asyncVariant(base, [...defs, 'INST']);
+    if (p === false) this.instBroken = true;
+    return p || null;
+  }
+
+  /**
+   * 기다리지 않는 변종 번역(0.42.0 인스턴싱 변종에서 떼어 냄 — 0.43.0 PBR 변종도 쓴다): 다 되었으면 프로그램, 번역 중이면 null(부르는 쪽은 다른 변종으로 그리고
+   * 뷰어가 instPending으로 다음 프레임에 다시 그린다), 번역·연결에 실패하면 false. KHR_parallel_shader_compile가 없으면 variant처럼 바로 번역한다
+   */
+  private asyncVariant(base: 'mesh' | 'wide' | 'thin', all: readonly string[]): Prog | null | false {
     const key = `${base}:${[...all].sort().join(',')}`;
     const have = this.variants.get(key);
     if (have) return have;
@@ -1090,8 +1102,7 @@ export class Renderer3d {
       try {
         return this.variant(base, all);
       } catch {
-        this.instBroken = true;
-        return null;
+        return false;
       }
     }
     const gl = this.gl;
@@ -1121,8 +1132,7 @@ export class Renderer3d {
     gl.deleteShader(q.fs);
     if (!ok) {
       gl.deleteProgram(q.p);
-      if (!gl.isContextLost()) this.instBroken = true;
-      return null;
+      return gl.isContextLost() ? null : false;
     }
     const prog: Prog = { p: q.p, u: new Map(), ...progFlags(all) };
     this.variants.set(key, prog);
@@ -2718,7 +2728,7 @@ export class Renderer3d {
    * 0.43.0 이번 그리기의 PBR 상태(PBR 필드가 없거나 쓸 것이 없으면 null — 0.42.0 셰이더). 올라가지 않은 그림은 없는 것처럼 본다(pbr.ts pbrState)
    */
   pbrStateOf(r: MeshRec): PbrState | null {
-    if (!r.pbr || !this.pbr) return null;
+    if (!r.pbr || !this.pbr || this.pbrBroken) return null;
     return pbrState(r.pbr, (id) => !!this.readyTex(id), r.attrs.uvN > 0);
   }
 
@@ -3215,14 +3225,22 @@ export class Renderer3d {
      */
     const progFor = (r: MeshRec, usePbr = true): Prog => {
       const pd = usePbr ? pbrDefsOf(r) : [];
-      if (!backOf(r) && !pd.length) return texOfR(r) ? texProg() : sceneMeshProg();
-      const defs = [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(texOfR(r) ? ['TEX'] : [])];
-      if (backOf(r)) {
-        defs.push('BACK');
-        if (!noTex && this.backTexOf(r)) defs.push('BACKTEX');
+      const defs = (): string[] => {
+        const d = [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(texOfR(r) ? ['TEX'] : [])];
+        if (backOf(r)) {
+          d.push('BACK');
+          if (!noTex && this.backTexOf(r)) d.push('BACKTEX');
+        }
+        return d;
+      };
+      if (pd.length && !this.pbrBroken) {
+        // 0.43.0 PBR 변종은 기다리지 않고 번역한다(병렬 번역이면 다 될 때까지 0.42.0 변종으로 — 뷰어가 다음 프레임에 다시 그린다)
+        const p = this.asyncVariant('mesh', [...defs(), ...pd]);
+        if (p) return p;
+        if (p === false) this.pbrBroken = true;
       }
-      defs.push(...pd);
-      return this.variant('mesh', defs);
+      if (!backOf(r)) return texOfR(r) ? texProg() : sceneMeshProg();
+      return this.variant('mesh', defs());
     };
     /** 묶음 안 구간이 있으면 [보통, 강조] 그릴 목록(없으면 null — 옛 캐시는 지운다). wire면 와이어프레임용 */
     const meshLists = (r: MeshRec, wire = false): [DrawList, DrawList] | null => {

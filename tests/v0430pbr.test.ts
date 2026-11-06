@@ -363,6 +363,22 @@ describe('뷰어의 PBR 그림(0.43.0)', () => {
     expect(pbrKind(drawOf(frame(w), COL.a)[0]!)).toBe('u_nscale');
   });
 
+  it('병렬 번역(KHR_parallel_shader_compile)이면 PBR 변종이 다 될 때까지 0.42.0 변종으로 그리고 기다리는 수를 알린 뒤, 다 되면 PBR로', async () => {
+    const w = view(scene());
+    await until(() => w.v.stats.textures.ready === 3);
+    const r = (w.v as unknown as { renderer: { parallel: object | null } }).renderer;
+    r.parallel = {};
+    w.gl.compileDone = false;
+    let d = frame(w);
+    expect([COL.a, COL.b, COL.c].map((c) => pbrKind(drawOf(d, c)[0]!))).toEqual(['legacy', 'legacy', 'legacy']);
+    // 판 a·b·c의 PBR 변종 셋(법선만 · 법선+PBR+무늬+뒷면 · PBR)
+    expect(w.v.stats.instanced.pending).toBe(3);
+    w.gl.compileDone = true;
+    d = frame(w);
+    expect([COL.a, COL.b, COL.c].map((c) => pbrKind(drawOf(d, c)[0]!))).toEqual(['u_nscale', 'u_nscale+u_pbr', 'u_pbr']);
+    expect(w.v.stats.instanced.pending).toBe(0);
+  });
+
   it('같은 PBR 그물 12자리는 PBR 인스턴싱 변종으로 모아 그리고, 색을 바꾼 자리는 PBR 없이 따로 묶인다', async () => {
     const s = scene();
     const b = s.meshes[2]!;
