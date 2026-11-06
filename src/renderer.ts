@@ -692,6 +692,8 @@ export class Renderer3d {
   private profileP: Prog | null = null;
   /** 0.49.0 주변 가림: 반 해상도 R8 그림 둘(가림 → 가로 흐림 → 세로 흐림 — 번갈아)과 그 프로그램 셋(처음 켤 때 만든다) */
   private aoTex: { a: { tex: WebGLTexture; fb: WebGLFramebuffer }; b: { tex: WebGLTexture; fb: WebGLFramebuffer }; w: number; h: number } | null = null;
+  /** 0.50.0 움직이는 동안 'low'의 ¼ 해상도 그림 둘(반 해상도 그림과 따로 둔다 — 움직임을 시작·멈출 때마다 다시 만들지 않게) */
+  private aoLow: Renderer3d['aoTex'] = null;
   private aoFailed = '';
   private aoP: Prog | null = null;
   private aoBlurP: Prog | null = null;
@@ -872,6 +874,7 @@ export class Renderer3d {
     this.profCol = null;
     this.profileP = null;
     this.aoTex = null;
+    this.aoLow = null;
     this.aoFailed = '';
     this.aoP = null;
     this.aoBlurP = null;
@@ -1123,13 +1126,17 @@ export class Renderer3d {
     this.profTex = null;
   }
 
-  /** 0.49.0 주변 가림 반 해상도 그림 둘(크기가 바뀌면 다시 만든다). 만들지 못하면 null(그 크기는 다시 시도하지 않는다 — 가림 없이 그린다) */
-  private aoTargets(w: number, h: number): NonNullable<Renderer3d['aoTex']> | null {
-    const [hw, hh] = aoSize(w, h);
-    const t = this.aoTex;
+  /**
+   * 0.49.0 주변 가림 반 해상도 그림 둘(크기가 바뀌면 다시 만든다). 만들지 못하면 null(그 크기는 다시 시도하지 않는다 — 가림 없이 그린다).
+   * 0.50.0 div 4(움직이는 동안 'low')는 ¼ 해상도 그림 둘을 따로 둔다
+   */
+  private aoTargets(w: number, h: number, div = 2): NonNullable<Renderer3d['aoTex']> | null {
+    const low = div !== 2;
+    const [hw, hh] = aoSize(w, h, div);
+    const t = low ? this.aoLow : this.aoTex;
     if (t && t.w === hw && t.h === hh) return t;
-    this.dropAo();
-    if (this.aoFailed === `${hw}x${hh}`) return null;
+    this.dropAo(low);
+    if (this.aoFailed === `${low ? 'low:' : ''}${hw}x${hh}`) return null;
     const gl = this.gl;
     const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     const made: { tex: WebGLTexture; fb: WebGLFramebuffer }[] = [];
@@ -1155,21 +1162,27 @@ export class Renderer3d {
         gl.deleteFramebuffer(m.fb);
         gl.deleteTexture(m.tex);
       }
-      this.aoFailed = `${hw}x${hh}`;
+      this.aoFailed = `${low ? 'low:' : ''}${hw}x${hh}`;
       return null;
     }
-    this.aoTex = { a: made[0]!, b: made[1]!, w: hw, h: hh };
-    return this.aoTex;
+    const rec = { a: made[0]!, b: made[1]!, w: hw, h: hh };
+    if (low) this.aoLow = rec;
+    else this.aoTex = rec;
+    return rec;
   }
 
-  private dropAo(): void {
-    const t = this.aoTex;
-    if (!t) return;
-    for (const m of [t.a, t.b]) {
-      this.gl.deleteFramebuffer(m.fb);
-      this.gl.deleteTexture(m.tex);
+  /** 가림 그림을 놓는다: low를 주면 그 하나(false = 반 해상도, true = ¼), 없으면 둘 다 */
+  private dropAo(low?: boolean): void {
+    for (const k of low === undefined ? ([false, true] as const) : [low]) {
+      const t = k ? this.aoLow : this.aoTex;
+      if (!t) continue;
+      for (const m of [t.a, t.b]) {
+        this.gl.deleteFramebuffer(m.fb);
+        this.gl.deleteTexture(m.tex);
+      }
+      if (k) this.aoLow = null;
+      else this.aoTex = null;
     }
-    this.aoTex = null;
   }
 
   /**
@@ -1178,7 +1191,7 @@ export class Renderer3d {
    */
   private drawAo(f: ViewFrame, devW: number, devH: number, ao: AoParams, target: WebGLFramebuffer | null, transparent: boolean, stats: RenderStats): boolean {
     const gl = this.gl;
-    const t = this.aoTargets(devW, devH);
+    const t = this.aoTargets(devW, devH, ao.div ?? 2);
     const inv = mat4Invert(f.proj);
     if (!t || !this.profTex || !inv) return false;
     const invProj = Float32Array.from(inv);
@@ -3723,7 +3736,9 @@ export class Renderer3d {
     } else if (this.shadowMap) this.dropShadow();
     // 0.49.0 주변 가림: 음영 계열(숨은 선 빼고)에서만. 끄면 그 그림도 놓는다
     const aoOn = !!st.ao && shadedLike && mode !== 'hiddenLine';
-    if (!aoOn && this.aoTex) this.dropAo();
+    if (!aoOn && (this.aoTex || this.aoLow)) this.dropAo();
+    // 0.50.0 움직이는 동안 'off'(hold): 이 그림은 가림 없이 — 그림·깊이 버퍼는 놓지 않고 둔다(멈추면 다시 쓴다)
+    const aoDraw = aoOn && !st.ao!.hold;
     // 외곽선을 끄면 깊이 그림 버퍼도 놓는다(0.49.0 주변 가림이 쓰는 동안은 둔다)
     if (!st.profiles && !aoOn && this.profTex) this.dropProfile();
 
@@ -3853,7 +3868,7 @@ export class Renderer3d {
     // 1d) 0.49.0 주변 가림: 불투명 그물 깊이(외곽선과 같은 깊이 그림 — 아래 2c가 다시 쓴다)에서 셈해 지금 그림에 곱한다.
     // 선·점·격자·반투명 면은 이 뒤에 그려 가리지 않는다. 깊이를 그리는 그리기 수·삼각형·인스턴싱 셈은 늘리지 않는다(2c와 같다)
     let depthDone = false;
-    if (aoOn && st.ao && visibleMeshes.some((r) => !transOf(r))) {
+    if (aoDraw && st.ao && visibleMeshes.some((r) => !transOf(r))) {
       const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
       const fb = this.profileTarget(devW, devH);
       if (fb) {

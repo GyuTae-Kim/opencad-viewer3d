@@ -169,7 +169,7 @@ export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cube
 export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
 export { INSTANCE_MIN } from './renderer';
 export { PBR_DEFAULT_ROUGHNESS, PBR_MAX_EXPONENT, type PbrSource, type PbrState, pbrSource, pbrState, specExponent } from './pbr';
-export { AO_MAX_INTENSITY, AO_MAX_PIXELS, AO_RADIUS_RATIO, AO_SAMPLES, type AmbientOcclusionOptions, type AoParams, aoParams, aoSize } from './ao';
+export { AO_LOW_DIV, AO_MAX_INTENSITY, AO_MAX_PIXELS, AO_RADIUS_RATIO, AO_SAMPLES, type AmbientOcclusionOptions, type AoMoving, type AoParams, aoParams, aoSize } from './ao';
 export {
   COORD_LIMIT,
   SCENE_ISSUE_MESSAGES,

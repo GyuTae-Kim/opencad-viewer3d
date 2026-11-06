@@ -2880,7 +2880,8 @@ export class Viewer3d {
   /**
    * 0.49.0 주변 가림(SSAO, 기본 꺼짐 — SKP 45차 요청): 면이 만나는 구석·틈을 어둡게 해 깊이를 읽기 쉽게 한다. 음영 계열 모드(음영·음영+윤곽·단색·무늬 없음)의 불투명 면만,
    * 선·점·격자·반투명 면은 그대로. radius = 가림을 보는 거리(세계 단위, 기본 보이는 범위 대각선의 2%), intensity = 세기(기본 1, 0~4 — 0이면 끔).
-   * true·{}면 기본 값, null·false면 끈다(끄면 그림·GL 호출이 0.48.0과 같다). 반 해상도로 셈하고 흐려 장치 화소에 곱한다(src/ao.ts)
+   * true·{}면 기본 값, null·false면 끈다(끄면 그림·GL 호출이 0.48.0과 같다). 반 해상도로 셈하고 흐려 장치 화소에 곱한다(src/ao.ts).
+   * 0.50.0 moving: 카메라를 옮기는 동안 'off'(가림 없이 — 멈춘 첫 그림부터 다시)·'low'(¼ 해상도). 기본 'keep'은 0.49.0과 같다
    */
   setAmbientOcclusion(o: AmbientOcclusionOptions | boolean | null): void {
     this.aoOpt = !o ? null : o === true ? {} : { ...o };
@@ -8235,7 +8236,8 @@ export class Viewer3d {
         : null,
       ...this.lineColorState(colors.background),
       // 0.49.0 주변 가림(끄면 필드를 넣지 않는다 — 0.48.0과 같은 상태). 기본 거리는 보이는 범위 대각선의 2%
-      ...(this.aoOpt ? { ao: aoParams(this.aoOpt, boxSphere(this.visibleBox()).radius * 2) } : {}),
+      // 0.50.0: 카메라를 옮기는 동안(끌기·휠·손가락 몸짓 — interacting, flyTo 등 움직임 — anim)이면 moving 선택('off'·'low')을 따른다(없거나 'keep'이면 0.49.0과 같은 값)
+      ...(this.aoOpt ? { ao: aoParams(this.aoOpt, boxSphere(this.visibleBox()).radius * 2, this.interacting || !!this.anim) } : {}),
     };
   }
 
