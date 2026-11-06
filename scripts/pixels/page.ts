@@ -8423,7 +8423,7 @@ const aoFlyEndValues: ValueSet = {
  * 0.50.0 값(기존 secrange 자료를 다시 쓴다 — 새 장면 없음): 앱이 깨진 파일에서 만들 수 있는 값을 secrange 그물('판재')·선분('기준선')의 사본에 넣거나,
  * 깨진 그물 하나를 판 옆에 더해 실제 WebGL2(SwiftShader)로 그린다. 바꾼 것마다
  * [이름, GL 오류(getError로 비운 값들), 예외(없으면 null), 카메라가 유한한지, 멀쩡한 장면 그림과 다른 화소 수, 바탕이 아닌 화소 수, 그 평균 상대 휘도(× 1000),
- *  장면 알림(sceneIssues가 있는 판 — 코드:조치 목록, 없으면 'no-api')].
+ *  장면 알림(sceneIssues가 있는 판 — 코드:조치 목록, 없으면 'no-api')]. 끝 줄은 0.50.0 주변 가림 moving 값(아래 (2)).
  * 0.49.0까지는 깨진 값을 거르지 않는다 — 이 묶음은 base와 값이 다른 것이 의도한 변화다(pixels-changed)
  */
 const inputFuzzValues: ValueSet = {
@@ -8525,7 +8525,47 @@ const inputFuzzValues: ValueSet = {
         const issues = Array.isArray(v.sceneIssues) ? (v.sceneIssues as { code: string; action: string }[]).map((i) => `${i.code}:${i.action}`) : 'no-api';
         out.push([name, e, threw, finiteCam(), img && ref ? diff(img, ref) : -1, ...(img ? fg(img) : [-1, -1]), issues]);
       }
+      // (2) 0.50.0 주변 가림 moving(같은 secrange 자료): 카메라를 옮기는 중(끌기 — 뷰어 안 상태를 그 그림 동안만 켠다)인 그림을 moving마다 찍어
+      // [moving, 멈춘 가림 그림과 다른 화소, 가림 끈 그림과 다른 화소(가림이 바꾼 화소), 그 화소의 밝기 비(켬/끔) 평균], 마지막에 다시 멈춘 그림이 처음과 같은지.
+      // moving 선택이 없는 판(0.49.0)은 셋 모두 'keep'과 같은 그림이다
+      if (typeof v.setAmbientOcclusion === 'function') {
+        v.setScene(clean);
+        v.setView('seIso', false);
+        v.fit(false);
+        v.setRenderMode('shadedEdges');
+        const shot = (): ImageData => {
+          v.renderNow();
+          return v.renderImage({});
+        };
+        const vs = (on: ImageData, off: ImageData): [number, number] => {
+          let n = 0, s = 0;
+          for (let i = 0; i < on.data.length; i += 4)
+            if (on.data[i] !== off.data[i] || on.data[i + 1] !== off.data[i + 1] || on.data[i + 2] !== off.data[i + 2]) {
+              n++;
+              s += (lum255(on.data, i) + 1e-6) / (lum255(off.data, i) + 1e-6);
+            }
+          return [n, n ? Math.round((s / n) * 1000) / 1000 : 1];
+        };
+        v.setAmbientOcclusion(null);
+        const off = shot();
+        v.setAmbientOcclusion({});
+        const still = shot();
+        const mv = v as unknown as { interacting: boolean };
+        const rows: unknown[] = ['ao-moving', vs(still, off)];
+        for (const m of ['keep', 'off', 'low'] as const) {
+          v.setAmbientOcclusion({ moving: m });
+          mv.interacting = true;
+          const img = shot();
+          mv.interacting = false;
+          rows.push([m, diff(img, still), ...vs(img, off)]);
+        }
+        rows.push(diff(shot(), still));
+        v.setAmbientOcclusion(null);
+        out.push(rows);
+      }
     } finally {
+      (v as unknown as { interacting: boolean }).interacting = false;
+      if (typeof v.setAmbientOcclusion === 'function') v.setAmbientOcclusion(null);
       v.setScene(clean);
       v.setView('seIso', false);
       v.fit(false);
