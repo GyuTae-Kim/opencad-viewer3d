@@ -36,7 +36,9 @@ export type {
   KeyboardCursorState,
   KeyboardSnapAnnouncement,
   KeyboardSnapOptions,
+  KeyPickCycleOptions,
   MeasureCandidatesOptions,
+  PickCandidatesOptions,
   PointerClaimHandler,
   PointerClaimQuery,
   PointerHoldEnd,
@@ -61,6 +63,7 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
+export { PICK_CANDIDATES_MAX, samePickTarget } from './scenepick';
 export type {
   InferenceLock,
   InferenceLockInput,

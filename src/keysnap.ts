@@ -164,14 +164,14 @@ export function keyLabel(s: string): string {
 
 /**
  * 키 안내 글(가상 커서를 켤 때 알림 끝에 붙인다): '옮기기 ←→↑↓ · 후보 Tab · 찍기 Enter · 끄기 Esc'. 할 일마다 첫 키, 끈 할 일은 뺀다.
- * mode가 'pick'이면 후보 돌리기를 빼고 찍기 대신 고르기다
+ * mode가 'pick'이면 찍기 대신 고르기이고, 후보 돌리기는 pickCycle일 때만 넣는다(0.47.0 — 주지 않으면 0.46.0처럼 뺀다)
  */
-export function keySnapHint(keys: KeySnapKeys, mode: 'measure' | 'pick'): string {
+export function keySnapHint(keys: KeySnapKeys, mode: 'measure' | 'pick', pickCycle = false): string {
   const first = (a: KeySnapAction): string | null => (keys[a].length ? keyLabel(keys[a][0]!) : null);
   const move = (['left', 'right', 'up', 'down'] as const).map(first).filter((s): s is string => !!s);
   const parts: string[] = [];
   if (move.length) parts.push(`옮기기 ${move.every((s) => s.length === 1) ? move.join('') : move.join(' ')}`);
-  const nx = mode === 'measure' ? first('next') : null;
+  const nx = mode === 'measure' || pickCycle ? first('next') : null;
   if (nx) parts.push(`후보 ${nx}`);
   const cm = first('commit');
   if (cm) parts.push(`${mode === 'measure' ? '찍기' : '고르기'} ${cm}`);
