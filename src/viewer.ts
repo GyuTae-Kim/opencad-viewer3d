@@ -229,13 +229,17 @@ import {
   KEY_STEP_PX,
   type KeySnapAction,
   type KeySnapKeys,
-  PICK_KIND_LABELS,
+  type KeySnapMessageKey,
+  type KeySnapMessages,
   candidateText,
+  formatKeySnapMessage,
   inPoints,
   keySnapAction,
   keySnapHint,
+  keySnapMessages,
   moveKeyCursor,
   normalizeKeySnapKeys,
+  orderedText,
   pointText,
   samePoint3,
   skipPoints,
@@ -764,6 +768,11 @@ export interface KeyboardSnapOptions {
    * 객체면 후보를 고를 선택(edges·meshesOnly·throughTranslucent — 앱의 onPick 선택과 맞춘다). false면 0.46.0처럼 고르기 모드의 Tab은 브라우저 초점 이동 그대로다
    */
   pickCycle?: boolean | KeyPickCycleOptions;
+  /**
+   * 0.47.0 알림 글 틀: 열쇠 → 틀 글({0}·{1} 자리 — KEY_SNAP_MESSAGES의 열쇠와 자리 뜻). 준 열쇠만 바꾸고 나머지는 기본(한국어 — 0.46.0 글과 같다).
+   * 앱 다국어 사전의 같은 열쇠 틀을 그대로 넣는다(알림 값은 그대로 — 값으로 제 글을 만들어도 된다)
+   */
+  messages?: Partial<Record<KeySnapMessageKey, string>>;
 }
 
 /** 키보드 고르기 후보 돌리기 선택(0.47.0 KeyboardSnapOptions.pickCycle — pickCandidates·pick 선택과 같은 뜻, 포인터 종류는 'keyboard') */
@@ -794,7 +803,7 @@ export interface KeyboardSnapAnnouncement {
   /** 'commit'(측정): 찍은 점(measurePoints의 마지막 것), 두 점째면 측정 결과도 */
   point?: MeasurePoint;
   measurement?: MeasureResult;
-  /** 코어 기본 한국어 글(앱이 다른 말로 읽게 하려면 위 값으로 만든다) */
+  /** 코어 기본 한국어 글(앱이 다른 말로 읽게 하려면 위 값으로 만들거나 0.47.0 KeyboardSnapOptions.messages로 틀을 준다) */
   text: string;
 }
 
@@ -1722,6 +1731,8 @@ export class Viewer3d {
     src: KeyboardSnapOptions;
     /** 0.47.0 고르기 모드 후보 돌리기 선택(끄면 null — 0.46.0 고르기 모드) */
     pickCycle: KeyPickCycleOptions | null;
+    /** 0.47.0 알림 글 틀(기본과 합친 것) */
+    msgs: KeySnapMessages;
   } | null = null;
   /**
    * 0.46.0 가상 커서(켰을 때만): 자리(CSS 화소)·지금 후보 차례·그 자리 측정 후보 목록, 고르기 모드면 커서 아래 고른 것,
@@ -4137,6 +4148,7 @@ export class Viewer3d {
       announce: typeof src.announce === 'function' ? src.announce : null,
       src,
       pickCycle: pc === false || pc === null ? null : typeof pc === 'object' ? { edges: pc.edges, meshesOnly: !!pc.meshesOnly, throughTranslucent: !!pc.throughTranslucent } : {},
+      msgs: keySnapMessages(src.messages),
     };
     // 고르기 모드에서 켜진 커서는 새 pickCycle로 그 자리를 다시 구한다(알리지 않는다 — 측정 모드는 0.46.0 그대로 두어 차례를 지킨다)
     if (this.keyCur && !this.measuring) {
@@ -7182,7 +7194,7 @@ export class Viewer3d {
       if (this.tracker) this.dwell(null, null);
     }
     this.invalidate();
-    if (say && this.keySnap?.announce) this.keySnap.announce({ reason: 'end', mode, x: c.x, y: c.y, snap: null, index: 0, count: 0, pick: null, text: '가상 커서를 껐습니다' });
+    if (say && this.keySnap?.announce) this.keySnap.announce({ reason: 'end', mode, x: c.x, y: c.y, snap: null, index: 0, count: 0, pick: null, text: this.keySnap.msgs.end });
   }
 
   /** 측정 모드의 첫 점에서 지금 후보까지 거리(첫 점만 찍었을 때) */
@@ -7191,11 +7203,12 @@ export class Viewer3d {
     return a && p ? Math.hypot(p[0]! - a[0], p[1]! - a[1], p[2]! - a[2]) : null;
   }
 
-  /** 고른 것의 글: '이름 면'(이름이 없으면 id) */
-  private pickText(p: Pick3d): string {
+  /** 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*) */
+  private pickText(p: Pick3d, msgs: KeySnapMessages): string {
     const it = this.items.get(p.id);
     const name = (it?.item.name || p.id).trim() || p.id;
-    return `${name} ${p.section ? '잘린 면' : PICK_KIND_LABELS[p.kind]}`;
+    const kind: KeySnapMessageKey = p.section ? 'pick.section' : `pick.${p.kind}`;
+    return formatKeySnapMessage(msgs.pickItem, [name, msgs[kind]]);
   }
 
   /** 알림을 만들어 앱에 넘긴다(extra = 찍은 점·측정 결과, lead = 지금 후보 글 대신 쓸 글) */
@@ -7208,14 +7221,16 @@ export class Viewer3d {
     const snap = mode === 'measure' ? this.measureHoverSnap : null;
     const count = this.keyCount(c);
     const index = count ? c.index : 0;
+    // 0.47.0: 글은 글 틀(setKeyboardSnap messages — 주지 않으면 0.46.0과 같은 한국어)
+    const M = ks.msgs;
     let body: string;
-    if (mode === 'measure') body = candidateText(snap ? { kind: snap.snap, axis: snap.axis, locked: snap.locked, point: snap.point } : null, index, count, num, this.keyDistance(snap?.point ?? null), unit);
+    if (mode === 'measure') body = candidateText(snap ? { kind: snap.snap, axis: snap.axis, locked: snap.locked, point: snap.point } : null, index, count, num, this.keyDistance(snap?.point ?? null), unit, M);
     // 0.47.0: 고르기 후보가 둘 이상이면 차례('상자 면 2/3: …' — 측정 후보 글과 같은 꼴)
-    else body = c.pick ? `${this.pickText(c.pick)}${count > 1 ? ` ${index + 1}/${count}` : ''}: ${pointText(c.pick.point, num)}` : '고를 것이 없습니다';
+    else body = c.pick ? orderedText(this.pickText(c.pick, M), index, count, pointText(c.pick.point, num, M), null, M) : M.noPick;
     let text = body;
-    if (reason === 'start') text = `가상 커서를 켰습니다. ${body}. ${keySnapHint(ks.keys, mode, !!ks.pickCycle)}`;
+    if (reason === 'start') text = formatKeySnapMessage(M.start, [body, keySnapHint(ks.keys, mode, !!ks.pickCycle, M)]);
     else if (extra?.lead) text = extra.lead;
-    else if (reason === 'cycle' && count === 1) text = `${body} (후보 하나)`;
+    else if (reason === 'cycle' && count === 1) text = formatKeySnapMessage(M.only, [body]);
     const a: KeyboardSnapAnnouncement = { reason, mode, x: c.x, y: c.y, snap, index, count, pick: c.pick ? { ...c.pick, point: [...c.pick.point] as V3 } : null, text };
     if (extra?.point) a.point = extra.point;
     if (extra?.measurement) a.measurement = extra.measurement;
@@ -7288,6 +7303,7 @@ export class Viewer3d {
   /** 가상 커서 Enter: 측정 모드면 지금 후보를 찍고(그 자리에서 다시 구해 보인 후보와 같은 점을 찍는다), 아니면 그 자리를 누른 것처럼 고른다(onPick) */
   private keyCommit(e: KeyboardEvent): void {
     const c = this.keyCur!;
+    const M = this.keySnap!.msgs;
     if (!this.measuring) {
       const ev = { pointerType: KEY_POINTER, button: 0, altKey: e.altKey, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, metaKey: e.metaKey } as unknown as PointerEvent;
       // 0.47.0: 돌려 고른 후보(pickCycle — 같은 자리에서 다시 구해 같은 후보를 찾는다)가 둘째 이후면 그 후보를 고른다. 첫째·후보 없음은 0.46.0처럼 누르기와 같은 고르기
@@ -7295,13 +7311,13 @@ export class Viewer3d {
       if (this.keySnap?.pickCycle && c.index > 0 && c.picks[c.index]) this.keyPickCandidate(c, e);
       else this.click(c.x, c.y, ev, true);
       if (this.keyCur !== c) return;
-      this.keyAnnounce('commit', { lead: c.pick ? `골랐습니다: ${this.pickText(c.pick)}` : '빈 곳을 골랐습니다' });
+      this.keyAnnounce('commit', { lead: c.pick ? formatKeySnapMessage(M.picked, [this.pickText(c.pick, M)]) : M.pickedNothing });
       return;
     }
     this.keyRecompute(true);
     const ent = c.list[c.index];
     if (!ent) {
-      this.keyAnnounce('commit', { lead: '찍을 점이 없습니다' });
+      this.keyAnnounce('commit', { lead: M.noPoint });
       return;
     }
     this.refsSet(ent.after);
@@ -7315,8 +7331,8 @@ export class Viewer3d {
     const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
     const u = unit ? ` ${unit}` : '';
     const lead = m
-      ? `둘째 점을 찍었습니다. 거리 ${num(m.distance)}${u}, X 차 ${num(m.dx)}, Y 차 ${num(m.dy)}, Z 차 ${num(m.dz)}`
-      : `첫 점을 찍었습니다. ${snapKindText(point.snap, point.axis, point.locked)}: ${pointText(point.point, num)}`;
+      ? formatKeySnapMessage(M.secondPoint, [`${num(m.distance)}${u}`, num(m.dx), num(m.dy), num(m.dz)])
+      : formatKeySnapMessage(M.firstPoint, [snapKindText(point.snap, point.axis, point.locked, M), pointText(point.point, num, M)]);
     this.keyAnnounce('commit', { point, measurement: m, lead });
   }
 
