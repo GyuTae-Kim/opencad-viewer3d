@@ -195,8 +195,10 @@ export interface Scene3d {
  * 0.9.0 추론 붙잡기(setMeasureSnap({ inference })): 'intersection' = 두 선분의 3D 교차점, 'perpendicular' = 첫 점에서 선분으로 내린 수직 발,
  * 'axis' = 첫 점에서 X·Y·Z 축 방향 선 위(어느 축인지는 Viewer3d.measureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB).
  * 0.10.0: 'parallel' = 첫 점에서 커서가 앞서 지나간 선분과 나란한 선 위(setMeasureSnap({ inference: { parallel } }) — 방향은 MeasureResult.directionB)
+ * 0.38.0: 'tangent' = 접점(앱이 준 붙잡기 점 — 예: 측정 첫 점에서 곡선에 그은 접선이 곡선에 닿는 점, AutoCAD 접점 붙잡기). 코어는 접점을 구하지 않는다 —
+ * 앱이 SnapPoint.kind로 달면 표식이 동그라미와 그 위에 닿는 가로선(AutoCAD 접점 표식 꼴)이고 측정 결과(snapA·snapB)·미리 보기(measureHoverSnap.snap)에 그대로 실린다
  */
-export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis' | 'parallel';
+export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis' | 'parallel' | 'tangent';
 
 /**
  * 앱이 주는 측정 붙잡기 점(0.8.0, Viewer3d.setMeasureSnap의 points·pointsFor). 예: STEP 모서리 표가 아는 원·원호 중심, B-rep 모서리의 곡선 가운데 점
@@ -204,7 +206,7 @@ export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' |
 export interface SnapPoint {
   /** 세계 좌표(묶음 origin·matrix를 거친 값) */
   point: readonly number[];
-  /** 붙잡은 종류(기본 'point') — 마우스를 올렸을 때 표식 모양과 측정 결과(MeasureResult.snapA·snapB)에 쓴다 */
+  /** 붙잡은 종류(기본 'point') — 마우스를 올렸을 때 표식 모양과 측정 결과(MeasureResult.snapA·snapB)에 쓴다(0.38.0 접점은 'tangent') */
   kind?: SnapKind;
   /**
    * 이 점이 속한 묶음 id(선택). 주면 그 묶음이 숨었으면 빼고, 그 묶음을 자르는 단면 평면으로 자르며,

@@ -35,6 +35,7 @@ export type {
   PointerClaimQuery,
   PointerHoldEnd,
   PointerHoldHandler,
+  PointsForContext,
   ProjectedPoint,
   RangeSelection,
   ReleaseOptions,
