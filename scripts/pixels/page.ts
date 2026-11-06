@@ -7901,6 +7901,80 @@ const secRangeValues: ValueSet = {
   },
 };
 
+// ───────────── 0.45.0 구간 단면과 앱 붙잡기 점 ─────────────
+/** 0.45.0 project의 id·raw(구간 단면 판정 — SnapPoint.raw와 같은 규칙)가 있는 판인지: B 구간 단면의 잘린 쪽 점이 raw를 주면 안 보인다 */
+const v0450raw: Need = (v) => {
+  const why = v0440range(v, null as unknown as Ctx);
+  if (why) return why;
+  const q = [245, 100, 90];
+  v.setSections([{ normal: [1, 0, 0], offset: 220, items: SECRANGE_ITEMS }]);
+  const a = v.project(q), b = v.project(q, { id: '판재', raw: 24 });
+  v.setSections(null);
+  return a?.visible && b && !b.visible ? null : '이 판에 없는 선택: 0.45.0 SnapPoint.raw·project의 id·raw(구간 단면 판정)';
+};
+/**
+ * 앱 붙잡기 점(head만): 합친 판재·기준선의 점은 묶음 id + raw(기본 도형 번호), 나눈 장면은 그 묶음 id만 — B 윗면(잘린 쪽·남는 쪽)·A 윗면·판 윗면(평면 너머지만 판은 잘리지 않음)·
+ * 기준선 1(잘린 쪽·남는 쪽)·기준선 0
+ */
+function secRangeSnapPoints(merged: boolean): { point: number[]; kind: 'center' | 'point'; id: string; raw?: number }[] {
+  const P: [number[], 'center' | 'point', string, string, number][] = [
+    [[245, 100, 90], 'center', 'B', '판재', 24],
+    [[195, 100, 90], 'center', 'B', '판재', 26],
+    [[250, 80, 55], 'point', 'B', '판재', 30],
+    [[80, 100, 90], 'center', 'A', '판재', 12],
+    [[250, 30, 20], 'point', '판', '판재', 2],
+    [[260, 100, 100], 'center', '기준선 1', '기준선', 1],
+    [[180, 100, 100], 'center', '기준선 1', '기준선', 1],
+    [[150, 180, 20.5], 'point', '기준선 0', '기준선', 0],
+  ];
+  return P.map(([point, kind, split, id, raw]) => (merged ? { point, kind, id, raw } : { point, kind, id: split }));
+}
+/**
+ * 0.45.0 구간 단면과 앱 붙잡기 점 값(head만): 합친 판재 + B 구간 단면 + raw를 단 앱 점과 나눈 장면 + B 묶음 단면 + id만 단 앱 점의
+ * 화면 격자·앱 점 자리 측정 미리 보기(종류·점)와 project 보이는지가 같은지, 그리고 합친 쪽 값(바뀌면 드러나게)
+ */
+const secRangeSnapValues: ValueSet = {
+  name: 'secrange-snap-values',
+  data: 'secrange',
+  needs: v0450raw,
+  run: (c) => {
+    const { v, w, h } = c;
+    const r6 = (p: readonly number[]): number[] => p.map((x) => Math.round(x * 1e6) / 1e6);
+    const res: unknown[][] = [];
+    for (const merged of [true, false]) {
+      v.setScene(secRangeScene(!merged), { keepView: true });
+      loaded = null;
+      v.setRenderMode('shadedEdges');
+      v.setSections([{ normal: [1, 0, 0], offset: 220, items: merged ? SECRANGE_ITEMS : SECRANGE_SPLIT_ITEMS, caps: 'all' }]);
+      const pts = secRangeSnapPoints(merged);
+      v.setMeasureMode(true);
+      v.setMeasureSnap({ points: pts, midpoints: true, edges: true });
+      const one: unknown[] = [];
+      const look = (x: number, y: number): void => {
+        c.hover(x, y);
+        v.renderNow();
+        const s = v.measureHoverSnap;
+        one.push(s ? [s.snap, r6(s.point)] : null);
+      };
+      for (let y = 30; y < h; y += 60) for (let x = 30; x < w; x += 60) look(x + 0.37, y + 0.23);
+      for (const sp of pts) {
+        const s = c.at(sp.point);
+        if (s) look(s.x + 0.31, s.y + 0.17);
+        else one.push('off');
+      }
+      for (const sp of pts) one.push(v.project(sp.point, sp)?.visible ?? null);
+      v.setMeasureMode(false);
+      v.setMeasureSnap(null);
+      res.push(one);
+    }
+    v.setSections(null);
+    const [m, s] = res as [unknown[], unknown[]];
+    const kinds: Record<string, number> = {};
+    for (const r of m) if (Array.isArray(r)) kinds[String(r[0])] = (kinds[String(r[0])] ?? 0) + 1;
+    return [JSON.stringify(m) === JSON.stringify(s), kinds, m];
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8002,6 +8076,7 @@ const VALUES: ValueSet[] = [
   manyInst43Values,
   pbrValues,
   secRangeValues,
+  secRangeSnapValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
