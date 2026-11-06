@@ -679,6 +679,120 @@ void main() {
 }`;
 
 /**
+ * 0.49.0 주변 가림(SSAO, src/ao.ts): 반 해상도 그림에 화소마다 가림(1 = 가리지 않음)을 쓴다. 깊이 그림은 외곽선과 같은 맨 앞 불투명 깊이(장치 화소).
+ * 눈 공간 자리는 역투영으로(원근·평행·렌즈 이동 모두), 법선은 이웃 깊이 둘 가운데 가까운 쪽으로 다시 세운다(물체 경계를 넘지 않게).
+ * 표본은 원반 위 나선(12개 — 화소마다 돌림을 바꾸고 뒤 흐리기가 무늬를 지운다). 가림 거리(u_radius) 밖·눈 쪽으로 멀리 떨어진 표본은 세지 않아
+ * 앞 물체 둘레에 그늘 띠가 생기지 않는다
+ */
+export const AO_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform highp sampler2D u_depth;
+uniform mat4 u_invProj;
+uniform vec2 u_texel;
+uniform float u_radius;
+uniform float u_pxPerUnit;
+uniform float u_ortho;
+uniform float u_intensity;
+uniform float u_maxPx;
+out vec4 o_color;
+ivec2 SZ;
+// 깊이 그림 화소 가운데의 깊이·눈 공간 자리(가장 가까운 화소의 깊이를 그 화소 가운데 자리로 — 화소 안 어긋남이 기운 면에 줄무늬를 만들지 않게)
+float D(ivec2 p) { return texelFetch(u_depth, clamp(p, ivec2(0), SZ - 1), 0).r; }
+vec3 viewAt(ivec2 p, float d) {
+  vec2 uv = (vec2(clamp(p, ivec2(0), SZ - 1)) + 0.5) * u_texel;
+  vec4 q = u_invProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  return q.xyz / q.w;
+}
+void main() {
+  SZ = textureSize(u_depth, 0);
+  ivec2 c = ivec2(v_uv / u_texel);
+  float d = D(c);
+  if (d >= 1.0) { o_color = vec4(1.0); return; }
+  vec3 P = viewAt(c, d);
+  ivec2 ex = ivec2(1, 0), ey = ivec2(0, 1);
+  vec3 r = viewAt(c + ex, D(c + ex)) - P, l = P - viewAt(c - ex, D(c - ex));
+  vec3 u = viewAt(c + ey, D(c + ey)) - P, b = P - viewAt(c - ey, D(c - ey));
+  vec3 N = cross(abs(r.z) < abs(l.z) ? r : l, abs(u.z) < abs(b.z) ? u : b);
+  float nl = length(N);
+  if (nl <= 0.0) { o_color = vec4(1.0); return; }
+  N /= nl;
+  if (dot(N, P) > 0.0) N = -N;
+  float rad = u_radius * u_pxPerUnit / (u_ortho > 0.5 ? 1.0 : max(-P.z, 1e-12));
+  if (rad < 2.0) { o_color = vec4(1.0); return; }
+  rad = min(rad, u_maxPx);
+  float spin = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  float r2 = u_radius * u_radius;
+  float sum = 0.0;
+  for (int i = 0; i < 12; i++) {
+    float a = (float(i) + 0.5) / 12.0;
+    float t = a * 43.982297 + spin;
+    ivec2 q = c + ivec2(round(a * rad * vec2(cos(t), sin(t))));
+    float dq = D(q);
+    if (dq >= 1.0) continue;
+    vec3 v = viewAt(q, dq) - P;
+    float vv = dot(v, v);
+    if (vv >= r2) continue;
+    float c = dot(v, N) * inversesqrt(vv + 1e-6 * r2) - 0.15;
+    sum += max(c, 0.0) * (1.0 - vv / r2);
+  }
+  float A = clamp(1.0 - u_intensity * 4.0 * sum / 12.0, 0.0, 1.0);
+  o_color = vec4(A, A, A, 1.0);
+}`;
+
+/**
+ * 0.49.0 주변 가림 흐리기(반 해상도, 가로 또는 세로 한 번 — 9칸 가우스): 눈 공간 깊이 차가 가림 거리보다 큰 이웃(다른 물체·바탕)은 섞지 않는다
+ */
+export const AO_BLUR_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform highp sampler2D u_ao;
+uniform highp sampler2D u_depth;
+uniform mat4 u_invProj;
+uniform vec2 u_step;
+uniform float u_radius;
+out vec4 o_color;
+float Z(vec2 uv) {
+  float d = texture(u_depth, uv).r;
+  if (d >= 1.0) return -1e30;
+  vec4 p = u_invProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  return p.z / p.w;
+}
+void main() {
+  float z0 = Z(v_uv);
+  if (z0 <= -1e29) { o_color = vec4(1.0); return; }
+  float s = 0.0, w0 = 0.0;
+  for (int i = -4; i <= 4; i++) {
+    vec2 q = v_uv + float(i) * u_step;
+    float w = exp(-float(i * i) / 8.0) * max(0.0, 1.0 - abs(Z(q) - z0) / u_radius);
+    s += texture(u_ao, q).r * w;
+    w0 += w;
+  }
+  float A = w0 > 0.0 ? s / w0 : 1.0;
+  o_color = vec4(A, A, A, 1.0);
+}`;
+
+/**
+ * 0.49.0 주변 가림 곱하기(장치 화소): 바탕 화소·가리지 않은 화소는 버린다(섞기 ZERO·SRC_COLOR — 그림의 색에 가림을 곱하고 알파는 그대로).
+ * 깊이를 불투명 깊이 그림 값으로 두고 그림의 깊이와 견준다(LEQUAL) — 단면의 잘린 면 채우기처럼 깊이 그림에 없는 앞의 면에는 곱하지 않는다
+ * (그물 면은 다각형 치우침으로 그림 깊이가 깊이 그림보다 조금 뒤라 통과한다)
+ */
+export const AO_MIX_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform highp sampler2D u_ao;
+uniform highp sampler2D u_depth;
+out vec4 o_color;
+void main() {
+  float d = texture(u_depth, v_uv).r;
+  if (d >= 1.0) discard;
+  float a = texture(u_ao, v_uv).r;
+  if (a >= 0.998) discard;
+  gl_FragDepth = d;
+  o_color = vec4(a, a, a, 1.0);
+}`;
+
+/**
  * 하늘·땅 바탕(0.7.0): 화소마다 눈에서 본 세계 방향의 높이(z 성분)로 지평선 위는 하늘(지평선 색 → 꼭대기 색),
  * 아래는 땅(지평선 색 → 바닥 색)을 칠한다. 평행 투영도 같은 시야각의 원근 방향으로 셈해 지평선이 앙각을 따라 움직인다.
  */

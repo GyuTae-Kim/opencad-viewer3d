@@ -192,6 +192,7 @@ import {
   sliceRange,
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
+import { type AmbientOcclusionOptions, aoParams } from './ao';
 import { countIdsUpTo } from './playback';
 import { type AnimateSetting, CAMERA_MOVE_MS, type FlyToOptions, moveDuration, normalizeAnimate, resolveAnimate, watchReducedMotion } from './motion';
 import { DRAG_START_PX, type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
@@ -1843,6 +1844,8 @@ export class Viewer3d {
   /** 해 조명·그림자, 안개 */
   private lightOpt: LightingOptions | null = null;
   private fogOpt: FogOptions | null = null;
+  /** 0.49.0 주변 가림 선택(끄면 null) */
+  private aoOpt: AmbientOcclusionOptions | null = null;
   /** 그림자 깊이 그림 판(그림자를 바꾸는 상태가 바뀔 때마다 늘린다) */
   private shadowVer = 0;
   /** 보여 주기 선택(외곽선·숨은 점선) */
@@ -2813,6 +2816,21 @@ export class Viewer3d {
 
   get fog(): FogOptions | null {
     return this.fogOpt ? { ...this.fogOpt } : null;
+  }
+
+  /**
+   * 0.49.0 주변 가림(SSAO, 기본 꺼짐 — SKP 45차 요청): 면이 만나는 구석·틈을 어둡게 해 깊이를 읽기 쉽게 한다. 음영 계열 모드(음영·음영+윤곽·단색·무늬 없음)의 불투명 면만,
+   * 선·점·격자·반투명 면은 그대로. radius = 가림을 보는 거리(세계 단위, 기본 보이는 범위 대각선의 2%), intensity = 세기(기본 1, 0~4 — 0이면 끔).
+   * true·{}면 기본 값, null·false면 끈다(끄면 그림·GL 호출이 0.48.0과 같다). 반 해상도로 셈하고 흐려 장치 화소에 곱한다(src/ao.ts)
+   */
+  setAmbientOcclusion(o: AmbientOcclusionOptions | boolean | null): void {
+    this.aoOpt = !o ? null : o === true ? {} : { ...o };
+    this.invalidate();
+  }
+
+  /** 0.49.0 주변 가림 선택(준 그대로 — 끄면 null) */
+  get ambientOcclusion(): AmbientOcclusionOptions | null {
+    return this.aoOpt ? { ...this.aoOpt } : null;
   }
 
   /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr) */
@@ -8143,6 +8161,8 @@ export class Viewer3d {
           }
         : null,
       ...this.lineColorState(colors.background),
+      // 0.49.0 주변 가림(끄면 필드를 넣지 않는다 — 0.48.0과 같은 상태). 기본 거리는 보이는 범위 대각선의 2%
+      ...(this.aoOpt ? { ao: aoParams(this.aoOpt, boxSphere(this.visibleBox()).radius * 2) } : {}),
     };
   }
 
