@@ -18,7 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "pixels": "node scripts/pixels/run.mjs",
-    "bench:edit": "node scripts/bench/edit.mjs"
+    "bench:edit": "node scripts/bench/edit.mjs",
+    "bench:many": "node scripts/bench/many.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
