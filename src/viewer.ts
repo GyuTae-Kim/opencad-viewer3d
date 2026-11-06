@@ -157,7 +157,17 @@ import {
 import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText, measureDigits, measureNumber } from './annotate';
-import { type ClosestResult, type ClosestShape, closestBetween } from './closest';
+import {
+  type ClosestResult,
+  ClosestSearch,
+  type ClosestShape,
+  type ClosestSliceStats,
+  closestBetween,
+  closestKey,
+  closestSlice,
+  sameClosestKey,
+  sliceRange,
+} from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
 import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
@@ -395,6 +405,25 @@ export interface WalkOptions {
  */
 export interface PointsForContext {
   first: V3 | null;
+}
+
+/**
+ * 두 묶음 최근접점 선택(Viewer3d.closestPoints·closestPointsAsync): maxDistance = 그보다 멀면 찾지 않고 null,
+ * 0.41.0 indices = 결과에 두 점이 놓인 기본 도형 번호(rawA·rawB — Pick3d.raw, indexA·indexB — Pick3d.index와 같은 뜻)를 싣는다(기본 꺼짐 — 끄면 0.40.0과 같은 필드)
+ */
+export interface ClosestPointsOptions {
+  maxDistance?: number;
+  indices?: boolean;
+}
+
+/**
+ * 나눠 돌리는 최근접점 선택(0.41.0 Viewer3d.closestPointsAsync): signal = 멈추기(AbortSignal — 멈추면 그 reason으로 거절),
+ * sliceMs = 한 조각 시간(기본 CLOSEST_SLICE_MS = 8 ms, 1000 위는 1000), stats = 0으로 채운 기록 객체를 주면 조각 수·가장 긴 조각·다시 찾은 횟수를 적는다
+ */
+export interface ClosestPointsAsyncOptions extends ClosestPointsOptions {
+  signal?: AbortSignal | null;
+  sliceMs?: number;
+  stats?: ClosestSliceStats | null;
 }
 
 /**
@@ -3841,23 +3870,103 @@ export class Viewer3d {
    * 두 묶음(그물·선분·점 묶음 id) 사이 가장 가까운 두 점과 거리(세계 좌표). 묶음 원점·행렬을 반영하고 숨긴 구간은 뺀다.
    * 이미 만든 BVH를 쓴다(없으면 만든다). 서로 걸치면 거리 0. maxDistance를 주면 그보다 멀면 null. 없는 id·빈 묶음도 null
    */
-  closestPoints(idA: string, idB: string, opts: { maxDistance?: number } = {}): ClosestResult | null {
+  closestPoints(idA: string, idB: string, opts: ClosestPointsOptions = {}): ClosestResult | null {
     const a = this.closestShape(idA), b = this.closestShape(idB);
     if (!a || !b) return null;
-    return closestBetween(a, b, opts);
+    return this.closestIds(idA, idB, closestBetween(a, b, opts));
   }
 
-  private closestShape(id: string): ClosestShape | null {
+  /**
+   * closestPoints를 시간 조각으로 나눠 돌린다(0.41.0 — 화면을 멈추지 않게). 조각마다 sliceMs(기본 CLOSEST_SLICE_MS = 8 ms)를 넘기 전에 멈추고
+   * 다음 작업(MessageChannel — 없으면 setTimeout 0)으로 넘겼다가 이어 간다. 답(두 점·거리·indices면 번호)은 끝날 때의 장면으로 부른 closestPoints와 바이트까지 같다
+   * (같은 BVH를 같은 차례로 내려간다). 그 사이 두 묶음의 모양(그물 바꾸기·지우기, 묶음 행렬·원점, 숨긴 구간, BVH)이 바뀌면 처음부터 다시 찾는다.
+   * 없는 id·빈 묶음·maxDistance보다 멀면 null, 뷰어를 닫으면 null. signal이 멈추면 signal.reason으로 거절한다.
+   * 아직 BVH가 없는 묶음은 그 묶음 BVH를 한 작업에서 만든 뒤 쉰다(BVH 만들기는 나누지 않는다 — 장면을 올린 뒤 쉬는 틈에 미리 만든다)
+   */
+  async closestPointsAsync(idA: string, idB: string, opts: ClosestPointsAsyncOptions = {}): Promise<ClosestResult | null> {
+    const signal = opts.signal ?? null;
+    signal?.throwIfAborted();
+    const ms = sliceRange(opts.sliceMs);
+    const st = opts.stats ?? null;
+    // 쉬는 길: MessageChannel(브라우저의 setTimeout 0은 다섯 번째부터 4 ms 넘게 미뤄진다), 없으면 setTimeout 0
+    const ch = typeof MessageChannel === 'function' ? new MessageChannel() : null;
+    let wake: (() => void) | null = null;
+    if (ch) ch.port1.onmessage = () => wake?.();
+    const wait = (): Promise<void> =>
+      new Promise<void>((res) => {
+        wake = res;
+        if (ch) ch.port2.postMessage(0);
+        else setTimeout(res, 0);
+      });
+    const now = (): number => performance.now();
+    try {
+      for (;;) {
+        // 모양 잡기: BVH가 없으면 그 묶음 것만 만들고 쉰다
+        let a = this.closestShape(idA, false);
+        if (!a) {
+          if (this.disposed || !this.items.has(idA) || !(a = this.closestShape(idA))) return null;
+          await wait();
+          signal?.throwIfAborted();
+          continue;
+        }
+        let b = this.closestShape(idB, false);
+        if (!b) {
+          if (this.disposed || !this.items.has(idB) || !(b = this.closestShape(idB))) return null;
+          await wait();
+          signal?.throwIfAborted();
+          continue;
+        }
+        const s = new ClosestSearch(a, b, opts);
+        const ka = closestKey(a), kb = closestKey(b);
+        let stale = false;
+        while (!closestSlice(s, ms, now, st)) {
+          await wait();
+          signal?.throwIfAborted();
+          if (this.disposed) return null;
+          // 모양이 바뀌었으면 처음부터
+          const a2 = this.closestShape(idA, false), b2 = this.closestShape(idB, false);
+          if (!a2 || !b2 || !sameClosestKey(ka, closestKey(a2)) || !sameClosestKey(kb, closestKey(b2))) {
+            stale = true;
+            if (st) st.restarts++;
+            break;
+          }
+        }
+        if (stale) continue;
+        return this.closestIds(idA, idB, s.result!);
+      }
+    } finally {
+      if (ch) {
+        ch.port1.onmessage = null;
+        ch.port1.close();
+        ch.port2.close();
+      }
+    }
+  }
+
+  /** 0.41.0 indices: 배열 안 번호(rawA·rawB)에 원본 식별 번호(indexA·indexB — segmentIds·pointIds, 그물이면 삼각형 번호 그대로)를 더한다 */
+  private closestIds(idA: string, idB: string, r: ClosestResult | null): ClosestResult | null {
+    if (!r || r.rawA === undefined || r.rawB === undefined) return r;
+    const idOf = (id: string, raw: number): number => {
+      const it = this.items.get(id);
+      return it?.kind === 'line' ? (it.item.segmentIds?.[raw] ?? raw) : it?.kind === 'point' ? (it.item.pointIds?.[raw] ?? raw) : raw;
+    };
+    r.indexA = idOf(idA, r.rawA);
+    r.indexB = idOf(idB, r.rawB);
+    return r;
+  }
+
+  /** 최근접점 모양(묶음 정점·BVH·모형 행렬·숨긴 구간). build = false면 BVH가 없을 때 null(0.41.0 — 나눠 돌리기가 BVH 만들기를 따로 둔다) */
+  private closestShape(id: string, build = true): ClosestShape | null {
     const it = this.items.get(id);
     if (!it) return null;
     const skip = this.rangeSel.get(id)?.test ?? null;
     if (it.kind === 'mesh') {
       const m = it.item;
-      const bvh = this.bvhFor('triangle', m.positions, m.indices, true);
+      const bvh = this.bvhFor('triangle', m.positions, m.indices, build);
       return bvh ? { kind: 'triangle', positions: m.positions, indices: m.indices, bvh, model: this.modelOf(m), skip } : null;
     }
     const kind = it.kind === 'line' ? 'segment' : 'point';
-    const bvh = this.bvhFor(kind, it.item.positions, undefined, true);
+    const bvh = this.bvhFor(kind, it.item.positions, undefined, build);
     const o = it.item.origin;
     return bvh ? { kind, positions: it.item.positions, bvh, model: this.lineModel(it.item) ?? (hasOrigin(o) ? translation(o) : undefined), skip } : null;
   }
