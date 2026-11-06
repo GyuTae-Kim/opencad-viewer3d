@@ -1478,19 +1478,77 @@ export function openFaceSnap<T extends TrackTriangle>(
     const p = acceptOnLine(f, c.p, q, { origin: L.from, dir: L.dir }, Infinity);
     if (!p) continue;
     const t = c.tri;
-    const [A, B, C] = t.corners as [readonly number[], readonly number[], readonly number[]];
     const tol = meetTol(f, p, t.wpp);
-    const n = cross3(sub3(B, A), sub3(C, A));
-    const nn = Math.hypot(n[0], n[1], n[2]);
-    const h = dot3(n, sub3(p, A)) / nn;
-    const foot: V3 = [p[0] - (n[0] / nn) * h, p[1] - (n[1] / nn) * h, p[2] - (n[2] / nn) * h];
-    if (!(Math.abs(h) <= OPEN_FACE_CHORD * longestEdge(t.corners) + tol) || !(triGap(foot, t.corners) <= tol) || dist3(p, L.from) <= tol || (t.keep && !t.keep(p))) continue;
+    if (!onFacePatch(p, t.corners, tol) || dist3(p, L.from) <= tol || (t.keep && !t.keep(p))) continue;
     const dist = screenDistance(f, p, x, y);
     if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
     if (visible && !visible(p, t)) continue;
     best = { p, core: c.p, line: c.line, tri: t, distPx: dist };
   }
   return best;
+}
+
+/**
+ * 점 p가 삼각형 c 위 곡면 조각 자리인지(0.22.0 openFaceSnap의 받는 규칙 — 0.37.0 acceptFacePatch도 쓴다): 삼각형 평면에 내린 발이 삼각형에서 tol 안이고
+ * 평면에서 OPEN_FACE_CHORD × 가장 긴 변 + tol 안(앞뒤 어느 쪽이든 — 볼록·오목)
+ */
+function onFacePatch(p: readonly number[], c: readonly (readonly number[])[], tol: number): boolean {
+  const [A, B, C] = c as [readonly number[], readonly number[], readonly number[]];
+  const n = cross3(sub3(B, A), sub3(C, A));
+  const nn = Math.hypot(n[0], n[1], n[2]);
+  const h = dot3(n, sub3(p, A)) / nn;
+  const foot: V3 = [p[0]! - (n[0] / nn) * h, p[1]! - (n[1] / nn) * h, p[2]! - (n[2] / nn) * h];
+  return Math.abs(h) <= OPEN_FACE_CHORD * longestEdge(c) + tol && triGap(foot, c) <= tol;
+}
+
+/** 닫힌 면 교차 다듬기의 넓힌 받기 결과(0.37.0 acceptFacePatch): 받은 점(선 위로 내린 자리), 그 점이 놓인 칸 조각(0 = 뚫은 삼각형, 1 이상 = around 안 같은 평면 짝의 번호 + 1), 커서와의 화면 거리 */
+export interface FacePatchAccept {
+  p: V3;
+  cell: number;
+  distPx: number;
+}
+
+/**
+ * 닫힌 면 교차 다듬기의 넓힌 받기(0.37.0 — STEP 42차 요청, 순수): 축·안내 선·잠근 선이 커서 아래 칸을 뚫는 코어 교차(0.18.0 axisFaceSnap·0.19.0 lockFaceSnap·
+ * 0.29.0 trackDirMeetSnap의 면 — 뚫는 자리 core가 커서에서 붙잡기 거리 안)를 앱 refineFace('axisFace')가 다듬은 점 q는 0.19.0부터 코어 점에서 화면 붙잡기 거리 안일 때만
+ * 받았다(acceptOnLine — 0.14.0 acceptRefined). 선이 칸을 얕게 뚫으면 그물을 뚫는 자리와 곡면을 뚫는 자리가 선을 따라 처짐 ÷ 사잇각의 사인만큼 떨어져, 곡면 위 교차가
+ * 커서에서 붙잡기 거리 안이어도 코어 점에서는 밖일 수 있다(그 자리는 현 위 코어 점 그대로 "면 위"였다). 그때 열린 면 교차(0.22.0 openFaceSnap — 0.34.0부터 뚫는 칸도)와
+ * 같은 규칙으로 받는다:
+ * - q를 선 위로 내린 자리 p가 q에서 그 깊이 화면 반 화소 안(acceptOnLine — 눈 뒤·가까운 면 앞이 아님)이고 선이 지나는 점 자리가 아니다
+ * - p가 그 칸 위 곡면 조각 자리다(onFacePatch — 뚫은 삼각형 tri, 또는 around 가운데 tri와 변을 함께 쓰는 같은 평면 짝(한 칸을 나눈 다른 삼각형 — 0.35.0 cellTwice와 같은
+ *   FLAT_COS)에 내린 발이 그 안, 평면에서 OPEN_FACE_CHORD × 가장 긴 변 안). 이웃 칸 위 교차는 받지 않는다(그 칸의 열린 교차가 맡는다)
+ * - p가 커서에서 snapPx 안이다(코어 점에서가 아니라 — 받는 점이 커서 붙잡기 거리 안이라는 모든 붙잡기의 규칙)
+ * 가림·단면은 부르는 쪽이 본다(뷰어는 열린 면 교차와 같은 가림 판정). 아니면 null
+ */
+export function acceptFacePatch(
+  f: ViewFrame,
+  core: readonly number[],
+  q: readonly number[],
+  line: { origin: readonly number[]; dir: readonly number[] },
+  tri: readonly (readonly number[])[],
+  around: readonly (readonly (readonly number[])[])[],
+  x: number,
+  y: number,
+  snapPx: number,
+): FacePatchAccept | null {
+  if (tri.length < 3) return null;
+  const p = acceptOnLine(f, core, q, line, Infinity);
+  if (!p) return null;
+  const tol = meetTol(f, p);
+  if (dist3(p, line.origin) <= tol) return null;
+  const distPx = screenDistance(f, p, x, y);
+  if (distPx === null || distPx > snapPx) return null;
+  if (onFacePatch(p, tri, tol)) return { p, cell: 0, distPx };
+  const nt = triNormal(tri);
+  const shareTol = 1e-6 * longestEdge(tri);
+  for (let i = 0; i < around.length; i++) {
+    const c = around[i]!;
+    if (c.length < 3 || Math.abs(dot3(triNormal(c), nt)) < FLAT_COS) continue;
+    let shared = 0;
+    for (const V of c) if (tri.some((W) => dist3(V, W) <= shareTol)) shared++;
+    if (shared === 2 && onFacePatch(p, c, tol)) return { p, cell: i + 1, distPx };
+  }
+  return null;
 }
 
 /**
