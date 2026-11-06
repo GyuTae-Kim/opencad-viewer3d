@@ -152,6 +152,15 @@ export {
 export { type Annotation3d, type AnnotationKind, HIDDEN_LABEL_DASH, angleAt, annotationGeometry, annotationLabelLook, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
+export {
+  type AnimateSetting,
+  type MotionMatchMedia,
+  type MotionQueryList,
+  REDUCED_MOTION_QUERY,
+  normalizeAnimate,
+  resolveAnimate,
+  watchReducedMotion,
+} from './motion';
 export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cubeTargets } from './viewcube';
 export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
 export { INSTANCE_MIN } from './renderer';
