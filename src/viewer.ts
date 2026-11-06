@@ -5601,8 +5601,16 @@ export class Viewer3d {
     if (!so.lens || !so.refine) return null;
     const ls = lines.filter((l) => lineScreenGap(f, l.from, l.dir, x, y) <= snapPx);
     if (!ls.length) return null;
-    const n = near();
-    const extra = lens().filter((s) => !n.some((t) => t.id === s.id && t.kind === s.kind && t.raw === s.raw));
+    // 커서 둘레 토막은 띠로 모은 같은 토막의 활꼴 높이 어림(sag)을 싣는다(가로지르는 자리가 먼 교차 거르기 — 곧은 토막은 빠진다). 띠로 모은 것 가운데 커서 둘레에 없는 것이 열린 교차 후보
+    const key = (s: NearSegment): string => `${s.kind}\u0000${s.id}\u0000${s.raw}`;
+    const L = lens();
+    const byKey = new Map(L.map((s) => [key(s), s]));
+    const n = near().map((s) => {
+      const l = byKey.get(key(s));
+      return l?.sag !== undefined ? { ...s, sag: l.sag } : s;
+    });
+    const nk = new Set(n.map(key));
+    const extra = L.filter((s) => !nk.has(key(s)));
     return n.length || extra.length ? this.openLineEdge(so, f, x, y, snapPx, ls, first, [...n, ...extra], budget, vis, undefined, extra) : null;
   }
 
@@ -5819,7 +5827,7 @@ export class Viewer3d {
       ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
     }, tolPx, chord > 0 ? LENS_SEGMENTS : undefined, chord);
-    return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw }));
+    return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw, ...(s.sag !== undefined ? { sag: s.sag } : {}) }));
   }
 
   /**

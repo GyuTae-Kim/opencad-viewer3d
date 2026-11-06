@@ -375,14 +375,16 @@ export interface NearSegmentHit {
   raw: number;
   /** 0.40.0 chord 모으기: 커서와 그 선분 띠 사이 화면 거리의 아래 한계(segmentCandidates bandPx — chord를 줬을 때만) */
   bandPx?: number;
+  /** 0.40.0 chord 모으기: 그 선분 활꼴 높이 어림(세계 길이 — segmentCandidates sag, chord를 줬을 때만) */
+  sag?: number;
 }
 
 /**
  * 커서 tolPx 안의 선분(0.9.0 추론 붙잡기 — 교차점·수직 발): 보이는 선분 묶음(그리기 범위 앞쪽, 숨긴 구간 빼고)과 o.edges면 그물 윤곽선.
  * 세계 끝점(자르기 전 — 교차·수직 발은 선 위 어디든 된다)과 그 묶음의 남는 쪽 판정을 돌려준다. 화면 거리 차례로 max개까지.
  * 가림은 따지지 않는다(후보 점마다 따로 묻는다). 0.14.0부터 선분 종류와 번호(kind·index·raw — 고르기 결과 Pick3d와 같은 뜻)도 싣는다
- * chord(0.40.0 — 0보다 크면): 선분 대신 그 띠(현의 직선에서 chord × 선분 길이 안 — segmentCandidates chord)가 커서 tolPx 안에 닿을 수 있는 선분을 모으고
- * 띠와의 거리(bandPx) 차례로 max개까지 둔다(같으면 현과의 거리 차례). 묶음 범위 상자도 chord × 대각선만큼 부풀려 본다
+ * chord(0.40.0 — 0보다 크면): 선분 대신 그 띠(현의 직선에서 활꼴 높이 어림 sag 안 — chord × 선분 길이를 넘지 않는다, segmentCandidates chord)가 커서 tolPx 안에 닿을 수 있는
+ * 선분을 모으고 띠와의 거리(bandPx) 차례로 max개까지 둔다(같으면 현과의 거리 차례). 묶음 범위 상자도 chord × 대각선만큼 부풀려 본다
  */
 export function segmentsNear(
   f: ViewFrame,
@@ -417,7 +419,7 @@ export function segmentsNear(
     ids: ArrayLike<number> | undefined,
     model: ArrayLike<number> | undefined,
     pl: readonly Readonly<Plane4>[],
-    hs: { index: number; distPx: number; depth: number; bandPx?: number }[],
+    hs: { index: number; distPx: number; depth: number; bandPx?: number; sag?: number }[],
   ): void => {
     if (!hs.length) return;
     const keep = keepOf(pl);
@@ -426,6 +428,7 @@ export function segmentsNear(
       const a: V3 = [P[k]!, P[k + 1]!, P[k + 2]!], b: V3 = [P[k + 3]!, P[k + 4]!, P[k + 5]!];
       const s: NearSegmentHit = { a: model ? transformPoint(model, a) : a, b: model ? transformPoint(model, b) : b, id, keep, distPx: h.distPx, depth: h.depth, kind, index: ids?.[h.index] ?? h.index, raw: h.index };
       if (h.bandPx !== undefined) s.bandPx = h.bandPx;
+      if (h.sag !== undefined) s.sag = h.sag;
       out.push(s);
     }
   };

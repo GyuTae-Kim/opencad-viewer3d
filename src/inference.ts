@@ -512,6 +512,8 @@ export interface NearSegment {
   kind?: 'line' | 'edge';
   index?: number;
   raw?: number;
+  /** 0.40.0: 띠로 모은 토막(openEdgeLens)의 활꼴 높이 어림(세계 길이 — track.ts TrackSegment.sag) */
+  sag?: number;
 }
 
 /**

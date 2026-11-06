@@ -54,18 +54,29 @@ describe('띠로 모으기(segmentCandidates·segmentsNear chord — 0.40.0)', (
     const s = projectToScreen(f, p)!;
     return [s[0], s[1]];
   };
-  // 긴 토막(길이 100 — 띠 10 = 100화소)이 커서에서 50화소, 같은 길이 토막이 300화소, 짧은 토막(길이 4 — 띠 0.4 = 4화소)이 30화소
-  const P = new Float32Array([-50, 5, 0, 50, 5, 0, -50, 30, 0, 50, 30, 0, -2, -3, 0, 2, -3, 0]);
+  // 선분 0~2: 꼭짓점마다 20° 꺾이는 꺾은선(가운데 토막 1 — (−50, 5) → (50, 5), 길이 100, 활꼴 높이 어림 50 × tan 10° = 8.8 = 88화소)이 커서에서 50화소.
+  // 선분 3: 따로 떨어진 곧은 선분(길이 100, 띠 없음)이 40화소. 선분 4~6: 90° 꺾인 모서리(곡선을 나눈 꼭짓점이 아니다)의 가운데 토막이 45화소
+  const c20 = Math.cos(20 * D) * 100, s20 = Math.sin(20 * D) * 100;
+  const P = new Float32Array([
+    ...[-50 - c20, 5 - s20, 0, -50, 5, 0],
+    ...[-50, 5, 0, 50, 5, 0],
+    ...[50, 5, 0, 50 + c20, 5 - s20, 0],
+    ...[-50, -4, 0, 50, -4, 0],
+    ...[-50, 95.5, 0, -50, -4.5, 0],
+    ...[-50, -4.5, 0, 50, -4.5, 0],
+    ...[50, -4.5, 0, 50, -104.5, 0],
+  ]);
   const [x, y] = at([0, 0, 0]);
 
-  it('chord 없이는 커서 붙잡기 거리 안 선분만, chord 0.1이면 띠가 닿는 긴 토막도(bandPx 0) — BVH 있이·없이 같다', () => {
+  it('chord 없이는 커서 붙잡기 거리 안 선분만, chord 0.1이면 띠(이웃과 꺾인 각으로 어림한 활꼴 높이)가 닿는 꺾은선 토막만 — 곧은 선분·모서리는 띠가 없다, BVH 있이·없이 같다', () => {
     expect(f.pixelConst).toBeCloseTo(0.1, 9);
     expect(segmentCandidates(f, P, null, null, x, y, SNAP)).toEqual([]);
     for (const bvh of [null, buildBvh('segment', P)]) {
       const hs = segmentCandidates(f, P, bvh, null, x, y, SNAP, { chord: OPEN_EDGE_CHORD });
-      expect(hs.map((h) => h.index)).toEqual([0]);
+      expect(hs.map((h) => h.index)).toEqual([1]);
       expect(hs[0]!.distPx).toBeCloseTo(50, 6);
       expect(hs[0]!.bandPx).toBe(0);
+      expect(hs[0]!.sag).toBeCloseTo(50 * Math.tan(10 * D), 4);
     }
   });
 
@@ -73,7 +84,8 @@ describe('띠로 모으기(segmentCandidates·segmentsNear chord — 0.40.0)', (
     const half = new Float32Array(Array.from(P, (v) => v / 2));
     const M = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
     const hs = segmentCandidates(f, half, buildBvh('segment', half), M, x, y, SNAP, { chord: OPEN_EDGE_CHORD });
-    expect(hs.map((h) => h.index)).toEqual([0]);
+    expect(hs.map((h) => h.index)).toEqual([1]);
+    expect(hs[0]!.sag).toBeCloseTo(50 * Math.tan(10 * D), 4);
   });
 });
 
@@ -296,8 +308,9 @@ describe('Viewer3d: 아래 토막 현을 가로지르는 자리가 근에서 먼
   });
 });
 
-describe('Viewer3d: 곧은 변과 나란히 띠 안을 지나는 축(헛 호출)', () => {
-  // 길이 180 곧은 변(띠 18) 위 1을 나란히 지나는 첫 점 X축. 앱은 곧은 선분에 null. 맞춰 보기에 첫 점이 들도록 먼 짧은 선분을 하나 둔다
+describe('Viewer3d: 곧은 변과 나란히 0.1 × 길이 안을 지나는 축(띠가 없어 묻지 않는다)', () => {
+  // 길이 180 곧은 변(0.1 × 길이 = 18) 위 1을 나란히 지나는 첫 점 X축 — 따로 떨어진 곧은 선분은 활꼴 높이 어림이 0이라 띠로 모으지 않는다.
+  // 맞춰 보기에 첫 점이 들도록 먼 짧은 선분을 하나 둔다
   const SCENE: Scene3d = {
     name: 's',
     units: 'mm',
@@ -310,7 +323,7 @@ describe('Viewer3d: 곧은 변과 나란히 띠 안을 지나는 축(헛 호출)
   };
   const A0: V3 = [-130, 1, 0];
 
-  it('켜도 축 위 커서 자리, 앱 호출은 그 변 하나(기억 — 다시 묻지 않는다)', () => {
+  it('켜도 축 위 커서 자리이고 앱을 부르지 않는다', () => {
     const on = counted([]);
     const w1 = view(SCENE, A0, { refine: on.refine, openEdgeLens: true }, [0, 1, 0], 0.02);
     const s = at(w1, [0, 1, 0]);
@@ -319,9 +332,7 @@ describe('Viewer3d: 곧은 변과 나란히 띠 안을 지나는 축(헛 호출)
       expect(w1.v.measureHoverSnap!.snap).toBe('axis');
       expect(w1.v.measureHoverSnap).not.toHaveProperty('refined');
     }
-    expect(on.calls.length).toBeGreaterThanOrEqual(1);
-    expect(on.calls.length).toBeLessThanOrEqual(3);
-    expect(on.calls.every((c) => c.open && c.segment.index === 7)).toBe(true);
+    expect(on.calls).toEqual([]);
     w1.v.dispose();
   });
 });

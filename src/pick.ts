@@ -109,8 +109,48 @@ export interface LinePick {
   point: V3;
   distPx: number;
   depth: number;
-  /** 0.40.0 segmentCandidates의 chord 모으기: 커서와 그 선분 띠(현 ± chord × 선분 길이를 화면에 비춘 것) 사이 화면 거리의 아래 한계(띠 안이면 0) */
+  /** 0.40.0 segmentCandidates의 chord 모으기: 커서와 그 선분 띠(현 ± sag를 화면에 비춘 것) 사이 화면 거리의 아래 한계(띠 안이면 0) */
   bandPx?: number;
+  /** 0.40.0 chord 모으기: 그 선분 활꼴 높이 어림(세계 길이 — segmentSag) */
+  sag?: number;
+}
+
+/** 꺾은선 토막 하나가 이 각보다 덜 돌아야 곡선을 나눈 토막으로 본다(0.20.0 OPEN_EDGE_CHORD 0.1의 전제 — 45°) */
+const SAG_TURN_MAX = Math.PI / 4;
+
+/**
+ * 선분 i(positions의 i번째 — 끝점 a·b는 세계 좌표)의 활꼴 높이 어림(0.40.0 openEdgeLens 띠): 배열에서 바로 앞·뒤 선분이 그 끝을 같은 값으로 이으면(꺾은선) 그 꼭짓점에서 꺾인 각을 본다.
+ * 원을 나눈 꺾은선이면 꼭짓점에서 꺾인 각은 두 토막이 도는 각의 평균이라 토막 i가 도는 각 θ는 꺾인 각의 2배를 넘지 않고, 활꼴 높이는 길이/2 × tan(θ/4) ≤ 길이/2 × tan(꺾인 각/2)다.
+ * 45° 이상 꺾인 꼭짓점은 모서리(곡선을 나눈 꼭짓점이 아니다)라 보지 않고, 두 끝 가운데 큰 각을 쓴다(θ도 45°까지 — OPEN_EDGE_CHORD 0.1의 전제와 같은 상한).
+ * 이을 선분이 없거나(따로 떨어진 선분) 나란히 이어지면 0 — 곧은 선분은 활꼴이 없다
+ */
+function segmentSag(P: Float32Array, n: number, i: number, M: ArrayLike<number> | null, a: V3, b: V3): number {
+  const g: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const L = Math.hypot(g[0], g[1], g[2]);
+  if (!(L > 0)) return 0;
+  const pt = (k: number): V3 => {
+    const q: V3 = [P[k]!, P[k + 1]!, P[k + 2]!];
+    return M ? transformPoint(M, q) : q;
+  };
+  const same = (j: number, k: number): boolean => P[j] === P[k] && P[j + 1] === P[k + 1] && P[j + 2] === P[k + 2];
+  const turn = (v: V3): number => {
+    const l = Math.hypot(v[0], v[1], v[2]);
+    if (!(l > 0)) return 0;
+    const c = (v[0] * g[0] + v[1] * g[1] + v[2] * g[2]) / (l * L);
+    const t = Math.acos(Math.max(-1, Math.min(1, c)));
+    return t < SAG_TURN_MAX ? t : 0;
+  };
+  let t = 0;
+  const o = i * 6;
+  if (i > 0 && same(o - 3, o)) {
+    const p = pt(o - 6);
+    t = Math.max(t, turn([a[0] - p[0], a[1] - p[1], a[2] - p[2]]));
+  }
+  if (i + 1 < n && same(o + 6, o + 3)) {
+    const q = pt(o + 9);
+    t = Math.max(t, turn([q[0] - b[0], q[1] - b[1], q[2] - b[2]]));
+  }
+  return t > 1e-9 ? (L / 2) * Math.tan(Math.min(t / 2, SAG_TURN_MAX / 4)) : 0;
 }
 
 export interface LinePickOpts {
@@ -326,9 +366,10 @@ export function normBound3(m: ArrayLike<number>): number {
  * 모형 행렬(로컬 → 세계)이 걸린 선분 배열에서 커서 tolPx 안의 선분을 모두 모은다(세계 좌표 결과). 그물 윤곽선(Mesh3d.edges) 고르기에 쓴다.
  * BVH 질의는 광선을 로컬로 옮겨 하고(반지름은 역행렬 노름 한계만큼 넉넉히), 후보마다 끝점을 세계로 옮겨 화면 거리를 정확히 잰다.
  * clips(세계 평면들)가 있으면 잘린 쪽 부분은 빼고 잰다. skip(선분 번호)이 true면 건너뛴다.
- * chord(0.40.0 — 0보다 크면): 선분 대신 그 띠(현의 직선에서 chord × 선분 길이 안 — 꺾은선 토막의 활꼴이 놓일 수 있는 자리)가 커서 tolPx 안에 닿을 수 있는 선분을 모은다.
+ * chord(0.40.0 — 0보다 크면): 선분 대신 그 띠(현의 직선에서 sag 안 — 꺾은선 토막의 활꼴이 놓일 수 있는 자리)가 커서 tolPx 안에 닿을 수 있는 선분을 모은다.
+ * sag는 배열에서 앞·뒤로 이어진 선분과 꺾인 각으로 어림한 활꼴 높이(segmentSag)이고 chord × 선분 길이를 넘지 않는다(이어진 꺾은선이 아니거나 곧으면 0 — 띠 없음).
  * 띠의 화면 폭은 선분의 가장 가까운 끝 깊이(띠 폭만큼 더 앞, 원근이면 가까운 면 안쪽)의 화소 세계 길이로 보수적으로 잰다. 결과의 distPx는 그대로 현과 커서의 거리이고
- * bandPx가 띠와의 거리(아래 한계)다. BVH 질의는 마디 상자를 chord × 대각선만큼 부풀린다(queryCone grow)
+ * bandPx가 띠와의 거리(아래 한계), sag가 그 활꼴 높이 어림이다. BVH 질의는 마디 상자를 chord × 대각선만큼 부풀린다(queryCone grow — sag ≤ chord × 길이 ≤ chord × 대각선)
  */
 export function segmentCandidates(
   f: ViewFrame,
@@ -367,18 +408,21 @@ export function segmentCandidates(
     const bx = a[0] + (b[0] - a[0]) * s1, by = a[1] + (b[1] - a[1]) * s1, bz = a[2] + (b[2] - a[2]) * s1;
     const h = segmentScreenPick(f, ax, ay, az, bx, by, bz, cx, cy);
     if (!h) return;
-    // 0.40.0 chord: 띠의 화면 폭(현에서 chord × 선분 길이 — 가장 가까운 끝보다 그 폭만큼 앞 깊이의 화소 세계 길이로)
-    let band = 0;
+    // 0.40.0 chord: 띠의 화면 폭(현에서 sag — 이웃 선분과 꺾인 각으로 어림한 활꼴 높이, chord × 선분 길이 안 — 가장 가까운 끝보다 그 폭만큼 앞 깊이의 화소 세계 길이로)
+    let band = 0, sag = 0;
     if (chord) {
-      const w = chord * Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-      const near = Math.min(viewDepth(f, [ax, ay, az]), viewDepth(f, [bx, by, bz])) - w;
+      sag = Math.min(chord * Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]), segmentSag(P, n, i, M, a, b));
+      const near = Math.min(viewDepth(f, [ax, ay, az]), viewDepth(f, [bx, by, bz])) - sag;
       const wpp = f.projection === 'perspective' ? Math.max(near, f.near) * f.pixelPerDepth : f.pixelConst;
-      band = wpp > 0 ? w / wpp : Infinity;
+      band = sag > 0 ? (wpp > 0 ? sag / wpp : Infinity) : 0;
     }
     if (!(h.distPx <= tolPx + band)) return;
     if (f.projection === 'perspective' && h.depth < f.near * 0.999) return;
     const o2: LinePick = { index: i, t: s0 + (s1 - s0) * h.t, point: h.point, distPx: h.distPx, depth: h.depth };
-    if (chord) o2.bandPx = Math.max(0, h.distPx - band);
+    if (chord) {
+      o2.bandPx = Math.max(0, h.distPx - band);
+      o2.sag = sag;
+    }
     out.push(o2);
   };
   if (bvh) {
