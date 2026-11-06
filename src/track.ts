@@ -1564,6 +1564,50 @@ export function acceptFacePatch(
   return null;
 }
 
+/** 닫힌 선분 교차 다듬기의 넓힌 받기 결과(0.38.0 acceptEdgePatch): 받은 점(선 위로 내린 자리)과 커서와의 화면 거리 */
+export interface EdgePatchAccept {
+  p: V3;
+  distPx: number;
+}
+
+/**
+ * 닫힌 선분 교차 다듬기의 넓힌 받기(0.38.0 — 37차 남은 꼴, 순수): 축·안내 선·잠근 선이 꺾은선 토막(현)과 3D로 만나는 코어 교차(0.17.0 trackEdgeSnap·0.18.0 axisEdgeSnap·
+ * 0.19.0 lockEdgeSnap·0.29.0 trackDirMeetSnap의 선분 — 만나는 자리 core가 커서에서 붙잡기 거리 안)를 앱 refine('axisEdge')이 다듬은 점 q는 0.18.0부터 코어 점에서
+ * 화면 붙잡기 거리 안일 때만 받았다(acceptOnLine). 선이 현을 얕게 가로지르면 현과 만나는 자리와 곡선과 만나는 자리가 선을 따라 처짐 ÷ 사잇각의 사인만큼 떨어져,
+ * 곡선 위 교차가 커서에서 붙잡기 거리 안이어도 코어 점에서는 밖일 수 있다(그 자리는 현 위 코어 점 그대로 "모서리 위"였다 — 0.37.0 acceptFacePatch와 같은 꼴).
+ * 그때 열린 교차(0.20.0 openEdgeSnap — 0.23.0 받는 규칙)와 같은 규칙으로 받는다:
+ * - q를 선 위로 내린 자리 p가 q에서 그 깊이 화면 반 화소 안(acceptOnLine — 눈 뒤·가까운 면 앞이 아님)이고 선이 지나는 점 자리가 아니다
+ * - p가 그 토막의 곡선 조각 자리다: 현에 내린 자리가 토막 범위 안이고 토막 끝에서 반 화소 넘게 떨어지며, 현에서 OPEN_EDGE_CHORD × 토막 길이 안
+ *   (선이 현을 가로질러 들어간 활꼴은 그 토막의 것이다 — 이웃 토막 활꼴 위 교차는 받지 않는다)
+ * - p가 커서에서 snapPx 안이다(코어 점에서가 아니라 — 받는 점이 커서 붙잡기 거리 안이라는 모든 붙잡기의 규칙)
+ * 가림·단면은 부르는 쪽이 본다(뷰어는 열린 교차와 같은 가림 판정). 아니면 null
+ */
+export function acceptEdgePatch(
+  f: ViewFrame,
+  core: readonly number[],
+  q: readonly number[],
+  line: { origin: readonly number[]; dir: readonly number[] },
+  ends: readonly [readonly number[], readonly number[]],
+  x: number,
+  y: number,
+  snapPx: number,
+): EdgePatchAccept | null {
+  const p = acceptOnLine(f, core, q, line, Infinity);
+  if (!p) return null;
+  const tol = meetTol(f, p);
+  const [a, b] = ends;
+  const g0 = b[0]! - a[0]!, g1 = b[1]! - a[1]!, g2 = b[2]! - a[2]!;
+  const C = g0 * g0 + g1 * g1 + g2 * g2;
+  if (!(C > 0)) return null;
+  const u = ((p[0] - a[0]!) * g0 + (p[1] - a[1]!) * g1 + (p[2] - a[2]!) * g2) / C;
+  if (!(u >= 0 && u <= 1) || dist3(p, a) <= tol || dist3(p, b) <= tol || dist3(p, line.origin) <= tol) return null;
+  const off = Math.hypot(p[0] - a[0]! - g0 * u, p[1] - a[1]! - g1 * u, p[2] - a[2]! - g2 * u);
+  if (!(off <= OPEN_EDGE_CHORD * Math.sqrt(C) + tol)) return null;
+  const distPx = screenDistance(f, p, x, y);
+  if (distPx === null || distPx > snapPx) return null;
+  return { p, distPx };
+}
+
 /**
  * 선 P + s·e(e는 단위)에서 삼각형 c 위 곡면 조각 자리인 조각의 매개변수 [s0, s1](0.23.0 열린 면 교차의 받는 범위): 삼각형 평면에 내린 발이 세 변을 바깥으로 grow만큼
  * 민 삼각형 안이고(openFaceSnap의 "발이 삼각형에서 반 화소 안"을 품는다) 평면에서 h 안이다(세 변의 수직 평면과 두 덮개 평면 사이 — 볼록한 기둥을 선으로 자른다).

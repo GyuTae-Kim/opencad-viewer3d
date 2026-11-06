@@ -89,6 +89,7 @@ import {
   type TrackGuide,
   type TrackLine,
   type TrackTriangle,
+  acceptEdgePatch,
   acceptFacePatch,
   axisEdgeSnap,
   axisFaceSnap,
@@ -480,6 +481,8 @@ export interface MeasureSnapOptions {
    * 활꼴을 두 번 지날 수 있다) point를 현의 다른 끝(나란하면 각 끝)에서 그 선에 내린 발로 바꿔 한 번 더 부른다. 앱이 point 둘레 교차 하나를 주면 두 교차가 따로 온다.
    * 그 선·토막의 앱 점은 코어 점 거리 대신 토막 범위(현에 내린 자리가 범위 안·현에서 0.1 × 토막 길이 안)로 받는다
    * 0.23.0: 모든 열린 후보('axisEdge', open)의 앱 점을 코어 점 거리 대신 토막 범위와 커서 붙잡기 거리로 받는다. 선에서 그 토막 범위인 조각이 커서에서 붙잡기 거리 밖이면 부르지 않는다
+   * 0.38.0: 닫힌 'axisEdge'(선이 토막과 3D로 만나는 코어 교차)의 앱 점도 코어 점에서 붙잡기 거리 밖이면 열린 교차와 같은 규칙(그 선 위로 내린 자리가 그 토막 범위 안·
+   * 토막 끝에서 반 화소 넘게·현에서 0.1 × 토막 길이 안, 커서에서 붙잡기 거리 안, 가리지 않음)으로 받는다 — 선이 현을 얕게 가로질러 곡선 교차가 현 위 코어 점에서 멀 때. 호출·기억은 그대로다
    */
   refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
   /**
@@ -5357,7 +5360,9 @@ export class Viewer3d {
    * 축과 선분의 교차 다듬기(0.18.0, 'axisEdge'): 코어 점 core(축과 꺾은선 토막의 교차), 그 토막 sg, 축 직선 line(지나는 점·단위 방향·축 이름 — 0.20.0부터 잠근 선이면
    * 축이 아닌 직선도, 그때 axis가 없다)을 앱 refine에 넘겨 받을 수 있는 점(acceptOnLine — 그 직선 위로 내린 자리가 앱 점에서 화면 반 화소 안, 코어 점에서 화면 붙잡기 거리 안,
    * 그 묶음 단면에서 남는 쪽)이면 그 자리. 아니면 null(코어 점 그대로). 결과는 커서 광선을 뺀 입력(종류·코어 점·토막·축 직선·첫 점)으로 기억한다(0.15.0 열린 후보의
-   * RefineMemo — 커서가 그 둘레를 움직이는 동안 다시 부르지 않는다). 가림은 다시 따지지 않는다(0.14.0과 같다 — 코어 점이 보이므로 그 바로 둘레다)
+   * RefineMemo — 커서가 그 둘레를 움직이는 동안 다시 부르지 않는다). 가림은 다시 따지지 않는다(0.14.0과 같다 — 코어 점이 보이므로 그 바로 둘레다).
+   * 0.38.0: 앱 점이 코어 점에서 화면 붙잡기 거리 밖이면(선이 현을 얕게 가로지른다) 열린 교차와 같은 규칙으로 한 번 더 본다(track.ts acceptEdgePatch — 그 선 위·
+   * 그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 그때는 열린 교차와 같은 가림(snapVisible)을 본다
    */
   private axisEdgeRefined(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5389,7 +5394,13 @@ export class Viewer3d {
     }
     if (!q) return null;
     const p = acceptOnLine(f, core, q, line, snapPx);
-    return p && !this.clippedAway(p, sg.id) ? p : null;
+    if (p) return this.clippedAway(p, sg.id) ? null : p;
+    // 0.38.0: 현을 얕게 가로지르는 선 — 앱 점이 그 토막 곡선 조각 자리이고 커서에서 붙잡기 거리 안이면 받는다(코어 점에서는 붙잡기 거리 밖).
+    // 코어 점에서 멀 수 있으므로 열린 교차와 같은 가림(snapVisible)을 본다
+    const w = acceptEdgePatch(f, core, q, line, sg.ends, x, y, snapPx);
+    if (!w || this.clippedAway(w.p, sg.id)) return null;
+    const sp = projectToScreen(f, w.p);
+    return sp && this.snapVisible(f, w.p, sp[0], sp[1], sg.id) ? w.p : null;
   }
 
   /**
