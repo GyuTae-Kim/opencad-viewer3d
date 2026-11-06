@@ -64,6 +64,9 @@ interface OpenRes {
   firstFrameMs: number;
   /** 모아 그리기 시작까지(변종 번역을 기다렸으면, 아니면 0) */
   instMs: number;
+  /** 다 연 뒤 JS 힙·GPU 버퍼(MB) */
+  heapMB: number;
+  gpuMB: number;
 }
 
 async function open(spec: ManySpec, budgetMs: number): Promise<OpenRes & { triangles: number; meshes: number; renderer: string }> {
@@ -128,8 +131,11 @@ async function open(spec: ManySpec, budgetMs: number): Promise<OpenRes & { trian
   syncGpu(v);
   po.disconnect();
   vd.draw = draw;
+  // 메모리: JS 힙(Chrome performance.memory — 쓰레기 수집 차이로 흔들린다)·GPU 버퍼 바이트(stats.buffers)
+  const heapMB = +(((performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0) / 1048576).toFixed(1);
+  const gpuMB = +(v.stats.buffers.bytes / 1048576).toFixed(1);
   (window as unknown as { last: V }).last = v;
-  return { callMs, doneMs: done, frames, drawSumMs: drawSum, drawMaxMs: drawMax, longSumMs: longSum, longCount, firstFrameMs: firstFrame, instMs, triangles: scene.triangles, meshes: scene.meshes.length, renderer };
+  return { callMs, doneMs: done, frames, drawSumMs: drawSum, drawMaxMs: drawMax, longSumMs: longSum, longCount, firstFrameMs: firstFrame, instMs, heapMB, gpuMB, triangles: scene.triangles, meshes: scene.meshes.length, renderer };
 }
 
 interface SteadyRow {

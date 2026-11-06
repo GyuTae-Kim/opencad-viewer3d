@@ -70,9 +70,9 @@ export function manyTable(res) {
     return `${s.median} (${s.min}~${s.max})`;
   };
   let md = `### ${res.backend} — ${res.renderer}\n\n그물 ${res.meshes.toLocaleString('en-US')}개(자리), 삼각형 ${res.triangles.toLocaleString('en-US')}개, CPU ${res.cpu ?? 1}배 느리게, 판마다 ${res.rounds}번(가운데값 (최소~최대) ms)\n\n`;
-  md += '| 판 | 처음 열기 다 올림 | 프레임 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 |\n|---|---:|---:|---:|---:|---:|---:|\n';
+  md += '| 판 | 처음 열기 다 올림 | 프레임 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n';
   for (const [name, r] of Object.entries(res.variants))
-    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} |\n`;
+    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
   md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 그리기 호출 | GL 호출 |\n|---|---|---:|---:|---:|---:|\n';
   for (const [name, r] of Object.entries(res.variants))
     for (const mode of Object.keys(r.steady)) {
