@@ -5,7 +5,8 @@
  *  - open: setScene(incremental { budgetMs }) → 다 올릴 때까지 프레임 수·벽시계·주 스레드 몫(프레임 JS 합·가장 긴 프레임·긴 작업 합)
  *  - steady: 다 올린 뒤 모드마다 조금씩 돌려 renderNow JS 시간·GPU 마침(1화소 읽기)까지·그리기 호출 수·GL 호출 수
  *    (0.43.0 모드 꼬리: +section = x 가운데 단면 하나(채우기 없음), +shadows = 해 그림자.
- *    0.44.0: +items = 그 평면이 열째 자리마다(300곳) 그물 통째, +secrange = 같은 자리의 앞 절반 삼각형 구간만)
+ *    0.44.0: +items = 그 평면이 열째 자리마다(300곳) 그물 통째, +secrange = 같은 자리의 앞 절반 삼각형 구간만.
+ *    0.49.0: +ao = 주변 가림(기본 값), 꼬리 여럿 잇기 — 예 shadedEdges+profiles+ao)
  */
 import { checkerBmp } from '../../src/synth';
 import type { Mesh3d } from '../../src/types';
@@ -179,9 +180,13 @@ async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
     await new Promise((res) => setTimeout(res, 10));
   }
   for (const mode of modes) {
-    const [m, opt] = mode.split('+');
+    // 0.49.0: 꼬리를 여럿 이을 수 있다(예: shadedEdges+profiles+ao) — 단면·그림자·강조 갈래는 그 가운데 첫 것
+    const [m, ...tails] = mode.split('+');
+    const opt = tails.find((t) => t !== 'profiles' && t !== 'ao');
     v.setRenderMode(m as never);
-    v.setRenderOptions({ profiles: opt === 'profiles' ? { width: 1 } : null });
+    v.setRenderOptions({ profiles: tails.includes('profiles') ? { width: 1 } : null });
+    // 0.49.0 +ao = 주변 가림(기본 값 — 그 API가 없는 판은 무시한다)
+    (v as { setAmbientOcclusion?: (o: object | null) => void }).setAmbientOcclusion?.(tails.includes('ao') ? {} : null);
     if (opt === 'highlight') v.highlight(['자리 0-0', '자리 3-7']);
     else v.highlight(null);
     // 0.43.0: 단면 하나(채우기 없음 — 면 그리기만 견준다)·해 그림자

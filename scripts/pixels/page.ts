@@ -8323,6 +8323,101 @@ const themeMotionValues: ValueSet = {
   },
 };
 
+// ───────────── 0.49.0 주변 가림 · 카메라 움직임 끝 알림 ─────────────
+/**
+ * 0.49.0 값(기존 secrange 자료 — 판 위 상자 둘, 새 장면 없음):
+ * (1) 주변 가림(setAmbientOcclusion): 두 테마 음영+윤곽에서 끈 그림과 켠 그림(기본·세기 2)을 견준 [바뀐 화소, 밝아진 화소, 바탕 화소가 바뀐 수, 알파가 바뀐 수,
+ *     바뀐 화소의 밝기 비(켬/끔) 평균·가장 작은 값]과 다시 끈 그림이 처음과 같은지. 모드마다(음영·단색·와이어프레임·X-ray·숨은 선) 바뀐 화소 수,
+ *     평행 투영·두 배 그림 저장·투명 바탕 그림 저장·단면(채우기)에서도.
+ * (2) 실제 Chrome의 requestAnimationFrame으로 끝 알림: 같은 프레임 두 번 flyTo(0.15초)의 [앞, 뒤] 값, 뒤가 풀릴 때까지 0.15초가 지났는지, 그때 카메라가 끝 자리인지,
+ *     바로 옮기는 fit(false)의 값(3초 안에 풀리지 않으면 'timeout')
+ */
+const aoFlyEndValues: ValueSet = {
+  name: 'ao-flyto-end-values',
+  data: 'secrange',
+  needs: fn('setAmbientOcclusion', 'renderImage', 'setTheme', 'setRenderMode'),
+  run: async (c) => {
+    const { v } = c;
+    const shot = (o: object = {}): ImageData => {
+      v.renderNow();
+      return v.renderImage(o);
+    };
+    const cmp = (on: ImageData, off: ImageData): number[] => {
+      const a = on.data, b = off.data;
+      const bg = commonColor(off);
+      let changed = 0, brighter = 0, bgChanged = 0, alpha = 0, sum = 0, min = 1;
+      for (let i = 0; i < a.length; i += 4) {
+        if (a[i] === b[i] && a[i + 1] === b[i + 1] && a[i + 2] === b[i + 2] && a[i + 3] === b[i + 3]) continue;
+        changed++;
+        if (a[i + 3] !== b[i + 3]) alpha++;
+        if (b[i] === bg[0] && b[i + 1] === bg[1] && b[i + 2] === bg[2]) bgChanged++;
+        const r = (lum255(a, i) + 1e-6) / (lum255(b, i) + 1e-6);
+        if (r > 1) brighter++;
+        sum += r;
+        min = Math.min(min, r);
+      }
+      return [changed, brighter, bgChanged, alpha, changed ? Math.round((sum / changed) * 1000) / 1000 : 1, Math.round(min * 1000) / 1000];
+    };
+    const same = (p: ImageData, q: ImageData): boolean => p.data.length === q.data.length && p.data.every((x, i) => x === q.data[i]);
+    const pair = (o: object = {}): [ImageData, ImageData] => {
+      v.setAmbientOcclusion(null);
+      const off = shot(o);
+      v.setAmbientOcclusion({});
+      return [shot(o), off];
+    };
+    const out: unknown[] = [];
+    v.setRenderMode('shadedEdges');
+    for (const theme of ['dark', 'light'] as const) {
+      v.setTheme(theme);
+      const [on, off] = pair();
+      v.setAmbientOcclusion({ intensity: 2 });
+      const on2 = shot();
+      v.setAmbientOcclusion(null);
+      out.push([theme, cmp(on, off), cmp(on2, off), same(shot(), off)]);
+    }
+    v.setTheme('dark');
+    const modes: unknown[] = [];
+    for (const m of ['shaded', 'monochrome', 'wireframe', 'xray', 'hiddenLine'] as const) {
+      v.setRenderMode(m);
+      const [on, off] = pair();
+      modes.push([m, cmp(on, off)[0]]);
+    }
+    v.setRenderMode('shadedEdges');
+    out.push(modes);
+    v.setProjection('orthographic');
+    out.push(['ortho', cmp(...pair())]);
+    v.setProjection('perspective');
+    out.push(['scale2', cmp(...pair({ scale: 2 }))]);
+    out.push(['transparent', cmp(...pair({ transparent: true }))]);
+    // 단면 가운데(x — 상자 A를 가른다), 닫힌 그물 잘린 면 채우기: 채운 면은 깊이 그림에 없어 가리지 않는다
+    v.setSectionAxis('x', 0.25, { caps: 'closed' });
+    out.push(['section', cmp(...pair())]);
+    v.setSection(null);
+    v.setAmbientOcclusion(null);
+    v.renderNow();
+    // (2) 끝 알림 — 실제 프레임으로
+    const key = (cam: any): string => JSON.stringify([cam.yaw, cam.pitch, cam.distance].map((x: number) => Math.round(x * 1e6) / 1e6));
+    const wait = <T>(p: unknown): Promise<T | 'timeout' | 'no-promise'> =>
+      p instanceof Promise ? Promise.race([p as Promise<T>, new Promise<'timeout'>((res) => setTimeout(() => res('timeout'), 3000))]) : Promise.resolve('no-promise');
+    const start = v.getCamera();
+    const to1 = { ...start, yaw: start.yaw + 0.5 }, to2 = { ...start, yaw: start.yaw - 0.4, distance: start.distance * 1.2 };
+    v.setAnimate(true);
+    const t0 = performance.now();
+    const p1 = v.flyTo(to1, true, { duration: 150 });
+    const p2 = v.flyTo(to2, true, { duration: 150 });
+    const r1 = await wait<boolean>(p1);
+    const r2 = await wait<boolean>(p2);
+    const late = performance.now() - t0 >= 150;
+    const at = key(v.getCamera()) === key(to2);
+    const r3 = await wait<boolean>(v.fit(false));
+    v.setCamera(start);
+    v.setAnimate(false);
+    v.renderNow();
+    out.push(['flyTo', r1, r2, late, at, r3]);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8428,6 +8523,7 @@ const VALUES: ValueSet[] = [
   keySnapValues,
   hiddenLabelCycleValues,
   themeMotionValues,
+  aoFlyEndValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
