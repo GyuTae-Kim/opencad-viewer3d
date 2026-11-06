@@ -7591,8 +7591,11 @@ const manyInstValues: ValueSet = {
       const on = await snap();
       v.setRenderOptions({ instancing: false });
       const off = await snap();
+      // 하한이 자리 수보다 크면 모두 그물마다(그림은 끔과 같은 길이라 수만 본다)
       v.setRenderOptions({ instancing: { min: 1000 } });
-      const high = await snap();
+      v.renderNow();
+      const hs = v.stats;
+      const high = { st: [hs.drawCalls, hs.triangles, hs.segments, hs.instanced.draws, hs.instanced.items] };
       let diff = 0, maxd = 0;
       const at: number[][] = [];
       for (let i = 0; i < on.img.data.length; i += 4) {
