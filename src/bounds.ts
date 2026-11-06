@@ -118,13 +118,14 @@ export function positionsBox(p: Float32Array): Box3 {
   }
   const b: Box3 = { min: [x0, y0, z0], max: [x1, y1, z1] };
   cache.set(p, b);
-  badCache.set(p, bad);
+  // 멀쩡한 배열(대부분)은 기억을 더하지 않는다 — 부품 자리 8만 장면에서 배열마다 WeakMap 하나가 눈에 띄었다
+  if (bad) badCache.set(p, bad);
   return b;
 }
 
 /** 0.50.0 xyz… 배열에서 범위에 넣지 않은 정점(NaN·무한대·|값| > COORD_LIMIT) 수 — positionsBox와 같은 훑기(캐시) */
 export function positionsBad(p: Float32Array): number {
-  if (!badCache.has(p)) positionsBox(p);
+  if (!cache.has(p)) positionsBox(p);
   return badCache.get(p) ?? 0;
 }
 

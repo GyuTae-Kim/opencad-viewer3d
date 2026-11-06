@@ -150,16 +150,29 @@ function placedOk(p: Float32Array, origin: readonly number[] | undefined | null,
 }
 
 // ───────────── 배열 검사(배열마다 한 번) ─────────────
+/** 이보다 짧은 배열은 기억하지 않고 그때마다 훑는다(작은 배열이 아주 많은 장면에서 WeakMap 기억이 훑기보다 비싸다) */
+const SMALL = 4096;
 const maxMemo = new WeakMap<Uint32Array, number>();
-/** 색인 배열의 가장 큰 값(빈 배열은 −1, 캐시) */
+/** 색인 배열의 가장 큰 값(빈 배열은 −1, 긴 배열은 캐시) */
 export function indexMax(idx: Uint32Array): number {
-  let m = maxMemo.get(idx);
+  let m = idx.length < SMALL ? undefined : maxMemo.get(idx);
   if (m === undefined) {
     m = -1;
     for (let i = 0; i < idx.length; i++) if (idx[i]! > m) m = idx[i]!;
-    maxMemo.set(idx, m);
+    if (idx.length >= SMALL) maxMemo.set(idx, m);
   }
   return m;
+}
+
+/** 범위에서 빼는 정점(NaN·무한대·한도 밖) 수 — 짧은 배열(윤곽선 등 범위를 세지 않는 배열)은 기억 없이 훑고, 긴 배열은 positionsBad(범위 훑기와 같은 기억) */
+function badOf(p: Float32Array): number {
+  if (p.length >= SMALL) return positionsBad(p);
+  let bad = 0;
+  for (let i = 0, n = p.length - (p.length % 3); i < n; i += 3) {
+    const x = p[i]!, y = p[i + 1]!, z = p[i + 2]!;
+    if (!(x >= -L && x <= L && y >= -L && y <= L && z >= -L && z <= L)) bad++;
+  }
+  return bad;
 }
 
 const finiteMemo = new WeakMap<ArrayLike<number>, number>();
@@ -184,6 +197,7 @@ export interface TriangleFix {
 }
 const triMemo = new WeakMap<Float32Array, { idx: Uint32Array | undefined; fix: TriangleFix | null }>();
 const segMemo = new WeakMap<Float32Array, { fix: Float32Array | null; bad: number }>();
+const NO_SEG_FIX: { readonly fix: null; readonly bad: 0 } = Object.freeze({ fix: null, bad: 0 });
 onForgetBounds((p) => {
   triMemo.delete(p);
   segMemo.delete(p);
@@ -195,13 +209,15 @@ onForgetBounds((p) => {
  * 고칠 것이 없으면 null(멀쩡한 그물은 색인 최댓값 한 번 훑기만 — 정점은 범위 계산과 함께 훑는다). 위치 배열·색인 배열 짝마다 캐시
  */
 export function triangleFix(positions: Float32Array, indices?: Uint32Array): TriangleFix | null {
-  const hit = triMemo.get(positions);
-  if (hit && hit.idx === indices) return hit.fix;
   const nv = Math.floor(positions.length / 3);
   const badV = positionsBad(positions);
   const outIdx = !!indices && indices.length >= 3 && indexMax(indices) >= nv;
+  // 멀쩡한 그물은 기억 없이 바로(범위·색인 최댓값 기억만 본다)
+  if (!badV && !outIdx) return null;
+  const hit = triMemo.get(positions);
+  if (hit && hit.idx === indices) return hit.fix;
   let fix: TriangleFix | null = null;
-  if (badV > 0 || outIdx) {
+  {
     // 범위에서 뺀 정점 표(그 정점이 하나라도 있을 때만)
     let badMark: Uint8Array | null = null;
     let good = 0;
@@ -242,10 +258,12 @@ export function triangleFix(positions: Float32Array, indices?: Uint32Array): Tri
  * NaN 선분은 0.49.0에도 그리지 않았고, 한도 밖 유한한 끝점은 화면을 가로지르는 선이 됐다). 선분 번호는 그대로. 고칠 것이 없으면 null(캐시)
  */
 export function segmentFix(positions: Float32Array): { fix: Float32Array | null; bad: number } {
+  // 멀쩡한 배열은 기억 없이 바로
+  if (!badOf(positions)) return NO_SEG_FIX;
   const hit = segMemo.get(positions);
   if (hit) return hit;
-  let r: { fix: Float32Array | null; bad: number } = { fix: null, bad: 0 };
-  if (positionsBad(positions) > 0) {
+  let r: { fix: Float32Array | null; bad: number } = NO_SEG_FIX;
+  {
     const n = Math.floor(positions.length / 6);
     let out: Float32Array | null = null;
     let bad = 0;
