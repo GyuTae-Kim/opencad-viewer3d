@@ -114,6 +114,8 @@ export {
   type ClosestYield,
   closestBetween,
   closestBetweenAsync,
+  type ClosestPart,
+  closestPart,
 } from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';

@@ -16,7 +16,7 @@
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
 import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
 import { type CutRanges, type IndexRange, type RangePart, cutBits, cutMaskAt, cutParts, cutRuns, mergeRanges, partCuts, partitionRanges, rangeTester } from './ranges';
-import { type Bvh, type PrimKind, buildBvh } from './bvh';
+import { type Bvh, type PrimKind, buildBvh, primCount as bvhPrimCount } from './bvh';
 import {
   type CameraState,
   type Projection,
@@ -159,12 +159,14 @@ import { SNAP_INDEX_MIN, SnapPointIndex } from './snapindex';
 import { type RayHit, castRay, walkStep } from './walk';
 import { type Annotation3d, type AnnotationGeometry, annotationGeometry, annotationText, measureDigits, measureNumber } from './annotate';
 import {
+  type ClosestPart,
   type ClosestResult,
   ClosestSearch,
   type ClosestShape,
   type ClosestSliceStats,
   closestBetween,
   closestKey,
+  closestPart,
   closestSlice,
   sameClosestKey,
   sliceRange,
@@ -450,6 +452,13 @@ export interface PointsForContext {
 export interface ClosestPointsOptions {
   maxDistance?: number;
   indices?: boolean;
+  /**
+   * 0.45.0 묶음 안 구간(면 표의 면 하나 같은 기본 도형 구간 — 그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점. Pick3d.raw·setHiddenRanges와 같은 번호, 여럿이면 합친다):
+   * 주면 그 묶음은 그 구간의 기본 도형만 잰다(rangeA = idA 쪽, rangeB = idB 쪽). 구간만의 BVH를 만들어(이어진 구간 하나는 배열을 복사하지 않는다) 묶음·구간마다 기억한다.
+   * 결과 번호(rawA·rawB·indexA·indexB)는 묶음 번호 그대로다. 묶음 수 밖은 자르고, 남는 것이 없으면 null. 주지 않으면 0.44.0 그대로(묶음 통째)
+   */
+  rangeA?: IndexRange | readonly IndexRange[] | null;
+  rangeB?: IndexRange | readonly IndexRange[] | null;
 }
 
 /**
@@ -1320,6 +1329,8 @@ const CUBE_INSET = 8;
 export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
 /** 그림 저장 한 변 한도(화소) */
 const SNAPSHOT_MAX_SIDE = 16384;
+/** 0.45.0 최근접점 구간 모양(closestPoints rangeA·rangeB)을 묶음(정점·번호 배열)마다 기억하는 개수 — 면 표에서 고른 면 짝을 잇달아 잴 때 다시 만들지 않게 */
+const CLOSEST_PART_CACHE = 64;
 /**
  * 0.30.0 처음 올릴 때 무늬 다시 그리기 간격: 첫 무늬 뒤로는 다른 무늬를 아직 푸는 중이면 앞서 무늬로 다시 그린 때부터 이만큼(ms)과
  * 그 뒤 그린 화면의 그리기·무늬 올리기 한 번·GPU 울타리 기다림에 걸린 가장 긴 시간 × TEXTURE_REDRAW_SLOW 가운데 긴 시간이 지나야 다시 그린다
@@ -1400,6 +1411,8 @@ export class Viewer3d {
   private grid: GridSpec | null = null;
   private gridOn: boolean;
   private bvhs = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Bvh>>();
+  /** 0.45.0 최근접점 구간 모양(closestPoints rangeA·rangeB): 정점 배열 → 번호 배열(없으면 종류) → 합친 구간 열쇠 → 조각. bvhs와 함께 버린다 */
+  private parts = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Map<string, ClosestPart>>>();
   private bvhGen = 0;
   private bvhTimer = 0;
   /** 쉬는 틈에 만들 BVH 일(작은 것부터) */
@@ -1773,6 +1786,7 @@ export class Viewer3d {
     this.lastLockable = null;
     this.clearTrack();
     this.bvhs = new WeakMap();
+    this.parts = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
     this.cutCache = new WeakMap();
@@ -1831,6 +1845,7 @@ export class Viewer3d {
     this.clearTrack();
     this.marker = null;
     this.bvhs = new WeakMap();
+    this.parts = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
     this.cutCache = new WeakMap();
@@ -1887,6 +1902,7 @@ export class Viewer3d {
         if (a === mesh.positions) {
           forgetBounds(a);
           this.bvhs.delete(a);
+          this.parts.delete(a);
           for (const it of this.items.values())
             if (it.item.positions === a) {
               this.boxes.delete(it.item);
@@ -2249,6 +2265,7 @@ export class Viewer3d {
     this.lastLockable = null;
     this.tracker = null;
     this.bvhs = new WeakMap();
+    this.parts = new WeakMap();
     this.boxes = new WeakMap();
     this.models = new WeakMap();
     this.cutCache = new WeakMap();
@@ -4249,10 +4266,11 @@ export class Viewer3d {
 
   /**
    * 두 묶음(그물·선분·점 묶음 id) 사이 가장 가까운 두 점과 거리(세계 좌표). 묶음 원점·행렬을 반영하고 숨긴 구간은 뺀다.
-   * 이미 만든 BVH를 쓴다(없으면 만든다). 서로 걸치면 거리 0. maxDistance를 주면 그보다 멀면 null. 없는 id·빈 묶음도 null
+   * 이미 만든 BVH를 쓴다(없으면 만든다). 서로 걸치면 거리 0. maxDistance를 주면 그보다 멀면 null. 없는 id·빈 묶음도 null.
+   * 0.45.0 rangeA·rangeB: 그 묶음 안 구간(면 하나의 삼각형 구간 등)끼리만 잰다 — 구간만의 BVH(만들어 기억한다)
    */
   closestPoints(idA: string, idB: string, opts: ClosestPointsOptions = {}): ClosestResult | null {
-    const a = this.closestShape(idA), b = this.closestShape(idB);
+    const a = this.closestShape(idA, true, opts.rangeA), b = this.closestShape(idB, true, opts.rangeB);
     if (!a || !b) return null;
     return this.closestIds(idA, idB, closestBetween(a, b, opts));
   }
@@ -4280,19 +4298,20 @@ export class Viewer3d {
         else setTimeout(res, 0);
       });
     const now = (): number => performance.now();
+    const ra = opts.rangeA, rb = opts.rangeB;
     try {
       for (;;) {
-        // 모양 잡기: BVH가 없으면 그 묶음 것만 만들고 쉰다
-        let a = this.closestShape(idA, false);
+        // 모양 잡기: BVH가 없으면 그 묶음 것만 만들고 쉰다(0.45.0 구간을 주면 그 구간 BVH)
+        let a = this.closestShape(idA, false, ra);
         if (!a) {
-          if (this.disposed || !this.items.has(idA) || !(a = this.closestShape(idA))) return null;
+          if (this.disposed || !this.items.has(idA) || !(a = this.closestShape(idA, true, ra))) return null;
           await wait();
           signal?.throwIfAborted();
           continue;
         }
-        let b = this.closestShape(idB, false);
+        let b = this.closestShape(idB, false, rb);
         if (!b) {
-          if (this.disposed || !this.items.has(idB) || !(b = this.closestShape(idB))) return null;
+          if (this.disposed || !this.items.has(idB) || !(b = this.closestShape(idB, true, rb))) return null;
           await wait();
           signal?.throwIfAborted();
           continue;
@@ -4305,7 +4324,7 @@ export class Viewer3d {
           signal?.throwIfAborted();
           if (this.disposed) return null;
           // 모양이 바뀌었으면 처음부터
-          const a2 = this.closestShape(idA, false), b2 = this.closestShape(idB, false);
+          const a2 = this.closestShape(idA, false, ra), b2 = this.closestShape(idB, false, rb);
           if (!a2 || !b2 || !sameClosestKey(ka, closestKey(a2)) || !sameClosestKey(kb, closestKey(b2))) {
             stale = true;
             if (st) st.restarts++;
@@ -4336,11 +4355,24 @@ export class Viewer3d {
     return r;
   }
 
-  /** 최근접점 모양(묶음 정점·BVH·모형 행렬·숨긴 구간). build = false면 BVH가 없을 때 null(0.41.0 — 나눠 돌리기가 BVH 만들기를 따로 둔다) */
-  private closestShape(id: string, build = true): ClosestShape | null {
+  /**
+   * 최근접점 모양(묶음 정점·BVH·모형 행렬·숨긴 구간). build = false면 BVH가 없을 때 null(0.41.0 — 나눠 돌리기가 BVH 만들기를 따로 둔다).
+   * 0.45.0 range: 그 묶음 안 구간만 담은 모양(closestPart — 구간 BVH는 partFor가 기억한다). 구간이 묶음 밖뿐이면 null
+   */
+  private closestShape(id: string, build = true, range?: IndexRange | readonly IndexRange[] | null): ClosestShape | null {
     const it = this.items.get(id);
     if (!it) return null;
     const skip = this.rangeSel.get(id)?.test ?? null;
+    if (range) {
+      const kind: PrimKind = it.kind === 'mesh' ? 'triangle' : it.kind === 'line' ? 'segment' : 'point';
+      const part = this.partFor(kind, it.item.positions, it.kind === 'mesh' ? it.item.indices : undefined, range, build);
+      if (!part) return null;
+      const o = it.item.origin;
+      const model = it.kind === 'mesh' ? this.modelOf(it.item) : (this.lineModel(it.item) ?? (hasOrigin(o) ? translation(o) : undefined));
+      const s: ClosestShape = { kind, positions: part.positions, bvh: part.bvh, model, skip, offset: part.offset, map: part.map };
+      if (part.indices) s.indices = part.indices;
+      return s;
+    }
     if (it.kind === 'mesh') {
       const m = it.item;
       const bvh = this.bvhFor('triangle', m.positions, m.indices, build);
@@ -4350,6 +4382,40 @@ export class Viewer3d {
     const bvh = this.bvhFor(kind, it.item.positions, undefined, build);
     const o = it.item.origin;
     return bvh ? { kind, positions: it.item.positions, bvh, model: this.lineModel(it.item) ?? (hasOrigin(o) ? translation(o) : undefined), skip } : null;
+  }
+
+  /**
+   * 0.45.0 최근접점 구간 모양 기억(정점 배열 → 번호 배열·종류 → 합친 구간 열쇠): 없으면 build일 때 만든다(closestPart). 묶음마다 CLOSEST_PART_CACHE개까지
+   * (가장 오래 쓰지 않은 것부터 버린다). BVH 기억과 함께 버린다(장면·그물 바꾸기, 제자리 정점 고치기). 구간이 묶음 밖뿐이거나 build가 아니고 없으면 null
+   */
+  private partFor(kind: PrimKind, positions: Float32Array, indices: Uint32Array | undefined, range: IndexRange | readonly IndexRange[], build: boolean): ClosestPart | null {
+    const R = mergeRanges(Array.isArray(range) ? (range as readonly IndexRange[]) : [range as IndexRange], bvhPrimCount(kind, positions, indices));
+    if (!R.length) return null;
+    let m = this.parts.get(positions);
+    if (!m) {
+      m = new Map();
+      this.parts.set(positions, m);
+    }
+    const sub = indices ?? kind;
+    let c = m.get(sub);
+    if (!c) {
+      c = new Map();
+      m.set(sub, c);
+    }
+    const key = R.map((r) => `${r.start}+${r.count}`).join(',');
+    let p = c.get(key);
+    if (p) {
+      // 가장 최근에 쓴 것을 뒤로
+      c.delete(key);
+      c.set(key, p);
+      return p;
+    }
+    if (!build) return null;
+    const made = closestPart(kind, positions, indices, R);
+    if (!made) return null;
+    c.set(key, made);
+    if (c.size > CLOSEST_PART_CACHE) c.delete(c.keys().next().value!);
+    return made;
   }
 
   // ───────────────────────── 묶음 겉모습 ─────────────────────────
