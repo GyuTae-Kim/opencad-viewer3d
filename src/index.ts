@@ -116,6 +116,7 @@ export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
 export { INSTANCE_MIN } from './renderer';
+export { PBR_DEFAULT_ROUGHNESS, PBR_MAX_EXPONENT, type PbrSource, type PbrState, pbrSource, pbrState, specExponent } from './pbr';
 export type { MeshArrays } from './release';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';

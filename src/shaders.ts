@@ -27,6 +27,11 @@
  *   같은 이름의 지역 변수로 둔다(아래 식은 그대로 — 같은 float 값에 같은 연산이라 그림이 바이트까지 같다). 그물 자리 하나 = 11텍셀(u_mvp 4·u_mv 4·u_nmat 3),
  *   선 자리 하나 = 5텍셀(u_mvp 4·u_mvz 1). 굵은 선은 인스턴스 = 선분 × 자리(선분 속성은 나눔 수 = 자리 수, 자리 = gl_InstanceID % u_instN).
  *   단면(CLIP·CLIPN)·그림자(SHADOW)·뒷면(BACK)과 함께 쓰지 않는다(그때는 렌더러가 그물마다 그린다)
+ * - PBR 그림(0.43.0 — 그물 변종, PBR 필드를 준 그물만. 주지 않은 그물은 아래 정의가 없어 0.42.0 셰이더와 전처리 뒤 글자까지 같다):
+ *   UV = 무늬 그림 없이도 무늬 좌표 a_uv·v_uv를 읽는다(TEX와 같은 줄). NMAP = 법선 그림(u_nmap — 접선 공간 RGB, X·Y 배율 u_nscale): 접선 틀은 시점 위치·무늬 좌표의
+ *   화면 미분(dFdx·dFdy)으로 풀어(∂p/∂u·∂p/∂v) 법선에 맞춰 곧게 펴고, 손잡이는 ∂p/∂v 쪽으로 맞춘다(접선 속성이 늘지 않는다). PBR = 거칠기(u_rough 초록)·금속성(u_metal 파랑)
+ *   그림 × 배율(u_pbr — 그림이 없으면 흰 1화소 그림이라 배율이 곧 값, z = 거칠기 뒤집기)로 반사광 지수 2/α² − 2(α = 거칠기²)·정규화 (n + 8)/8·F0 = mix(0.04, 바탕색, 금속성)·n·l,
+ *   확산광 (1 − 금속성)배, 금속은 주변광 몫을 바탕색으로 되비춘다(둘레 빛 없는 어림 — 계산 근거는 pbr.ts). 뒷면 색·무늬를 칠하는 쪽(BACK)에는 쓰지 않는다
  */
 
 /** 셰이더 원본에 #define들을 넣은 변종 */
@@ -62,7 +67,7 @@ out vec4 v_col;
 uniform vec4 u_clip;
 out float v_clip;
 #endif
-#ifdef TEX
+#if defined(TEX) || defined(UV)
 layout(location=3) in vec3 a_uv;
 uniform float u_uvq;
 uniform vec4 u_uvt;
@@ -101,7 +106,7 @@ void main() {
 #ifdef CLIP
   v_clip = dot(u_clip, vec4(a_pos, 1.0));
 #endif
-#ifdef TEX
+#if defined(TEX) || defined(UV)
   vec3 b1 = u_uvq > 0.5 ? a_uv : vec3(a_uv.xy, 1.0);
   v_uv = vec3(b1.xy * u_uvt.xy + u_uvt.zw * b1.z, b1.z);
 #endif
@@ -123,8 +128,10 @@ out vec4 o_color;
 #ifdef CLIP
 in float v_clip;
 #endif
-#ifdef TEX
+#if defined(TEX) || defined(UV)
 in vec3 v_uv;
+#endif
+#ifdef TEX
 uniform sampler2D u_tex;
 uniform float u_texAlpha;
 #endif
@@ -165,9 +172,41 @@ in vec3 v_uv2;
 uniform sampler2D u_tex2;
 uniform float u_tex2Alpha;
 #endif
+#ifdef NMAP
+uniform sampler2D u_nmap;
+uniform vec2 u_nscale;
+#endif
+#ifdef PBR
+uniform sampler2D u_rough;
+uniform sampler2D u_metal;
+uniform vec3 u_pbr;
+#endif
 void main() {
   vec3 V = u_ortho > 0.5 ? vec3(0.0, 0.0, 1.0) : normalize(-v_vpos);
   vec3 ng = cross(dFdx(v_vpos), dFdy(v_vpos));
+#if defined(NMAP) || defined(PBR)
+  // 0.43.0 PBR 그림: 미분·그림 읽기는 버리기·갈래 앞에서(고른 흐름) 한다
+  vec2 puv = v_uv.xy / v_uv.z;
+  bool pbrSide = true;
+#ifdef BACK
+  if (gl_FrontFacing == (u_flipFace > 0.5)) {
+#ifdef BACKTEX
+    pbrSide = false;
+#else
+    pbrSide = u_backColor.a < 0.0;
+#endif
+  }
+#endif
+#endif
+#ifdef NMAP
+  vec3 dp1 = dFdx(v_vpos), dp2 = dFdy(v_vpos);
+  vec2 du1 = dFdx(puv), du2 = dFdy(puv);
+  vec3 tn = texture(u_nmap, puv).xyz * 2.0 - 1.0;
+#endif
+#ifdef PBR
+  float pRough = texture(u_rough, puv).g;
+  float pMetal = texture(u_metal, puv).b;
+#endif
 #ifdef CLIP
   if (v_clip > 0.0) discard;
 #endif
@@ -188,6 +227,22 @@ void main() {
       if (dot(n, ng) < 0.0) n = -n;
     }
   }
+#ifdef NMAP
+  // 접선 틀: dp = T·du + B·dv(T = ∂p/∂u, B = ∂p/∂v)를 화면 두 방향으로 풀고, T를 법선에 맞춰 곧게 펴 B = n × T(손잡이는 ∂p/∂v 쪽)
+  float tdet = du1.x * du2.y - du2.x * du1.y;
+  vec3 tT = (dp1 * du2.y - dp2 * du1.y) * sign(tdet);
+  vec3 tB = (dp2 * du1.x - dp1 * du2.x) * sign(tdet);
+  tT -= n * dot(n, tT);
+  float tl = length(tT);
+  if (pbrSide && tl > 0.0) {
+    tT /= tl;
+    vec3 bN = cross(n, tT);
+    if (dot(bN, tB) < 0.0) bN = -bN;
+    vec3 pn = tT * (tn.x * u_nscale.x) + bN * (tn.y * u_nscale.y) + n * tn.z;
+    float lp = length(pn);
+    if (lp > 0.0) n = pn / lp;
+  }
+#endif
   vec3 L1 = normalize(vec3(-0.35, 0.55, 0.76));
   vec3 L2 = normalize(vec3(0.6, -0.3, 0.45));
   float dif = 0.30 + 0.60 * max(dot(n, L1), 0.0) + 0.20 * max(dot(n, L2), 0.0);
@@ -218,6 +273,25 @@ void main() {
   vec3 c = base.rgb * dif + vec3(spec);
 #ifdef SUN
   c = base.rgb * (vec3(u_amb) + u_sunCol * nl) + vec3(spec);
+#endif
+#ifdef PBR
+  if (pbrSide) {
+    // 거칠기 → α = r², Blinn-Phong 지수 2/α² − 2(상한 2048), 정규화 (n + 8)/8, F0 = mix(0.04, 바탕색, 금속성) × 빛 확산 세기 × n·l
+    float rgh = clamp(u_pbr.x * mix(pRough, 1.0 - pRough, u_pbr.z), 0.0, 1.0);
+    float mtl = clamp(u_pbr.y * pMetal, 0.0, 1.0);
+    float a2 = rgh * rgh;
+    a2 *= a2;
+    float sn = min(2.0 / max(a2, 1e-6) - 2.0, 2048.0);
+    vec3 f0 = mix(vec3(0.04), base.rgb, mtl);
+    // 고정 조명은 두 빛 모두 반사광을 낸다(확산과 같은 세기 0.60·0.20 — 아주 거친 금속은 같은 색 확산면과 밝기가 같다)
+    float s1 = (sn + 8.0) / 8.0 * pow(max(dot(n, normalize(L1 + V)), 1e-6), sn);
+    float s1b = (sn + 8.0) / 8.0 * pow(max(dot(n, normalize(L2 + V)), 1e-6), sn);
+    c = base.rgb * ((1.0 - mtl) * dif + mtl * 0.30) + f0 * (0.60 * s1 * max(dot(n, L1), 0.0) + 0.20 * s1b * max(dot(n, L2), 0.0));
+#ifdef SUN
+    float s2 = (sn + 8.0) / 8.0 * pow(max(dot(n, normalize(u_sunDir + V)), 1e-6), sn);
+    c = base.rgb * ((1.0 - mtl) * (vec3(u_amb) + u_sunCol * nl) + mtl * vec3(u_amb)) + f0 * u_sunCol * (s2 * nl);
+#endif
+  }
 #endif
 #ifdef FLAT
   c = base.rgb;
