@@ -34,8 +34,19 @@ export function boxDiagonal(b: Box3): number {
   return Math.hypot(s[0], s[1], s[2]);
 }
 
+/**
+ * 0.50.0 좌표 한도: 절댓값이 이보다 큰 좌표(와 NaN·무한대)는 깨진 값으로 보고 범위에 넣지 않는다 — 앱이 깨진 파일에서 만든 1e38 같은 좌표 하나가
+ * 장면 범위를 키워 카메라 맞춤·자르기 면이 float32로 넘치면(약 1e37부터) 화면 전체가 비었다. 1e15(mm면 지구–태양 거리의 6.7배)는
+ * float32 좌표의 칸 간격이 1억을 넘는 자리라 그리기·고르기·측정 어디에서도 쓸 수 없고, 카메라 행렬이 넘치는 자리보다 22자리 아래다
+ */
+export const COORD_LIMIT = 1e15;
+
+/** 한도 안의 유한한 좌표인지(NaN·±무한대·한도 밖이면 false) */
+export const okCoord = (x: number): boolean => x >= -COORD_LIMIT && x <= COORD_LIMIT;
+
 export function expandPoint(b: Box3, x: number, y: number, z: number): void {
-  if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) return;
+  // 0.50.0: NaN·무한대에 더해 한도(COORD_LIMIT) 밖 좌표도 건너뛴다(행렬·원점으로 옮긴 꼭짓점 — 0.49.0은 유한하면 넣었다)
+  if (!(okCoord(x) && okCoord(y) && okCoord(z))) return;
   if (x < b.min[0]) b.min[0] = x;
   if (y < b.min[1]) b.min[1] = y;
   if (z < b.min[2]) b.min[2] = z;
@@ -75,6 +86,13 @@ export function transformBox(b: Box3, m: ArrayLike<number>): Box3 {
 }
 
 const cache = new WeakMap<Float32Array, Box3>();
+/** 0.50.0 배열마다 범위에서 뺀 정점 수(NaN·무한대·한도 밖 — positionsBox가 함께 센다) */
+const badCache = new WeakMap<Float32Array, number>();
+/** 0.50.0 배열을 제자리에서 고쳤을 때(forgetBounds) 함께 버릴 기억(정점을 보고 만든 것 — sceneissues의 삼각형·선분 고침) */
+const forgetHooks: ((p: Float32Array) => void)[] = [];
+export function onForgetBounds(f: (p: Float32Array) => void): void {
+  forgetHooks.push(f);
+}
 
 /** xyz… 배열의 범위(같은 배열은 캐시) */
 export function positionsBox(p: Float32Array): Box3 {
@@ -82,10 +100,15 @@ export function positionsBox(p: Float32Array): Box3 {
   if (hit) return hit;
   let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
   const n = p.length - (p.length % 3);
+  const L = COORD_LIMIT;
+  let bad = 0;
   for (let i = 0; i < n; i += 3) {
     const x = p[i]!, y = p[i + 1]!, z = p[i + 2]!;
-    // NaN·무한대는 건너뛴다(비교가 모두 거짓이 되도록 한 번에 거른다)
-    if (!(x - x === 0 && y - y === 0 && z - z === 0)) continue;
+    // NaN·무한대·한도 밖은 건너뛴다(비교가 모두 거짓이 되도록 한 번에 거른다 — 0.50.0 한도 COORD_LIMIT)
+    if (!(x >= -L && x <= L && y >= -L && y <= L && z >= -L && z <= L)) {
+      bad++;
+      continue;
+    }
     if (x < x0) x0 = x;
     if (x > x1) x1 = x;
     if (y < y0) y0 = y;
@@ -95,13 +118,22 @@ export function positionsBox(p: Float32Array): Box3 {
   }
   const b: Box3 = { min: [x0, y0, z0], max: [x1, y1, z1] };
   cache.set(p, b);
+  badCache.set(p, bad);
   return b;
+}
+
+/** 0.50.0 xyz… 배열에서 범위에 넣지 않은 정점(NaN·무한대·|값| > COORD_LIMIT) 수 — positionsBox와 같은 훑기(캐시) */
+export function positionsBad(p: Float32Array): number {
+  if (!badCache.has(p)) positionsBox(p);
+  return badCache.get(p) ?? 0;
 }
 
 /** 배열을 제자리에서 고친 뒤(0.11.0 Viewer3d.setMesh의 vertices): 그 배열의 캐시한 범위를 버린다(다음에 다시 훑는다 — 0.30.0 방향 범위 기억도) */
 export function forgetBounds(p: Float32Array): void {
   cache.delete(p);
+  badCache.delete(p);
   extentMemo.delete(p);
+  for (const f of forgetHooks) f(p);
 }
 
 /**

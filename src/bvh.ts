@@ -18,9 +18,14 @@ export interface Bvh {
   nodeCount: number;
   /** 정렬된 기본 도형 번호 */
   order: Uint32Array;
-  /** 기본 도형 수 */
+  /** 나무에 든 기본 도형 수(0.50.0: 깨진 정점을 쓰는 것은 빼고 — order의 길이) */
   count: number;
+  /** 0.50.0 배열의 기본 도형 수(뺀 것까지 — 이 나무를 만든 배열인지 견줄 때) */
+  prims: number;
 }
+
+/** 0.50.0 좌표 한도(bounds.COORD_LIMIT와 같은 값 — 이 모듈은 다른 모듈에 기대지 않는다) */
+const LIM = 1e15;
 
 /** 기본 도형 수 */
 export function primCount(kind: PrimKind, positions: Float32Array, indices?: Uint32Array): number {
@@ -68,12 +73,15 @@ export function buildBvh(kind: PrimKind, positions: Float32Array, indices?: Uint
   const P = positions;
   // 1) 기본 도형 가운데의 범위
   let c0x = Infinity, c0y = Infinity, c0z = Infinity, c1x = -Infinity, c1y = -Infinity, c1z = -Infinity;
-  const cen = (i: number, o: Float64Array): void => {
+  /** 가운데를 o에 쓰고, 정점이 모두 한도 안의 유한한 좌표인지 돌려준다(0.50.0 — 정점 수 밖 색인은 undefined라 거짓) */
+  const cen = (i: number, o: Float64Array): boolean => {
     const k = primVerts(kind, indices, i, vs);
     let ax = Infinity, ay = Infinity, az = Infinity, bx = -Infinity, by = -Infinity, bz = -Infinity;
+    let ok = true;
     for (let j = 0; j < k; j++) {
       const v = vs[j]! * 3;
       const x = P[v]!, y = P[v + 1]!, z = P[v + 2]!;
+      if (!(x >= -LIM && x <= LIM && y >= -LIM && y <= LIM && z >= -LIM && z <= LIM)) ok = false;
       if (x < ax) ax = x;
       if (x > bx) bx = x;
       if (y < ay) ay = y;
@@ -84,10 +92,18 @@ export function buildBvh(kind: PrimKind, positions: Float32Array, indices?: Uint
     o[0] = (ax + bx) / 2;
     o[1] = (ay + by) / 2;
     o[2] = (az + bz) / 2;
+    return ok;
   };
   const c = new Float64Array(3);
+  // 0.50.0: 깨진 정점(NaN·무한대·|값| > 1e15·정점 수 밖 색인)을 쓰는 기본 도형은 나무에 넣지 않는다 — 고르기·붙잡기가 그리지 않는 도형을 맞히지 않게(그리기는 sceneissues의 고침 사본)
+  let skip: Uint8Array | null = null;
+  let m = n;
   for (let i = 0; i < n; i++) {
-    cen(i, c);
+    if (!cen(i, c)) {
+      (skip ??= new Uint8Array(n))[i] = 1;
+      m--;
+      continue;
+    }
     if (c[0]! < c0x) c0x = c[0]!;
     if (c[0]! > c1x) c1x = c[0]!;
     if (c[1]! < c0y) c0y = c[1]!;
@@ -99,31 +115,32 @@ export function buildBvh(kind: PrimKind, positions: Float32Array, indices?: Uint
   const sy = c1y > c0y ? 1023.999 / (c1y - c0y) : 0;
   const sz = c1z > c0z ? 1023.999 / (c1z - c0z) : 0;
   // 2) 모턴 부호
-  let codes = new Uint32Array(n);
-  let order = new Uint32Array(n);
-  for (let i = 0; i < n; i++) {
+  let codes = new Uint32Array(m);
+  let order = new Uint32Array(m);
+  for (let i = 0, w = 0; i < n; i++) {
+    if (skip && skip[i]) continue;
     cen(i, c);
     const qx = Math.min(1023, Math.max(0, ((c[0]! - c0x) * sx) | 0));
     const qy = Math.min(1023, Math.max(0, ((c[1]! - c0y) * sy) | 0));
     const qz = Math.min(1023, Math.max(0, ((c[2]! - c0z) * sz) | 0));
-    codes[i] = (spread3(qx) | (spread3(qy) << 1) | (spread3(qz) << 2)) >>> 0;
-    order[i] = i;
+    codes[w] = (spread3(qx) | (spread3(qy) << 1) | (spread3(qz) << 2)) >>> 0;
+    order[w++] = i;
   }
   // 3) 기수 정렬(10비트씩 세 번)
   {
-    let c2 = new Uint32Array(n);
-    let o2 = new Uint32Array(n);
+    let c2 = new Uint32Array(m);
+    let o2 = new Uint32Array(m);
     const cnt = new Uint32Array(1024);
     for (let shift = 0; shift < 30; shift += 10) {
       cnt.fill(0);
-      for (let i = 0; i < n; i++) cnt[(codes[i]! >>> shift) & 1023]!++;
+      for (let i = 0; i < m; i++) cnt[(codes[i]! >>> shift) & 1023]!++;
       let sum = 0;
       for (let b = 0; b < 1024; b++) {
         const t = cnt[b]!;
         cnt[b] = sum;
         sum += t;
       }
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; i < m; i++) {
         const code = codes[i]!;
         const d = cnt[(code >>> shift) & 1023]!++;
         c2[d] = code;
@@ -138,7 +155,7 @@ export function buildBvh(kind: PrimKind, positions: Float32Array, indices?: Uint
     }
   }
   // 4) 위에서 아래로 나누기
-  let cap = Math.max(1, Math.ceil((n / Math.max(1, leafSize)) * 2.5) + 1);
+  let cap = Math.max(1, Math.ceil((m / Math.max(1, leafSize)) * 2.5) + 1);
   let node = new Uint32Array(cap * 2);
   let nodeCount = 1;
   const grow = (): void => {
@@ -147,7 +164,7 @@ export function buildBvh(kind: PrimKind, positions: Float32Array, indices?: Uint
     nn.set(node);
     node = nn;
   };
-  const stack: number[] = [0, 0, n];
+  const stack: number[] = [0, 0, m];
   while (stack.length) {
     const hi = stack.pop()!;
     const lo = stack.pop()!;
@@ -204,7 +221,7 @@ export function buildBvh(kind: PrimKind, positions: Float32Array, indices?: Uint
     box[o + 4] = by;
     box[o + 5] = bz;
   }
-  return { kind, box, node: node.subarray(0, nodeCount * 2), nodeCount, order, count: n };
+  return { kind, box, node: node.subarray(0, nodeCount * 2), nodeCount, order, count: m, prims: n };
 }
 
 /** 정렬된 부호 [lo, hi)를 처음 달라지는 비트에서 나눈다(반환: 오른쪽 시작) */

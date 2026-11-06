@@ -196,7 +196,14 @@ export function sectionSegments(positions: Float32Array, indices: Uint32Array | 
     if (s2 !== s0) cut(i2, v2, i0, v0);
   };
   const count = indices ? Math.floor(indices.length / 3) : Math.floor(P.length / 9);
-  if (bvh && bvh.count === count && bvh.kind === 'triangle') {
+  // 0.50.0: 나무는 깨진 삼각형(NaN·무한대·|값| > 1e15 정점, 정점 수 밖 색인)을 빼고 만든다 — 그 배열의 나무인지는 prims로 본다. 나무 없이 훑을 때도 그 삼각형은 건너뛴다
+  const L = 1e15;
+  const okv = (i: number): boolean => {
+    const x = P[i]!, y = P[i + 1]!, z = P[i + 2]!;
+    return x >= -L && x <= L && y >= -L && y <= L && z >= -L && z <= L;
+  };
+  const good = (t: number): boolean => (indices ? okv(indices[t * 3]! * 3) && okv(indices[t * 3 + 1]! * 3) && okv(indices[t * 3 + 2]! * 3) : okv(t * 9) && okv(t * 9 + 3) && okv(t * 9 + 6));
+  if (bvh && (bvh.prims ?? bvh.count) === count && bvh.kind === 'triangle') {
     const { box, node, order } = bvh;
     const stack: number[] = [0];
     while (stack.length) {
@@ -214,7 +221,7 @@ export function sectionSegments(positions: Float32Array, indices: Uint32Array | 
       if (k > 0) for (let j = first; j < first + k; j++) tri(order[j]!);
       else if (first !== 0xffffffff) stack.push(first, first + 1);
     }
-  } else for (let t = 0; t < count; t++) tri(t);
+  } else for (let t = 0; t < count; t++) if (good(t)) tri(t);
   return out.slice(0, n - (n % 6));
 }
 
