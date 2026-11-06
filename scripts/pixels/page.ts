@@ -7230,6 +7230,89 @@ const lowExactValues: ValueSet = {
   },
 };
 
+// ───────────── 0.40.0 아주 가까이 확대한 꺾은선 토막의 교차(openEdgeLens) ─────────────
+/** 첫 점 X축 y = 25가 12토막 원의 45°–75° 토막 현을 가로지르는 자리 가운데 근 x = √(900 − 625)(현을 가로지르는 자리는 x 14.65 — 근에서 1.93) */
+const R12_CROSS_X = Math.sqrt(900 - 25 * 25);
+/** 0.40.0 openEdgeLens가 있는 판인지 — 확대 0.01(틈 0.52가 약 52화소 — 현이 커서에서 붙잡기 거리 밖)에서 첫 점 X축(y = 29.5)의 교차 둘레가 원 위 교차인지 */
+const v0400lens: Need = (v, c) => {
+  const why = fn('zoomToRect', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { refine: r12Refine, openEdgeLens: true }, [-40, 29.5, 0]);
+  r12Zoom(c, 0.01);
+  const s = c.at([R12_XI, 29.5, 0]);
+  if (s) c.hover(s.x + 1, s.y + 2);
+  v.renderNow();
+  const ok = !!v.measureHoverSnap?.refined;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.40.0 openEdgeLens(현이 커서에서 붙잡기 거리 밖인 토막의 활꼴 띠)';
+};
+/**
+ * 0.40.0 값(ring12 — 새 값): openEdgeLens를 켜고 (1) 꼭대기 활꼴을 지나는 첫 점 X축(y = 29.5)을 확대 0.005·0.01·0.02로 위에서 본 두 교차 둘레,
+ * (2) 같은 축을 잠근 X축으로 확대 0.01, (3) 45°–75° 토막 현을 가로지르는 첫 점 X축(y = 25)을 확대 0.02·0.05로 본 근 둘레 — 각 5 × 5(2화소 칸) 미리 보기
+ */
+const ringLensFarValues: ValueSet = {
+  name: 'ring12-measure-lens-far',
+  data: 'ring12',
+  needs: v0400lens,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const lock of [false, true]) {
+      r12First(c, { refine: r12Refine, openEdgeLens: true }, [-40, 29.5, 0]);
+      if (lock) c.v.setMeasureInferenceLock('x');
+      for (const w of lock ? [0.01] : [0.005, 0.01, 0.02]) {
+        r12Zoom(c, w);
+        for (const sgn of [-1, 1]) out.push(['top', lock, w, sgn, r12Grid(c, [sgn * R12_XI, 29.5, 0], 2, 2)]);
+      }
+      r12Done(c.v);
+    }
+    r12First(c, { refine: r12Refine, openEdgeLens: true }, [-40, 25, 0]);
+    for (const w of [0.02, 0.05]) {
+      const { v } = c;
+      v.setView('top', false);
+      v.fit(false);
+      v.renderNow();
+      const hw = (c.w / 2) * w;
+      const a = c.at([R12_CROSS_X - hw, 25 - 0.75 * hw, 0]), b = c.at([R12_CROSS_X + hw, 25 + 0.75 * hw, 0]);
+      if (a && b) v.zoomToRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y), false);
+      v.renderNow();
+      out.push(['cross', false, w, 1, r12Grid(c, [R12_CROSS_X, 25, 0], 2, 2)]);
+    }
+    r12Done(c.v);
+    return out;
+  },
+};
+/**
+ * 0.40.0 값(ring12): 위 (1)·(3)과 같은 자리를 openEdgeLens: false로 — 0.39.0까지의 판(그 선택이 없다)과 같아야 한다(끄면 0.39.0과 같다는 확인. 0.35.0부터 찍는다)
+ */
+const ringLensOffValues: ValueSet = {
+  name: 'ring12-measure-lens-off',
+  data: 'ring12',
+  needs: v0350lens,
+  run: (c) => {
+    const out: unknown[] = [];
+    r12First(c, { refine: r12Refine, openEdgeLens: false }, [-40, 29.5, 0]);
+    for (const w of [0.005, 0.01, 0.02]) {
+      r12Zoom(c, w);
+      for (const sgn of [-1, 1]) out.push(['top', w, sgn, r12Grid(c, [sgn * R12_XI, 29.5, 0], 2, 2)]);
+    }
+    r12Done(c.v);
+    r12First(c, { refine: r12Refine, openEdgeLens: false }, [-40, 25, 0]);
+    for (const w of [0.02, 0.05]) {
+      const { v } = c;
+      v.setView('top', false);
+      v.fit(false);
+      v.renderNow();
+      const hw = (c.w / 2) * w;
+      const a = c.at([R12_CROSS_X - hw, 25 - 0.75 * hw, 0]), b = c.at([R12_CROSS_X + hw, 25 + 0.75 * hw, 0]);
+      if (a && b) v.zoomToRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y), false);
+      v.renderNow();
+      out.push(['cross', w, r12Grid(c, [R12_CROSS_X, 25, 0], 2, 2)]);
+    }
+    r12Done(c.v);
+    return out;
+  },
+};
+
 // ───────────── 0.38.0 pointsFor의 첫 점(pointsForFirst)·접점 붙잡기 종류('tangent') ─────────────
 /** 0.38.0 API가 있는 판인지(pointsFor 기억만 비우기 clearMeasurePointsFor — pointsForFirst·'tangent' 표식과 같은 판) */
 const v0380: Need = fn('setMeasureSnap', 'project', 'clearMeasurePointsFor');
@@ -7379,6 +7462,8 @@ const VALUES: ValueSet[] = [
   pointsFirstValues,
   ringExactValues,
   lowExactValues,
+  ringLensFarValues,
+  ringLensOffValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
