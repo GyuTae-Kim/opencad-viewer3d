@@ -3,6 +3,8 @@
  * 뷰어(가짜 DOM·matchMedia 흉내): 주지 않으면 0.47.0(부드럽게·움직임 질의 없음), false, 'auto'가 연 뒤 선호 바뀜을 따르기 — 뷰 큐브·키 F·1~7·가운데 단추 두 번·
  * fit·fitItems·setView·setViewDir·zoomToRect·flyTo 모두, 옮기는 중 줄이기로 바뀌면 끝 자리로, setAnimate, 인자가 이김, dispose가 듣기를 푼다
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import { type CameraState, VIEW_DIRS, cameraBasis, defaultCamera, dirToAngles } from '../src/camera';
@@ -99,11 +101,13 @@ describe('순수: watchReducedMotion', () => {
     w.off();
   });
 
-  it('입구에서 내보낸다', () => {
+  it('입구에서 내보내고, 하위 경로 motion은 다른 모듈을 가져오지 않는다(앱 첫 화면에서 써도 뷰어·그리기가 끌려오지 않는다)', () => {
     expect(entry.REDUCED_MOTION_QUERY).toBe(REDUCED_MOTION_QUERY);
     expect(entry.normalizeAnimate).toBe(normalizeAnimate);
     expect(entry.resolveAnimate).toBe(resolveAnimate);
     expect(entry.watchReducedMotion).toBe(watchReducedMotion);
+    const src = readFileSync(fileURLToPath(new URL('../src/motion.ts', import.meta.url)), 'utf8');
+    expect(src).not.toMatch(/^\s*(import|export)\s[^;]*\sfrom\s/m);
   });
 });
 
