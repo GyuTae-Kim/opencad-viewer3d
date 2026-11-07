@@ -373,12 +373,18 @@ export interface NearSegmentHit {
   kind: 'line' | 'edge';
   index: number;
   raw: number;
+  /** 0.40.0 chord 모으기: 커서와 그 선분 띠 사이 화면 거리의 아래 한계(segmentCandidates bandPx — chord를 줬을 때만) */
+  bandPx?: number;
+  /** 0.40.0 chord 모으기: 그 선분 활꼴 높이 어림(세계 길이 — segmentCandidates sag, chord를 줬을 때만) */
+  sag?: number;
 }
 
 /**
  * 커서 tolPx 안의 선분(0.9.0 추론 붙잡기 — 교차점·수직 발): 보이는 선분 묶음(그리기 범위 앞쪽, 숨긴 구간 빼고)과 o.edges면 그물 윤곽선.
  * 세계 끝점(자르기 전 — 교차·수직 발은 선 위 어디든 된다)과 그 묶음의 남는 쪽 판정을 돌려준다. 화면 거리 차례로 max개까지.
  * 가림은 따지지 않는다(후보 점마다 따로 묻는다). 0.14.0부터 선분 종류와 번호(kind·index·raw — 고르기 결과 Pick3d와 같은 뜻)도 싣는다
+ * chord(0.40.0 — 0보다 크면): 선분 대신 그 띠(현의 직선에서 활꼴 높이 어림 sag 안 — chord × 선분 길이를 넘지 않는다, segmentCandidates chord)가 커서 tolPx 안에 닿을 수 있는
+ * 선분을 모으고 띠와의 거리(bandPx) 차례로 max개까지 둔다(같으면 현과의 거리 차례). 묶음 범위 상자도 chord × 대각선만큼 부풀려 본다
  */
 export function segmentsNear(
   f: ViewFrame,
@@ -388,8 +394,18 @@ export function segmentsNear(
   o: Pick<ScenePickOptions, 'bvh' | 'limit' | 'bounds' | 'model' | 'clip' | 'clips' | 'hidden' | 'edges' | 'edgeHidden' | 'itemModel'>,
   tolPx: number,
   max = 24,
+  chord = 0,
 ): NearSegmentHit[] {
-  const bounds = o.bounds ?? itemBounds;
+  const bounds0 = o.bounds ?? itemBounds;
+  // 0.40.0 chord: 묶음 안 선분 길이는 범위 상자 대각선보다 길지 않다 — 띠는 상자에서 chord × 대각선 안
+  const bounds =
+    chord > 0
+      ? (it: Mesh3d | LineSet3d): Box3 => {
+          const b = bounds0(it);
+          const g = chord * Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]);
+          return { min: [b.min[0] - g, b.min[1] - g, b.min[2] - g], max: [b.max[0] + g, b.max[1] + g, b.max[2] + g] };
+        }
+      : bounds0;
   const clip = o.clip ?? null;
   const NONE: readonly Readonly<Plane4>[] = [];
   const planesOf = (it: Mesh3d | LineSet3d): readonly Readonly<Plane4>[] => (o.clips ? (o.clips(it) ?? NONE) : clip ? [clip] : NONE);
@@ -403,23 +419,27 @@ export function segmentsNear(
     ids: ArrayLike<number> | undefined,
     model: ArrayLike<number> | undefined,
     pl: readonly Readonly<Plane4>[],
-    hs: { index: number; distPx: number; depth: number }[],
+    hs: { index: number; distPx: number; depth: number; bandPx?: number; sag?: number }[],
   ): void => {
     if (!hs.length) return;
     const keep = keepOf(pl);
     for (const h of hs) {
       const k = h.index * 6;
       const a: V3 = [P[k]!, P[k + 1]!, P[k + 2]!], b: V3 = [P[k + 3]!, P[k + 4]!, P[k + 5]!];
-      out.push({ a: model ? transformPoint(model, a) : a, b: model ? transformPoint(model, b) : b, id, keep, distPx: h.distPx, depth: h.depth, kind, index: ids?.[h.index] ?? h.index, raw: h.index });
+      const s: NearSegmentHit = { a: model ? transformPoint(model, a) : a, b: model ? transformPoint(model, b) : b, id, keep, distPx: h.distPx, depth: h.depth, kind, index: ids?.[h.index] ?? h.index, raw: h.index };
+      if (h.bandPx !== undefined) s.bandPx = h.bandPx;
+      if (h.sag !== undefined) s.sag = h.sag;
+      out.push(s);
     }
   };
+  const ch = chord > 0 ? { chord } : {};
   for (const l of items.lines) {
     if (!nearBox(f, bounds(l), x, y, tolPx + (l.width ?? 1) / 2)) continue;
     const model = o.itemModel?.(l) ?? (l.origin && (l.origin[0] || l.origin[1] || l.origin[2]) ? translation(l.origin) : undefined);
     const pl = planesOf(l);
     const lim = o.limit?.(l.id) ?? Infinity;
     const hid = o.hidden?.(l);
-    add('line', l.id, l.positions, l.segmentIds, model, pl, segmentCandidates(f, l.positions, o.bvh('segment', l.positions, undefined), model, x, y, tolPx + (l.width ?? 1) / 2, { clips: pl.length ? pl : null, skip: (i) => i >= lim || !!hid?.(i) }));
+    add('line', l.id, l.positions, l.segmentIds, model, pl, segmentCandidates(f, l.positions, o.bvh('segment', l.positions, undefined), model, x, y, tolPx + (l.width ?? 1) / 2, { clips: pl.length ? pl : null, skip: (i) => i >= lim || !!hid?.(i), ...ch }));
   }
   if (o.edges)
     for (const m of items.meshes) {
@@ -427,9 +447,10 @@ export function segmentsNear(
       if (!E || E.length < 6 || !nearBox(f, bounds(m), x, y, tolPx)) continue;
       const model = o.model ? o.model(m) : modelMatrix(m.matrix, m.origin);
       const pl = planesOf(m);
-      add('edge', m.id, E, undefined, model, pl, segmentCandidates(f, E, o.bvh('segment', E, undefined), model, x, y, tolPx, { clips: pl.length ? pl : null, skip: o.edgeHidden?.(m) }));
+      add('edge', m.id, E, undefined, model, pl, segmentCandidates(f, E, o.bvh('segment', E, undefined), model, x, y, tolPx, { clips: pl.length ? pl : null, skip: o.edgeHidden?.(m), ...ch }));
     }
-  out.sort((p, q) => p.distPx - q.distPx);
+  if (chord > 0) out.sort((p, q) => p.bandPx! - q.bandPx! || p.distPx - q.distPx);
+  else out.sort((p, q) => p.distPx - q.distPx);
   if (out.length > max) out.length = max;
   return out;
 }

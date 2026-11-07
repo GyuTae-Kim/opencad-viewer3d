@@ -405,6 +405,8 @@ export function countRayHits(
  * 원뿔 질의: 광선 둘레 반지름 r(t) = r0 + k·t 안에 들 수 있는 잎의 기본 도형을 모두 visit에 넘긴다.
  * (원근 투영에서 "화면 몇 화소 안"을 세계 길이로 보수적으로 바꾼 것. 정확한 판정은 visit이 한다)
  * visit이 false를 돌려주면 멈춘다.
+ * grow(0.40.0 — 기본 0): 마디마다 반지름을 grow × 그 마디 상자 대각선만큼 더 늘린다. 기본 도형(선분)마다 제 길이에 비례해 부푼 띠(현 둘레 활꼴 높이 한도)를 찾을 때 —
+ * 마디 안 선분의 길이는 그 상자 대각선보다 길지 않으므로 보수적이다(뿌리 쪽 큰 마디는 넉넉히, 잎 쪽 작은 마디는 좁게 걸러진다)
  */
 export function queryCone(
   bvh: Bvh,
@@ -414,6 +416,7 @@ export function queryCone(
   k: number,
   tMax: number,
   visit: (prim: number) => boolean | void,
+  grow = 0,
 ): void {
   if (!bvh.count) return;
   const ox = origin[0]!, oy = origin[1]!, oz = origin[2]!;
@@ -428,9 +431,11 @@ export function queryCone(
     // 상자 안 t의 위쪽 한계(가운데 투영 + 반폭 투영)
     const hx = (box[o + 3]! - box[o]!) / 2, hy = (box[o + 4]! - box[o + 1]!) / 2, hz = (box[o + 5]! - box[o + 2]!) / 2;
     const cx = box[o]! + hx - ox, cy = box[o + 1]! + hy - oy, cz = box[o + 2]! + hz - oz;
-    const tFar = cx * dx + cy * dy + cz * dz + hx * adx + hy * ady + hz * adz;
+    // 0.40.0 grow: 띠는 상자에서 g 안이므로 깊이 한계도 g만큼 늘린다
+    const g = grow > 0 ? grow * 2 * Math.hypot(hx, hy, hz) : 0;
+    const tFar = cx * dx + cy * dy + cz * dz + hx * adx + hy * ady + hz * adz + g;
     if (tFar < 0) continue;
-    const r = r0 + k * Math.min(tFar, tMax);
+    const r = r0 + k * Math.min(tFar, tMax) + g;
     if (rayBoxEntry(box, ni, ox, oy, oz, ix, iy, iz, tMax, r) === Infinity) continue;
     const a = node[ni * 2]!, n = node[ni * 2 + 1]!;
     if (n > 0) {

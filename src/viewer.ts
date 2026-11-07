@@ -78,7 +78,9 @@ import {
 } from './snap';
 import {
   EXACT_SNAP_SCALE,
+  LENS_SEGMENTS,
   MeasureTracker,
+  OPEN_EDGE_CHORD,
   type OpenEdgeCandidate,
   type OpenEdgeSnap,
   type OpenFaceSnap,
@@ -96,6 +98,8 @@ import {
   axisFaceSnap,
   chooseTrackPoint,
   hiddenByOwnPatch,
+  lensEdgeSnap,
+  lineScreenGap,
   lockEdgeSnap,
   lockFaceSnap,
   lockTrackSnap,
@@ -533,6 +537,16 @@ export interface MeasureSnapOptions {
    * 앱 호출·기억 열쇠·후보 차례(X의 커서 거리로 견준다)·값의 꼴은 그대로다(이미 부르던 닫힌 답을 받는 규칙만 넓힌다). 주지 않거나 false면 0.38.0과 같다
    */
   refineSnapToExact?: boolean;
+  /**
+   * 0.40.0(기본 켜짐 — refine이 있을 때만, false면 0.39.0과 결과·앱 호출 수가 같다): 아주 가까이 확대해 처짐이 화면에서 붙잡기 거리보다 커진 꺾은선 토막의 교차(0.35.0 남은 한계).
+   * 선(첫 점 축 — inference.axisEdges, 끌어온 축 — track, 끌어온 점 안내 선 — trackDirs { meets: { open } }, 잠근 선 — lockEdges) 가운데 화면에서 커서 붙잡기 거리 안을
+   * 지나는 것만 보고, 토막의 활꼴 띠(현에서 활꼴 높이 어림 안 — 배열에서 앞·뒤로 이어진 토막과 꺾인 각으로 어림, 0.1 × 토막 길이를 넘지 않고 곧은 토막은 0)가
+   * 화면에서 커서 붙잡기 거리 안에 닿는 토막을 LENS_SEGMENTS(24)개까지 모아 (1) 현이 커서에서 붙잡기 거리 밖인 토막의 열린 교차, (2) 선이 현을 가로지르는 자리가
+   * 커서에서 붙잡기 거리 밖인 교차(가로지르는 자리를 힌트로)를 앱 refine에 'axisEdge'·open = true로 묻는다.
+   * 받는 규칙·기억 열쇠·값은 0.23.0 열린 교차와 같다(받는 점은 그 선 위·그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 호출은 앞의 열린 후보들이 쓰고 남은 한도로 하고
+   * (미리 보기 한 번 OPEN_REFINE_CALLS — 넘지 않는다), 다른 점 후보보다 뒤 차례다(1화소 넘게 가까워야 이긴다)
+   */
+  openEdgeLens?: boolean;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
@@ -1350,6 +1364,8 @@ export class Viewer3d {
     ends: boolean;
     /** 0.39.0 닫힌 선분·면 교차의 앱 점이 커서에서 붙잡기 거리 밖이어도 같은 교차의 정확한 자리면 옮기는지(refineSnapToExact — refine·refineFace가 있을 때만 true) */
     exact: boolean;
+    /** 0.40.0 현이 커서에서 붙잡기 거리 밖이어도 활꼴 띠가 닿는 토막의 교차를 보는지(openEdgeLens — 기본 켜짐, refine이 있을 때만 true) */
+    lens: boolean;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
@@ -3265,6 +3281,7 @@ export class Viewer3d {
         through: !!o.throughTranslucent,
         ends: o.refineEnds === true && !!o.refine,
         exact: o.refineSnapToExact === true && !!(o.refine || o.refineFace),
+        lens: o.openEdgeLens !== false && !!o.refine,
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
@@ -4805,6 +4822,9 @@ export class Viewer3d {
     // 커서 둘레 선분(0.9.0 교차점·수직 발과 0.12.0 선분 방향 잠금이 함께 쓴다 — 필요할 때 한 번만 구한다)
     let near: NearSegment[] | null = null;
     const nearSegs = (): NearSegment[] => (near ??= this.segmentsAround(f, x, y, snapPx, edges));
+    // 0.40.0 openEdgeLens: 활꼴 띠가 커서 붙잡기 거리 안에 닿는 토막(필요할 때 한 번만)
+    let lensList: NearSegment[] | null = null;
+    const lensSegs = (): NearSegment[] => (lensList ??= this.segmentsAround(f, x, y, snapPx, edges, OPEN_EDGE_CHORD));
     const app = this.snapCandidates(f, x, y, snapPx, d?.pick ?? null);
     const lock = first ? this.inferLock : null;
     // 열린 후보(0.15.0): 다듬기가 있고 잠그지 않았을 때만 — 토막 밖 수직 발·넓힌 교차점을 앱이 다듬은 점으로(받을 수 있는 것만).
@@ -4841,7 +4861,7 @@ export class Viewer3d {
       // 0.21.0: 잠근 선이 끌어온 축과 만나는 점(lockTracks — 끌어온 점이 있을 때)도 — 그 셋보다 먼저 견준다
       const lockTracks = inf?.lockTracks && this.tracker?.size ? this.tracker.view : null;
       if (!q && (inf?.lockEdges || inf?.lockFaces || lockTracks)) {
-        const m = this.lockedMeet(so, inf!, f, x, y, snapPx, first, lock, d, nearSegs, pointerType, lockOut, budget, lockTracks);
+        const m = this.lockedMeet(so, inf!, f, x, y, snapPx, first, lock, d, nearSegs, pointerType, lockOut, budget, lockTracks, lensSegs);
         if (m) return m;
       }
       const l = lockedSnap(f, first, lock.direction, x, y, q ? q.p : null);
@@ -4888,6 +4908,8 @@ export class Viewer3d {
       // 0.20.0 열린 교차: 끌어온 축·첫 점 축(axisEdges)이 커서 둘레 토막과 3D로 만나지 않지만 그 활꼴을 지날 만큼 가까우면 앱 refine('axisEdge', open)이 준
       // 곡선 위 교차(받을 수 있는 것만 — 다듬은 점으로 견준다). 다섯 후보 뒤 차례
       let openE: { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null = null;
+      // 0.40.0 openEdgeLens가 다시 보는 선(이 열린 교차와 0.31.0 안내 선의 열린 교차의 선)
+      const lensLines: OpenRefineLine[] = [];
       if (so.refine && (tracks || axisEdges)) {
         const ls: OpenRefineLine[] = [];
         const axes: SnapAxis[] = ['x', 'y', 'z'];
@@ -4895,6 +4917,7 @@ export class Viewer3d {
         // 끌어온 축이 곧 첫 점 축이면(끌어온 점이 첫 점 축 위) 그 축은 한 번만(끌어온 축 — 방향도 실린다)
         if (axisEdges) for (const axis of axes) if (!ls.some((l) => l.axis === axis && along(l.from, axis))) ls.push({ from: first!, dir: axisLock(axis).direction, axis, track: false });
         openE = this.openLineEdge(so, f, x, y, snapPx, ls, first, nearSegs(), budget, vis);
+        lensLines.push(...ls);
       }
       // 0.22.0 면의 열린 교차: 첫 점 축·끌어온 축(axisFaces)이 커서 둘레 삼각형을 뚫지 않지만 그 삼각형과 곡면 사이를 지날 만큼 가까우면 앱 refineFace('axisFace', open)가 준
       // 곡면 위 교차(받을 수 있는 것만 — 다듬은 점으로 견준다). 선은 열린 교차와 같이 끌어온 축 → 첫 점 축(같은 직선이면 한 번). 여섯 후보 뒤 차례
@@ -4920,6 +4943,7 @@ export class Viewer3d {
         const ls: OpenRefineLine[] = [];
         for (const P of tracks!) if (!first || !sameTrackPoint(P, first)) for (const g of trackDirGuides(P, openRef)) ls.push({ from: P, dir: g.dir, track: true, guide: g.kind });
         if (ls.length) openG = this.openLineEdge(so, f, x, y, snapPx, ls, first, nearSegs(), budget, vis);
+        lensLines.push(...ls);
       }
       // 0.32.0 안내 선의 면의 열린 교차(trackDirs { meets: { openFaces: true } } — refineFace가 있을 때만): 같은 안내 선이 커서 둘레 삼각형을 뚫지 않지만
       // 그 삼각형과 곡면 사이를 지날 만큼 가까우면 앱 refineFace('axisFace', open — 축 이름 없는 그 선)가 준 곡면 위 교차. 0.22.0 면의 열린 교차와 같은 셈·한도·기억. 열 후보 뒤 차례
@@ -4939,7 +4963,10 @@ export class Viewer3d {
         endRef = el.ref;
         if (el.lines.length) ends = this.openLineEdge(so, f, x, y, snapPx, el.lines, first, nearSegs(), budget, vis, null);
       }
-      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap, openGF?.snap, ends?.snap]);
+      // 0.40.0 openEdgeLens: 같은 선(첫 점 축·끌어온 축·안내 선)이 현이 커서에서 붙잡기 거리 밖인 토막(활꼴 띠가 커서에 닿는 토막)의 활꼴을 지나는 열린 교차.
+      // 남은 호출 한도로 묻고(앞의 열린 후보가 먼저 쓴다), 열두 후보 뒤 차례
+      const lens = so.lens && lensLines.length ? this.openLensEdge(so, f, x, y, snapPx, lensLines, first, nearSegs, lensSegs, budget, vis) : null;
+      const t = chooseTrackPoint<{ distPx: number }>([cross, pair, edge, axe, face, openE?.snap, openF?.snap, meet?.snap, guide, openG?.snap, openGF?.snap, ends?.snap, lens?.snap]);
       if (t && t === cross) return { p: cross.p, vertex: true, kind: 'axis', axis: cross.axis, direction: cross.direction!, trackFrom: cross.from };
       if (t && t === pair) {
         const out: MeasurePick = { p: pair.p, vertex: true, kind: 'axis', axis: pair.axis, trackFrom: pair.from, trackOther: pair.other! };
@@ -5046,6 +5073,8 @@ export class Viewer3d {
       }
       // 0.33.0 꼭짓점을 지나는 선의 다듬은 교차: 축이면 열린 교차(0.20.0), 안내 선이면 안내 선의 열린 교차(0.31.0)와 같은 값
       if (t && ends && t === ends.snap) return this.openEdgePick(f, ends, first, null, endRef, refsBefore);
+      // 0.40.0 띠로 모은 토막의 열린 교차: 축이면 열린 교차(0.20.0), 안내 선이면 안내 선의 열린 교차(0.31.0)와 같은 값
+      if (t && lens && t === lens.snap) return lens.line.guide ? this.openEdgePick(f, lens, first, null, openRef, refsBefore) : this.openEdgePick(f, lens, first, null, null, null);
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
     if (first && noPoint && (inf?.axes || inf?.parallel)) {
@@ -5497,6 +5526,7 @@ export class Viewer3d {
    * (0.18.0 'axisEdge'와 같은 꼴의 열쇠 — 잠그기 전 첫 점 축과 잠근 축이 같은 열쇠다. 0.36.0부터 끝에 '#open'이 붙어 같은 입력의 닫힌 'axisEdge'와 따로 묻는다). 받은 것이 없으면 null.
    * 0.33.0: at이 undefined가 아니면 열린 교차 대신 선이 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리(track.ts vertexEdgeSnap — refineEnds)를 같은 부르기·한도·기억으로 본다
    * (at = 끝점 붙잡기가 고른 꼭짓점 — 그 자리만, null이면 커서 둘레 토막의 모든 끝)
+   * 0.40.0 from: 열린 교차 후보를 낼 토막(띠로 모은 토막 — openLensEdge). segs는 이웃 판정에도 쓴다
    */
   private openLineEdge(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5510,6 +5540,7 @@ export class Viewer3d {
     budget: { calls: number },
     vis: (p: V3, sg: NearSegment) => boolean,
     at?: V3 | null,
+    from?: readonly NearSegment[],
   ): { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null {
     const refine = so.refine;
     if (!refine || !lines.length) return null;
@@ -5541,8 +5572,47 @@ export class Viewer3d {
       return q;
     };
     const list = [...ids.keys()];
-    const r = at === undefined ? openEdgeSnap(f, lines, list, x, y, snapPx, ask, vis) : vertexEdgeSnap(f, lines, list, x, y, snapPx, ask, vis, at);
+    const r = from
+      ? lensEdgeSnap(f, lines, list, from.filter((s) => ids.has(s)), x, y, snapPx, ask, vis)
+      : at === undefined
+        ? openEdgeSnap(f, lines, list, x, y, snapPx, ask, vis)
+        : vertexEdgeSnap(f, lines, list, x, y, snapPx, ask, vis, at);
     return r ? { snap: r, line: lines[r.line]! } : null;
+  }
+
+  /**
+   * 0.40.0 openEdgeLens: 아주 가까이 확대해 처짐이 화면에서 붙잡기 거리보다 큰 꺾은선 토막의 교차(track.ts lensEdgeSnap). 선 lines 가운데 화면에서 커서 붙잡기 거리 안인 것만 보고
+   * (lineScreenGap — 받는 점은 그 선 위·커서에서 붙잡기 거리 안), 활꼴 띠(현에서 OPEN_EDGE_CHORD × 토막 길이 안 — 0.23.0 받는 범위)가 커서 붙잡기 거리 안에 닿는 토막(lens — 띠와
+   * 거리 차례로 LENS_SEGMENTS개까지) 가운데 커서 둘레 토막(near)에 없는 것의 열린 교차와, near·lens 모두에서 선이 현을 가로지르는 자리가 커서에서 먼 교차(가로지르는 자리를 힌트로)를
+   * 'axisEdge'·open = true로 묻는다. 받는 규칙·기억은 0.20.0 열린 교차(openLineEdge)와 같고, 이웃 판정은 near와 lens를 함께 본다. 호출 한도 budget은 앞의 열린 후보들이 쓰고 남은 것이다
+   */
+  private openLensEdge(
+    so: NonNullable<Viewer3d['snapOpt']>,
+    f: ViewFrame,
+    x: number,
+    y: number,
+    snapPx: number,
+    lines: readonly OpenRefineLine[],
+    first: V3 | null,
+    near: () => NearSegment[],
+    lens: () => NearSegment[],
+    budget: { calls: number },
+    vis: (p: V3, sg: NearSegment) => boolean,
+  ): { snap: OpenEdgeSnap<NearSegment>; line: OpenRefineLine } | null {
+    if (!so.lens || !so.refine) return null;
+    const ls = lines.filter((l) => lineScreenGap(f, l.from, l.dir, x, y) <= snapPx);
+    if (!ls.length) return null;
+    // 커서 둘레 토막은 띠로 모은 같은 토막의 활꼴 높이 어림(sag)을 싣는다(가로지르는 자리가 먼 교차 거르기 — 곧은 토막은 빠진다). 띠로 모은 것 가운데 커서 둘레에 없는 것이 열린 교차 후보
+    const key = (s: NearSegment): string => `${s.kind}\u0000${s.id}\u0000${s.raw}`;
+    const L = lens();
+    const byKey = new Map(L.map((s) => [key(s), s]));
+    const n = near().map((s) => {
+      const l = byKey.get(key(s));
+      return l?.sag !== undefined ? { ...s, sag: l.sag } : s;
+    });
+    const nk = new Set(n.map(key));
+    const extra = L.filter((s) => !nk.has(key(s)));
+    return n.length || extra.length ? this.openLineEdge(so, f, x, y, snapPx, ls, first, [...n, ...extra], budget, vis, undefined, extra) : null;
   }
 
   /**
@@ -5660,6 +5730,7 @@ export class Viewer3d {
     lockOut: (p: V3) => MeasurePick,
     budget: { calls: number },
     tracks: readonly V3[] | null,
+    lensSegs: () => NearSegment[],
   ): MeasurePick | null {
     const vis = (p: V3, sg: NearSegment): boolean => {
       const sp = projectToScreen(f, p);
@@ -5677,9 +5748,12 @@ export class Viewer3d {
     const openF = inf.lockFaces && so.refineFace ? this.openLineFace(so, f, x, y, snapPx, [line], first, budget) : null;
     // 0.33.0 refineEnds: 잠근 선이 커서 둘레 꺾은선 꼭짓점을 반 화소 안으로 지나는 자리(선분 교차에서 빠지는 자리)의 다듬은 교차 — 면의 열린 교차 뒤 차례
     const ends = inf.lockEdges && so.ends ? this.openLineEdge(so, f, x, y, snapPx, [line], first, nearSegs(), budget, vis, null) : null;
-    const t = chooseTrackPoint<{ distPx: number }>([trk, edge, face, open?.snap, openF?.snap, ends?.snap]);
+    // 0.40.0 openEdgeLens: 잠근 선이 현이 커서에서 붙잡기 거리 밖인 토막(활꼴 띠가 커서에 닿는 토막)의 활꼴을 지나는 열린 교차 — 남은 호출 한도로, 꼭짓점 다듬기 뒤 차례
+    const lens = inf.lockEdges && so.lens ? this.openLensEdge(so, f, x, y, snapPx, [line], first, nearSegs, lensSegs, budget, vis) : null;
+    const t = chooseTrackPoint<{ distPx: number }>([trk, edge, face, open?.snap, openF?.snap, ends?.snap, lens?.snap]);
     if (!t) return null;
     if (ends && t === ends.snap) return this.openEdgePick(f, ends, first, lockOut, null, null);
+    if (lens && t === lens.snap) return this.openEdgePick(f, lens, first, lockOut, null, null);
     if (t === trk) {
       const out = lockOut(trk.p);
       if (trk.axis) out.trackOther = { from: trk.from, axis: trk.axis };
@@ -5740,8 +5814,11 @@ export class Viewer3d {
     return edgeLineLock(a, p, lines(), tol(a), tol(p));
   }
 
-  /** 커서 tolPx 안의 보이는 선분(선분 묶음, edges면 그물 윤곽선)과 그 깊이의 화소 세계 길이(0.9.0 추론·0.12.0 선분 방향 잠금) */
-  private segmentsAround(f: ViewFrame, x: number, y: number, tolPx: number, edges: boolean): NearSegment[] {
+  /**
+   * 커서 tolPx 안의 보이는 선분(선분 묶음, edges면 그물 윤곽선)과 그 깊이의 화소 세계 길이(0.9.0 추론·0.12.0 선분 방향 잠금).
+   * 0.40.0 chord(openEdgeLens): 선분 대신 그 활꼴 띠(현에서 chord × 선분 길이 안)가 커서 tolPx 안에 닿는 선분을 띠와의 거리 차례로 LENS_SEGMENTS개까지
+   */
+  private segmentsAround(f: ViewFrame, x: number, y: number, tolPx: number, edges: boolean, chord = 0): NearSegment[] {
     const segs = segmentsNear(f, x, y, this.visibleItems(), {
       ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
@@ -5750,8 +5827,8 @@ export class Viewer3d {
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
       hidden: (it) => this.rangeSel.get(it.id)?.test,
-    }, tolPx);
-    return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw }));
+    }, tolPx, chord > 0 ? LENS_SEGMENTS : undefined, chord);
+    return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw, ...(s.sag !== undefined ? { sag: s.sag } : {}) }));
   }
 
   /**

@@ -5,7 +5,7 @@
  * 토막은 여전히 커서 둘레(화면에서 붙잡기 거리 안 — segmentsAround)여야 한다.
  * - 순수: cursorInLens, openEdgeCandidates(12토막 원 — 활꼴 쪽·현 반대쪽 커서)
  * - 뷰어(가짜 DOM — 실제 포인터 사건): 12토막 원의 활꼴을 지나는 첫 점 X축을 1화소 0.05로 위에서 보면 두 교차 모두 원 위로(0.34.0은 축 위 커서 자리),
- *   0.02면 현이 커서에서 붙잡기 거리 밖이라 그대로. NC 23차 재현의 앞 1단은 tests/v0230.test.ts·v0330ends.test.ts
+ *   0.02면 현이 커서에서 붙잡기 거리 밖이라 0.39.0까지 그대로(0.40.0부터는 openEdgeLens: false일 때만 — 기본은 tests/v0400lens.test.ts). NC 23차 재현의 앞 1단은 tests/v0230.test.ts·v0330ends.test.ts
  * 화면 좌표로 가리킬 때는 선·그물의 경계나 바깥 구석을 정확히 가리키지 않고 몇 화소 옆을 가리킨다(Node 판마다 마지막 자리 반올림이 다르다).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -117,7 +117,7 @@ const hoverXY = (w: View, x: number, y: number): void => {
 };
 const INF = { intersections: true, perpendicular: true, axes: true, parallel: true, lock: true, track: true, axisEdges: true, axisFaces: true, lockEdges: true, lockFaces: true } as const;
 /** A0(앱 점)을 첫 점으로 찍고 위에서 원 꼭대기 둘레를 1화소 = w로(zoomToRect) */
-function ringView(refine: MeasureSnapOptions['refine'], w: number): View {
+function ringView(refine: MeasureSnapOptions['refine'], w: number, extra: Partial<MeasureSnapOptions> = {}): View {
   const host = dom.host();
   host.rect = { left: 0, top: 0, width: 800, height: 600 };
   const v = new Viewer3d(host as unknown as HTMLElement, { animate: false, keyboard: false });
@@ -126,7 +126,7 @@ function ringView(refine: MeasureSnapOptions['refine'], w: number): View {
   v.setView('top', false);
   v.fit(false);
   v.setMeasureMode(true);
-  v.setMeasureSnap({ points: [{ point: A0, kind: 'point' }], inference: INF, refine });
+  v.setMeasureSnap({ points: [{ point: A0, kind: 'point' }], inference: INF, refine, ...extra });
   v.renderNow();
   const s0 = at(vw, A0);
   hoverXY(vw, s0.x + 1, s0.y);
@@ -158,8 +158,8 @@ describe('Viewer3d: 아주 가까이 본 12토막 원의 활꼴 열린 교차(0.
     }
   });
 
-  it('1화소 0.02(틈 26화소)면 현이 커서에서 붙잡기 거리 밖이라 그대로 축 위 커서 자리(커서 둘레 선분이 없다)', () => {
-    const w = ringView(ringRefine, 0.02);
+  it('1화소 0.02(틈 26화소)면 현이 커서에서 붙잡기 거리 밖이라 커서 둘레 선분이 없다 — openEdgeLens: false면 그대로 축 위 커서 자리(0.40.0 기본은 원 위 교차 — tests/v0400lens.test.ts)', () => {
+    const w = ringView(ringRefine, 0.02, { openEdgeLens: false });
     const s = at(w, [XI, 29.5, 0]);
     hoverXY(w, s.x + 1, s.y + 2);
     const h = w.v.measureHoverSnap!;

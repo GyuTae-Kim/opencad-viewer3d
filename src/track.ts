@@ -95,6 +95,11 @@ export interface TrackSegment {
   b: readonly number[];
   wpp: number;
   keep?: (p: readonly number[]) => boolean;
+  /**
+   * 0.40.0(선택): 그 토막 활꼴 높이 어림(세계 길이 — 띠로 모은 토막, 이웃 토막과 꺾인 각으로 어림한 값). 있으면 열린 교차·가로지르는 자리가 먼 교차의 후보 거르기
+   * (선과 현 사이·커서가 활꼴 쪽인지·선에서 그 토막 범위인 조각)에 OPEN_EDGE_CHORD × 토막 길이 대신 쓴다. 받는 규칙은 그대로다(현에서 OPEN_EDGE_CHORD × 토막 길이 안)
+   */
+  sag?: number;
 }
 
 /** 끌어온 축과 선분의 교차 결과(0.17.0): TrackSnap에 그 점이 놓인 선분(받은 segs의 그 객체) */
@@ -609,6 +614,9 @@ export function lockTrackSnap(
  */
 export const OPEN_EDGE_CHORD = OPEN_INTERSECTION_CHORD;
 
+/** 토막의 활꼴 높이 한도(0.40.0 — 띠로 모은 토막의 어림 sag, 없으면 OPEN_EDGE_CHORD × 토막 길이 — 0.20.0) */
+const sagOf = (s: TrackSegment): number => s.sag ?? OPEN_EDGE_CHORD * dist3(s.a, s.b);
+
 /** 열린 교차가 보는 선 하나(0.20.0): 지나는 점(첫 측정 점·끌어온 점)과 방향(길이는 상관없다 — 축·잠근 선) */
 export interface OpenEdgeLine {
   from: readonly number[];
@@ -698,7 +706,9 @@ function lineSegClosest(
  *   (곡선에 거의 닿듯 지나 활꼴의 높은 가운데를 지나는 선), segs 안의 이웃 토막이 선이 곡선의 안쪽(볼록하지 않은 쪽)을 지난다고 보이면 뺀다
  *   (이웃이 없으면 볼록한 쪽을 모르므로 남긴다). 현의 다른 끝(나란하면 두 끝 각각)에서 선에 내린 발을 같은 선·토막의 둘째 힌트(twin)로 더한다
  *   (그 끝을 함께 쓰는 이웃 토막을 선이 지나면 그 발은 뺀다). 앞의 후보(코어 점)의 자리는 0.20.0 그대로다
- * 커서에 가까운 코어 점부터(같으면 선 → 토막 차례). 다듬기 손잡이를 부를 차례와 같다
+ * 커서에 가까운 코어 점부터(같으면 선 → 토막 차례). 다듬기 손잡이를 부를 차례와 같다.
+ * 0.40.0 from(선택): 후보를 낼 토막(주지 않으면 segs 모두). segs는 이웃 토막 판정(끝을 함께 쓰는 이웃을 선이 지나는지·볼록한 쪽)에도 쓰므로 from을 담아야 한다 —
+ * 아주 가까이 확대해 현이 커서에서 붙잡기 거리 밖인 토막(띠로 모은 토막 — lensSegments)만 따로 물을 때
  */
 export function openEdgeCandidates<S extends TrackSegment>(
   f: ViewFrame,
@@ -707,26 +717,30 @@ export function openEdgeCandidates<S extends TrackSegment>(
   x: number,
   y: number,
   snapPx: number,
+  from?: readonly S[] | null,
 ): OpenEdgeCandidate<S>[] {
   const out: OpenEdgeCandidate<S>[] = [];
-  if (!lines.length || !segs.length) return out;
+  const own = from ?? segs;
+  if (!lines.length || !own.length) return out;
   let ray: { origin: V3; dir: V3 } | undefined;
   for (let li = 0; li < lines.length; li++) {
     const { from: P, dir } = lines[li]!;
     const e = unitDir([0, 0, 0], dir);
     if (!e || !P.every(Number.isFinite) || cursorOn(f, P, x, y, snapPx)) continue;
-    for (const s of segs) {
+    for (const s of own) {
       const c = lineSegClosest(P, e, s.a, s.b);
       if (!c) continue;
       const tol = meetTol(f, c.m, s.wpp);
-      if (!(c.gap > tol) || !(c.gap <= OPEN_EDGE_CHORD * dist3(s.a, s.b)) || dist3(c.m, P) <= tol) continue;
+      // 0.40.0: 띠로 모은 토막은 활꼴 높이 어림(sag)으로 거른다(없으면 OPEN_EDGE_CHORD × 토막 길이)
+      const h = sagOf(s);
+      if (!(c.gap > tol) || !(c.gap <= h) || dist3(c.m, P) <= tol) continue;
       // 0.35.0: 그 틈이 붙잡기 거리의 세계 길이(snapPx × 커서 쪽 깊이의 화소 세계 길이)를 넘어도 커서가 그 토막의 활꼴 쪽(cursorInLens)이면 남긴다 —
       // 아주 가까이 확대하면 활꼴 높이가 붙잡기 거리의 세계 길이보다 크다(0.34.0 면의 열린 교차와 같은 근거). 토막은 이미 화면에서 커서 snapPx 안이다(커서 둘레 선분)
-      if (!(c.gap <= snapPx * s.wpp) && !cursorInLens((ray ??= screenRay(f, x, y)), s.a, s.b, c.m, OPEN_EDGE_CHORD * dist3(s.a, s.b))) continue;
+      if (!(c.gap <= snapPx * s.wpp) && !cursorInLens((ray ??= screenRay(f, x, y)), s.a, s.b, c.m, h)) continue;
       // 가장 가까운 자리가 토막 끝 밖이면 그 끝, 나란하면 두 끝을 함께 쓰는 이웃 토막을 선이 3D로 지나는지
       if (c.clamped && throughNeighbor(f, P, e, s, segs, c.parallel ? [s.a, s.b] : [c.t === 0 ? s.a : s.b], tol)) continue;
       // 0.23.0: 받는 점은 선 위·그 토막 범위 안·커서에서 snapPx 안이다 — 선에서 그 범위인 조각이 화면에서 커서 snapPx 밖이면 앱에 묻지 않는다
-      const span = segSlabSpan(P, e, s.a, s.b, OPEN_EDGE_CHORD * dist3(s.a, s.b) + 2 * tol);
+      const span = segSlabSpan(P, e, s.a, s.b, h + 2 * tol);
       const reach = span && segmentReachPx(f, P, e, span, x, y);
       if (reach == null || reach > snapPx) continue;
       // 0.22.0 두 번 지날 수 있는 토막: 선이 현의 직선과 같은 평면에서 토막 밖에서 만나거나 나란하면, 곡선이 선 쪽으로 볼록할 때 활꼴을 두 번 지난다
@@ -778,6 +792,24 @@ export function cursorInLens(ray: { origin: readonly number[]; dir: readonly num
   if (!(tc >= 0 && tc <= 1)) return false;
   const v = dot3(sub3(C, [a[0]! + g[0] * tc, a[1]! + g[1] * tc, a[2]! + g[2] * tc]), side) / sl;
   return v >= 0 && v <= h;
+}
+
+/**
+ * 띠로 모으는 토막 수 한도(0.40.0 openEdgeLens — 띠와 커서 사이 화면 거리 차례로 이만큼까지). 0.9.0 커서 둘레 선분(segmentsNear 기본 24개)과 같은 수다.
+ * 넓은 탐색(아주 가까이 확대한 원호·12토막 원·구멍 테두리)에서 띠가 커서에 닿는 토막은 확대 단계마다 몇 개뿐이다(README 0.40.0)
+ */
+export const LENS_SEGMENTS = 24;
+
+/**
+ * 커서와 직선 from + t·dir를 화면에 비춘 것(원근이면 가까운 면 앞쪽) 사이 화면 거리(0.40.0 — 띠로 모으기 전 거르기). 열린 교차의 받는 점은 그 선 위·커서에서
+ * 붙잡기 거리 안이므로, 이 거리가 붙잡기 거리 밖인 선은 볼 까닭이 없다. 비추는 조각은 지나는 점에서 양쪽으로 (먼 면 + 눈까지 거리)의 1,000배까지다. 방향이 0이거나 다 눈 뒤면 Infinity
+ */
+export function lineScreenGap(f: ViewFrame, from: readonly number[], dir: readonly number[], x: number, y: number): number {
+  const e = unitDir([0, 0, 0], dir);
+  if (!e || !from.every(Number.isFinite)) return Infinity;
+  const T = 1000 * (Math.abs(f.far) + Math.hypot(from[0]! - f.eye[0], from[1]! - f.eye[1], from[2]! - f.eye[2]) + 1);
+  const h = segmentScreenPick(f, from[0]! - e[0] * T, from[1]! - e[1] * T, from[2]! - e[2] * T, from[0]! + e[0] * T, from[1]! + e[1] * T, from[2]! + e[2] * T, x, y);
+  return h && Number.isFinite(h.distPx) ? h.distPx : Infinity;
 }
 
 /** 토막 s의 끝 ends(세계 점)를 함께 쓰는 이웃 토막(segs 안)을 선 P + t·e가 3D로 지나는지(0.20.0 열린 교차에서 뺄 때) */
@@ -890,7 +922,8 @@ function skewGap(P: readonly number[], e: readonly number[], a: readonly number[
  * 코어 점 그대로를 돌려줘도 받는다(곡선 평면을 수직으로 뚫는 축은 코어 점이 곧 교차다 — 모르면 null을 돌려준다).
  * 0.23.0: "코어 점에서 snapPx 안"(0.20.0)은 보지 않는다. 같은 평면에서 현과 거의 나란히 활꼴을 지나는 선은 코어 점이 현 끝(꼭짓점) 위라
  * 그 둘레에서는 끝점 붙잡기가 먼저 이기고, 토막 범위 판정이 앱 점을 그 토막 곡선 조각으로 이미 묶는다(0.22.0은 두 번 지날 수 있는 토막에서만 그렇게 받았다).
- * 받는 점은 커서에서 후보의 reachPx보다 가까울 수 없으므로 reachPx가 지금 고른 거리 이상인 후보는 부르지 않는다
+ * 받는 점은 커서에서 후보의 reachPx보다 가까울 수 없으므로 reachPx가 지금 고른 거리 이상인 후보는 부르지 않는다.
+ * 0.40.0 from(선택): openEdgeCandidates와 같다(후보를 낼 토막만 — segs는 이웃 판정에도 쓴다)
  */
 export function openEdgeSnap<S extends TrackSegment>(
   f: ViewFrame,
@@ -901,8 +934,67 @@ export function openEdgeSnap<S extends TrackSegment>(
   snapPx: number,
   refine: (c: OpenEdgeCandidate<S>) => readonly number[] | null | undefined,
   visible?: ((p: V3, seg: S) => boolean) | null,
+  from?: readonly S[] | null,
 ): OpenEdgeSnap<S> | null {
-  return acceptOpenEdges(f, lines, openEdgeCandidates(f, lines, segs, x, y, snapPx), x, y, snapPx, refine, visible);
+  return acceptOpenEdges(f, lines, openEdgeCandidates(f, lines, segs, x, y, snapPx, from), x, y, snapPx, refine, visible);
+}
+
+/**
+ * 선이 현을 가로지르는 자리가 커서에서 먼 교차의 후보(0.40.0 openEdgeLens — 0.35.0 README 남은 일의 둘째 설계, 면의 0.36.0 뚫는 칸과 같은 꼴, 순수):
+ * 선 lines가 토막 segs와 3D로 만나지만(가장 가까운 두 점 사이가 그 깊이 화면 반 화소 안 — axisEdgeSnap·trackEdgeSnap·lockEdgeSnap의 코어 교차 X) X가 커서에서 snapPx 밖이라
+ * 코어 교차 후보가 되지 못하는 것 가운데, 선에서 그 토막 범위인 조각(reachPx — 0.23.0, 현에 내린 자리가 토막 안·현의 직선에서 OPEN_EDGE_CHORD × 토막 길이 안,
+ * 토막에 sag가 있으면 그 활꼴 높이 어림 안 — 곧은 토막(sag 0)이면 가로지르는 자리뿐이라 빠진다)이 커서 snapPx 안인 것. 아주 가까이 확대해 처짐이 화면에서 붙잡기 거리보다 크면 곡선은 현과 다른 자리에서 그 선을 가로지르고, 그 교차는 X와 같은 토막의 곡선 조각 위다
+ * (선이 현을 한 번 지나면 그 토막의 곡선 조각도 한 번 지난다 — 0.39.0과 같은 근거). 후보의 p는 X(앱 힌트), gap은 X에서 토막까지(반 화소 안).
+ * 빼는 것: X가 토막 끝 둘레(꼭짓점을 지나는 선 — 0.33.0 refineEnds가 맡는다)거나 선이 지나는 점 자리, 커서가 지나는 점의 화면 자리 snapPx 안인 선.
+ * 받는 규칙은 0.20.0 열린 교차와 같다(openEdgeSnap — 선 위로 내린 자리가 그 토막 곡선 조각 자리·커서에서 snapPx 안·단면·가림). 커서에 가까운 X부터
+ */
+export function piercedEdgeCandidates<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  segs: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+): OpenEdgeCandidate<S>[] {
+  const out: OpenEdgeCandidate<S>[] = [];
+  for (let li = 0; li < lines.length; li++) {
+    const { from: P, dir } = lines[li]!;
+    const e = unitDir([0, 0, 0], dir);
+    if (!e || !P.every(Number.isFinite) || cursorOn(f, P, x, y, snapPx)) continue;
+    for (const s of segs) {
+      const c = lineSegClosest(P, e, s.a, s.b);
+      if (!c || c.clamped) continue;
+      const tol = meetTol(f, c.m, s.wpp);
+      if (!(c.gap <= tol) || dist3(c.m, P) <= tol || dist3(c.m, s.a) <= tol || dist3(c.m, s.b) <= tol) continue;
+      const d = screenDistance(f, c.m, x, y);
+      if (d === null || d <= snapPx) continue;
+      const span = segSlabSpan(P, e, s.a, s.b, sagOf(s) + 2 * tol);
+      const reach = span && segmentReachPx(f, P, e, span, x, y);
+      if (reach == null || reach > snapPx) continue;
+      out.push({ p: c.m, line: li, seg: s, gap: c.gap, distPx: d, reachPx: reach });
+    }
+  }
+  return out.sort((p, q) => p.distPx - q.distPx);
+}
+
+/**
+ * 아주 가까이 확대한 꺾은선 토막의 교차(0.40.0 openEdgeLens, 순수): 띠로 모은 토막 from(현이 커서에서 snapPx 밖이지만 활꼴 띠가 커서에 닿는 토막 — segs에도 담는다)의
+ * 열린 교차 후보(openEdgeCandidates — 이웃 판정은 segs)와, segs 모두의 선이 현을 가로지르는 자리가 커서에서 먼 교차 후보(piercedEdgeCandidates)를 커서에 가까운 힌트부터
+ * refine에 물어 0.20.0 열린 교차와 같은 규칙(openEdgeSnap)으로 받은 것 가운데 커서에 가장 가까운 것
+ */
+export function lensEdgeSnap<S extends TrackSegment>(
+  f: ViewFrame,
+  lines: readonly OpenEdgeLine[],
+  segs: readonly S[],
+  from: readonly S[],
+  x: number,
+  y: number,
+  snapPx: number,
+  refine: (c: OpenEdgeCandidate<S>) => readonly number[] | null | undefined,
+  visible?: ((p: V3, seg: S) => boolean) | null,
+): OpenEdgeSnap<S> | null {
+  const cands = [...openEdgeCandidates(f, lines, segs, x, y, snapPx, from), ...piercedEdgeCandidates(f, lines, segs, x, y, snapPx)].sort((p, q) => p.distPx - q.distPx);
+  return acceptOpenEdges(f, lines, cands, x, y, snapPx, refine, visible);
 }
 
 /**
