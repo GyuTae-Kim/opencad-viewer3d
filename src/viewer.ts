@@ -1916,8 +1916,20 @@ export class Viewer3d {
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
   private rangeVer = 0;
-  /** 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림. 0.51.0 first = 첫 프레임 몫(쓰고 나면 null) */
-  private upload: { budget: number; first: number | null; cb: ((done: number, total: number) => void) | null } | null = null;
+  /**
+   * 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림. 0.51.0 fn = 걸음마다 몫 함수(없으면 budget), step = 다음 걸음 번호,
+   * redraw = 올리기만으로 생긴 다시 그리기 간격(0이면 걸음마다 — 0.50.0), lastDraw = 마지막으로 장면을 그린 때(performance.now)
+   */
+  private upload: {
+    budget: number;
+    fn: ((step: number, meshes: number) => number) | null;
+    step: number;
+    redraw: number;
+    lastDraw: number;
+    cb: ((done: number, total: number) => void) | null;
+  } | null = null;
+  /** 0.51.0 기다리는 그리기가 나눠 올리기 걸음만으로 생겼는지(다른 까닭의 invalidate가 끼면 false — redrawMs가 이 그리기만 건너뛴다) */
+  private upOnly = false;
   private measureCbs = new Set<(m: MeasureResult | null) => void>();
   private camCbs = new Set<(c: CameraState) => void>();
   private lastCamKey = '';
@@ -2062,14 +2074,18 @@ export class Viewer3d {
    * 이 장면에 setMesh로 넣는 그물도 같다. 문맥을 잃었다 되찾으면 위치·색으로 먼저 그리고 onContextRestore로 다시 받는다.
    * 주지 않으면 0.24.0과 같다(장면 배열을 붙잡고 문맥 복구 때 그대로 다시 올린다)
    *
-   * 0.51.0 incremental.firstMs: 첫 프레임의 올리기 몫만 따로(예: budgetMs 100 · firstMs 8 — 첫 그림은 곧, 나머지는 큰 몫으로 걸음 수를 줄여 빨리 끝낸다.
-   * 나눠 올리는 동안 프레임마다 그때까지 올린 것을 다시 그리므로 걸음이 많으면 다 올리기까지 오래 걸린다). 주지 않으면 0.50.0과 같다(모든 프레임 budgetMs)
+   * 0.51.0 나눠 올리기 걸음(STEP 58·59차): 나눠 올리는 동안 프레임마다 그때까지 올린 것을 다시 그리므로 걸음이 많으면 다 올리기까지 오래 걸린다(그물 수의 제곱).
+   * - incremental.budgetMs에 함수 `(step, meshes) => ms`를 주면 걸음마다 몫을 정한다(step = 0부터 센 걸음, meshes = 장면 그물 수 — 예: 앞 두 걸음은 8 ms로 첫 그림을 곧,
+   *   그다음은 그물 1,000개마다 1 ms). 돌려준 값이 유한한 양수가 아니거나 함수가 예외를 내면 그 걸음은 8 ms
+   * - incremental.redrawMs: 나눠 올리는 동안 올리기만으로 생긴 다시 그리기를 이 간격(ms)에 한 번만 한다(첫 걸음은 그린다 — 첫 그림). 다 올린 걸음은 그리지 않고 다음 프레임에
+   *   장면 전체를 그린다(올리기와 장면 그리기를 두 작업으로 — 가장 긴 작업이 둘의 합이 아니게). 카메라·고르기·무늬 등 다른 까닭의 다시 그리기는 그대로 그린다. Infinity면 첫 그림과 다 올린 뒤만
+   * 주지 않으면 0.50.0과 같다(모든 걸음 budgetMs 숫자, 걸음마다 그리기)
    */
   setScene(
     scene: Scene3d,
     opts: {
       keepView?: boolean;
-      incremental?: boolean | { budgetMs?: number; firstMs?: number };
+      incremental?: boolean | { budgetMs?: number | ((step: number, meshes: number) => number); redrawMs?: number };
       onProgress?: (done: number, total: number) => void;
       release?: boolean | ReleaseOptions;
     } = {},
@@ -2116,9 +2132,12 @@ export class Viewer3d {
     this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
     const inc = opts.incremental;
-    // 0.51.0 firstMs(유한한 양수만 — 아니면 0.50.0처럼 모든 프레임 budgetMs)
-    const first = typeof inc === 'object' && typeof inc.firstMs === 'number' && Number.isFinite(inc.firstMs) && inc.firstMs > 0 ? Math.max(1, inc.firstMs) : null;
-    this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), first, cb: opts.onProgress ?? null } : null;
+    // 0.51.0 걸음마다 몫(함수 — 숫자 몫 budget은 8 ms로 두고 함수가 쓸 수 없는 값을 내면 그것을 쓴다)·다시 그리기 간격(유한한 양수 또는 Infinity — 아니면 0.50.0처럼 걸음마다)
+    const io = typeof inc === 'object' ? inc : null;
+    const fn = typeof io?.budgetMs === 'function' ? io.budgetMs : null;
+    const num = typeof io?.budgetMs === 'number' ? io.budgetMs : undefined;
+    const redraw = typeof io?.redrawMs === 'number' && io.redrawMs > 0 ? io.redrawMs : 0;
+    this.upload = inc ? { budget: Math.max(1, num ?? 8), fn, step: 0, redraw, lastDraw: -Infinity, cb: opts.onProgress ?? null } : null;
     // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
@@ -3832,7 +3851,7 @@ export class Viewer3d {
    * 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만). onProgress는 장면 나눠 올리기만 알린다
    * (0.11.0 그물 바꾸기 나눠 올리기는 알리지 않는다)
    */
-  private pumpUpload(budgetMs: number): void {
+  private pumpUpload(budgetMs: number): boolean {
     const scene = !!this.renderer.uploadProgress;
     const done = this.renderer.uploadSome(budgetMs);
     this.shadowVer++;
@@ -3846,9 +3865,15 @@ export class Viewer3d {
         cb?.(total, total);
       } else cb?.(p.done, p.total);
     }
-    if (!done) this.invalidate();
+    if (!done) {
+      // 0.51.0 다음 걸음 그리기는 올리기만으로 생긴 것(기다리는 그리기가 없었을 때 — 다른 까닭의 invalidate가 끼면 풀린다)
+      const fresh = !this.raf;
+      this.invalidate();
+      if (fresh && this.raf) this.upOnly = true;
+    }
     // 0.29.0: 나눠 올리기를 마쳤으면 되찾은 뒤 끝 알림(다시 받을 것·풀 무늬가 남았으면 그것을 기다린다)
     else this.checkRestoreDone();
+    return done;
   }
 
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
@@ -5535,6 +5560,8 @@ export class Viewer3d {
       cancelAnimationFrame(this.raf);
       this.raf = 0;
     }
+    // 0.51.0 바로 그리기는 늘 그린다(나눠 올리기 redrawMs가 건너뛰지 않는다)
+    this.upOnly = false;
     this.draw(performance.now());
   }
 
@@ -8126,6 +8153,8 @@ export class Viewer3d {
   // ───────────────────────── 내부: 그리기 ─────────────────────────
 
   private invalidate(): void {
+    // 0.51.0 다른 까닭의 다시 그리기가 끼면 그 그리기는 나눠 올리기 걸음만의 것이 아니다(redrawMs가 건너뛰지 않는다)
+    this.upOnly = false;
     if (this.raf || this.disposed || this.lost) return;
     this.raf = requestAnimationFrame((t) => {
       this.raf = 0;
@@ -8136,6 +8165,9 @@ export class Viewer3d {
   private draw(now: number): void {
     if (this.disposed || this.lost) return;
     const t0 = performance.now();
+    // 0.51.0 이 그리기가 나눠 올리기 걸음만으로 생겼는지(읽고 비운다)
+    const upOnly = this.upOnly;
+    this.upOnly = false;
     if (this.anim) {
       const a = this.anim;
       const t = Math.min(1, (now - a.t0) / a.dur);
@@ -8187,15 +8219,34 @@ export class Viewer3d {
       if (this.tracker) this.dwell(this.measureHover, this.lastHoverAt);
     }
     if (this.renderer.uploading) {
-      // 0.51.0 장면 나눠 올리기의 첫 프레임은 firstMs(주었으면 — 한 번 쓰고 비운다)
       const up = this.upload;
+      const sceneUp = !!this.renderer.uploadProgress;
       let b = this.meshBudget;
-      if (this.renderer.uploadProgress) {
-        b = up?.first ?? up?.budget ?? 8;
-        if (up) up.first = null;
+      if (sceneUp) {
+        b = up?.budget ?? 8;
+        // 0.51.0 걸음마다 몫 함수(쓸 수 없는 값·예외면 숫자 몫)
+        if (up?.fn) {
+          let v: unknown;
+          try {
+            v = up.fn(up.step, this.sceneRef?.meshes.length ?? 0);
+          } catch {
+            v = undefined;
+          }
+          if (typeof v === 'number' && Number.isFinite(v) && v > 0) b = Math.max(1, v);
+        }
+        if (up) up.step++;
       }
-      this.pumpUpload(b);
+      const done = this.pumpUpload(b);
+      // 0.51.0 redrawMs: 올리기 걸음만으로 생긴 그리기는 간격 안이면 건너뛰고, 다 올린 걸음은 그리지 않고 다음 프레임에 장면 전체를 그린다
+      if (sceneUp && up && up.redraw > 0 && upOnly) {
+        if (done) {
+          this.invalidate();
+          return;
+        }
+        if (t0 - up.lastDraw < up.redraw) return;
+      }
     }
+    if (this.upload) this.upload.lastDraw = t0;
     if (this.cutDirty) {
       if (this.sec) this.updateCut();
       else {
