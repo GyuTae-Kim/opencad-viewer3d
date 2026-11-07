@@ -392,9 +392,9 @@ describe('뷰어 — 키보드 붙잡기(setKeyboardSnap)', () => {
     expect(v.keyboardCursor).toMatchObject({ x: 404, y: 0 });
   });
 
-  it('Tab은 커서가 켜진 측정 모드에서만 받는다(켜기 전·고르기 모드·끈 뒤는 초점 이동 그대로)', () => {
+  it('Tab은 커서가 켜진 측정 모드에서만 받는다(켜기 전·고르기 모드·끈 뒤는 초점 이동 그대로 — 0.47.0부터 고르기 모드는 pickCycle false일 때)', () => {
     const v = make();
-    withKeys(v);
+    withKeys(v, { pickCycle: false });
     expect(key(v, 'Tab')).toBe(false);
     expect(key(v, 'Tab', { shift: true })).toBe(false);
     expect(v.keyboardCursor).toBeNull();

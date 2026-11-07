@@ -360,6 +360,86 @@ export function pickScene(f: ViewFrame, x: number, y: number, items: ScenePickIt
   return null;
 }
 
+/** 고르기 후보 수 한도 기본값(0.47.0 pickSceneCandidates — 키보드 후보 돌리기 KEY_CANDIDATES_MAX와 같다) */
+export const PICK_CANDIDATES_MAX = 16;
+
+/** 두 고르기가 같은 것(종류·묶음·번호·잘린 면 — 고른 점은 보지 않는다, 0.47.0)인지. 고른 점까지 견주는 것은 snap.ts samePick */
+export function samePickTarget(a: Pick3d, b: Pick3d): boolean {
+  return a.kind === b.kind && a.id === b.id && a.index === b.index && (a.raw ?? a.index) === (b.raw ?? b.index) && !!a.section === !!b.section;
+}
+
+/**
+ * 0.47.0 화면 점(x, y)에 겹친 고르기 후보(차례대로, max개까지 — AutoCAD 선택 돌리기처럼 겹친 것을 차례로 고를 때). 첫째는 pickScene(f, x, y, items, o)와 같고,
+ * 다음은 앞 후보의 기본 도형(점 묶음의 점·선분·그물 삼각형·윤곽선 선분·잘린 면)을 숨긴 채 같은 pickScene을 다시 부른 것이다 — 그래서 고르기 차례
+ * (점 → 선분 → 윤곽선 → 잘린 면 → 그물 면)·허용 거리·가림·단면·숨긴 구간·반투명 지나기가 그대로이고, 그물은 앞 면을 걷어 낸 뒤 그 뒤의 것
+ * (같은 그물의 뒷면·뒤 묶음·앞 면에 가렸던 선분·점)이 차례로 나온다(깊이 벗기기).
+ * - 같은 그물에서 앞 후보와 같은 깊이·같은 법선으로 맞은 삼각형(삼각형 경계 위 — 한 평면)은 후보로 더하지 않고 숨기기만 한다
+ * - 잘린 면은 그 그물(capGroup이면 그 묶음 이름)의 잘린 면을 고른 뒤나 그 그물의 삼각형을 하나라도 걷어 낸 뒤에는 보지 않는다
+ *   (잘린 면은 그 그물의 남는 쪽 면보다 앞이므로 먼저 나온다 — 걷어 낸 삼각형이 안팎 세기를 바꿔 없는 잘린 면을 만들지 않게)
+ * 숨긴 것 판정은 o.hidden·o.edgeHidden·o.caps를 감싼다(o는 바꾸지 않는다). 후보가 없으면 빈 배열
+ */
+export function pickSceneCandidates(f: ViewFrame, x: number, y: number, items: ScenePickItems, o: ScenePickOptions, max = PICK_CANDIDATES_MAX): PickDetail[] {
+  const out: PickDetail[] = [];
+  const lim = Math.max(0, Math.floor(max));
+  if (!lim) return out;
+  const meshSet = new Set<unknown>(items.meshes), lineSet = new Set<unknown>(items.lines);
+  /** 걷어 낸 기본 도형: 'm'(삼각형)·'l'(선분)·'p'(점)·'e'(윤곽선) + 묶음 id → 배열 안 번호 */
+  const peeled = new Map<string, Set<number>>();
+  /** 잘린 면을 보지 않을 그물 id와 capGroup 이름 */
+  const capOff = new Set<string>(), capOffGroup = new Set<string>();
+  const kindOf = (it: Mesh3d | LineSet3d | PointSet3d): string => (meshSet.has(it) ? 'm' : lineSet.has(it) ? 'l' : 'p');
+  const withPeel = (key: string, base: ((i: number) => boolean) | null | undefined): ((i: number) => boolean) | null | undefined => {
+    const s = peeled.get(key);
+    if (!s) return base;
+    return base ? (i: number) => s.has(i) || base(i) : (i: number) => s.has(i);
+  };
+  const capsOff = (m: Mesh3d): boolean => {
+    if (capOff.has(m.id)) return true;
+    const g = o.capGroup?.(m);
+    return g !== undefined && capOffGroup.has(g);
+  };
+  const turnCapOff = (m: Mesh3d | undefined, id: string): void => {
+    capOff.add(id);
+    const g = m ? o.capGroup?.(m) : undefined;
+    if (g !== undefined) capOffGroup.add(g);
+  };
+  const po: ScenePickOptions = {
+    ...o,
+    hidden: (it) => withPeel(`${kindOf(it)}\u0000${it.id}`, o.hidden?.(it)),
+    edgeHidden: (m) => withPeel(`e\u0000${m.id}`, o.edgeHidden?.(m)),
+    ...(o.caps ? { caps: (m: Mesh3d, k?: number) => !capsOff(m) && o.caps!(m, k) } : {}),
+  };
+  const meshOf = (id: string): Mesh3d | undefined => items.meshes.find((m) => m.id === id);
+  for (let guard = 0; out.length < lim && guard < lim * 4 + 8; guard++) {
+    const d = pickScene(f, x, y, items, po);
+    if (!d) break;
+    const p = d.pick;
+    if (p.kind === 'mesh' && p.section) {
+      if (capOff.has(p.id)) break;
+      turnCapOff(meshOf(p.id), p.id);
+    } else {
+      const key = `${p.kind === 'mesh' ? 'm' : p.kind === 'line' ? 'l' : p.kind === 'edge' ? 'e' : 'p'}\u0000${p.id}`;
+      const raw = p.raw ?? p.index;
+      let s = peeled.get(key);
+      if (!s) peeled.set(key, (s = new Set()));
+      if (s.has(raw)) break;
+      s.add(raw);
+      if (p.kind === 'mesh') turnCapOff(meshOf(p.id), p.id);
+    }
+    if (p.kind === 'mesh' && !p.section && out.some((e) => sameFaceSpot(f, e.pick, p))) continue;
+    out.push(d);
+  }
+  return out;
+}
+
+/** 같은 그물에서 같은 깊이·같은 법선으로 맞은 삼각형인지(삼각형 경계 위를 맞은 한 평면 — 고르기 후보로 겹쳐 세지 않는다) */
+function sameFaceSpot(f: ViewFrame, a: Pick3d, b: Pick3d): boolean {
+  if (a.kind !== 'mesh' || a.section || a.id !== b.id || !a.normal || !b.normal) return false;
+  const da = viewDepth(f, a.point), db = viewDepth(f, b.point);
+  if (Math.abs(da - db) > Math.max(Math.abs(da) * 1e-6, worldPerPixel(f, da) * 1e-3, 1e-9)) return false;
+  return a.normal[0] * b.normal[0] + a.normal[1] * b.normal[1] + a.normal[2] * b.normal[2] > 1 - 1e-6;
+}
+
 type ScenePickRay = { origin: V3; dir: V3 };
 
 /** 커서 둘레 선분 하나(segmentsNear): 세계 끝점, 묶음 id, 남는 쪽 판정, 화면 거리·깊이, 0.14.0 선분 종류와 번호(원본 식별 번호 index, 배열 안 번호 raw) */

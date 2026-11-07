@@ -8097,6 +8097,132 @@ const keySnapValues: ValueSet = {
   },
 };
 
+// ───────────── 0.47.0 가려진 덧그림 글상자 대비 · 겹친 것 고르기 돌리기 ─────────────
+/** sRGB 0~255 화소의 상대 휘도(WCAG 2) */
+function lum255(d: Uint8ClampedArray, i: number): number {
+  const ch = (v: number): number => {
+    const x = v / 255;
+    return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * ch(d[i]!) + 0.7152 * ch(d[i + 1]!) + 0.0722 * ch(d[i + 2]!);
+}
+
+/**
+ * 그림의 글상자(CSS 화소 사각형 r, 그림 배율 k) 재기: [글 대비, 위 테두리 줄 덮음 비율]. 글 대비 = 상자 안(테두리에서 3화소 안쪽)의 가장 흔한 색(바탕)과
+ * 그 바탕과 휘도 차가 가장 큰 화소(글)의 WCAG 대비. 테두리 덮음 = 위 테두리 둘레 세 줄에서 바탕과 휘도 차가 가장 큰 화소를 열마다 보아,
+ * 그 차가 전체 가장 큰 차의 절반을 넘는 열의 비율(실선 ≈ 1, [4, 3] 점선 ≈ 4/7)
+ */
+function measureLabelBox(img: ImageData, r: { x: number; y: number; width: number; height: number }, k: number): [number, number] {
+  const d = img.data, W = img.width;
+  const x0 = Math.ceil((r.x + 3) * k), x1 = Math.floor((r.x + r.width - 3) * k);
+  const y0 = Math.ceil((r.y + 3) * k), y1 = Math.floor((r.y + r.height - 3) * k);
+  const count = new Map<number, number>();
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
+      const i = (y * W + x) * 4;
+      const key = (d[i]! << 16) | (d[i + 1]! << 8) | d[i + 2]!;
+      count.set(key, (count.get(key) ?? 0) + 1);
+    }
+  let bgKey = 0, best = -1;
+  for (const [key, n] of count) if (n > best) [bgKey, best] = [key, n];
+  const bg = new Uint8ClampedArray([(bgKey >> 16) & 255, (bgKey >> 8) & 255, bgKey & 255]);
+  const lb = lum255(bg, 0);
+  let lt = lb;
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
+      const l = lum255(d, (y * W + x) * 4);
+      if (Math.abs(l - lb) > Math.abs(lt - lb)) lt = l;
+    }
+  const ratio = (Math.max(lt, lb) + 0.05) / (Math.min(lt, lb) + 0.05);
+  const ty = Math.round(r.y * k);
+  const cols: number[] = [];
+  for (let x = x0; x < x1; x++) {
+    let m = 0;
+    for (let y = ty - 1; y <= ty + 1; y++) m = Math.max(m, Math.abs(lum255(d, (y * W + x) * 4) - lb));
+    cols.push(m);
+  }
+  const top = Math.max(...cols);
+  const cover = cols.filter((m) => m > top / 2).length / Math.max(1, cols.length);
+  return [Math.round(ratio * 100) / 100, Math.round(cover * 100) / 100];
+}
+
+/**
+ * 0.47.0 값(기존 base 장면을 다시 쓴다 — 새 장면 없음):
+ * (1) 가려진 앱 측정 덧그림 글상자의 그린 대비: 상자 안(가려짐 — 기본 hidden 0.35)과 상자 위(보임) 거리 덧그림을 하나씩 두 테마로 그림 저장(renderImage)해
+ *     [가려진 것 글 대비, 위 테두리 덮음, 보이는 것 글 대비, 덮음](measureLabelBox). 0.46.0 판은 가려진 글상자를 반투명(0.5)으로 그려 글 대비가 다르다 —
+ *     이 묶음은 base 7df754f와 값이 다른 것이 의도한 변화다(pixels-changed)
+ * (2) 겹친 것 고르기 돌리기(pickCandidates가 있는 판만 — 없으면 'no-api'): 화면 격자 90자리의 후보 수 분포와 첫째 = pick 수, 구멍 점 (50, 50, 40) 자리의 후보 차례,
+ *     가상 커서 고르기 모드에서 Tab 한 바퀴 = 목록 · Enter로 고른 둘째 후보 = onPick 사건 cycle
+ */
+const hiddenLabelCycleValues: ValueSet = {
+  name: 'hidden-label-cycle-values',
+  data: 'base',
+  needs: fn('setAnnotations', 'renderImage', 'project', 'pick'),
+  run: (c) => {
+    const { v, w, h } = c;
+    const label = 'MEASURE 88.8';
+    const HID = { kind: 'distance' as const, a: c.world([20, 40, 20]), b: c.world([100, 40, 20]), label };
+    const VIS = { kind: 'distance' as const, a: c.world([0, -20, 60]), b: c.world([120, -20, 60]), label };
+    const out: unknown[] = [];
+    for (const theme of ['dark', 'light'] as const) {
+      v.setTheme(theme);
+      const row: unknown[] = [theme];
+      for (const an of [HID, VIS]) {
+        // 덧그림 가림은 이미 만든 BVH만 쓴다 — 글자 자리에서 한 번 골라 만든다
+        const s = c.at(an.a.map((x, i) => (x + an.b[i]!) / 2));
+        if (s) v.pick(s.x, s.y);
+        v.setAnnotations([an]);
+        v.renderNow();
+        const r = v.annotationLabelRects[0];
+        const img: ImageData = v.renderImage({});
+        row.push(r ? measureLabelBox(img, r, img.width / w) : null);
+      }
+      out.push(row);
+    }
+    v.setAnnotations(null);
+    v.setTheme('dark');
+    if (typeof v.pickCandidates !== 'function') return [...out, 'no-api'];
+    const sig = (p: any): string => `${p.kind}:${p.id}${p.section ? ':cut' : ''}`;
+    const sameT = (a: any, b: any): boolean => !!a && !!b && a.kind === b.kind && a.id === b.id && a.index === b.index && !!a.section === !!b.section;
+    // 격자
+    const counts: Record<string, number> = {};
+    let first = 0;
+    for (let j = 0; j < 9; j++)
+      for (let i = 0; i < 10; i++) {
+        const x = ((i + 0.5) * w) / 10 + 0.31, y = ((j + 0.5) * h) / 9 + 0.17;
+        const list = v.pickCandidates(x, y) as any[];
+        counts[String(list.length)] = (counts[String(list.length)] ?? 0) + 1;
+        const p = v.pick(x, y);
+        if (p ? sameT(list[0], p) : list.length === 0) first++;
+      }
+    // 구멍 점 자리
+    const spot = c.at(c.world([50, 50, 40]))!;
+    const at = (v.pickCandidates(spot.x, spot.y) as any[]).map(sig);
+    // 가상 커서: 가운데에서 켜고 그 자리까지 걸음으로 옮긴 뒤 Tab 한 바퀴, 둘째 후보 Enter
+    const said: string[] = [];
+    v.setKeyboardSnap({ announce: (a: any) => said.push(`${a.reason}:${a.index}/${a.count}:${a.text}`) });
+    const key = (k: string, shiftKey = false): boolean => v.handleKey(new KeyboardEvent('keydown', { key: k, shiftKey, cancelable: true }));
+    const vv = v as any;
+    key('Enter');
+    for (let n = 0; n < 200 && Math.abs(vv.keyboardCursor.x - spot.x) >= 5; n++) key(vv.keyboardCursor.x < spot.x ? 'ArrowRight' : 'ArrowLeft');
+    for (let n = 0; n < 200 && Math.abs(vv.keyboardCursor.y - spot.y) >= 5; n++) key(vv.keyboardCursor.y < spot.y ? 'ArrowDown' : 'ArrowUp');
+    const cur = vv.keyboardCursor;
+    const list = (v.pickCandidates(cur.x, cur.y, 'keyboard') as any[]).map(sig);
+    const tabbed: string[] = [];
+    for (let i = 0; i < list.length; i++) {
+      key('Tab');
+      tabbed.push(said.at(-1)!.split(':')[1]!);
+    }
+    for (let n = 0; n < list.length && vv.keyboardCursor.index !== Math.min(1, list.length - 1); n++) key('Tab');
+    const got: unknown[] = [];
+    const off = v.onPick((p: any, e: any) => got.push([p ? sig(p) : null, e.cycle ?? null, e.pointerType]));
+    key('Enter');
+    off();
+    v.setKeyboardSnap(null);
+    return [...out, counts, first, at, [Math.round(cur.x), Math.round(cur.y)], list, tabbed.join(' '), got, said.slice(0, 2)];
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8200,6 +8326,7 @@ const VALUES: ValueSet[] = [
   secRangeValues,
   secRangeSnapValues,
   keySnapValues,
+  hiddenLabelCycleValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

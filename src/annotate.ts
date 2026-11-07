@@ -138,6 +138,63 @@ export function measureNumber(v: number, digits: number): string {
   return s === `-${(0).toFixed(digits)}` ? (0).toFixed(digits) : s;
 }
 
+/** 가려진 덧그림 글상자의 테두리 점선(0.47.0 — 제도의 숨은선처럼 점선: 선 4·틈 3 CSS 화소) */
+export const HIDDEN_LABEL_DASH: readonly number[] = [4, 3];
+
+/**
+ * 덧그림 글상자를 그리는 꼴(0.47.0, 순수): hidden = 글자 상자 자리가 앞 면에 가려졌는지, opacity = setAnnotations의 hidden(가려진 부분 불투명도 0~1).
+ * - 보이면 실선 테두리(dash 빈 배열 — 0.46.0 그대로)
+ * - 가려졌고 opacity ≤ 0이면 그리지 않는다(null — 0.46.0 그대로)
+ * - 가려졌고 opacity ≥ 1이면 보이는 것과 같다(앱이 가려짐을 가르지 않게 했다 — 0.46.0 그대로)
+ * - 그 밖에는 상자 바탕·글을 보이는 것처럼 불투명하게 그리고 테두리만 점선(HIDDEN_LABEL_DASH)으로 가려짐을 알린다.
+ *   0.46.0까지는 상자·글 전체를 불투명도 max(opacity, 0.5)로 그려 글이 바탕과 4.5:1에 못 미쳤다(WCAG 1.4.3 — 기본 hidden 0.35, 테마 바탕 위에서 밝은 테마 3.1:1, 어두운 테마 4.4:1).
+ *   점선은 투명도·색이 아닌 모양으로 가려짐을 가른다(WCAG 1.4.1, 제도의 숨은선 관례). 점 표식과 GL 선은 글이 아니므로 그대로 opacity다
+ */
+export function annotationLabelLook(hidden: boolean, opacity: number): { dash: readonly number[] } | null {
+  if (!hidden) return { dash: [] };
+  if (!(opacity > 0)) return null;
+  return opacity >= 1 ? { dash: [] } : { dash: HIDDEN_LABEL_DASH };
+}
+
+/**
+ * 사각형 테두리를 점선 토막으로(0.47.0, 순수): 왼쪽 위에서 시계 방향으로 둘레를 따라 dash(선·틈 길이 되풀이)대로 자른 선 토막 [x0, y0, x1, y1] 목록.
+ * 모서리를 지나는 토막은 모서리에서 나눈다(홀수 길이 무늬는 두 번 이어 쓴다 — 캔버스 setLineDash와 같은 뜻). 뷰어는 토막마다 선 굵기의 작은 사각형을 칠한다 —
+ * 점선 경로 스트로크(setLineDash·여러 토막 경로)는 Chrome 2D 캔버스에서 같은 캔버스의 다른 선·점의 경계 화소(안티에일리어싱)까지 몇 단계 바꿨다(화소 회귀로 보았다)
+ */
+export function dashedRectSegments(x: number, y: number, w: number, h: number, dash: readonly number[]): [number, number, number, number][] {
+  const out: [number, number, number, number][] = [];
+  const pat = dash.filter((d) => Number.isFinite(d) && d > 0);
+  if (!(w > 0) || !(h > 0) || !pat.length) return out;
+  const pattern = pat.length % 2 ? [...pat, ...pat] : pat;
+  const corners: [number, number][] = [
+    [x, y],
+    [x + w, y],
+    [x + w, y + h],
+    [x, y + h],
+    [x, y],
+  ];
+  let k = 0, left = pattern[0]!;
+  for (let e = 0; e < 4; e++) {
+    const [ax, ay] = corners[e]!, [bx, by] = corners[e + 1]!;
+    const len = Math.hypot(bx - ax, by - ay);
+    let t = 0;
+    while (t < len - 1e-9) {
+      const step = Math.min(left, len - t);
+      if (k % 2 === 0) {
+        const s0 = t / len, s1 = (t + step) / len;
+        out.push([ax + (bx - ax) * s0, ay + (by - ay) * s0, ax + (bx - ax) * s1, ay + (by - ay) * s1]);
+      }
+      t += step;
+      left -= step;
+      if (left <= 1e-9) {
+        k = (k + 1) % pattern.length;
+        left = pattern[k]!;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * 덧그림 글(label이 있으면 그것을 줄로 나눠). 없으면 값으로: distance = "12.5 mm", angle = "90.0°", radius = "R 6 mm",
  * point = "X … Y … Z …". fmt는 길이 숫자 꼴(뷰어의 장면 크기 맞춤 자릿수)

@@ -36,7 +36,9 @@ export type {
   KeyboardCursorState,
   KeyboardSnapAnnouncement,
   KeyboardSnapOptions,
+  KeyPickCycleOptions,
   MeasureCandidatesOptions,
+  PickCandidatesOptions,
   PointerClaimHandler,
   PointerClaimQuery,
   PointerHoldEnd,
@@ -61,6 +63,7 @@ export type {
   Viewer3dStats,
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
+export { PICK_CANDIDATES_MAX, samePickTarget } from './scenepick';
 export type {
   InferenceLock,
   InferenceLockInput,
@@ -112,16 +115,24 @@ export {
   KEY_CANDIDATES_MAX,
   KEY_POINTER,
   KEY_SNAP_KEYS,
+  KEY_SNAP_MESSAGES,
   KEY_STEP_PX,
   type KeyDesc,
   type KeySnapAction,
   type KeySnapKeys,
+  type KeySnapMessageKey,
+  type KeySnapMessages,
   SNAP_KIND_LABELS,
+  candidateText,
+  formatKeySnapMessage,
   keyLabel,
   keySnapAction,
   keySnapHint,
+  keySnapMessages,
   normalizeKeySnapKeys,
+  orderedText,
   parseKeyDesc,
+  pointText,
   snapKindText,
 } from './keysnap';
 export type { IndexRange } from './ranges';
@@ -138,7 +149,7 @@ export {
   type ClosestPart,
   closestPart,
 } from './closest';
-export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
+export { type Annotation3d, type AnnotationKind, HIDDEN_LABEL_DASH, angleAt, annotationGeometry, annotationLabelLook, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cubeTargets } from './viewcube';
