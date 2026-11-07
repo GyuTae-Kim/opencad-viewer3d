@@ -133,6 +133,9 @@ export function manyTable(res) {
         md += `| ${name} | ${mode} | ${f(s.js)} | ${m(s.total)} | ${m(s.render)} | ${Math.round((js - m(s.render)) * 10) / 10} | ${m(s.stub.all)} | ${share('draw')} | ${share('uniform')} | ${share('bind')} | ${share('state')} | ${c.draw}·${c.uniform}·${c.bind}·${c.state}·${c.upload + c.other} | ${s.culled.join('·')} | ${m(s.pickFirst)}·${m(s.pick)} |\n`;
       }
   }
+  // 0.51.0 그림 해시(판·차례마다 — 같은 모드는 판끼리 같아야 한다)
+  for (const [name, r] of Object.entries(res.variants))
+    if (r.hashes?.length) md += `\n**${name} 그림 해시**: ${r.hashes.map((/** @type {any[]} */ hs) => hs.map((h) => `${h.mode} ${h.hash}(${h.lit})`).join(' · ')).join(' / ')}\n`;
   // 0.51.0 CPU 프로필(마지막 차례의 것 — 함수별 자기 시간 ms, 프레임 수로 나누지 않은 합)
   for (const [name, r] of Object.entries(res.variants))
     for (const [mode, p] of Object.entries(r.profile ?? {})) {
@@ -162,6 +165,7 @@ async function main() {
       parts: { type: 'boolean' },
       profile: { type: 'boolean' },
       'open-only': { type: 'boolean' },
+      hash: { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
@@ -228,6 +232,11 @@ async function main() {
             res.triangles = o.triangles;
             const v = (res.variants[name] ??= { open: [], steady: {}, parts: {} });
             v.open.push(o);
+            // 0.51.0 --hash: 모드마다 그림 해시(판끼리 같은 그림인지 — 기계 GPU에서도)
+            if (values.hash) {
+              const hs = await browser.evaluate(`bench.hashes(${JSON.stringify(modes)})`, 900_000);
+              (v.hashes ??= []).push(hs);
+            }
             // 0.51.0 --open-only: 처음 열기만(나눠 올리기 걸음 견주기)
             if (values['open-only']) continue;
             if (values.profile) {

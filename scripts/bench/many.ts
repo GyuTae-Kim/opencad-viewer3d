@@ -465,6 +465,30 @@ function prep(mode: string): void {
   }
 }
 
+/**
+ * 0.51.0 그림 해시(모드마다 — 그 모드로 맞춘 뒤 한 번 그려 화면 전체를 읽은 FNV-1a): 판끼리 같은 장면·같은 카메라면 같은 해시여야 한다
+ * (화소 비교는 SwiftShader라 기계 GPU에서 같은지 본다). 바탕 아닌 화소 수도 함께
+ */
+function hashes(modes: string[]): { mode: string; hash: string; lit: number }[] {
+  const v = (window as unknown as { last: V }).last;
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext;
+  const out: { mode: string; hash: string; lit: number }[] = [];
+  for (const mode of modes) {
+    setMode(v, mode);
+    v.renderNow();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let x = 0x811c9dc5;
+    for (let i = 0; i < px.length; i++) x = Math.imul(x ^ px[i]!, 0x01000193) >>> 0;
+    let lit = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] !== px[0] || px[i + 1] !== px[1] || px[i + 2] !== px[2]) lit++;
+    out.push({ mode, hash: x.toString(16).padStart(8, '0'), lit });
+  }
+  v.highlight(null);
+  return out;
+}
+
 /** n번 돌려 그리고 GPU 마침을 기다린다 */
 function spin(n: number): void {
   const v = (window as unknown as { last: V }).last;
@@ -475,4 +499,4 @@ function spin(n: number): void {
   }
 }
 
-(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin };
+(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes };
