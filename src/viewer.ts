@@ -69,6 +69,7 @@ import {
   openRefineKey,
   refineOpen,
   refineTarget,
+  sameFirst,
   sameRefineInput,
   samePick,
   snapLimit,
@@ -88,6 +89,7 @@ import {
   type TrackGuide,
   type TrackLine,
   type TrackTriangle,
+  acceptEdgePatch,
   acceptFacePatch,
   axisEdgeSnap,
   axisFaceSnap,
@@ -340,7 +342,7 @@ export interface MeasureResult {
   dy: number;
   dz: number;
   /**
-   * 두 점을 붙잡은 종류(0.8.0): 'vertex'·'endpoint'·'midpoint'·'center'·'point'(0.9.0부터 추론 'intersection'·'perpendicular'·'axis'),
+   * 두 점을 붙잡은 종류(0.8.0): 'vertex'·'endpoint'·'midpoint'·'center'·'point'(0.9.0부터 추론 'intersection'·'perpendicular'·'axis', 0.10.0 'parallel', 0.38.0 앱 접점 'tangent'),
    * 붙잡지 않은 점(면·선 위 아무 데)은 null. setMeasureSnap을 켰을 때만 있다(끄면 예전처럼 이 두 필드가 없다)
    */
   snapA?: SnapKind | null;
@@ -381,6 +383,15 @@ export interface WalkOptions {
 }
 
 /**
+ * pointsFor의 둘째 인자(0.38.0): 그 미리 보기의 측정 상태. 코어는 늘 넘긴다(인자 하나로 적은 앱 함수는 그대로다).
+ * first = 측정 첫 점(첫 점만 찍었을 때 그 세계 점의 복사본 — 추론 붙잡기의 첫 점과 같다), 아니면 null(아직 찍지 않았거나 두 점을 찍었다).
+ * 첫 점에 따라 다른 점(접점 등)을 주려면 MeasureSnapOptions.pointsForFirst를 켠다 — 끄면 기억(0.10.0)이 고르기로만 정해져 첫 점이 바뀌어도 앞 결과를 다시 쓴다
+ */
+export interface PointsForContext {
+  first: V3 | null;
+}
+
+/**
  * 측정 점 붙잡기 선택(0.8.0, Viewer3d.setMeasureSnap). 주지 않은 것은 끈다(edges는 pickEdges를 따른다).
  * 붙잡기 거리는 0.6.0 규칙 그대로(마우스·펜 SNAP_PX 10화소, 터치 max(10, touchPickTolerance)) — 정밀 조준(펜 포인터)도 같다
  */
@@ -402,8 +413,16 @@ export interface MeasureSnapOptions {
    * 마우스 이동마다 부르므로 가볍게. id를 주지 않은 점은 고른 묶음 id로 자르고 가린다.
    * 0.10.0: 바로 앞과 같은 고르기(종류·묶음·번호·고른 점·법선이 같다 — 같은 자리에서 미리 본 뒤 누르기, 붙잡기 한도·잠금이 바뀌어 다시 구하기)면
    * 다시 부르지 않고 앞 결과를 쓴다. 결과는 고른 것으로만 정해져야 한다(앱 자료가 바뀌면 setMeasureSnap을 다시 준다 — 0.8.0부터의 약속)
+   * 0.38.0: 둘째 인자 ctx(PointsForContext — 측정 첫 점)를 넘긴다(앱이 직접 부를 때를 위해 타입은 선택 인자). pointsForFirst를 켜면 결과가 고른 것과 첫 점으로 정해져도 된다.
+   * 앱 자료만 바뀌었으면 Viewer3d.clearMeasurePointsFor로 기억만 비운다
    */
-  pointsFor?: ((pick: Pick3d) => readonly SnapPoint[] | null | undefined) | null;
+  pointsFor?: ((pick: Pick3d, ctx?: PointsForContext) => readonly SnapPoint[] | null | undefined) | null;
+  /**
+   * 0.38.0(기본 꺼짐): pointsFor 기억(0.10.0 — 바로 앞과 같은 고르기면 다시 부르지 않는다)을 고르기와 측정 첫 점(ctx.first)으로 정한다 — 첫 점을 찍거나
+   * 지우면(두 점째·Esc·측정 지우기) 같은 고르기에서도 다시 부른다. 앱이 첫 점에 따라 다른 점(첫 점에서 곡선에 그은 접선의 접점 등)을 줄 때 켠다.
+   * 같은 첫 점·같은 고르기면 예전처럼 다시 쓴다(첫 점은 좌표 값으로 견준다). 주지 않거나 false면 0.37.0과 같다(이것만으로는 붙잡기를 켜지 않는다)
+   */
+  pointsForFirst?: boolean;
   /**
    * 추론 붙잡기(0.9.0, 기본 꺼짐): intersections = 커서 둘레 두 선분(선분 묶음·윤곽선)의 3D 교차점, perpendicular = 첫 측정 점에서
    * 커서 둘레 선분으로 내린 수직 발, axes = 첫 측정 점에서 X·Y·Z 축 방향(점 붙잡기가 없을 때만 — 축 색 안내선). true면 셋 모두.
@@ -462,6 +481,8 @@ export interface MeasureSnapOptions {
    * 활꼴을 두 번 지날 수 있다) point를 현의 다른 끝(나란하면 각 끝)에서 그 선에 내린 발로 바꿔 한 번 더 부른다. 앱이 point 둘레 교차 하나를 주면 두 교차가 따로 온다.
    * 그 선·토막의 앱 점은 코어 점 거리 대신 토막 범위(현에 내린 자리가 범위 안·현에서 0.1 × 토막 길이 안)로 받는다
    * 0.23.0: 모든 열린 후보('axisEdge', open)의 앱 점을 코어 점 거리 대신 토막 범위와 커서 붙잡기 거리로 받는다. 선에서 그 토막 범위인 조각이 커서에서 붙잡기 거리 밖이면 부르지 않는다
+   * 0.38.0: 닫힌 'axisEdge'(선이 토막과 3D로 만나는 코어 교차)의 앱 점도 코어 점에서 붙잡기 거리 밖이면 열린 교차와 같은 규칙(그 선 위로 내린 자리가 그 토막 범위 안·
+   * 토막 끝에서 반 화소 넘게·현에서 0.1 × 토막 길이 안, 커서에서 붙잡기 거리 안, 가리지 않음)으로 받는다 — 선이 현을 얕게 가로질러 곡선 교차가 현 위 코어 점에서 멀 때. 호출·기억은 그대로다
    */
   refine?: ((c: SnapRefineInput) => readonly number[] | null | undefined) | null;
   /**
@@ -1300,8 +1321,10 @@ export class Viewer3d {
     /** 0.10.0 차례 값(점마다, 차례가 없는 점은 −Infinity — 한 점도 차례가 없으면 null)과 붙잡기 한도(없으면 null) */
     orders: Float64Array | null;
     limit: number | null;
-    /** 0.10.0: 바로 앞 pointsFor 호출의 고르기(복사본)와 결과 — 같은 고르기면 다시 부르지 않는다 */
-    pfMemo: { pick: Pick3d; res: readonly SnapPoint[] | null | undefined } | null;
+    /** 0.10.0: 바로 앞 pointsFor 호출의 고르기(복사본)와 결과 — 같은 고르기면 다시 부르지 않는다. 0.38.0: 그때의 첫 점(복사본 — pfFirst면 열쇠에 든다) */
+    pfMemo: { pick: Pick3d; first: V3 | null; res: readonly SnapPoint[] | null | undefined } | null;
+    /** 0.38.0 pointsForFirst — pointsFor 기억이 첫 점으로도 정해지는지 */
+    pfFirst: boolean;
     /** 0.14.0 다듬기 손잡이와 바로 앞 호출의 입력(복사본)·결과(수 셋인 점의 복사본, 아니면 null) — 같은 입력이면 다시 부르지 않는다 */
     refine: MeasureSnapOptions['refine'];
     /** 0.19.0 축이 면을 뚫는 점 다듬기 손잡이(기억은 openMemo) */
@@ -1791,7 +1814,7 @@ export class Viewer3d {
 
   /**
    * 코어가 놓은 배열·원본 가운데 지금 GPU에 없는 것(0.25.0 — 문맥 복구 뒤 앱이 다 주었는지 볼 때). 없으면 null.
-   * 나눠 올리는 중이면 아직 올리지 않은 그물도 차례가 왔을 때 없을 것으로 셈한다
+   * 나눠 올리는 중이면 아직 올리지 않은 그물도 차례가 왔을 때 없을 것으로 셈한다. 0.38.0: 앱이 아직 주지 않은 pending 무늬(Texture3d.pending)도 textures에 든다
    */
   get restoreNeed(): ContextRestoreNeed | null {
     if (this.disposed || this.lost) return null;
@@ -1817,7 +1840,9 @@ export class Viewer3d {
   /**
    * 코어가 놓은 무늬 원본을 다시 준다(0.25.0 — 문맥 복구 뒤, 그 무늬가 기다리는 동안만). 그림 파일 바이트(Uint8Array), 푼 그림(ImageBitmap — 다 쓰면 닫는다),
    * 또는 { data, bitmap, mime, width, height }. 처음 올릴 때와 같은 크기 한도로 풀어 올리고 다시 그린다. 원본은 붙잡지 않는다.
-   * 올렸으면 true로 풀리는 약속(기다리는 무늬가 아니거나 풀지 못하면 false — 풀지 못하면 다시 기다린다)
+   * 올렸으면 true로 풀리는 약속(기다리는 무늬가 아니거나 풀지 못하면 false — 풀지 못하면 다시 기다린다).
+   * 0.38.0: 장면에서 Texture3d.pending으로 둔 무늬(앱이 장면을 올린 뒤에 주는 그림 — 손질한 무늬 등)도 기다리는 무늬다. 문맥을 잃지 않아도 setScene 뒤 언제든 준다.
+   * 코어가 붙잡지 않으므로 문맥을 잃었다 되찾으면 다시 기다린다(onContextRestore의 need.textures에 든다). 이미 올린 무늬를 바꾸는 길은 아니다(그때는 false)
    */
   restoreTexture(id: string, src: TextureSource): Promise<boolean> {
     if (!this.gpu) return Promise.resolve(false);
@@ -3169,7 +3194,7 @@ export class Viewer3d {
   /**
    * 측정 점 붙잡기 넓히기(0.8.0, 기본 꺼짐 — 끄면 0.7.2처럼 꼭짓점·끝점에만): midpoints = 선분·윤곽선 가운데 점, edges = 측정 중에만 윤곽선 고르기,
    * points = 늘 후보인 앱 점(원 중심 등), pointsFor = 고른 것에 따라 앱이 더하는 점. 붙잡기 거리 안에서 화면에 가장 가까운 것을 붙잡고(같으면 꼭짓점·끝점),
-   * 마우스를 올리면 표식 모양으로 종류를 보인다(끝점·꼭짓점 네모, 가운데 점 세모, 중심 ⊕, 그 밖의 앱 점 마름모). 측정 결과에 snapA·snapB가 실린다.
+   * 마우스를 올리면 표식 모양으로 종류를 보인다(끝점·꼭짓점 네모, 가운데 점 세모, 중심 ⊕, 0.38.0 접점('tangent') 동그라미 위 가로선, 그 밖의 앱 점 마름모). 측정 결과에 snapA·snapB가 실린다.
    * null(또는 빈 선택)이면 끈다. 장면을 바꿔도 남는다(점 목록은 앱이 장면에 맞춰 다시 준다)
    */
   setMeasureSnap(o: MeasureSnapOptions | null): void {
@@ -3219,6 +3244,7 @@ export class Viewer3d {
         orders,
         limit,
         pfMemo: null,
+        pfFirst: o.pointsForFirst === true,
         refine: o.refine ?? null,
         refineFace: o.refineFace ?? null,
         rfMemo: null,
@@ -3287,6 +3313,21 @@ export class Viewer3d {
     so.ofMemo = null;
     this.rehover();
     return n;
+  }
+
+  /**
+   * pointsFor 기억만 비운다(0.38.0): 바로 앞 pointsFor 호출의 고르기와 결과(0.10.0 — 같은 고르기면 다시 쓴다)를 잊고, 측정 미리 보기가 보이면 그 자리에서 다시 구한다
+   * (그때 앱 함수를 다시 부른다). 앱 점을 정하는 앱 자료가 바뀌었을 때(곡선 정의를 나눠 받기 등) setMeasureSnap을 다시 주지 않고(잠금·끌어온 점이 풀린다) 쓴다.
+   * 찍은 점·잠금·끌어온 점·나란함 기준 선분·붙잡기 선택·한도·다듬기 기억(clearMeasureRefine)은 그대로다. 첫 점에 따라 다른 점은 pointsForFirst가 맡는다(첫 점이 바뀌면 저절로 다시 부른다).
+   * 비운 기억이 있었으면 true, 없었거나 붙잡기가 꺼져 있으면 false
+   */
+  clearMeasurePointsFor(): boolean {
+    const so = this.snapOpt;
+    if (!so) return false;
+    const had = !!so.pfMemo;
+    so.pfMemo = null;
+    this.rehover();
+    return had;
   }
 
   /**
@@ -5321,7 +5362,9 @@ export class Viewer3d {
    * 축과 선분의 교차 다듬기(0.18.0, 'axisEdge'): 코어 점 core(축과 꺾은선 토막의 교차), 그 토막 sg, 축 직선 line(지나는 점·단위 방향·축 이름 — 0.20.0부터 잠근 선이면
    * 축이 아닌 직선도, 그때 axis가 없다)을 앱 refine에 넘겨 받을 수 있는 점(acceptOnLine — 그 직선 위로 내린 자리가 앱 점에서 화면 반 화소 안, 코어 점에서 화면 붙잡기 거리 안,
    * 그 묶음 단면에서 남는 쪽)이면 그 자리. 아니면 null(코어 점 그대로). 결과는 커서 광선을 뺀 입력(종류·코어 점·토막·축 직선·첫 점)으로 기억한다(0.15.0 열린 후보의
-   * RefineMemo — 커서가 그 둘레를 움직이는 동안 다시 부르지 않는다). 가림은 다시 따지지 않는다(0.14.0과 같다 — 코어 점이 보이므로 그 바로 둘레다)
+   * RefineMemo — 커서가 그 둘레를 움직이는 동안 다시 부르지 않는다). 가림은 다시 따지지 않는다(0.14.0과 같다 — 코어 점이 보이므로 그 바로 둘레다).
+   * 0.38.0: 앱 점이 코어 점에서 화면 붙잡기 거리 밖이면(선이 현을 얕게 가로지른다) 열린 교차와 같은 규칙으로 한 번 더 본다(track.ts acceptEdgePatch — 그 선 위·
+   * 그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 그때는 열린 교차와 같은 가림(snapVisible)을 본다
    */
   private axisEdgeRefined(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5353,7 +5396,13 @@ export class Viewer3d {
     }
     if (!q) return null;
     const p = acceptOnLine(f, core, q, line, snapPx);
-    return p && !this.clippedAway(p, sg.id) ? p : null;
+    if (p) return this.clippedAway(p, sg.id) ? null : p;
+    // 0.38.0: 현을 얕게 가로지르는 선 — 앱 점이 그 토막 곡선 조각 자리이고 커서에서 붙잡기 거리 안이면 받는다(코어 점에서는 붙잡기 거리 밖).
+    // 코어 점에서 멀 수 있으므로 열린 교차와 같은 가림(snapVisible)을 본다
+    const w = acceptEdgePatch(f, core, q, line, sg.ends, x, y, snapPx);
+    if (!w || this.clippedAway(w.p, sg.id)) return null;
+    const sp = projectToScreen(f, w.p);
+    return sp && this.snapVisible(f, w.p, sp[0], sp[1], sg.id) ? w.p : null;
   }
 
   /**
@@ -5712,13 +5761,17 @@ export class Viewer3d {
     };
     const lim = so.limit;
     if (pick && so.pointsFor) {
-      // 0.10.0: 바로 앞과 같은 고르기(같은 자리 — 미리 본 뒤 누르기, 붙잡기 한도·잠금이 바뀌어 다시 구하기)면 앞 결과를 다시 쓴다
+      // 0.10.0: 바로 앞과 같은 고르기(같은 자리 — 미리 본 뒤 누르기, 붙잡기 한도·잠금이 바뀌어 다시 구하기)면 앞 결과를 다시 쓴다.
+      // 0.38.0: 둘째 인자로 측정 첫 점(복사본)을 넘기고, pointsForFirst면 첫 점도 같아야 다시 쓴다
       const memo = so.pfMemo;
+      const p0 = this.measurePts.length === 1 ? this.measurePts[0]! : null;
       let extra: readonly SnapPoint[] | null | undefined;
-      if (memo && samePick(memo.pick, pick)) extra = memo.res;
+      if (memo && samePick(memo.pick, pick) && (!so.pfFirst || sameFirst(memo.first, p0))) extra = memo.res;
       else {
-        extra = so.pointsFor(pick);
-        so.pfMemo = { pick: { ...pick, point: [...pick.point] as V3, ...(pick.normal ? { normal: [...pick.normal] as V3 } : {}) }, res: extra };
+        const first: V3 | null = p0 ? [p0[0], p0[1], p0[2]] : null;
+        const ctx: PointsForContext = { first: first ? [first[0], first[1], first[2]] : null };
+        extra = so.pointsFor(pick, ctx);
+        so.pfMemo = { pick: { ...pick, point: [...pick.point] as V3, ...(pick.normal ? { normal: [...pick.normal] as V3 } : {}) }, first, res: extra };
       }
       if (extra)
         for (const sp of extra) {
@@ -6728,16 +6781,31 @@ export class Viewer3d {
     };
     /**
      * 0.8.0 붙잡기 표식: 가운데 점 = 세모, 중심 = 동그라미 테 + 십자(⊕), 그 밖의 앱 점 = 마름모.
-     * 0.9.0 추론: 교차점 = 엇갈린 십자(×), 수직 발 = ⊥(두 선이 만나는 곳이 점)
+     * 0.9.0 추론: 교차점 = 엇갈린 십자(×), 수직 발 = ⊥(두 선이 만나는 곳이 점).
+     * 0.38.0 접점(앱 점 'tangent'): 동그라미 테와 그 꼭대기에 닿는 가로선(AutoCAD 접점 표식 꼴 — 점은 동그라미 가운데)
      */
-    const snapMarkAt = (p: V3 | null, kind: 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular'): void => {
+    const snapMarkAt = (p: V3 | null, kind: 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'tangent'): void => {
       if (!p) return;
       const [x, y] = p;
       ctx.fillStyle = th.measure;
       ctx.strokeStyle = th.textBg;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      if (kind === 'intersection' || kind === 'perpendicular') {
+      if (kind === 'tangent') {
+        // 바탕 테(대비) 위에 측정 색 테와 위 접선(중심 ⊕와 같은 반지름 — 십자 대신 꼭대기 가로선이 테 밖으로 나간다)
+        for (const [color, w] of [
+          [th.textBg, 4],
+          [th.measure, 2],
+        ] as const) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          ctx.arc(x, y, 6, 0, Math.PI * 2);
+          ctx.moveTo(x - 10, y - 6);
+          ctx.lineTo(x + 10, y - 6);
+          ctx.stroke();
+        }
+      } else if (kind === 'intersection' || kind === 'perpendicular') {
         // 바탕 테(대비) 위에 측정 색 선
         for (const [color, w] of [
           [th.textBg, 4.5],
@@ -7003,7 +7071,7 @@ export class Viewer3d {
             ctx.stroke();
           }
         }
-      } else if (k === 'midpoint' || k === 'center' || k === 'point' || k === 'intersection' || k === 'perpendicular') snapMarkAt(P(hover.p), k);
+      } else if (k === 'midpoint' || k === 'center' || k === 'point' || k === 'intersection' || k === 'perpendicular' || k === 'tangent') snapMarkAt(P(hover.p), k);
       else if (k === 'axis' && hover.axis) {
         // 축 위 점: 축 색 동그라미
         const sp = P(hover.p);

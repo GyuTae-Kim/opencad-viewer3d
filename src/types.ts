@@ -129,6 +129,13 @@ export interface Texture3d {
   height?: number;
   /** 투명한 화소를 쓰는 그림이면 true — 이 무늬를 칠한 그물은 반투명 차례에 그린다(아니면 그림의 알파는 무시) */
   alpha?: boolean;
+  /**
+   * 0.38.0: 앱이 그림을 장면을 올린 뒤에 준다(data·bitmap 없이 true). 코어는 풀지 않고 그 무늬를 기다리며(그동안 그 무늬를 칠한 그물은 color — 0.25.0 놓은 무늬를
+   * 되찾을 때와 같다, restoreNeed·stats.textures.missing에 든다), 앱이 Viewer3d.restoreTexture로 주면 풀어 올린다. 예: 앱이 원본을 손질한 그림(색 바꾸기·알파 재기)을
+   * 첫 그림 뒤에 만든다. 크기를 알면 width·height를 함께 준다(한 장 한도·전체 예산을 처음부터 나눈다). 코어는 받은 그림을 붙잡지 않으므로 문맥을 잃었다 되찾으면 다시 기다린다.
+   * data나 bitmap이 있으면 이 값은 보지 않는다(0.37.0과 같다)
+   */
+  pending?: boolean;
 }
 
 /** 선분 묶음(공구 경로·와이어프레임 등) */
@@ -195,8 +202,10 @@ export interface Scene3d {
  * 0.9.0 추론 붙잡기(setMeasureSnap({ inference })): 'intersection' = 두 선분의 3D 교차점, 'perpendicular' = 첫 점에서 선분으로 내린 수직 발,
  * 'axis' = 첫 점에서 X·Y·Z 축 방향 선 위(어느 축인지는 Viewer3d.measureHoverSnap.axis, 찍은 결과는 0.9.1부터 MeasureResult.axisB).
  * 0.10.0: 'parallel' = 첫 점에서 커서가 앞서 지나간 선분과 나란한 선 위(setMeasureSnap({ inference: { parallel } }) — 방향은 MeasureResult.directionB)
+ * 0.38.0: 'tangent' = 접점(앱이 준 붙잡기 점 — 예: 측정 첫 점에서 곡선에 그은 접선이 곡선에 닿는 점, AutoCAD 접점 붙잡기). 코어는 접점을 구하지 않는다 —
+ * 앱이 SnapPoint.kind로 달면 표식이 동그라미와 그 위에 닿는 가로선(AutoCAD 접점 표식 꼴)이고 측정 결과(snapA·snapB)·미리 보기(measureHoverSnap.snap)에 그대로 실린다
  */
-export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis' | 'parallel';
+export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'axis' | 'parallel' | 'tangent';
 
 /**
  * 앱이 주는 측정 붙잡기 점(0.8.0, Viewer3d.setMeasureSnap의 points·pointsFor). 예: STEP 모서리 표가 아는 원·원호 중심, B-rep 모서리의 곡선 가운데 점
@@ -204,7 +213,7 @@ export type SnapKind = 'vertex' | 'endpoint' | 'midpoint' | 'center' | 'point' |
 export interface SnapPoint {
   /** 세계 좌표(묶음 origin·matrix를 거친 값) */
   point: readonly number[];
-  /** 붙잡은 종류(기본 'point') — 마우스를 올렸을 때 표식 모양과 측정 결과(MeasureResult.snapA·snapB)에 쓴다 */
+  /** 붙잡은 종류(기본 'point') — 마우스를 올렸을 때 표식 모양과 측정 결과(MeasureResult.snapA·snapB)에 쓴다(0.38.0 접점은 'tangent') */
   kind?: SnapKind;
   /**
    * 이 점이 속한 묶음 id(선택). 주면 그 묶음이 숨었으면 빼고, 그 묶음을 자르는 단면 평면으로 자르며,

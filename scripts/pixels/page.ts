@@ -36,9 +36,10 @@ type V = Viewer3d & Record<string, any>;
  * lowcyl = 낮은 원기둥 옆면(반지름 30, 높이 60, 50토막 — 칸 0이 −90°를 가운데에)뿐인 자료(0.35.0 한 칸의 두 삼각형 위 두 번 스침 — tests/v0350twice.test.ts와 같은 장면.
  * 0.37.0 칸을 얕게 뚫는 첫 점 X축의 닫힌 면 교차 넓힌 받기 — tests/v0370shallow.test.ts),
  * lying12 = 반투명 판(600 × 400 × 18)에 누운 작은 구멍(반지름 2.5, 길이 12, 12토막 원기둥 고체)과 판 윗면의 기운 기준 선분(27°)뿐인 자료
- * (0.37.0 긴 칸을 따라가는 안내 선의 비켜 가는 삼각형 힌트 — tests/v0370shallow.test.ts와 같은 장면)
+ * (0.37.0 긴 칸을 따라가는 안내 선의 비켜 가는 삼각형 힌트 — tests/v0370shallow.test.ts와 같은 장면),
+ * ring50 = 50토막 원 꺾은선(반지름 30, z 0 — 토막 0이 −90°를 가운데에)뿐인 자료(0.38.0 현을 얕게 가로지르는 첫 점 X축의 닫힌 선분 교차 넓힌 받기 — tests/v0380edge.test.ts와 같은 꼴)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole' | 'ring12' | 'lowcyl' | 'lying12';
+type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole' | 'ring12' | 'lowcyl' | 'lying12' | 'ring50';
 
 interface Ctx {
   v: V;
@@ -91,6 +92,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (!s && d === 'ring12') scenes.set(d, (s = ring12Scene()));
   if (!s && d === 'lowcyl') scenes.set(d, (s = lowCylScene()));
   if (!s && d === 'lying12') scenes.set(d, (s = lying12Scene()));
+  if (!s && d === 'ring50') scenes.set(d, (s = ring50Scene()));
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
@@ -7073,6 +7075,125 @@ const lyingCellValues: ValueSet = {
   },
 };
 
+// ───────────── 0.38.0 현을 얕게 가로지르는 선의 닫힌 선분 교차 넓힌 받기 ─────────────
+/** 50토막 원 꺾은선(반지름 30, z 0 — 꼭짓점이 lowcyl 옆면 아래 테두리와 같다: 토막 0이 −90°를 가운데에) */
+function ring50Scene(): Scene3d {
+  const P: number[] = [];
+  const v = (k: number): number[] => {
+    const a = -90 * R12_RAD - LC_STEP / 2 + LC_STEP * k;
+    return [30 * Math.cos(a), 30 * Math.sin(a), 0];
+  };
+  for (let k = 0; k < 50; k++) P.push(...v(k), ...v(k + 1));
+  // 범위는 첫 점(−45, −29.2, 0)까지 — 맞춰 보기에서 그 점을 눌러 찍는다
+  return { name: 'ring50', units: 'mm', meshes: [], lines: [{ id: '원', positions: new Float32Array(P), color: [0.4, 0.85, 1, 1] }], points: [], bounds: { min: [-50, -35, -10], max: [35, 35, 10] } };
+}
+/** 0.38.0 닫힌 선분 교차의 넓힌 받기가 있는 판인지 — 거리 15에서 첫 점 X축이 현과 만나는 X와 원 위 근 Q 사이를 가리켜 원 위 교차인지(없는 판은 X 그대로) */
+const v0380chord: Need = (v, c) => {
+  const why = fn('setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { edges: true, refine: r12Refine }, [-45, -LS_D, 0]);
+  const Q = [-30 * Math.sin(LS_W), -LS_D, 0];
+  lsCamera(c, Q, 15);
+  const a = c.at(lsPierce(0, Q)), b = c.at(Q);
+  if (a && b) c.hover((a.x + b.x) / 2 + 0.31, (a.y + b.y) / 2 + 0.17);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && Math.abs(Math.hypot(h.point[0], h.point[1]) - 30) < 1e-9;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.38.0 현을 얕게 가로지르는 선의 닫힌 선분 교차 넓힌 받기(커서에서 붙잡기 거리 안인 곡선 위 근)';
+};
+/** 거리 15에서 X와 Q 사이를 가리킨 그림 — 원 위 다듬은 교차에 측정 미리 보기 표식(새 장면) */
+SHOTS.push({
+  name: 'ring50-measure-chord',
+  data: 'ring50',
+  needs: v0380chord,
+  setup: (c) => {
+    r12First(c, { edges: true, refine: r12Refine }, [-45, -LS_D, 0]);
+    const Q = [-30 * Math.sin(LS_W), -LS_D, 0];
+    lsCamera(c, Q, 15);
+    const a = c.at(lsPierce(0, Q)), b = c.at(Q);
+    if (a && b) c.hover((a.x + b.x) / 2 + 0.31, (a.y + b.y) / 2 + 0.17);
+  },
+});
+/** 0.38.0 값(ring50 — 새 값): 첫 점 X축이 이웃 토막 현을 얕게 가로지르는 두 근 둘레 5 × 5(2.5화소 칸) 미리 보기(거리 15·40), 잠근 X축도 */
+const ringChordValues: ValueSet = {
+  name: 'ring50-measure-chord',
+  data: 'ring50',
+  needs: v0380chord,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const lock of [false, true]) {
+      r12First(c, { edges: true, refine: r12Refine }, [-45, -LS_D, 0]);
+      if (lock) c.v.setMeasureInferenceLock('x');
+      for (const d of [15, 40])
+        for (const sgn of [-1, 1]) {
+          const Q = [sgn * 30 * Math.sin(LS_W), -LS_D, 0];
+          lsCamera(c, Q, d);
+          out.push([lock, d, sgn, r12Grid(c, Q, 2, 2.5)]);
+        }
+      r12Done(c.v);
+    }
+    return out;
+  },
+};
+
+// ───────────── 0.38.0 pointsFor의 첫 점(pointsForFirst)·접점 붙잡기 종류('tangent') ─────────────
+/** 0.38.0 API가 있는 판인지(pointsFor 기억만 비우기 clearMeasurePointsFor — pointsForFirst·'tangent' 표식과 같은 판) */
+const v0380: Need = fn('setMeasureSnap', 'project', 'clearMeasurePointsFor');
+/** 상자 앞 윗모서리 위 접점 자리(앱 점 — 첫 점을 찍은 뒤에만 준다) */
+const TAN_AT = [84, 0, 40];
+/** 상자 윗면 가운데 앱 점(중심)을 첫 점으로 찍고, 첫 점이 있을 때만 주는 접점('tangent')을 가리킨 그림 — 접점 표식(동그라미 테와 꼭대기 가로선, 새 장면) */
+SHOTS.push({
+  name: 'base-measure-tangent',
+  data: 'base',
+  needs: v0380,
+  setup: (c) => {
+    const T = c.world(TAN_AT);
+    c.v.setMeasureMode(true);
+    c.v.setMeasureSnap({
+      edges: true,
+      points: [{ point: c.world([60, 40, 40]), kind: 'center', id: '상자' }],
+      pointsFor: (_pick: unknown, ctx?: { first: number[] | null }) => (ctx?.first ? [{ point: T, kind: 'tangent' }] : null),
+      pointsForFirst: true,
+    });
+    const a = c.at(c.world([60, 40, 40]));
+    if (a) c.click(a.x + 2, a.y - 2);
+    const p = c.at(T);
+    if (p) c.hover(p.x + 3, p.y + 2);
+  },
+});
+/**
+ * 첫 점에 따라 달라지는 앱 점(0.38.0 pointsFor 둘째 인자): 고른 점을 4 단위 격자로 내린 점(point)과, 첫 점이 있으면 첫 점과 그 격자 점의 가운데(접점 'tangent').
+ * calls에 부른 횟수를 센다
+ */
+function firstPoints(calls: { n: number }) {
+  return (pick: any, ctx?: { first: number[] | null }) => {
+    calls.n++;
+    const g = (pick.point as number[]).map((x) => Math.round(x / 4) * 4);
+    const F = ctx?.first;
+    return F ? [{ point: g, kind: 'point' as const }, { point: g.map((x, k) => (x + F[k]!) / 2), kind: 'tangent' as const }] : [{ point: g, kind: 'point' as const }];
+  };
+}
+/**
+ * 0.38.0 값(새 값): 첫 점에 따라 달라지는 앱 점으로 미리 보고 같은 자리를 누른 결과와 부른 횟수 — pointsForFirst를 켜면 첫 점이 바뀐 같은 고르기도 다시 부르고,
+ * 같은 차례를 끄고 되풀이하면 0.37.0 기억(고르기로만)이다
+ */
+const pointsFirstValues: ValueSet = {
+  name: 'base-measure-points-first',
+  data: 'base',
+  needs: v0380,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const on of [true, false]) {
+      const calls = { n: 0 };
+      c.v.setMeasureSnap({ midpoints: true, pointsFor: firstPoints(calls), ...(on ? { pointsForFirst: true } : {}) });
+      const res = hoverClicks(c);
+      out.push([on, calls.n, res]);
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -7161,6 +7282,8 @@ const VALUES: ValueSet[] = [
   holeMidValues,
   lowShallowValues,
   lyingCellValues,
+  ringChordValues,
+  pointsFirstValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

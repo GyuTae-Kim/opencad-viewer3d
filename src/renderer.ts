@@ -2094,9 +2094,16 @@ export class Renderer3d {
     if (!fresh.length && !dropped) return;
     const maxSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
     const sides = textureSides([...used.values()], Math.max(1, Math.min(maxSize, this.textureLimit)), this.textureBudget);
-    // 0.25.0: 코어가 원본을 지운 무늬(문맥을 잃었다 되찾음 등)는 풀지 않고 앱이 다시 줄 때까지 기다린다(그동안 그물은 color)
+    // 0.25.0: 코어가 원본을 지운 무늬(문맥을 잃었다 되찾음 등)는 풀지 않고 앱이 다시 줄 때까지 기다린다(그동안 그물은 color).
+    // 0.38.0: 앱이 나중에 주는 무늬(pending — 그림 바이트·푼 그림이 없다)도 같은 상태로 기다린다(restoreTexture가 받는다)
     for (const t of fresh)
-      this.textures.set(t.id, { src: t, side: sides.get(t.id) ?? TEXTURE_LIMIT, tex: null, state: this.texLaid.has(t) && !t.data?.length && !t.bitmap ? 'missing' : 'queued', bytes: 0 });
+      this.textures.set(t.id, {
+        src: t,
+        side: sides.get(t.id) ?? TEXTURE_LIMIT,
+        tex: null,
+        state: (this.texLaid.has(t) || t.pending === true) && !t.data?.length && !t.bitmap ? 'missing' : 'queued',
+        bytes: 0,
+      });
     this.pumpTextures();
   }
 
@@ -2119,7 +2126,7 @@ export class Renderer3d {
   }
 
   /**
-   * 0.25.0 앱이 다시 준 무늬 원본을 풀어 올린다(코어가 원본을 지운 뒤 문맥을 잃었다 되찾아 기다리는 무늬만 — state 'missing').
+   * 0.25.0 앱이 다시 준 무늬 원본을 풀어 올린다(코어가 원본을 지운 뒤 문맥을 잃었다 되찾아 기다리는 무늬만 — state 'missing'. 0.38.0부터 앱이 나중에 주는 pending 무늬도).
    * 긴 변은 처음 올릴 때와 같은 한도. 원본은 붙잡지 않고, 받은 ImageBitmap은 다 쓰면 닫는다. 올렸으면 true
    */
   restoreTexture(id: string, src: TextureSource): Promise<boolean> {

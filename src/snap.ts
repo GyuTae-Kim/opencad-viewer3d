@@ -507,6 +507,15 @@ export function samePick(a: Pick3d, b: Pick3d): boolean {
 }
 
 /**
+ * 같은 첫 점인지(0.38.0 — pointsForFirst의 pointsFor 기억 열쇠): 둘 다 없거나 세 좌표가 모두 같으면 true.
+ * 좌표 값으로 견준다(같은 자리를 다시 찍어 배열 객체가 달라도 같은 첫 점 — 앱 점은 첫 점으로 정해지므로 다시 쓴 결과가 부른 결과와 같다)
+ */
+export function sameFirst(a: readonly number[] | null, b: readonly number[] | null): boolean {
+  if (!a || !b) return !a && !b;
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+/**
  * 찍은 측정 점의 붙잡기: 종류(붙잡지 않았으면 null)와 축 붙잡기('axis')면 그 축,
  * 0.10.0부터 방향 추론(축·나란함·수직)이면 첫 점을 지나는 그 선의 단위 방향과 잠갔는지
  */
