@@ -62,9 +62,8 @@ vec4 instAt(int j) {
   return texelFetch(u_inst, ivec2(k & 1023, k >> 10), 0);
 }
 #else
-uniform mat4 u_mvp;
-uniform mat4 u_mv;
-uniform mat3 u_nmat;
+// 0.51.0 그물마다 행렬 셋(u_mvp 4 · u_mv 4 · u_nmat 3열)을 균일 변수 한 번에 — 자리 자료 그림(INST)의 11텍셀과 같은 꼴·같은 float 값
+uniform vec4 u_m[11];
 #endif
 uniform vec4 u_color;
 uniform float u_vcol;
@@ -109,6 +108,10 @@ void main() {
 #ifdef CLIP
   vec4 u_clip = instAt(u_instStride - 1);
 #endif
+#else
+  mat4 u_mvp = mat4(u_m[0], u_m[1], u_m[2], u_m[3]);
+  mat4 u_mv = mat4(u_m[4], u_m[5], u_m[6], u_m[7]);
+  mat3 u_nmat = mat3(u_m[8].xyz, u_m[9].xyz, u_m[10].xyz);
 #endif
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;

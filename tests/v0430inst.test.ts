@@ -72,9 +72,8 @@ function sameAsPerMesh(w: W, stride: number, pick: (e: DrawEntry) => boolean, o:
   w.v.setRenderOptions({ instancing: true });
   for (let i = 0; i < 12; i++) {
     const e = per[i]!, t = data[i]!;
-    expect(t.slice(0, 16)).toEqual(mat(e, 'u_mvp'));
-    expect(t.slice(16, 32)).toEqual(mat(e, 'u_mv'));
-    expect([t[32], t[33], t[34], t[36], t[37], t[38], t[40], t[41], t[42]]).toEqual(mat(e, 'u_nmat'));
+    // 0.51.0: 그물마다 그릴 때도 행렬 셋을 u_m(11 × vec4 — 자리 자료 앞 11텍셀과 같은 꼴) 한 번에 보낸다
+    expect(t.slice(0, 44)).toEqual(mat(e, 'u_m'));
     if (o.shadow) expect(t.slice(44, 60)).toEqual(mat(e, 'u_shadowM'));
     // u_clip은 uniform4f(double — GL이 float32로 바꾼다)라 같은 반올림으로 견준다
     if (o.clip) expect(t.slice((stride - 1) * 4, stride * 4)).toEqual((uni(e, 'u_clip') as number[]).map((x) => Math.fround(x) + 0));

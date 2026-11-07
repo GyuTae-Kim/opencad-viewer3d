@@ -52,15 +52,22 @@ export function mat4Identity(): Mat4 {
   return m;
 }
 
-/** a · b (열 우선). out을 주면 거기에 쓴다(그리기마다 새 배열을 만들지 않게 — a·b와 겹치면 안 된다) */
+/**
+ * a · b (열 우선). out을 주면 거기에 쓴다(그리기마다 새 배열을 만들지 않게 — a·b와 겹치면 안 된다).
+ * 0.51.0: 값을 지역 변수로 읽어 풀어 쓴 같은 셈 — 칸마다 0에서 시작해 k = 0…3 차례로 더한다(((0 + a₀b₀) + a₁b₁) + …, 예전 고리와 같은 연산·차례라
+ * −0·NaN·무한대까지 비트가 같다). 그물 많은 장면에서 그물마다 두세 번 부른다
+ */
 export function mat4Mul(a: ArrayLike<number>, b: ArrayLike<number>, out?: Mat4): Mat4 {
   const o = out ?? new Float64Array(16);
-  for (let c = 0; c < 4; c++)
-    for (let r = 0; r < 4; r++) {
-      let s = 0;
-      for (let k = 0; k < 4; k++) s += a[k * 4 + r]! * b[c * 4 + k]!;
-      o[c * 4 + r] = s;
-    }
+  const a0 = a[0]!, a1 = a[1]!, a2 = a[2]!, a3 = a[3]!, a4 = a[4]!, a5 = a[5]!, a6 = a[6]!, a7 = a[7]!;
+  const a8 = a[8]!, a9 = a[9]!, a10 = a[10]!, a11 = a[11]!, a12 = a[12]!, a13 = a[13]!, a14 = a[14]!, a15 = a[15]!;
+  for (let c = 0; c < 16; c += 4) {
+    const b0 = b[c]!, b1 = b[c + 1]!, b2 = b[c + 2]!, b3 = b[c + 3]!;
+    o[c] = 0 + a0 * b0 + a4 * b1 + a8 * b2 + a12 * b3;
+    o[c + 1] = 0 + a1 * b0 + a5 * b1 + a9 * b2 + a13 * b3;
+    o[c + 2] = 0 + a2 * b0 + a6 * b1 + a10 * b2 + a14 * b3;
+    o[c + 3] = 0 + a3 * b0 + a7 * b1 + a11 * b2 + a15 * b3;
+  }
   return o;
 }
 

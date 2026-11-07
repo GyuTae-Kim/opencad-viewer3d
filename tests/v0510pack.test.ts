@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { packNormals, packUvs } from '../src/attribs';
-import { hypot3 } from '../src/math';
+import { hypot3, mat4Mul } from '../src/math';
 import type { UvTransform } from '../src/types';
 
 /** 0.50.0 packNormals 그대로(견줄 기준) */
@@ -114,6 +114,33 @@ describe('0.51.0 hypot3 — V8 Math.hypot과 비트 같음', () => {
     ];
     for (const [x, y, z] of cases) expect(Object.is(hypot3(x, y, z), Math.hypot(x, y, z))).toBe(true);
     expect(hypot3(1e308, 1e308, 1e308)).toBeCloseTo(Math.sqrt(3) * 1e308, -300);
+  });
+});
+
+describe('0.51.0 mat4Mul 풀어 쓴 셈 — 0.50.0 고리와 비트 같음', () => {
+  /** 0.50.0 mat4Mul 그대로 */
+  function mul050(a: ArrayLike<number>, b: ArrayLike<number>): Float64Array {
+    const o = new Float64Array(16);
+    for (let c = 0; c < 4; c++)
+      for (let r = 0; r < 4; r++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += a[k * 4 + r]! * b[c * 4 + k]!;
+        o[c * 4 + r] = s;
+      }
+    return o;
+  }
+  it('무작위·넓은 값·특수 값(−0·NaN·무한대) 행렬 5만 짝(Float64Array·보통 배열, out 있음·없음)', () => {
+    const r = rng(4);
+    let n = 0;
+    for (let t = 0; t < 50_000; t++) {
+      const a = Array.from({ length: 16 }, () => (t % 4 ? r() * 4 - 2 : wide(r)));
+      const b = Array.from({ length: 16 }, () => (t % 3 ? r() * 4 - 2 : wide(r)));
+      if (t % 7 === 0) a[(t >> 3) % 16] = -0;
+      const want = mul050(a, b);
+      const got = t % 2 ? mat4Mul(new Float64Array(a), b) : mat4Mul(a, new Float64Array(b), new Float64Array(16));
+      for (let i = 0; i < 16; i++) if (!Object.is(got[i], want[i])) n++;
+    }
+    expect(n).toBe(0);
   });
 });
 

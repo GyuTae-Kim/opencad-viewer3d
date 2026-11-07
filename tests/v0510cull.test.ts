@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import type { DrawEntry, FakeGL } from './fakegl';
-import { cullBox, cullOut, cullPlanes, segmentsBox } from '../src/cull';
+import { cullBox, cullOut, cullPlanes, cullSide, cullUnion, segmentsBox } from '../src/cull';
 import { mat4Mul, orthographic, perspective, translation } from '../src/math';
 import { boxMesh } from '../src/synth';
 import type { Mesh3d, Scene3d } from '../src/types';
@@ -79,6 +79,36 @@ describe('0.51.0 cull.ts 순수 계산', () => {
     expect(cullOut(P, cullBox(local, translation([-1e9, 0, 0]))!)).toBe(false);
     // 크게 바깥이면 뺀다
     expect(cullOut(P, cullBox(box([1e9 + 1e4, 0, 0], [1e9 + 2e4, 1, 1]), translation([-1e9, 0, 0]))!)).toBe(true);
+  });
+
+  it('덩어리(cullUnion·cullSide): 확실히 바깥이면 든 그물 모두 cullOut, 확실히 안이면 모두 남김(무작위 상자·시야 2만 번)', () => {
+    let s = 77;
+    const r = () => ((s = (s * 1103515245 + 12345) >>> 0) / 4294967296) * 2 - 1;
+    let outN = 0, inN = 0;
+    for (let t = 0; t < 20_000; t++) {
+      const vp = t % 2 ? orthographic(-10, 10, -6, 6, 0.1, 100) : mat4Mul(perspective(1, 1.6, 0.1, 500), translation([r() * 5, r() * 5, -30 + r() * 10]));
+      const P = cullPlanes(vp, 0.02, 0.03);
+      const k = 1 + Math.floor(Math.abs(r()) * 6);
+      const cx = r() * 40, cy = r() * 40, sp = Math.abs(r()) * 15;
+      const list = Array.from({ length: k }, () => {
+        const x = cx + r() * sp, y = cy + r() * sp, z = r() * 10;
+        return cullBox(box([x, y, z], [x + Math.abs(r()) * 3, y + Math.abs(r()) * 3, z + Math.abs(r()) * 3]), t % 3 ? undefined : placeAt(r(), r(), 0, r() * 180, t % 6 === 0))!;
+      });
+      const u = cullUnion(list)!;
+      const side = cullSide(P, u);
+      if (side === -1) {
+        outN++;
+        for (const b of list) expect(cullOut(P, b)).toBe(true);
+      } else if (side === 1) {
+        inN++;
+        for (const b of list) expect(cullOut(P, b)).toBe(false);
+      }
+      // 하나뿐인 덩어리의 바깥 판단은 cullOut과 같다
+      expect(cullSide(P, list[0]!) === -1).toBe(cullOut(P, list[0]!));
+    }
+    expect(outN).toBeGreaterThan(300);
+    expect(inN).toBeGreaterThan(300);
+    expect(cullUnion([cullBox(box([0, 0, 0], [1, 1, 1]), undefined), null])).toBeNull();
   });
 
   it('빈 범위·수가 아닌 값·투영 성분 행렬은 null(빼지 않는다), 윤곽선 범위는 깨진 값을 뺀다', () => {
@@ -213,6 +243,43 @@ describe('0.51.0 화면 밖 잘라내기 — 뷰어', () => {
     expect(w.v.stats.culled).toBe(0);
     w.v.setRenderOptions({ culling: false });
     expect(frame(w).map(key)).toEqual(on.map(key));
+  });
+
+  it('덩어리 판단(겉모습 없음)과 그물마다 판단(겉모습 있음 — 색만 바꿈)이 같은 그물을 뺀다(그물 300개, 여러 카메라·숨김·지움·바꿈)', () => {
+    const grid = (): Scene3d => {
+      const meshes: Mesh3d[] = [];
+      for (let i = 0; i < 300; i++) meshes.push(boxMesh(`q${i}`, [(i % 20) * 20, Math.floor(i / 20) * 20, 0], [(i % 20) * 20 + 8, Math.floor(i / 20) * 20 + 8, 6], [0.5, 0.6, 0.7, 1], `r${Math.floor(i / 20)}`));
+      return { name: 'g', units: 'mm', meshes, lines: [] };
+    };
+    const a = view(grid(), 'shadedEdges');
+    const b = view(grid(), 'shadedEdges');
+    // b만 겉모습(색)이 있어 그물마다 판단한다 — 색은 범위와 상관없다
+    b.v.setItemColor('q0', [0.5, 0.6, 0.7, 1]);
+    const ids = (w: W): string => {
+      const d = frame(w);
+      return `${w.v.stats.culled}/${d.length}`;
+    };
+    const steps: ((v: Viewer3d) => void)[] = [
+      (v) => (v.fit(false), v.zoomBy(0.3)),
+      (v) => v.orbitBy(0.4, 0.2),
+      (v) => v.zoomBy(0.5),
+      (v) => v.setGroupVisible('r3', false),
+      (v) => v.orbitBy(-0.9, 0.1),
+      (v) => v.setItemVisible('q150', false),
+      (v) => v.setProjection('orthographic'),
+    ];
+    for (const st of steps) {
+      st(a.v);
+      st(b.v);
+      expect(ids(a)).toBe(ids(b));
+    }
+    expect(a.v.stats.culled).toBeGreaterThan(50);
+    // 그물을 지우고(removeMesh) 바꾸면(setMesh) 그 덩어리를 다시 셈한다
+    for (const w of [a, b]) {
+      w.v.removeMesh('q10');
+      w.v.setMesh(boxMesh('q11', [-400, -400, 0], [-390, -390, 5], [1, 0, 0, 1]));
+    }
+    expect(ids(a)).toBe(ids(b));
   });
 
   it('옮긴 묶음(setItemMatrix)은 옮긴 자리로 판단한다', () => {

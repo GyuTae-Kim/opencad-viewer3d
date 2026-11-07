@@ -97,6 +97,54 @@ export function cullBox(local: Box3, model: ArrayLike<number> | undefined, out: 
 /** 어긋남 한도 비(2⁻²⁰ — float32 곱·합 몇 번의 반올림 2⁻²⁴의 16배) */
 const TOL = 2 ** -20;
 
+/**
+ * 잘라내기 자료 여럿을 감싸는 자료(가운데·반폭은 합친 상자, 어긋남 크기 A는 축마다 가장 큰 값). 하나라도 null이면 null(덩어리째 판단하지 않는다). 0.51.0
+ * 덩어리가 cullSide로 −1(바깥)이면 들어 있는 그물마다 cullOut도 true, 1(안)이면 모두 false다(그물 상자 ⊂ 덩어리 상자, 그물 한도 ≤ 덩어리 한도)
+ */
+export function cullUnion(list: readonly (CullBox | null)[], out: Float64Array = new Float64Array(9)): CullBox | null {
+  if (!list.length) return null;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity, ax = 0, ay = 0, az = 0;
+  for (const b of list) {
+    if (!b) return null;
+    x0 = Math.min(x0, b[0]! - b[3]!);
+    x1 = Math.max(x1, b[0]! + b[3]!);
+    y0 = Math.min(y0, b[1]! - b[4]!);
+    y1 = Math.max(y1, b[1]! + b[4]!);
+    z0 = Math.min(z0, b[2]! - b[5]!);
+    z1 = Math.max(z1, b[2]! + b[5]!);
+    ax = Math.max(ax, b[6]!);
+    ay = Math.max(ay, b[7]!);
+    az = Math.max(az, b[8]!);
+  }
+  // 가운데·반폭은 위로 반올림해도 상자를 덮게(반폭을 아주 조금 키운다)
+  out[0] = (x0 + x1) / 2;
+  out[1] = (y0 + y1) / 2;
+  out[2] = (z0 + z1) / 2;
+  out[3] = (x1 - x0) / 2 + Math.abs(out[0]) * 2 ** -50;
+  out[4] = (y1 - y0) / 2 + Math.abs(out[1]) * 2 ** -50;
+  out[5] = (z1 - z0) / 2 + Math.abs(out[2]) * 2 ** -50;
+  out[6] = ax;
+  out[7] = ay;
+  out[8] = az;
+  for (let i = 0; i < 9; i++) if (!Number.isFinite(out[i]!)) return null;
+  return out;
+}
+
+/** 상자가 네 평면 모두의 확실히 안쪽이면 1, 한 평면의 확실히 바깥이면 −1(cullOut과 같은 판단), 그 밖(걸침·한도 안)은 0. 0.51.0 */
+export function cullSide(P: CullPlanes, b: CullBox): -1 | 0 | 1 {
+  const cx = b[0]!, cy = b[1]!, cz = b[2]!, ex = b[3]!, ey = b[4]!, ez = b[5]!, ax = b[6]!, ay = b[7]!, az = b[8]!;
+  let inside = true;
+  for (let i = 0; i < 16; i += 4) {
+    const a = P[i]!, bb = P[i + 1]!, c = P[i + 2]!, d = P[i + 3]!;
+    const mid = a * cx + bb * cy + c * cz + d;
+    const r = Math.abs(a) * ex + Math.abs(bb) * ey + Math.abs(c) * ez;
+    const tol = TOL * (P[16 + i]! * ax + P[17 + i]! * ay + P[18 + i]! * az + P[19 + i]!);
+    if (mid + r < -tol) return -1;
+    if (!(mid - r > tol)) inside = false;
+  }
+  return inside ? 1 : 0;
+}
+
 /** 잘라내기 자료가 네 평면 가운데 하나의 확실히 바깥이면 true(그리지 않아도 된다). 0.51.0 */
 export function cullOut(P: CullPlanes, b: CullBox): boolean {
   const cx = b[0]!, cy = b[1]!, cz = b[2]!, ex = b[3]!, ey = b[4]!, ez = b[5]!, ax = b[6]!, ay = b[7]!, az = b[8]!;

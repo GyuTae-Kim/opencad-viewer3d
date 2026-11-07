@@ -41,7 +41,7 @@ import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
 import { type V3, cross, hasOrigin, mat4Invert, mat4Mul, modelMatrix, normalMatrix, normalize, orthographic, translation } from './math';
 import { boxCenter, boxIsEmpty, boxSphere, meshBounds, offsetBox, positionsBox, rangesBox, transformBox, unionBox } from './bounds';
-import { type CullBox, cullBox, cullOut, cullPlanes, segmentsBox } from './cull';
+import { type CullBox, cullBox, cullOut, cullPlanes, cullSide, cullUnion, segmentsBox } from './cull';
 import {
   AO_BLUR_FS,
   AO_FS,
@@ -529,6 +529,9 @@ function cacheCuts(c: PartCache, parts: readonly RangePart[]): number[] | null {
 /** 구간이 이보다 많으면 모은 자료(색인·복사본)를 만들어 그리기 한 번으로 그린다 */
 const RUN_LIMIT = 24;
 
+/** 0.51.0 화면 밖 잘라내기 덩어리 하나의 그물 수(장면 차례 — 감싸는 상자가 확실히 안·바깥이면 그물마다 보지 않는다) */
+const CULL_CHUNK = 64;
+
 interface MeshRec {
   lookM?: LookCache;
   src: Mesh3d;
@@ -561,6 +564,8 @@ interface MeshRec {
   cull?: CullBox | null;
   /** 0.51.0 이 그리기 번호(Renderer3d.frameNo)에서 화면 밖으로 잘라냈으면 그 번호 */
   culledAt?: number;
+  /** 0.51.0 이 그리기 번호에서 보이는 그물이면 그 번호(덩어리 잘라내기가 보이는 그물만 센다) */
+  visAt?: number;
   edges: LineRec | null;
   /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
   wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
@@ -756,8 +761,9 @@ export class Renderer3d {
   stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0, culled: 0 };
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
-  private m4b = new Float32Array(16);
   private m3 = new Float32Array(9);
+  /** 0.51.0 그물 행렬 셋을 한 번에 보내는 자리(u_m — 11 × vec4: u_mvp 4열·u_mv 4열·u_nmat 3열(넷째 값 0)) */
+  private mPack = new Float32Array(44);
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
   /** 0.43.0 자리 자료의 그림자 행렬(빛 · 모형) 셈 자리 */
@@ -818,6 +824,11 @@ export class Renderer3d {
   instStats = { draws: 0, items: 0 };
   /** 0.51.0 그리기 번호(화면 밖으로 잘라낸 그물에 MeshRec.culledAt으로 적는다) */
   private frameNo = 0;
+  /**
+   * 0.51.0 잘라내기 덩어리(this.meshes 차례로 CULL_CHUNK개씩): 그때의 그물 기록(같은 자리의 기록이 바뀌면 그 덩어리를 다시 셈한다)·덩어리 그물 수·감싸는 자료
+   * (null이면 덩어리째 판단하지 않는다). 그물마다 판단하는 것과 같은 결과를 덩어리 하나의 셈으로(맞춘 화면이면 거의 모든 덩어리가 확실히 안)
+   */
+  private cullChunks: { recs: (MeshRec | undefined)[]; n: number[]; box: (CullBox | null)[] } = { recs: [], n: [], box: [] };
   /** 0.51.0 시험용: true면 선 상태 기억(LineMemo)을 쓰지 않고 그물마다 모두 보낸다(0.50.0 GL 호출 — 기억과 그리기 기록이 같은지 견줄 때) */
   lineMemoOff = false;
 
@@ -872,6 +883,7 @@ export class Renderer3d {
     this.jobs.clear();
     this.vaos.clear();
     this.meshes = [];
+    this.cullChunks = { recs: [], n: [], box: [] };
     this.lines = [];
     this.points = [];
     this.grid = null;
@@ -1377,6 +1389,29 @@ export class Renderer3d {
         else this.pbrBroken = true;
       }
     }
+  }
+
+  /**
+   * 0.51.0 그물 프로그램(INST 아님)의 행렬 셋을 균일 변수 한 번에(u_m — 0.50.0의 u_mvp·u_mv·u_nmat 세 번과 같은 float 값:
+   * 시점·투영 · 모형과 시점 · 모형은 double을 float32로, 법선 행렬은 float32 배열에 곧바로 — 자리 자료 그림 instMeshes와 같은 꼴)
+   */
+  private meshMats(p: Prog, mvp: ArrayLike<number>, mv: ArrayLike<number>): void {
+    const u = this.mPack, m3 = this.m3;
+    for (let k = 0; k < 16; k++) {
+      u[k] = mvp[k]!;
+      u[16 + k] = mv[k]!;
+    }
+    normalMatrix(mv, m3);
+    u[32] = m3[0]!;
+    u[33] = m3[1]!;
+    u[34] = m3[2]!;
+    u[36] = m3[3]!;
+    u[37] = m3[4]!;
+    u[38] = m3[5]!;
+    u[40] = m3[6]!;
+    u[41] = m3[7]!;
+    u[42] = m3[8]!;
+    this.gl.uniform4fv(this.loc(p, 'u_m'), u);
   }
 
   /** 여러 단면 평면(로컬)을 지금 프로그램에 올린다(u_clips·u_nclip) */
@@ -2603,6 +2638,7 @@ export class Renderer3d {
     this.refs.clear();
     this.jobs.clear();
     this.meshes = [];
+    this.cullChunks = { recs: [], n: [], box: [] };
     this.lines = [];
     this.points = [];
     this.setHighlightSegments(null);
@@ -3385,12 +3421,8 @@ export class Renderer3d {
       const p = cur;
       const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
       const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
-      this.m4a.set(mvp);
-      this.m4b.set(mv);
-      normalMatrix(mv, this.m3);
-      gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
-      gl.uniformMatrix4fv(this.loc(p, 'u_mv'), false, this.m4b);
-      gl.uniformMatrix3fv(this.loc(p, 'u_nmat'), false, this.m3);
+      // 0.51.0 행렬 셋을 균일 변수 한 번에(u_m — 같은 float 값)
+      this.meshMats(p, mvp, mv);
       if (p.shadow && this.shadowMap) {
         // 깊이 그림 좌표 = [0, 1] 맞춤 · 빛 투영·시점 · 모형(double로 합친 뒤 float)
         const lv = model ? mat4Mul(this.shadowMap.vp, model, this.d4a) : this.shadowMap.vp;
@@ -3598,25 +3630,37 @@ export class Renderer3d {
       tex: boolean;
       /** 0.43.0 PBR 변종 정의(같은 그물 열쇠는 PBR 필드도 같다 — 색을 바꾼 자리만 PBR이 꺼져 따로 묶인다) */
       pbr: string[];
+      /** 0.51.0 pbr.join()(묶음마다 한 번 — 자리마다 견줄 때 다시 잇지 않는다) */
+      pk: string;
       list: MeshRec[];
     }
     const vcolOf = (r: MeshRec): boolean => r.hasColors && !(look && lookOf(r.src.id)?.color) && !mono && !flat;
-    /** 같은 그물 자리들을 균일 변수가 같은 묶음으로 나눈다(색은 같은 객체를 먼저 보고, 다른 객체면 값으로) */
+    const NO_DEFS: string[] = [];
+    /**
+     * 같은 그물 자리들을 균일 변수가 같은 묶음으로 나눈다(색은 같은 객체를 먼저 보고, 다른 객체면 값으로).
+     * 0.51.0: 자리마다 닫힘 함수·빈 배열·글자열 잇기를 만들지 않는다(PBR 필드가 없는 그물은 빈 정의 — 같은 묶음 나누기·차례)
+     */
     const splitBatches = (list: readonly MeshRec[], tintOf: (r: MeshRec) => number): MeshBatch[] => {
       const out: MeshBatch[] = [];
       const byObj = new Map<Rgba, MeshBatch[]>();
       const byVal = new Map<string, MeshBatch>();
       for (const r of list) {
         const color = colOf(r), tint = tintOf(r), vcol = vcolOf(r), tex = !!texOfR(r);
-        const pbr = pbrDefsOf(r);
-        const pk = pbr.join();
-        const same = (b: MeshBatch): boolean => b.tint === tint && b.vcol === vcol && b.tex === tex && b.pbr.join() === pk;
-        let b = byObj.get(color)?.find(same);
+        const pbr = r.pbr ? pbrDefsOf(r) : NO_DEFS;
+        const pk = pbr.length ? pbr.join() : '';
+        let b: MeshBatch | undefined;
+        const cand = byObj.get(color);
+        if (cand)
+          for (const x of cand)
+            if (x.tint === tint && x.vcol === vcol && x.tex === tex && x.pk === pk) {
+              b = x;
+              break;
+            }
         if (!b) {
           const k = `${tint}|${vcol ? 1 : 0}${tex ? 1 : 0}|${color[0]},${color[1]},${color[2]},${color[3]}${pk ? `|${pk}` : ''}`;
           b = byVal.get(k);
           if (!b) {
-            out.push((b = { color, tint, vcol, tex, pbr, list: [] }));
+            out.push((b = { color, tint, vcol, tex, pbr, pk, list: [] }));
             byVal.set(k, b);
           }
           const a = byObj.get(color);
@@ -3703,23 +3747,66 @@ export class Renderer3d {
       else m.set(k, [r]);
     };
 
-    const visibleMeshes = this.meshes.filter((r) => vis(r.src.id, r.src.group));
+    const frameNo = ++this.frameNo;
+    const visibleMeshes: MeshRec[] = [];
+    for (const r of this.meshes)
+      if (vis(r.src.id, r.src.group)) {
+        r.visAt = frameNo;
+        visibleMeshes.push(r);
+      }
     // 0.51.0 화면 밖 잘라내기(src/cull.ts): 시야 사각뿔 옆 네 평면 가운데 하나의 확실히 바깥인 그물에 이 그리기 번호를 적고 면·윤곽선·삼각형 변·숨은 점선·
     // 외곽선·주변 가림 깊이·반투명 면에서 뺀다 — 화면에 화소를 내지 않는 그물이라 그림은 같다. 여백은 굵은 선 반폭·끝 마개(장치 화소 4 × 화소 비율 + 4).
     // 그림자 깊이 그림(해 쪽 시야)·잘린 면 채우기 단위·인스턴싱 자리 수·모은 묶음 나누기와 차례는 잘라내기 전 그대로 둔다(0.50.0과 같은 길)
-    const frameNo = ++this.frameNo;
     let culledN = 0;
     if (this.culling && visibleMeshes.length) {
       const vw = Math.min(devW, st.viewport ? st.viewport[0] : devW, gl.drawingBufferWidth || devW);
       const vh = Math.min(devH, st.viewport ? st.viewport[1] : devH, gl.drawingBufferHeight || devH);
       const px = 4 * st.dpr + 4;
       const P = cullPlanes(f.viewProj, (2 * px) / Math.max(1, vw), (2 * px) / Math.max(1, vh));
-      for (const r of visibleMeshes) {
-        const lk = look ? lookOf(r.src.id)?.matrix : undefined;
-        const d = lk ? cullBox(r.local, this.lookModel(r, lk, r.model).model) : r.cull === undefined ? (r.cull = cullBox(r.local, r.model)) : r.cull;
-        if (d && cullOut(P, d)) {
-          r.culledAt = frameNo;
-          culledN++;
+      const cullOf = (r: MeshRec): CullBox | null => (r.cull === undefined ? (r.cull = cullBox(r.local, r.model)) : r.cull);
+      if (look) {
+        // 겉모습 행렬이 있으면 그물마다(옮긴 묶음은 옮긴 자리로)
+        for (const r of visibleMeshes) {
+          const lk = lookOf(r.src.id)?.matrix;
+          const d = lk ? cullBox(r.local, this.lookModel(r, lk, r.model).model) : cullOf(r);
+          if (d && cullOut(P, d)) {
+            r.culledAt = frameNo;
+            culledN++;
+          }
+        }
+      } else {
+        // 장면 차례 CULL_CHUNK개 덩어리: 감싸는 상자가 확실히 안이면 건너뛰고, 확실히 바깥이면 통째로, 걸치면 그물마다(같은 판단 — cullUnion)
+        const M = this.meshes, C = this.cullChunks;
+        if (C.recs.length > M.length) C.recs.length = M.length;
+        for (let s = 0, k = 0; s < M.length; s += CULL_CHUNK, k++) {
+          const e = Math.min(M.length, s + CULL_CHUNK);
+          let ok = C.n[k] === e - s;
+          for (let i = s; ok && i < e; i++) if (C.recs[i] !== M[i]) ok = false;
+          if (!ok) {
+            const list: (CullBox | null)[] = [];
+            for (let i = s; i < e; i++) {
+              C.recs[i] = M[i];
+              list.push(cullOf(M[i]!));
+            }
+            C.box[k] = cullUnion(list);
+            C.n[k] = e - s;
+          }
+          const box = C.box[k];
+          const side = box ? cullSide(P, box) : 0;
+          if (side === 1) continue;
+          for (let i = s; i < e; i++) {
+            const r = M[i]!;
+            if (r.visAt !== frameNo) continue;
+            let out = side === -1;
+            if (!out) {
+              const d = cullOf(r);
+              out = !!d && cullOut(P, d);
+            }
+            if (out) {
+              r.culledAt = frameNo;
+              culledN++;
+            }
+          }
         }
       }
       stats.culled = culledN;
@@ -4660,12 +4747,7 @@ export class Renderer3d {
       gl.uniform1f(this.loc(plainP, 'u_ortho'), ortho);
       const T = translation(c);
       const mv = mat4Mul(f.view, T, this.d4a);
-      this.m4a.set(mat4Mul(f.proj, mv, this.d4b));
-      this.m4b.set(mv);
-      normalMatrix(mv, this.m3);
-      gl.uniformMatrix4fv(this.loc(plainP, 'u_mvp'), false, this.m4a);
-      gl.uniformMatrix4fv(this.loc(plainP, 'u_mv'), false, this.m4b);
-      gl.uniformMatrix3fv(this.loc(plainP, 'u_nmat'), false, this.m3);
+      this.meshMats(plainP, mat4Mul(f.proj, mv, this.d4b), mv);
       if (multi) this.setClips(plainP, u.others.map((q) => planeToLocal(q, T)));
       const mc = u.color, sc = secColor;
       const k = 0.25;
