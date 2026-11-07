@@ -75,6 +75,31 @@ async function bundle(outDir, commit, cacheDir) {
   });
 }
 
+/**
+ * 0.51.0 CPU 프로필(Profiler.stop의 profile)에서 함수별 자기 시간(ms) 위 n개 — 이름·파일:줄로 묶는다(GL 메서드는 이름만)
+ * @param {any} profile @param {number} n
+ */
+export function topSelf(profile, n) {
+  /** @type {Map<number, any>} */
+  const byId = new Map(profile.nodes.map((/** @type {any} */ x) => [x.id, x]));
+  /** @type {Map<string, number>} */
+  const self = new Map();
+  let total = 0;
+  const samples = profile.samples ?? [], deltas = profile.timeDeltas ?? [];
+  for (let i = 0; i < samples.length; i++) {
+    const node = byId.get(samples[i]);
+    const dt = (deltas[i + 1] ?? deltas[i] ?? 0) / 1000;
+    if (!node) continue;
+    const cf = node.callFrame;
+    const file = cf.url ? cf.url.split('/').pop() : '';
+    const key = file ? `${cf.functionName || '(익명)'} ${file}:${cf.lineNumber + 1}` : cf.functionName || '(익명)';
+    self.set(key, (self.get(key) ?? 0) + dt);
+    total += dt;
+  }
+  const top = [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
+  return { total: Math.round(total), top: top.map(([k, ms]) => [k, Math.round(ms * 10) / 10]) };
+}
+
 /** 표(가운데값 (최소~최대)) @param {any} res */
 export function manyTable(res) {
   const f = (/** @type {number[]} */ a) => {
@@ -106,6 +131,12 @@ export function manyTable(res) {
         md += `| ${name} | ${mode} | ${f(s.js)} | ${m(s.total)} | ${m(s.render)} | ${Math.round((js - m(s.render)) * 10) / 10} | ${m(s.stub.all)} | ${share('draw')} | ${share('uniform')} | ${share('bind')} | ${share('state')} | ${c.draw}·${c.uniform}·${c.bind}·${c.state}·${c.upload + c.other} | ${s.culled.join('·')} | ${m(s.pickFirst)}·${m(s.pick)} |\n`;
       }
   }
+  // 0.51.0 CPU 프로필(마지막 차례의 것 — 함수별 자기 시간 ms, 프레임 수로 나누지 않은 합)
+  for (const [name, r] of Object.entries(res.variants))
+    for (const [mode, p] of Object.entries(r.profile ?? {})) {
+      const pp = /** @type {any} */ (p);
+      md += `\n**${name} ${mode} 프로필**(그리기 ${pp.frames}번, 벽시계 ${pp.wall} ms, 표본 합 ${pp.top.total} ms): ${pp.top.top.map((/** @type {any} */ x) => `${x[0]} ${x[1]}`).join(' · ')}\n`;
+    }
   return md;
 }
 
@@ -127,6 +158,7 @@ async function main() {
       chrome: { type: 'string' },
       pbr: { type: 'boolean' },
       parts: { type: 'boolean' },
+      profile: { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
@@ -190,6 +222,20 @@ async function main() {
             res.triangles = o.triangles;
             const v = (res.variants[name] ??= { open: [], steady: {}, parts: {} });
             v.open.push(o);
+            if (values.profile) {
+              // 0.51.0 CPU 프로필(모드마다 reps × 2번 그리기 — 함수별 자기 시간 위 20)
+              for (const mode of modes) {
+                await browser.evaluate(`bench.prep(${JSON.stringify(mode)})`, 900_000);
+                await browser.send('Profiler.enable');
+                await browser.send('Profiler.setSamplingInterval', { interval: 200 });
+                await browser.send('Profiler.start');
+                const t0 = Date.now();
+                await browser.evaluate(`bench.spin(${reps * 2})`, 900_000);
+                const wall = Date.now() - t0;
+                const { profile } = await browser.send('Profiler.stop', {}, 300_000);
+                (v.profile ??= {})[mode] = { frames: reps * 2, wall, top: topSelf(profile, 20) };
+              }
+            }
             if (values.parts) {
               // 0.51.0 프레임 비용 나누기
               const pr = await browser.evaluate(`bench.parts(${reps}, ${JSON.stringify(modes)})`, 1_800_000);
@@ -234,7 +280,11 @@ async function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
-  main().catch((e) => {
-    console.error(`[bench] 오류: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
-    process.exit(2);
-  });
+  main().then(
+    // 0.51.0: 결과를 다 쓴 뒤에는 바로 끝낸다(묶기 서비스·남은 연결이 이벤트 고리를 붙잡아 끝나지 않은 적이 있다)
+    () => process.exit(0),
+    (e) => {
+      console.error(`[bench] 오류: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+      process.exit(2);
+    },
+  );

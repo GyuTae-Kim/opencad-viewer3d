@@ -412,4 +412,25 @@ async function parts(reps: number, modes: string[]): Promise<PartsRow[]> {
   return rows;
 }
 
-(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts };
+/** 0.51.0 CPU 프로필용: 모드를 맞추고 두 번 그려 데운다(many.mjs --profile이 이 뒤에 Profiler.start → spin → stop) */
+function prep(mode: string): void {
+  const v = (window as unknown as { last: V }).last;
+  setMode(v, mode);
+  for (let i = 0; i < 2; i++) {
+    v.orbitBy(0.01, 0);
+    v.renderNow();
+    syncGpu(v);
+  }
+}
+
+/** n번 돌려 그리고 GPU 마침을 기다린다 */
+function spin(n: number): void {
+  const v = (window as unknown as { last: V }).last;
+  for (let i = 0; i < n; i++) {
+    v.orbitBy(0.02, 0.005);
+    v.renderNow();
+    syncGpu(v);
+  }
+}
+
+(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin };
