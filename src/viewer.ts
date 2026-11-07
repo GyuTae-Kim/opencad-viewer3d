@@ -7744,6 +7744,8 @@ export class Viewer3d {
       this.renderer.init();
       // 0.25.0: 놓기 선택이 있으면 그대로 다시 건다(코어가 지운 배열·원본은 없이 위치·색으로 올리고, 아래 emitRestore로 앱에 알려 다시 받는다)
       if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload, release: this.releaseOpt });
+      // 0.51.0 다시 나눠 올리기는 걸음 번호를 0부터(몫 함수의 앞 걸음 — 되찾은 첫 그림도 곧)
+      if (this.upload) this.upload.step = 0;
       if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
       this.uploadAnnotations();
       // 단면 테두리도 GPU 자료라 다시 올린다
