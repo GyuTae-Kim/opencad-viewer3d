@@ -154,9 +154,13 @@ export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
 export {
   type AnimateSetting,
+  CAMERA_MOVE_MAX_MS,
+  CAMERA_MOVE_MS,
+  type FlyToOptions,
   type MotionMatchMedia,
   type MotionQueryList,
   REDUCED_MOTION_QUERY,
+  moveDuration,
   normalizeAnimate,
   resolveAnimate,
   watchReducedMotion,
@@ -165,6 +169,7 @@ export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cube
 export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
 export { INSTANCE_MIN } from './renderer';
 export { PBR_DEFAULT_ROUGHNESS, PBR_MAX_EXPONENT, type PbrSource, type PbrState, pbrSource, pbrState, specExponent } from './pbr';
+export { AO_MAX_INTENSITY, AO_MAX_PIXELS, AO_RADIUS_RATIO, AO_SAMPLES, type AmbientOcclusionOptions, type AoParams, aoParams, aoSize } from './ao';
 export type { MeshArrays } from './release';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';

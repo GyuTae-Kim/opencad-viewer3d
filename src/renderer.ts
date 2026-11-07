@@ -39,9 +39,29 @@ import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransfor
 import { type ViewFrame, viewMatrix } from './camera';
 import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
-import { type V3, cross, hasOrigin, mat4Mul, modelMatrix, normalMatrix, normalize, orthographic, translation } from './math';
+import { type V3, cross, hasOrigin, mat4Invert, mat4Mul, modelMatrix, normalMatrix, normalize, orthographic, translation } from './math';
 import { boxCenter, boxIsEmpty, boxSphere, meshBounds, offsetBox, rangesBox, transformBox, unionBox } from './bounds';
-import { DEPTH_FS, DEPTH_VS, FULL_VS, MESH_FS, MESH_VS, POINT_FS, POINT_VS, PROFILE_FS, SKY_FS, THIN_FS, THIN_VS, WIDE_FS, WIDE_VS, withClip, withDefines } from './shaders';
+import {
+  AO_BLUR_FS,
+  AO_FS,
+  AO_MIX_FS,
+  DEPTH_FS,
+  DEPTH_VS,
+  FULL_VS,
+  MESH_FS,
+  MESH_VS,
+  POINT_FS,
+  POINT_VS,
+  PROFILE_FS,
+  SKY_FS,
+  THIN_FS,
+  THIN_VS,
+  WIDE_FS,
+  WIDE_VS,
+  withClip,
+  withDefines,
+} from './shaders';
+import { AO_MAX_PIXELS, type AoParams, aoSize } from './ao';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { contrastLineColor } from './theme';
 import { type BufferSink, type BufferTarget, CHUNK_BYTES, CHUNK_MIN_BYTES, ChunkedUpload, type UploadArray, newArrays } from './upload';
@@ -300,6 +320,8 @@ export interface RenderState {
   fog?: { color: Rgba; start: number; end: number } | null;
   /** 앱 측정 덧그림 선(setAnnotationLines로 올린 것)을 그릴 때: 굵기(화면 화소)·가려진 부분 불투명도(0이면 안 그림) */
   annotations?: { width: number; hidden: number } | null;
+  /** 0.49.0 주변 가림(SSAO): 가림 거리(세계 단위)·세기. 음영 계열(숨은 선 빼고)에서 불투명 면을 그린 뒤 곱한다. 없으면 0.48.0과 같은 GL 호출 */
+  ao?: AoParams | null;
 }
 
 export interface RenderStats {
@@ -593,6 +615,8 @@ const INST_W = 1024, INST_MESH = 11, INST_LINE = 5;
 const INST_UNIT = 5;
 /** 0.43.0 PBR 그림 무늬 단위: 법선 그림·거칠기 그림·금속성 그림(WebGL2 조각 셰이더 무늬 단위는 16개 이상) */
 const NMAP_UNIT = 6, ROUGH_UNIT = 7, METAL_UNIT = 8;
+/** 0.49.0 주변 가림 그림을 읽는 무늬 단위(그림자 단위 2를 비우지 않게 따로 — 깊이 그림은 외곽선과 같은 1) */
+const AO_UNIT = 9;
 
 /** 0.42.0 인스턴싱 선택(Renderer3d.instancing): on = 켬(기본), min = 모아 그릴 같은 그물 자리 수 하한(2 이상) */
 export interface InstancingOptions {
@@ -663,6 +687,12 @@ export class Renderer3d {
   /** 그물마다 외곽선 색을 쓸 때만(0.9.0): 외곽선 깊이 그림(profTex)과 함께 묶은 색 그림(RGBA8) */
   private profCol: { tex: WebGLTexture; fb: WebGLFramebuffer } | null = null;
   private profileP: Prog | null = null;
+  /** 0.49.0 주변 가림: 반 해상도 R8 그림 둘(가림 → 가로 흐림 → 세로 흐림 — 번갈아)과 그 프로그램 셋(처음 켤 때 만든다) */
+  private aoTex: { a: { tex: WebGLTexture; fb: WebGLFramebuffer }; b: { tex: WebGLTexture; fb: WebGLFramebuffer }; w: number; h: number } | null = null;
+  private aoFailed = '';
+  private aoP: Prog | null = null;
+  private aoBlurP: Prog | null = null;
+  private aoMixP: Prog | null = null;
   private skyP: Prog | null = null;
   /** 해 그림자 깊이 그림과 그때의 빛 행렬(판이 같으면 다시 쓴다) */
   private shadowMap: { tex: WebGLTexture; fb: WebGLFramebuffer; size: number; version: number; vp: Float64Array } | null = null;
@@ -838,6 +868,11 @@ export class Renderer3d {
     this.profTex = null;
     this.profCol = null;
     this.profileP = null;
+    this.aoTex = null;
+    this.aoFailed = '';
+    this.aoP = null;
+    this.aoBlurP = null;
+    this.aoMixP = null;
     this.skyP = null;
     this.shadowMap = null;
     this.instTex = null;
@@ -1083,6 +1118,129 @@ export class Renderer3d {
     this.gl.deleteFramebuffer(t.fb);
     this.gl.deleteTexture(t.tex);
     this.profTex = null;
+  }
+
+  /** 0.49.0 주변 가림 반 해상도 그림 둘(크기가 바뀌면 다시 만든다). 만들지 못하면 null(그 크기는 다시 시도하지 않는다 — 가림 없이 그린다) */
+  private aoTargets(w: number, h: number): NonNullable<Renderer3d['aoTex']> | null {
+    const [hw, hh] = aoSize(w, h);
+    const t = this.aoTex;
+    if (t && t.w === hw && t.h === hh) return t;
+    this.dropAo();
+    if (this.aoFailed === `${hw}x${hh}`) return null;
+    const gl = this.gl;
+    const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const made: { tex: WebGLTexture; fb: WebGLFramebuffer }[] = [];
+    let ok = true;
+    for (let i = 0; i < 2 && ok; i++) {
+      const tex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, hw, hh, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fb = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      made.push({ tex, fb });
+      ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
+    if (!ok) {
+      for (const m of made) {
+        gl.deleteFramebuffer(m.fb);
+        gl.deleteTexture(m.tex);
+      }
+      this.aoFailed = `${hw}x${hh}`;
+      return null;
+    }
+    this.aoTex = { a: made[0]!, b: made[1]!, w: hw, h: hh };
+    return this.aoTex;
+  }
+
+  private dropAo(): void {
+    const t = this.aoTex;
+    if (!t) return;
+    for (const m of [t.a, t.b]) {
+      this.gl.deleteFramebuffer(m.fb);
+      this.gl.deleteTexture(m.tex);
+    }
+    this.aoTex = null;
+  }
+
+  /**
+   * 0.49.0 주변 가림 셋째 단계(외곽선 깊이 그림 profTex에 불투명 그물 깊이를 그린 뒤): 반 해상도 가림 → 가로·세로 흐림 → 장치 화소 그림(target)에 곱하기.
+   * 그리기 수에 화면 전체 삼각형 넷을 더한다. 그림을 만들지 못하면 아무것도 하지 않는다(false)
+   */
+  private drawAo(f: ViewFrame, devW: number, devH: number, ao: AoParams, target: WebGLFramebuffer | null, transparent: boolean, stats: RenderStats): boolean {
+    const gl = this.gl;
+    const t = this.aoTargets(devW, devH);
+    const inv = mat4Invert(f.proj);
+    if (!t || !this.profTex || !inv) return false;
+    const invProj = Float32Array.from(inv);
+    const aoP = (this.aoP ??= this.program(FULL_VS, AO_FS));
+    const blurP = (this.aoBlurP ??= this.program(FULL_VS, AO_BLUR_FS));
+    const mixP = (this.aoMixP ??= this.program(FULL_VS, AO_MIX_FS));
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray((this.emptyVao ??= gl.createVertexArray()));
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.profTex.tex);
+    // 가림(반 해상도 → a)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.a.fb);
+    gl.viewport(0, 0, t.w, t.h);
+    gl.useProgram(aoP.p);
+    gl.uniform1i(this.loc(aoP, 'u_depth'), 1);
+    gl.uniformMatrix4fv(this.loc(aoP, 'u_invProj'), false, invProj);
+    gl.uniform2f(this.loc(aoP, 'u_texel'), 1 / devW, 1 / devH);
+    gl.uniform1f(this.loc(aoP, 'u_radius'), ao.radius);
+    gl.uniform1f(this.loc(aoP, 'u_pxPerUnit'), (f.proj[5]! * devH) / 2);
+    gl.uniform1f(this.loc(aoP, 'u_ortho'), f.projection === 'orthographic' ? 1 : 0);
+    gl.uniform1f(this.loc(aoP, 'u_intensity'), ao.intensity);
+    gl.uniform1f(this.loc(aoP, 'u_maxPx'), AO_MAX_PIXELS);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // 가로 흐림(a → b)·세로 흐림(b → a)
+    gl.useProgram(blurP.p);
+    gl.uniform1i(this.loc(blurP, 'u_depth'), 1);
+    gl.uniform1i(this.loc(blurP, 'u_ao'), AO_UNIT);
+    gl.uniformMatrix4fv(this.loc(blurP, 'u_invProj'), false, invProj);
+    gl.uniform1f(this.loc(blurP, 'u_radius'), ao.radius);
+    gl.activeTexture(gl.TEXTURE0 + AO_UNIT);
+    for (const [src, dst, sx, sy] of [
+      [t.a, t.b, 1 / t.w, 0],
+      [t.b, t.a, 0, 1 / t.h],
+    ] as const) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
+      gl.bindTexture(gl.TEXTURE_2D, src.tex);
+      gl.uniform2f(this.loc(blurP, 'u_step'), sx, sy);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    // 곱하기(a → 그림)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+    gl.viewport(0, 0, devW, devH);
+    gl.bindTexture(gl.TEXTURE_2D, t.a.tex);
+    gl.useProgram(mixP.p);
+    gl.uniform1i(this.loc(mixP, 'u_depth'), 1);
+    gl.uniform1i(this.loc(mixP, 'u_ao'), AO_UNIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.ZERO, gl.SRC_COLOR, gl.ZERO, gl.ONE);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    stats.drawCalls += 4;
+    // 그리기 처음과 같은 섞기(투명 바탕 그림 저장은 알파를 따로)
+    if (transparent) gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.BLEND);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindVertexArray(null);
+    gl.depthMask(true);
+    return true;
   }
 
   /** 겉모습 행렬 m을 합친 모형 행렬(m · base, 캐시) */
@@ -2422,9 +2580,12 @@ export class Renderer3d {
     this.dropBuffer(this.quadPoint);
     this.dropBuffer(this.capBuf);
     gl.deleteVertexArray(this.capVao);
-    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC, this.profileP, this.skyP, ...this.variants.values()]) if (p) gl.deleteProgram(p.p);
+    for (const p of [this.mesh, this.wideP, this.thinP, this.pointP, this.meshC, this.thinC, this.meshT, this.meshTC, this.profileP, this.skyP, this.aoP, this.aoBlurP, this.aoMixP, ...this.variants.values()])
+      if (p) gl.deleteProgram(p.p);
     this.variants.clear();
     this.profileP = null;
+    this.aoP = this.aoBlurP = this.aoMixP = null;
+    this.dropAo();
     this.dropProfile();
     this.dropShadow();
     if (this.instTex) gl.deleteTexture(this.instTex.tex);
@@ -3542,8 +3703,11 @@ export class Renderer3d {
       }
       shadowOn = !!m && m.size === size;
     } else if (this.shadowMap) this.dropShadow();
-    // 외곽선을 끄면 깊이 그림 버퍼도 놓는다
-    if (!st.profiles && this.profTex) this.dropProfile();
+    // 0.49.0 주변 가림: 음영 계열(숨은 선 빼고)에서만. 끄면 그 그림도 놓는다
+    const aoOn = !!st.ao && shadedLike && mode !== 'hiddenLine';
+    if (!aoOn && this.aoTex) this.dropAo();
+    // 외곽선을 끄면 깊이 그림 버퍼도 놓는다(0.49.0 주변 가림이 쓰는 동안은 둔다)
+    if (!st.profiles && !aoOn && this.profTex) this.dropProfile();
 
     // 0.42.0 인스턴싱: 보이는 같은 그물 자리 수(그물 열쇠·윤곽선 버퍼별). 단면이 있으면 끈다(자리마다 로컬 평면이 다르다 — 그물마다 그린다).
     // 불투명 면·외곽선 깊이는 그림자를 쓰면(자리마다 그림자 행렬) 그물마다, 반투명 면은 늘 그물마다(뒤에서 앞으로 정렬)
@@ -3564,6 +3728,26 @@ export class Renderer3d {
     /** 면을 모아 그릴 자리인지(같은 그물이 하한 이상 보이고, 묶음 안 구간이 없을 때 — 0.43.0부터 단면 하나·그림자도) */
     const meshInst = (r: MeshRec): boolean => !!geoN && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id);
     const pend = new Map<string, MeshRec[]>();
+    /** 불투명 그물 깊이만 지금 묶은 깊이 그림 버퍼에(외곽선 2c와 0.49.0 주변 가림이 같이 쓴다 — 색은 쓰지 않는다) */
+    const opaqueDepth = (): void => {
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.colorMask(false, false, false, false);
+      meshUse(sceneMeshProg());
+      for (const r of visibleMeshes) {
+        if (transOf(r)) continue;
+        // 0.42.0 같은 그물 자리는 모아서(뒷면 변종 그물은 그물마다)
+        if (!(r.back && backOf(r)) && meshInst(r)) {
+          addPend(pend, r.geo, r);
+          continue;
+        }
+        // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
+        const p = progFor(r, false);
+        if (p !== cur) meshUse(p);
+        meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
+      }
+      if (pend.size) flushMeshes(pend, () => 0, false);
+      gl.disable(gl.CULL_FACE);
+    };
 
     // 1) 불투명 면(무늬 없는 것 먼저, 그다음 올린 무늬가 있는 것 — 프로그램을 한 번씩만 바꾼다). 0.42.0: 모아 그릴 자리는 그 뒤에 묶음마다
     if (shadedLike) {
@@ -3645,6 +3829,31 @@ export class Renderer3d {
           return k ? [k.n, k.h] : [];
         };
         if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, capLists, (pl) => (capPlane = pl), mm, plain);
+      }
+    }
+
+    // 1d) 0.49.0 주변 가림: 불투명 그물 깊이(외곽선과 같은 깊이 그림 — 아래 2c가 다시 쓴다)에서 셈해 지금 그림에 곱한다.
+    // 선·점·격자·반투명 면은 이 뒤에 그려 가리지 않는다. 깊이를 그리는 그리기 수·삼각형·인스턴싱 셈은 늘리지 않는다(2c와 같다)
+    let depthDone = false;
+    if (aoOn && st.ao && visibleMeshes.some((r) => !transOf(r))) {
+      const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+      const fb = this.profileTarget(devW, devH);
+      if (fb) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.viewport(0, 0, devW, devH);
+        gl.clearDepth(1);
+        gl.depthMask(true);
+        const dc = stats.drawCalls, tr = stats.triangles;
+        const inst0 = { ...this.instStats };
+        opaqueDepth();
+        stats.drawCalls = dc;
+        stats.triangles = tr;
+        this.instStats = inst0;
+        gl.colorMask(true, true, true, true);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+        gl.viewport(0, 0, devW, devH);
+        depthDone = true;
+        this.drawAo(f, devW, devH, st.ao, target, !!st.transparent, stats);
       }
     }
 
@@ -3904,25 +4113,7 @@ export class Renderer3d {
           gl.disable(gl.CULL_FACE);
           if (st.transparent) gl.clearColor(0, 0, 0, 0);
           else gl.clearColor(bg[0], bg[1], bg[2], 1);
-        } else {
-          gl.clear(gl.DEPTH_BUFFER_BIT);
-          gl.colorMask(false, false, false, false);
-          meshUse(sceneMeshProg());
-          for (const r of visibleMeshes) {
-            if (transOf(r)) continue;
-            // 0.42.0 같은 그물 자리는 모아서(뒷면 변종 그물은 그물마다)
-            if (!(r.back && backOf(r)) && meshInst(r)) {
-              addPend(pend, r.geo, r);
-              continue;
-            }
-            // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
-            const p = progFor(r, false);
-            if (p !== cur) meshUse(p);
-            meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
-          }
-          if (pend.size) flushMeshes(pend, () => 0, false);
-          gl.disable(gl.CULL_FACE);
-        }
+        } else if (!depthDone) opaqueDepth(); // 0.49.0 주변 가림이 이미 그린 같은 깊이 그림은 다시 그리지 않는다
         stats.drawCalls = dc;
         stats.triangles = tr;
         this.instStats = inst0;
