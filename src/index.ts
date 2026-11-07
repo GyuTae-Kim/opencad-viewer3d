@@ -39,6 +39,7 @@ export type {
   PointerHoldHandler,
   PointsForContext,
   ProjectedPoint,
+  ProjectOptions,
   RangeSelection,
   ReleaseOptions,
   SectionCaps,
@@ -70,7 +71,7 @@ export type {
   TrackDirEdgeFilter,
 } from './inference';
 export type { SnapFace, SnapRefineFaceInput, SnapRefineFaceKind, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
-export { LOW_PRIORITY_YIELD_PX } from './snap';
+export { LOW_PRIORITY_YIELD_PX, snapRaw } from './snap';
 export type {
   AxisEdgeSnap,
   AxisFaceSnap,
@@ -113,6 +114,8 @@ export {
   type ClosestYield,
   closestBetween,
   closestBetweenAsync,
+  type ClosestPart,
+  closestPart,
 } from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';

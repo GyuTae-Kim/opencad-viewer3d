@@ -4,9 +4,11 @@
  * 묶음마다 이미 있는 BVH(삼각형·선분·점)를 함께 내려가며(가지치기: 두 마디 세계 상자 사이 거리 ≥ 지금 최솟값이면 버림)
  * 잎끼리는 기본 도형 쌍의 정확한 최근접점(점·선분·삼각형 조합, double)을 잰다. 모형 행렬(로컬 → 세계: 묶음 원점·Mesh3d.matrix)은
  * 마디 상자 여덟 꼭짓점과 정점을 세계로 옮겨 반영한다(필요한 것만, 한 번씩). 교차하면 거리 0.
+ * 0.45.0: 묶음 안 구간(면 표의 삼각형 구간 등)만 담은 모양 조각(closestPart — 이어진 구간 하나는 배열의 subarray로 복사 없이, 그 구간만의 BVH)끼리도 잰다.
  */
-import type { Bvh, PrimKind } from './bvh';
+import { type Bvh, type PrimKind, buildBvh, primCount } from './bvh';
 import type { V3 } from './math';
+import { type IndexRange, mergeRanges, rangesTotal } from './ranges';
 
 export interface ClosestShape {
   kind: PrimKind;
@@ -16,8 +18,75 @@ export interface ClosestShape {
   bvh: Bvh;
   /** 로컬 → 세계(없으면 단위) */
   model?: ArrayLike<number> | null;
-  /** true면 그 기본 도형은 건너뛴다(숨긴 구간) */
+  /** true면 그 기본 도형은 건너뛴다(숨긴 구간 — 0.45.0 구간 모양이면 묶음 번호로 묻는다) */
   skip?: ((i: number) => boolean) | null;
+  /**
+   * 0.45.0 구간 모양(closestPart): 이 모양의 기본 도형 i는 묶음의 기본 도형 map[i](map이 없으면 offset + i)다 — skip은 묶음 번호로 묻고 결과 rawA·rawB도 묶음 번호다.
+   * 없으면 0·null(0.44.0 그대로 — 모양 번호가 곧 묶음 번호)
+   */
+  offset?: number;
+  map?: Uint32Array | null;
+}
+
+/**
+ * 0.45.0 묶음 안 구간만 담은 최근접점 모양 조각(closestPart): 정점 배열·번호 배열(이어진 구간 하나면 원래 배열의 subarray — 복사 없음, 여러 구간이면 모은 것)과
+ * 그 구간만의 BVH, 모양 번호 → 묶음 번호(offset·map). ClosestShape의 같은 이름 필드로 그대로 넘긴다
+ */
+export interface ClosestPart {
+  kind: PrimKind;
+  positions: Float32Array;
+  indices?: Uint32Array;
+  bvh: Bvh;
+  offset: number;
+  map: Uint32Array | null;
+  /** 담은 기본 도형 수 */
+  count: number;
+  /** 새로 잡은 바이트(BVH 배열과 모은 배열·번호 표 — subarray는 0) */
+  bytes: number;
+}
+
+/**
+ * 0.45.0 묶음(kind·positions·indices)의 기본 도형 구간들(그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점 — Pick3d.raw·setHiddenRanges와 같은 번호)만 담은 모양 조각.
+ * 구간은 mergeRanges로 합치고 묶음 수 밖은 자른다(남는 것이 없으면 null). 이어진 구간 하나면 번호 배열(번호 없는 그물·선분·점이면 정점 배열)의 subarray로 복사 없이,
+ * 여럿이면 번호 배열을 모으고(번호 없는 그물은 정점 번호를 만들고, 선분·점은 정점을 모은다) 그 구간만의 BVH를 만든다(buildBvh — 구간 기본 도형 수에 비례).
+ * 같은 기본 도형을 같은 차례로 따로 담은 묶음의 BVH와 같은 나무라, 앱이 그 구간을 따로 묶음으로 만들어 잰 것과 같은 답(두 점·거리 — 번호는 묶음 번호)이다
+ */
+export function closestPart(kind: PrimKind, positions: Float32Array, indices: Uint32Array | undefined, ranges: readonly IndexRange[]): ClosestPart | null {
+  const R = mergeRanges(ranges, primCount(kind, positions, indices));
+  if (!R.length) return null;
+  const count = rangesTotal(R);
+  const per = kind === 'triangle' ? 9 : kind === 'segment' ? 6 : 3;
+  let P = positions, I: Uint32Array | undefined, offset = 0, map: Uint32Array | null = null, bytes = 0;
+  if (R.length === 1) {
+    const { start } = R[0]!;
+    offset = start;
+    if (kind === 'triangle' && indices) I = indices.subarray(start * 3, (start + count) * 3);
+    else P = positions.subarray(start * per, (start + count) * per);
+  } else {
+    map = new Uint32Array(count);
+    let k = 0;
+    for (const r of R) for (let i = r.start; i < r.start + r.count; i++) map[k++] = i;
+    bytes += map.byteLength;
+    if (kind === 'triangle') {
+      I = new Uint32Array(count * 3);
+      for (let j = 0; j < count; j++) {
+        const t = map[j]!;
+        I[j * 3] = indices ? indices[t * 3]! : t * 3;
+        I[j * 3 + 1] = indices ? indices[t * 3 + 1]! : t * 3 + 1;
+        I[j * 3 + 2] = indices ? indices[t * 3 + 2]! : t * 3 + 2;
+      }
+      bytes += I.byteLength;
+    } else {
+      P = new Float32Array(count * per);
+      for (let j = 0; j < count; j++) P.set(positions.subarray(map[j]! * per, map[j]! * per + per), j * per);
+      bytes += P.byteLength;
+    }
+  }
+  const bvh = buildBvh(kind, P, I);
+  bytes += bvh.box.byteLength + bvh.node.byteLength + bvh.order.byteLength;
+  const out: ClosestPart = { kind, positions: P, bvh, offset, map, count, bytes };
+  if (I) out.indices = I;
+  return out;
 }
 
 export interface ClosestResult {
@@ -207,15 +276,25 @@ class WorldShape {
   private boxDone: Uint8Array;
   private verts: Float64Array | null;
   private vertDone: Uint8Array | null;
+  /**
+   * 0.45.0 구간 모양이 큰 그물의 정점 배열을 함께 쓰고 쓰는 정점이 적으면(번호 수 × 4 < 정점 수) 세계 정점을 정점 수만큼의 배열 대신 Map에 둔다
+   * (작은 면 하나를 잴 때마다 그물 정점 수만큼 잡지 않게 — 값은 같은 셈이다)
+   */
+  private sparse: Map<number, V3> | null = null;
   readonly perPrim: number;
   constructor(s: ClosestShape) {
     this.s = s;
     this.boxes = new Float64Array(s.bvh.nodeCount * 6);
     this.boxDone = new Uint8Array(s.bvh.nodeCount);
     const nv = Math.floor(s.positions.length / 3);
-    this.verts = s.model ? new Float64Array(nv * 3) : null;
-    this.vertDone = s.model ? new Uint8Array(nv) : null;
     this.perPrim = s.kind === 'triangle' ? 3 : s.kind === 'segment' ? 2 : 1;
+    if (s.model && (s.offset !== undefined || s.map) && s.indices && s.indices.length * 4 < nv) {
+      this.sparse = new Map();
+      this.verts = this.vertDone = null;
+    } else {
+      this.verts = s.model ? new Float64Array(nv * 3) : null;
+      this.vertDone = s.model ? new Uint8Array(nv) : null;
+    }
   }
 
   /** 마디 ni의 세계 상자(out 안 o부터 [min xyz, max xyz]) */
@@ -257,6 +336,16 @@ class WorldShape {
     const P = this.s.positions;
     const M = this.s.model;
     if (!M) return [P[v * 3]!, P[v * 3 + 1]!, P[v * 3 + 2]!];
+    const S = this.sparse;
+    if (S) {
+      let w = S.get(v);
+      if (!w) {
+        const x = P[v * 3]!, y = P[v * 3 + 1]!, z = P[v * 3 + 2]!;
+        w = [M[0]! * x + M[4]! * y + M[8]! * z + M[12]!, M[1]! * x + M[5]! * y + M[9]! * z + M[13]!, M[2]! * x + M[6]! * y + M[10]! * z + M[14]!];
+        S.set(v, w);
+      }
+      return [w[0], w[1], w[2]];
+    }
     const W = this.verts!;
     if (!this.vertDone![v]) {
       const x = P[v * 3]!, y = P[v * 3 + 1]!, z = P[v * 3 + 2]!;
@@ -312,12 +401,21 @@ export class ClosestSearch {
   private best: { c1: V3; c2: V3; ia: number; ib: number } | null = null;
   private readonly stack: number[];
   private out: ClosestResult | null | undefined;
+  /** 0.45.0 모양 번호 → 묶음 번호(구간 모양 — 없으면 0·null) */
+  private readonly offA: number;
+  private readonly offB: number;
+  private readonly mapA: Uint32Array | null;
+  private readonly mapB: Uint32Array | null;
   /** 지금까지 꺼낸 마디 쌍 수 */
   visited = 0;
 
   constructor(A: ClosestShape, B: ClosestShape, opts: ClosestOptions = {}) {
     this.A = A;
     this.B = B;
+    this.offA = A.offset ?? 0;
+    this.offB = B.offset ?? 0;
+    this.mapA = A.map ?? null;
+    this.mapB = B.map ?? null;
     this.indices = opts.indices === true;
     const max = opts.maxDistance;
     this.best2 = max !== undefined && max >= 0 ? max * max : Infinity;
@@ -361,6 +459,8 @@ export class ClosestSearch {
     const stack = this.stack;
     let best2 = this.best2;
     let best = this.best;
+    // 0.45.0 모양 번호 → 묶음 번호(구간 모양이 아니면 0 · null — 그대로)
+    const offA = this.offA, offB = this.offB, mapA = this.mapA, mapB = this.mapB;
     let k = 0;
     while (stack.length && k < n) {
       k++;
@@ -373,18 +473,20 @@ export class ClosestSearch {
         if (ak === 0 || bk === 0) continue;
         for (let x = aa; x < aa + ak; x++) {
           const pi = A.bvh.order[x]!;
-          if (A.skip && A.skip(pi)) continue;
+          const ra = mapA ? mapA[pi]! : offA + pi;
+          if (A.skip && A.skip(ra)) continue;
           const PA = wa.prim(pi);
           for (let y = ba0; y < ba0 + bk; y++) {
             const pj = B.bvh.order[y]!;
-            if (B.skip && B.skip(pj)) continue;
+            const rb = mapB ? mapB[pj]! : offB + pj;
+            if (B.skip && B.skip(rb)) continue;
             const r = closestPrims(PA, wb.prim(pj));
             if (r.d2 < best2 || (!best && r.d2 <= best2)) {
               best2 = r.d2;
-              best = { c1: r.c1, c2: r.c2, ia: pi, ib: pj };
+              best = { c1: r.c1, c2: r.c2, ia: ra, ib: rb };
               if (best2 === 0) {
                 this.visited += k;
-                this.finish(r.c1, r.c2, 0, pi, pj);
+                this.finish(r.c1, r.c2, 0, ra, rb);
                 return true;
               }
             }
@@ -490,6 +592,8 @@ export function closestKey(s: ClosestShape): ClosestKey {
 export function sameClosestKey(a: ClosestKey, b: ClosestKey): boolean {
   const s = a.s, t = b.s;
   if (s.kind !== t.kind || s.positions !== t.positions || s.indices !== t.indices || s.bvh !== t.bvh || (s.skip ?? null) !== (t.skip ?? null)) return false;
+  // 0.45.0 구간 모양의 번호 돌리기
+  if ((s.offset ?? 0) !== (t.offset ?? 0) || (s.map ?? null) !== (t.map ?? null)) return false;
   const m = a.model, n = b.model;
   if (!m || !n) return !m && !n;
   if (m.length !== n.length) return false;
