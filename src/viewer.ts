@@ -2806,6 +2806,9 @@ export class Viewer3d {
    * 서로 다른 그물이 같은 깊이로 겹치는 곳(맞닿은 면, 반투명 모서리 선이 엇갈린 몇 화소)은 보이는 쪽·섞임이 끔과 다를 수 있다
    * 0.43.0 pbr(기본 켬): Mesh3d의 PBR 필드(normalTexture·roughness·metallic·metallicRoughnessTexture 등)를 쓴다. false·null이면 끄고 그 그물도 0.42.0 셰이더 그대로 그린다
    * (그림은 그대로 올라가 있어 다시 켜면 바로 쓴다 — 휴대 기기에서 조각 셰이더 몫을 줄일 때). PBR 필드가 없는 그물은 켬·끔과 상관없이 0.42.0과 같다
+   * 0.51.0 culling(기본 켬): 화면 밖 잘라내기 — 그물(삼각형 정점과 윤곽선 끝점의 범위를 모형·겉모습 행렬로 옮긴 상자)이 시야 옆 네 평면 가운데 하나의 확실히 바깥이면
+   * 면·윤곽선·삼각형 변·숨은 점선·외곽선·주변 가림 깊이·반투명 면을 그리지 않는다(src/cull.ts — 화면에 화소를 내지 않는 그물이라 그림은 끔과 같다. 굵은 선 반폭·
+   * float32 셈 어긋남만큼 여유를 둔다). 그림자 깊이 그림·잘린 면 채우기는 그대로 모두 그린다. 뺀 그물 수는 stats.culled, 그리기 호출 수는 그만큼 준다. false·null이면 끈다
    */
   setRenderOptions(o: {
     profiles?: boolean | { width?: number; color?: Rgba | string } | null;
@@ -2813,6 +2816,7 @@ export class Viewer3d {
     edgeColor?: Rgba | string | null;
     instancing?: boolean | { min?: number } | null;
     pbr?: boolean | null;
+    culling?: boolean | null;
   }): void {
     if ('profiles' in o) {
       const p = o.profiles;
@@ -2837,6 +2841,7 @@ export class Viewer3d {
       this.renderer.instancing = { on: i !== false && i !== null, min };
     }
     if ('pbr' in o) this.renderer.pbr = o.pbr !== false && o.pbr !== null;
+    if ('culling' in o) this.renderer.culling = o.culling !== false && o.culling !== null;
     this.invalidate();
   }
 
@@ -2900,7 +2905,7 @@ export class Viewer3d {
     return this.aoOpt ? { ...this.aoOpt } : null;
   }
 
-  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr) */
+  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr, 0.51.0 culling) */
   get renderOptions(): {
     profiles: { width: number; color: Rgba | string | null } | null;
     hiddenEdges: number;
@@ -2909,6 +2914,7 @@ export class Viewer3d {
     edgeColor: Rgba | string | null;
     instancing: { on: boolean; min: number };
     pbr: boolean;
+    culling: boolean;
   } {
     const r = this.renderOpts;
     return {
@@ -2919,6 +2925,7 @@ export class Viewer3d {
       edgeColor: r.edgeColor,
       instancing: { ...this.renderer.instancing },
       pbr: this.renderer.pbr,
+      culling: this.renderer.culling,
     };
   }
 

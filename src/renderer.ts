@@ -40,7 +40,8 @@ import { type ViewFrame, viewMatrix } from './camera';
 import type { GridLines } from './grid';
 import { type MarkerKind, markerMesh } from './marker';
 import { type V3, cross, hasOrigin, mat4Invert, mat4Mul, modelMatrix, normalMatrix, normalize, orthographic, translation } from './math';
-import { boxCenter, boxIsEmpty, boxSphere, meshBounds, offsetBox, rangesBox, transformBox, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, meshBounds, offsetBox, positionsBox, rangesBox, transformBox, unionBox } from './bounds';
+import { type CullBox, cullBox, cullOut, cullPlanes, segmentsBox } from './cull';
 import {
   AO_BLUR_FS,
   AO_FS,
@@ -330,6 +331,8 @@ export interface RenderStats {
   triangles: number;
   segments: number;
   points: number;
+  /** 0.51.0 화면 밖으로 잘라내 그리지 않은 그물 수(보이는 그물 가운데 — 잘라내기를 끄면 0) */
+  culled: number;
 }
 
 /** 무늬 그림 상태(장면이 쓰는 것만) */
@@ -553,6 +556,11 @@ interface MeshRec {
   box: Box3;
   /** 세계 좌표 범위의 가운데(반투명 정렬용) */
   center: V3;
+  /** 0.51.0 화면 밖 잘라내기 로컬 범위(positions와 윤곽선 끝점 — 원점·행렬 전, 깨진 값은 뺀다). 처음 쓸 때 cull(모형 행렬로 옮긴 잘라내기 자료)을 만든다 */
+  local: Box3;
+  cull?: CullBox | null;
+  /** 0.51.0 이 그리기 번호(Renderer3d.frameNo)에서 화면 밖으로 잘라냈으면 그 번호 */
+  culledAt?: number;
   edges: LineRec | null;
   /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
   wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
@@ -745,7 +753,7 @@ export class Renderer3d {
   private cutSeg: LineRec | null = null;
   /** 앱 측정 덧그림 선(정점 색). 장면을 바꿔도 남는다(앱이 지운다) */
   private annoSeg: LineRec | null = null;
-  stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0 };
+  stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0, culled: 0 };
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
   private m4b = new Float32Array(16);
@@ -782,6 +790,8 @@ export class Renderer3d {
   instancing: InstancingOptions = { on: true, min: INSTANCE_MIN };
   /** 0.43.0 PBR 그림(법선·거칠기·금속)을 쓸지(기본 켬 — 끄면 PBR 필드를 준 그물도 0.42.0 셰이더 그대로, 다음 그리기부터) */
   pbr = true;
+  /** 0.51.0 화면 밖 잘라내기(기본 켬 — src/cull.ts, 다음 그리기부터). 끄면 0.50.0처럼 보이는 그물을 모두 그린다 */
+  culling = true;
   /** 0.43.0 흰 1화소 그림(거칠기·금속성 그림이 없는 쪽에 묶는다 — 배율이 곧 값). 문맥을 잃으면 잊는다 */
   private white: WebGLTexture | null = null;
   /** 0.42.0 자리 자료 그림(RGBA32F, 폭 INST_W)과 높이(줄). 문맥을 잃으면 잊는다 */
@@ -806,6 +816,10 @@ export class Renderer3d {
   private pbrBroken = false;
   /** 0.42.0 지난 그리기의 인스턴싱: 모아 그린 그리기 호출 수·그 자리 수(차례마다 센다 — 면·외곽선 깊이·선을 모두) */
   instStats = { draws: 0, items: 0 };
+  /** 0.51.0 그리기 번호(화면 밖으로 잘라낸 그물에 MeshRec.culledAt으로 적는다) */
+  private frameNo = 0;
+  /** 0.51.0 시험용: true면 선 상태 기억(LineMemo)을 쓰지 않고 그물마다 모두 보낸다(0.50.0 GL 호출 — 기억과 그리기 기록이 같은지 견줄 때) */
+  lineMemoOff = false;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -2391,6 +2405,8 @@ export class Renderer3d {
       model: modelMatrix(m.matrix, m.origin),
       box,
       center: boxCenter(box),
+      // 0.51.0 잘라내기 로컬 범위: 삼각형 정점(meshBounds가 이미 훑은 같은 기억)과 윤곽선 끝점(윤곽선이 그물 밖으로 나가도 덮게)
+      local: edges ? unionBox(positionsBox(m.positions), segmentsBox(m.edges!)) : positionsBox(m.positions),
       edges,
       wire: null,
       attrs,
@@ -3179,7 +3195,7 @@ export class Renderer3d {
   /** 한 프레임 그리기. f는 카메라 행렬, devW·devH는 장치 화소 크기 */
   render(f: ViewFrame, devW: number, devH: number, st: RenderState): void {
     const gl = this.gl;
-    const stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0 };
+    const stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0, culled: 0 };
     this.stats = stats;
     this.instRow = 0;
     this.instStats = { draws: 0, items: 0 };
@@ -3298,8 +3314,31 @@ export class Renderer3d {
     // 그물 프로그램을 쓰기 시작할 때 meshUse()로 캐시를 비운다
     let cur: Prog = this.mesh;
     let lastMat: ArrayLike<number> | null | undefined;
-    let lastCol = '';
-    let lastFlags = '';
+    // 0.51.0 색·깃발 기억은 글자열 대신 수로(그물마다 글자열을 만들지 않는다 — 같은 값이면 다시 보내지 않는 것은 그대로, NaN만 늘 다시 보낸다)
+    let colOk = false;
+    let lc0 = 0, lc1 = 0, lc2 = 0, lc3 = 0;
+    let flagsOk = false;
+    let lfV = false, lfN = false, lfT = 0, lfA = 0;
+    /** 색 u_color를 보내야 하면 true(기억을 새 값으로) */
+    const colNew = (c: Rgba): boolean => {
+      if (colOk && lc0 === c[0] && lc1 === c[1] && lc2 === c[2] && lc3 === c[3]) return false;
+      colOk = true;
+      lc0 = c[0];
+      lc1 = c[1];
+      lc2 = c[2];
+      lc3 = c[3];
+      return true;
+    };
+    /** 깃발(u_vcol·u_hasNrm·u_tint·u_alpha)을 보내야 하면 true */
+    const flagsNew = (vcol: boolean, nrm: boolean, tint: number, alpha: number): boolean => {
+      if (flagsOk && lfV === vcol && lfN === nrm && lfT === tint && lfA === alpha) return false;
+      flagsOk = true;
+      lfV = vcol;
+      lfN = nrm;
+      lfT = tint;
+      lfA = alpha;
+      return true;
+    };
     let lastCull: boolean | undefined;
     let lastTex: WebGLTexture | null = null;
     let lastClip = '#';
@@ -3307,8 +3346,8 @@ export class Renderer3d {
       cur = p;
       gl.useProgram(p.p);
       lastMat = undefined;
-      lastCol = '';
-      lastFlags = '';
+      colOk = false;
+      flagsOk = false;
       lastCull = undefined;
       lastTex = null;
       lastClip = '#';
@@ -3424,15 +3463,9 @@ export class Renderer3d {
         setMeshMatrix(matrix);
       }
       if (multi) meshClips(r, matrix, cut);
-      const ck = `${color[0]},${color[1]},${color[2]},${color[3]}`;
-      if (ck !== lastCol) {
-        lastCol = ck;
-        gl.uniform4f(this.loc(p, 'u_color'), color[0], color[1], color[2], color[3]);
-      }
+      if (colNew(color)) gl.uniform4f(this.loc(p, 'u_color'), color[0], color[1], color[2], color[3]);
       const vcol = r.hasColors && !(look && lookOf(r.src.id)?.color) && !mono && !flat;
-      const fk = `${vcol ? 1 : 0}${r.hasNormals ? 1 : 0}|${tint}|${alpha}`;
-      if (fk !== lastFlags) {
-        lastFlags = fk;
+      if (flagsNew(vcol, r.hasNormals, tint, alpha)) {
         gl.uniform1f(this.loc(p, 'u_vcol'), vcol ? 1 : 0);
         gl.uniform1f(this.loc(p, 'u_hasNrm'), r.hasNormals ? 1 : 0);
         gl.uniform4f(this.loc(p, 'u_tint'), hiTint[0], hiTint[1], hiTint[2], tint);
@@ -3609,14 +3642,8 @@ export class Renderer3d {
         const ut = r.uvT;
         gl.uniform4f(this.loc(p, 'u_uvt'), ut ? ut[0] : 1, ut ? ut[1] : 1, ut ? ut[2] : 0, ut ? ut[3] : 0);
       }
-      const ck = `${color[0]},${color[1]},${color[2]},${color[3]}`;
-      if (ck !== lastCol) {
-        lastCol = ck;
-        gl.uniform4f(this.loc(p, 'u_color'), color[0], color[1], color[2], color[3]);
-      }
-      const fk = `${vcol ? 1 : 0}${r.hasNormals ? 1 : 0}|${tint}|${alpha}`;
-      if (fk !== lastFlags) {
-        lastFlags = fk;
+      if (colNew(color)) gl.uniform4f(this.loc(p, 'u_color'), color[0], color[1], color[2], color[3]);
+      if (flagsNew(vcol, r.hasNormals, tint, alpha)) {
         gl.uniform1f(this.loc(p, 'u_vcol'), vcol ? 1 : 0);
         gl.uniform1f(this.loc(p, 'u_hasNrm'), r.hasNormals ? 1 : 0);
         gl.uniform4f(this.loc(p, 'u_tint'), hiTint[0], hiTint[1], hiTint[2], tint);
@@ -3640,11 +3667,14 @@ export class Renderer3d {
           for (const r of b.list) if (r.parts) this.dropParts(r);
           // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
           // 0.43.0 그림자(SHADOW)·단면 하나(CLIP)도 — 자리마다 그림자 행렬·로컬 평면을 자리 자료에 더 쓴다(그물마다 그릴 때의 균일 변수와 같은 값)
+          // 0.51.0 화면 밖으로 잘라낸 자리는 묶음에서 뺀다(묶음 나누기·차례·상태는 빼기 전 그대로 — 남은 자리만 자리 자료에)
+          const list = culledN ? b.list.filter((r) => r.culledAt !== frameNo) : b.list;
+          if (!list.length) continue;
           const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
           const p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
-          const base = p ? this.instMeshes(f, b.list.map(mm), { shadow: shadowVp, clip: sec ? clipOf : null }) : -1;
+          const base = p ? this.instMeshes(f, list.map(mm), { shadow: shadowVp, clip: sec ? clipOf : null }) : -1;
           if (!p || base < 0) {
-            for (const r of b.list) {
+            for (const r of list) {
               const q = progFor(r, usePbr);
               if (q !== cur) meshUse(q);
               meshDrawParts(r, b.color, 1, b.tint, cull);
@@ -3657,7 +3687,7 @@ export class Renderer3d {
           instState(r0, b.color, 1, b.tint, cull, b.vcol);
           if (p.uv) this.pbrBind(p, r0, pbrOf(r0));
           gl.bindVertexArray(r0.vao);
-          const n = b.list.length;
+          const n = list.length;
           if (r0.indexed) gl.drawElementsInstanced(gl.TRIANGLES, r0.count, gl.UNSIGNED_INT, 0, n);
           else gl.drawArraysInstanced(gl.TRIANGLES, 0, r0.count, n);
           stats.drawCalls++;
@@ -3674,6 +3704,39 @@ export class Renderer3d {
     };
 
     const visibleMeshes = this.meshes.filter((r) => vis(r.src.id, r.src.group));
+    // 0.51.0 화면 밖 잘라내기(src/cull.ts): 시야 사각뿔 옆 네 평면 가운데 하나의 확실히 바깥인 그물에 이 그리기 번호를 적고 면·윤곽선·삼각형 변·숨은 점선·
+    // 외곽선·주변 가림 깊이·반투명 면에서 뺀다 — 화면에 화소를 내지 않는 그물이라 그림은 같다. 여백은 굵은 선 반폭·끝 마개(장치 화소 4 × 화소 비율 + 4).
+    // 그림자 깊이 그림(해 쪽 시야)·잘린 면 채우기 단위·인스턴싱 자리 수·모은 묶음 나누기와 차례는 잘라내기 전 그대로 둔다(0.50.0과 같은 길)
+    const frameNo = ++this.frameNo;
+    let culledN = 0;
+    if (this.culling && visibleMeshes.length) {
+      const vw = Math.min(devW, st.viewport ? st.viewport[0] : devW, gl.drawingBufferWidth || devW);
+      const vh = Math.min(devH, st.viewport ? st.viewport[1] : devH, gl.drawingBufferHeight || devH);
+      const px = 4 * st.dpr + 4;
+      const P = cullPlanes(f.viewProj, (2 * px) / Math.max(1, vw), (2 * px) / Math.max(1, vh));
+      for (const r of visibleMeshes) {
+        const lk = look ? lookOf(r.src.id)?.matrix : undefined;
+        const d = lk ? cullBox(r.local, this.lookModel(r, lk, r.model).model) : r.cull === undefined ? (r.cull = cullBox(r.local, r.model)) : r.cull;
+        if (d && cullOut(P, d)) {
+          r.culledAt = frameNo;
+          culledN++;
+        }
+      }
+      stats.culled = culledN;
+    }
+    /** 이 그리기에서 화면 밖으로 잘라낸 그물인지 */
+    const gone = (r: MeshRec): boolean => culledN > 0 && r.culledAt === frameNo;
+    /** 모은 선 묶음에서 화면 밖 자리를 뺀 것(색·굵기·불투명도는 그대로) */
+    const cutBatch = (b: LineBatch): LineBatch => {
+      const recs: MeshRec[] = [], models: (ArrayLike<number> | undefined)[] = [];
+      b.recs.forEach((r, i) => {
+        if (r.culledAt !== frameNo) {
+          recs.push(r);
+          models.push(b.models[i]);
+        }
+      });
+      return { ...b, recs, models };
+    };
 
     // 1a) 해 그림자 깊이 그림(판이 바뀌었을 때만 다시): 불투명 그물을 해 쪽 평행 투영으로
     if (light && st.shadow && shadedLike && !flat) {
@@ -3773,6 +3836,7 @@ export class Renderer3d {
           addPend(pend, r.geo, r);
           continue;
         }
+        if (gone(r)) continue;
         // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
         const p = progFor(r, false);
         if (p !== cur) meshUse(p);
@@ -3794,13 +3858,14 @@ export class Renderer3d {
       for (const r of visibleMeshes) {
         if (transOf(r)) continue;
         if (r.back && backOf(r)) {
-          backs = true;
+          if (!gone(r)) backs = true;
           continue;
         }
         if (meshInst(r)) {
           addPend(pend, r.geo, r);
           continue;
         }
+        if (gone(r)) continue;
         // 0.43.0 PBR 그림을 쓰는 그물은 아래에서 그물마다 맞는 변종으로(PBR 필드가 없는 그물은 늘 빈 목록)
         if (r.pbr && pbrDefsOf(r).length) {
           pbrs = true;
@@ -3815,13 +3880,13 @@ export class Renderer3d {
       if (textured) {
         meshUse(texProg());
         for (const r of visibleMeshes)
-          if (!transOf(r) && texOfR(r) && !(r.back && backOf(r)) && !meshInst(r) && !(r.pbr && pbrDefsOf(r).length))
+          if (!transOf(r) && !gone(r) && texOfR(r) && !(r.back && backOf(r)) && !meshInst(r) && !(r.pbr && pbrDefsOf(r).length))
             meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
       if (pend.size) flushMeshes(pend, hiOf);
       if (pbrs)
         for (const r of visibleMeshes) {
-          if (transOf(r) || (r.back && backOf(r)) || meshInst(r) || !pbrDefsOf(r).length) continue;
+          if (transOf(r) || gone(r) || (r.back && backOf(r)) || meshInst(r) || !pbrDefsOf(r).length) continue;
           const p = progFor(r);
           if (p !== cur) meshUse(p);
           meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
@@ -3829,7 +3894,7 @@ export class Renderer3d {
       // 뒷면 색·무늬가 있는 그물(그물마다 맞는 변종)
       if (backs)
         for (const r of visibleMeshes) {
-          if (transOf(r) || !r.back || !backOf(r)) continue;
+          if (transOf(r) || gone(r) || !r.back || !backOf(r)) continue;
           const p = progFor(r);
           if (p !== cur) meshUse(p);
           meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
@@ -3973,7 +4038,17 @@ export class Renderer3d {
       };
       // 0.42.0 모아 그릴 윤곽선(열쇠 = 함께 쓰는 윤곽선 버퍼)·삼각형 변(열쇠 = 'w' + 그물 열쇠) 묶음
       const lineBatches = new Map<unknown, LineBatch[]>();
+      // 0.51.0 같은 프로그램·같은 값의 윤곽선을 그물마다 잇달아 그릴 때 고정 균일 변수를 다시 보내지 않는다(다른 길이 끼면 memo.p = null)
+      const memo = this.lineMemoOff ? null : lineMemo();
       for (const r of visibleMeshes) {
+        // 0.51.0 화면 밖 그물: 모으는 길(같은 윤곽선 버퍼·삼각형 변 자리)이 아니면 건너뛴다 — 모으는 길은 묶음·차례를 그대로 두고 그릴 때 뺀다
+        if (gone(r)) {
+          const solo = st.parts?.(r.src.id);
+          const batch = r.edges
+            ? !solo && !!edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin
+            : meshLineKind(r.src, mode) === 'triangles' && !!wireGeoN && (wireGeoN.get(r.geo) ?? 0) >= instMin && !solo;
+          if (!batch) continue;
+        }
         const hi = st.highlight.has(r.src.id);
         const c = colOf(r);
         // 0.9.0 그물마다 윤곽선 색(setItemEdgeColor): 그 그물에서는 전역 edgeColor 자리에(대비 선택은 그대로)
@@ -3997,9 +4072,10 @@ export class Renderer3d {
           const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaOf(r.src.id), clip: clipOf(model), clips: clipsOf(r.src.id, model) };
           if (!ep || !eparts) {
             if (r.edges.parts) this.dropParts(r.edges);
-            this.drawLines(f, r.edges, model, { ...eo, first: 0, count: r.edges.n }, st, stats);
+            this.drawLines(f, r.edges, model, { ...eo, first: 0, count: r.edges.n }, st, stats, memo);
           } else {
             // 윤곽선 구간(숨김·강조)
+            if (memo) memo.p = null;
             const c = this.partCache(r.edges, ep.ver);
             const EC = lineCuts(r.edges, c, eparts, r.src.id, model, r.src.edges!, undefined);
             if (EC)
@@ -4019,15 +4095,19 @@ export class Renderer3d {
             addLineBatch(lineBatches, `w${r.geo}`, r, col, 1, alphaOf(r.src.id), model);
             continue;
           }
+          if (memo) memo.p = null;
           wireDraw(r, model, col);
         }
       }
       // 0.42.0 모은 윤곽선·삼각형 변을 묶음마다 그리기 한 번으로(삼각형 변 색인은 묶음 첫 그물 것 하나만 만든다). 자리 자료 그림이 모자라면 그물마다
       for (const [key, list] of lineBatches)
-        for (const b of list) {
+        for (const b0 of list) {
+          // 0.51.0 화면 밖 자리는 묶음에서 뺀다(묶음·차례는 그대로, 선 버퍼·삼각형 변 색인은 묶음 첫 자리 것)
+          const b = culledN ? cutBatch(b0) : b0;
+          if (!b.recs.length) continue;
           const wire = typeof key === 'string';
           const o = { color: b.color, vcol: false, width: b.width, dashed: false, alpha: b.alpha };
-          if (wire ? this.drawLinesInst(f, null, b.models, o, st, stats, this.wireOf(b.recs[0]!)) : this.drawLinesInst(f, b.recs[0]!.edges!, b.models, o, st, stats)) continue;
+          if (wire ? this.drawLinesInst(f, null, b.models, o, st, stats, this.wireOf(b0.recs[0]!)) : this.drawLinesInst(f, b0.recs[0]!.edges!, b.models, o, st, stats)) continue;
           b.recs.forEach((r, i) => {
             if (wire) wireDraw(r, b.models[i], b.color);
             else this.drawLines(f, r.edges!, b.models[i], { ...o, first: 0, count: r.edges!.n }, st, stats);
@@ -4064,6 +4144,8 @@ export class Renderer3d {
       };
       // 0.42.0 같은 윤곽선 버퍼 자리가 하한 이상이면 묶음마다(점선은 같은 색·같은 불투명도 겹침이라 차례와 상관없다)
       const dashBatches = new Map<unknown, LineBatch[]>();
+      // 0.51.0 그물마다 잇단 점선은 고정 균일 변수를 다시 보내지 않는다(구간 길이 끼면 memo.p = null)
+      const dmemo = this.lineMemoOff ? null : lineMemo();
       for (const r of visibleMeshes) {
         if (!r.edges || !backEdges.meshes) continue;
         const ep = st.parts?.(r.src.id);
@@ -4071,11 +4153,21 @@ export class Renderer3d {
           addLineBatch(dashBatches, r.edges.pos, r, dashCol, 1, st.hiddenEdges * alphaOf(r.src.id), mm(r));
           continue;
         }
-        dashHidden(r.edges, r.src.id, mm(r), r.edges.n, ep?.edges, ep?.ver ?? 0, r.src.edges!, undefined);
+        // 0.51.0 화면 밖 그물은 건너뛴다(모으는 길은 그릴 때 뺀다)
+        if (gone(r)) continue;
+        if (!ep?.edges) {
+          const model = mm(r);
+          this.drawLines(f, r.edges, model, { ...backEdgeDash(dashCol, st.hiddenEdges * alphaOf(r.src.id)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: r.edges.n }, st, stats, dmemo);
+          continue;
+        }
+        if (dmemo) dmemo.p = null;
+        dashHidden(r.edges, r.src.id, mm(r), r.edges.n, ep.edges, ep.ver, r.src.edges!, undefined);
       }
       for (const list of dashBatches.values())
-        for (const b of list) {
-          const r0 = b.recs[0]!;
+        for (const b0 of list) {
+          const b = culledN ? cutBatch(b0) : b0;
+          if (!b.recs.length) continue;
+          const r0 = b0.recs[0]!;
           if (this.drawLinesInst(f, r0.edges!, b.models, backEdgeDash(dashCol, b.alpha), st, stats)) continue;
           b.recs.forEach((r, i) => dashHidden(r.edges!, r.src.id, b.models[i], r.edges!.n, null, 0, r.src.edges!, undefined));
         }
@@ -4115,7 +4207,7 @@ export class Renderer3d {
           const dp = this.variant('depth', ['PCOL', ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : [])]);
           gl.useProgram(dp.p);
           for (const r of visibleMeshes) {
-            if (transOf(r)) continue;
+            if (transOf(r) || gone(r)) continue;
             const model = mm(r);
             const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
             this.m4a.set(model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj);
@@ -4359,7 +4451,8 @@ export class Renderer3d {
 
     // 7) 반투명 면(X-ray 포함): 뒤에서 앞으로
     const xray = mode === 'xray';
-    const trans = mode === 'wireframe' || flat ? [] : visibleMeshes.filter((r) => xray || transOf(r));
+    // 0.51.0 화면 밖 그물은 빼고(남은 그물의 정렬 차례는 그대로 — 안정 정렬)
+    const trans = mode === 'wireframe' || flat ? [] : visibleMeshes.filter((r) => (xray || transOf(r)) && !gone(r));
     if (trans.length) {
       const eye = f.eye;
       const fwd: V3 = [-f.basis.back[0], -f.basis.back[1], -f.basis.back[2]];
@@ -4606,6 +4699,7 @@ export class Renderer3d {
     o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; first: number; count: number; bias?: number; clip?: Plane4 | null; clips?: Plane4[] | null; noFog?: boolean; capz?: boolean },
     st: RenderState,
     stats: RenderStats,
+    memo?: LineMemo | null,
   ): void {
     const gl = this.gl;
     if (o.count <= 0) return;
@@ -4625,21 +4719,25 @@ export class Renderer3d {
           : clips
             ? this.variant('wide', ['CLIPN'])
             : this.wideP;
-      gl.useProgram(p.p);
+      const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
+      const dash = o.dashed ? DASH[0] * st.dpr : 0;
+      // 0.51.0 앞 그리기와 프로그램·값이 같으면(memo) 프로그램·고정 균일 변수를 다시 보내지 않는다 — 그물마다 바뀌는 행렬·단면 평면·안개만
+      if (!memo || !lineSame(memo, p, o.color, o.vcol ? 1 : 0, o.alpha, o.bias ?? 0, wDev, dash, DASH[1] * st.dpr, vw, vh, clip ? 1 : 0)) {
+        gl.useProgram(p.p);
+        gl.uniform2f(this.loc(p, 'u_viewport'), vw, vh);
+        gl.uniform1f(this.loc(p, 'u_width'), wDev);
+        gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
+        gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
+        gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
+        gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
+        gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
+        gl.uniform2f(this.loc(p, 'u_dash'), dash, DASH[1] * st.dpr);
+        if (!clip) gl.uniform4f(this.loc(p, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
+      }
       if (clips) this.setClips(p, clips);
       if (fog) this.setLineFog(p, f, matrix, fog);
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-      if (st.viewport) gl.uniform2f(this.loc(p, 'u_viewport'), st.viewport[0], st.viewport[1]);
-      else gl.uniform2f(this.loc(p, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
-      gl.uniform1f(this.loc(p, 'u_width'), wDev);
-      gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
-      gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
-      gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
-      gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
-      gl.uniform2f(this.loc(p, 'u_dash'), o.dashed ? DASH[0] * st.dpr : 0, DASH[1] * st.dpr);
-      const k = clip ?? NO_CLIP;
-      gl.uniform4f(this.loc(p, 'u_clip'), k[0], k[1], k[2], k[3]);
+      if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
       gl.bindVertexArray(r.wide);
       if (o.first) this.bindWide(r.pos, r.col, o.first);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, o.count);
@@ -4652,15 +4750,17 @@ export class Renderer3d {
           : clip
             ? this.thinClip()
             : this.thinP;
-      gl.useProgram(p.p);
+      if (!memo || !lineSame(memo, p, o.color, o.vcol ? 1 : 0, o.alpha, o.bias ?? 0, 0, 0, 0, 0, 0, 0)) {
+        gl.useProgram(p.p);
+        gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
+        gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
+        gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
+        gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
+        gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
+      }
       if (clips) this.setClips(p, clips);
       if (fog) this.setLineFog(p, f, matrix, fog);
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-      gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
-      gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
-      gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
-      gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
       if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
       gl.bindVertexArray(r.thin);
       gl.drawArrays(gl.LINES, o.first * 2, o.count * 2);
@@ -4668,4 +4768,55 @@ export class Renderer3d {
     stats.drawCalls++;
     stats.segments += o.count;
   }
+}
+
+/**
+ * 0.51.0 선 그리기 상태 기억(drawLines의 memo — 그물 윤곽선·숨은 점선처럼 같은 프로그램·같은 값의 선을 그물마다 잇달아 그릴 때).
+ * p = 마지막으로 쓴 프로그램(null이면 다음 그리기는 모두 보낸다 — 부르는 쪽이 사이에 다른 프로그램·균일 변수를 쓰면 null로), v = 그때 고정 균일 변수 값
+ */
+interface LineMemo {
+  p: Prog | null;
+  v: Float64Array;
+}
+
+/** 새 선 상태 기억(비었음) */
+function lineMemo(): LineMemo {
+  return { p: null, v: new Float64Array(13) };
+}
+
+/** 기억한 프로그램·값과 같으면 true, 아니면 새 값을 적고 false(같은 수인지는 === — NaN은 늘 다르게 보아 다시 보낸다) */
+function lineSame(m: LineMemo, p: Prog, c: Rgba, vcol: number, alpha: number, bias: number, w: number, d0: number, d1: number, vw: number, vh: number, clip: number): boolean {
+  const v = m.v;
+  if (
+    m.p === p &&
+    v[0] === c[0] &&
+    v[1] === c[1] &&
+    v[2] === c[2] &&
+    v[3] === c[3] &&
+    v[4] === vcol &&
+    v[5] === alpha &&
+    v[6] === bias &&
+    v[7] === w &&
+    v[8] === d0 &&
+    v[9] === d1 &&
+    v[10] === vw &&
+    v[11] === vh &&
+    v[12] === clip
+  )
+    return true;
+  m.p = p;
+  v[0] = c[0];
+  v[1] = c[1];
+  v[2] = c[2];
+  v[3] = c[3];
+  v[4] = vcol;
+  v[5] = alpha;
+  v[6] = bias;
+  v[7] = w;
+  v[8] = d0;
+  v[9] = d1;
+  v[10] = vw;
+  v[11] = vh;
+  v[12] = clip;
+  return false;
 }
