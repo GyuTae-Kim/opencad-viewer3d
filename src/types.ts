@@ -110,6 +110,32 @@ export interface Mesh3d {
   backUvs?: UvArray;
   /** 따로 준 뒷면 무늬 좌표(backUvs)의 축척·이동(0.26.0, 선택 — uvTransform과 같은 뜻. 없으면 [1, 1, 0, 0]. 뒷면이 uvs를 함께 쓰면 uvTransform) */
   backUvTransform?: UvTransform;
+  /**
+   * 0.43.0 PBR 법선 그림 id(Scene3d.textures, 선택 — glTF 2.0 normalTexture, SketchUp 재질 법선 그림). 접선 공간 법선을 RGB에 담은 그림:
+   * R·G → X·Y는 [−1, 1](X = 무늬 u가 느는 쪽, Y = v가 느는 쪽 — 초록이 위, OpenGL 꼴), B → Z는 [0, 1](면 법선 쪽).
+   * 무늬 좌표는 uvs·uvTransform을 함께 쓴다(uvs가 없으면 쓰지 않는다). 접선은 받지 않고 조각마다 위치·무늬 좌표의 화면 미분으로 만든다.
+   * 앞면 재질에만 쓴다(뒷면 색·무늬가 칠해지는 쪽에는 쓰지 않는다). 무늬 없음·단색·숨은 선 모드와 색을 바꾼 묶음(setItemColor)에서는 쓰지 않는다
+   */
+  normalTexture?: string;
+  /** 법선 그림의 X·Y 배율(0.43.0, 기본 1 — glTF normalTexture.scale). 클수록 울퉁불퉁하다 */
+  normalScale?: number;
+  /** 법선 그림의 초록이 아래쪽(DirectX 꼴)이면 true(0.43.0) — Y를 뒤집어 읽는다(SketchUp normalMapStyle) */
+  normalFlipY?: boolean;
+  /**
+   * 0.43.0 거칠기 0~1(선택). 거칠기 그림이 있으면 그 값에 곱하는 배율(기본 1 — glTF roughnessFactor), 없으면 그 값.
+   * 거칠기·금속성 값과 그림이 하나도 없으면 0.42.0 반사광 그대로다(거칠기로 치면 PBR_DEFAULT_ROUGHNESS ≈ 0.447)
+   */
+  roughness?: number;
+  /** 0.43.0 금속성 0~1(선택). 금속성 그림이 있으면 배율(기본 1 — glTF metallicFactor), 없으면 그 값(기본 0) */
+  metallic?: number;
+  /** 0.43.0 금속·거칠기 그림 id(선택 — glTF metallicRoughnessTexture): 초록 채널 = 거칠기, 파랑 채널 = 금속성 */
+  metallicRoughnessTexture?: string;
+  /** 0.43.0 따로 준 거칠기 그림 id(선택, 초록 채널 — 회색조 그림이면 그대로). 있으면 metallicRoughnessTexture의 거칠기 대신 */
+  roughnessTexture?: string;
+  /** 0.43.0 따로 준 금속성 그림 id(선택, 파랑 채널 — 회색조 그림이면 그대로). 있으면 metallicRoughnessTexture의 금속성 대신 */
+  metallicTexture?: string;
+  /** 0.43.0 거칠기 그림 값이 매끈함(1 − 거칠기)이면 true(SketchUp roughness_texture_invert) */
+  roughnessInvert?: boolean;
 }
 
 /**

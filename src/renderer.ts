@@ -24,6 +24,10 @@
  *
  * 0.28.0 GPU 버퍼 바이트: 버퍼는 모두 newBuffer로 만들고 dropBuffer로 지워 살아 있는 버퍼마다 성분(GpuBufferPart)과 bufferData로 잡은 크기를 적는다
  * (bufferStats — 나눠 올리기는 크기를 잡을 때 적고 그 배열의 성분으로 바꾼다, 문맥을 잃으면 비운다). GL 부르는 차례는 예전과 같다
+ *
+ * 0.43.0 PBR 그림: 그물 기록이 PBR 필드(pbr.ts PbrSource)를 기억하고, 그 그림 id도 무늬 표(textures)에 들어 무늬 그림과 같은 길(예산·놓기·pending·복구)로 올린다.
+ * 그리기마다 올라간 그림으로 상태(pbrState)를 정해 셰이더 변종(UV·NMAP·PBR)과 무늬 단위 6·7·8(없는 쪽은 흰 1화소 그림)을 건다. PBR 필드가 없는 그물은 늘 0.42.0 길이다.
+ * 인스턴싱(0.42.0)은 그림자·단면 하나일 때도 면을 모은다 — 자리 자료에 그림자 행렬·로컬 평면을 더 쓴다(instMeshes)
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
@@ -39,6 +43,7 @@ import { type BufferSink, type BufferTarget, CHUNK_BYTES, CHUNK_MIN_BYTES, Chunk
 import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, partsOf, rangesTotal } from './ranges';
 import { type MeshArrays, type MeshLayout, type MeshMiss, type ReleaseFlags, type RestoreNeed, arraysMiss, layoutMiss, takeArrays } from './release';
+import { type PbrSource, type PbrState, pbrDefines, pbrNeedsUv, pbrSource, pbrState, pbrTextureIds } from './pbr';
 
 /**
  * 그리기 모드. 0.7.0: hiddenLine(면을 바탕색으로 채워 뒤의 선을 가리고 윤곽선만 — 숨은 윤곽선을 점선으로 보일 수도),
@@ -425,6 +430,10 @@ interface Prog {
   backTex?: boolean;
   /** 0.42.0 인스턴싱 변종(INST — 자리 행렬을 자리 자료 그림에서 읽는다) */
   inst?: boolean;
+  /** 0.43.0 PBR 그림 변종: UV(무늬 그림 없이 무늬 좌표)·NMAP(법선 그림)·PBR(거칠기·금속성) */
+  uv?: boolean;
+  nmap?: boolean;
+  pbr?: boolean;
 }
 
 /** 겉모습 행렬을 합친 모형 행렬 캐시(행렬·원래 모형이 같으면 다시 쓴다 — 균일 변수 캐시가 같은 객체로 알아보게) */
@@ -510,6 +519,8 @@ interface MeshRec {
    * 인스턴싱은 이 열쇠로 모아 기록 하나의 VAO로 자리 여럿을 그린다
    */
   geo: string;
+  /** 0.43.0 PBR 필드(법선·거칠기·금속 그림 id와 값 — 없으면 null = 0.42.0 그물). 무늬 좌표는 attrs.uv·uvT를 함께 쓴다 */
+  pbr: PbrSource | null;
 }
 
 interface PointRec {
@@ -550,6 +561,8 @@ export const INSTANCE_MIN = 8;
 const INST_W = 1024, INST_MESH = 11, INST_LINE = 5;
 /** 자리 자료 그림을 묶어 두는 무늬 단위(다른 그리기가 쓰지 않는 자리: 0 무늬·1 외곽선 깊이·2 그림자·3 뒷면 무늬·4 외곽선 색) */
 const INST_UNIT = 5;
+/** 0.43.0 PBR 그림 무늬 단위: 법선 그림·거칠기 그림·금속성 그림(WebGL2 조각 셰이더 무늬 단위는 16개 이상) */
+const NMAP_UNIT = 6, ROUGH_UNIT = 7, METAL_UNIT = 8;
 
 /** 0.42.0 인스턴싱 선택(Renderer3d.instancing): on = 켬(기본), min = 모아 그릴 같은 그물 자리 수 하한(2 이상) */
 export interface InstancingOptions {
@@ -569,6 +582,9 @@ function progFlags(defs: readonly string[]): Omit<Prog, 'p' | 'u'> {
     back: defs.includes('BACK'),
     backTex: defs.includes('BACKTEX'),
     inst: defs.includes('INST'),
+    uv: defs.includes('UV'),
+    nmap: defs.includes('NMAP'),
+    pbr: defs.includes('PBR'),
   };
 }
 
@@ -671,6 +687,8 @@ export class Renderer3d {
   private m3 = new Float32Array(9);
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
+  /** 0.43.0 자리 자료의 그림자 행렬(빛 · 모형) 셈 자리 */
+  private d4c = new Float64Array(16);
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
   /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
   private pending: { scene: Scene3d; mi: number; li: number; pi: number; chunk?: ChunkedUpload<WebGLBuffer> | null } | null = null;
@@ -697,6 +715,10 @@ export class Renderer3d {
   onTexture: ((uploadMs: number) => void) | null = null;
   /** 0.42.0 인스턴싱 선택(다음 그리기부터) */
   instancing: InstancingOptions = { on: true, min: INSTANCE_MIN };
+  /** 0.43.0 PBR 그림(법선·거칠기·금속)을 쓸지(기본 켬 — 끄면 PBR 필드를 준 그물도 0.42.0 셰이더 그대로, 다음 그리기부터) */
+  pbr = true;
+  /** 0.43.0 흰 1화소 그림(거칠기·금속성 그림이 없는 쪽에 묶는다 — 배율이 곧 값). 문맥을 잃으면 잊는다 */
+  private white: WebGLTexture | null = null;
   /** 0.42.0 자리 자료 그림(RGBA32F, 폭 INST_W)과 높이(줄). 문맥을 잃으면 잊는다 */
   private instTex: { tex: WebGLTexture; h: number } | null = null;
   /** 이번 그리기에서 자리 자료 그림의 다음 빈 줄(그리기마다 0부터 — 앞 그리기 호출이 읽는 줄은 덮지 않는다) */
@@ -715,6 +737,8 @@ export class Renderer3d {
   private pendingProgs = new Map<string, { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader; defs: readonly string[] }>();
   /** 인스턴싱 변종을 만들지 못했으면 true(그 문맥에서는 끄고 그물마다 그린다) */
   private instBroken = false;
+  /** 0.43.0 PBR 변종을 만들지 못했으면 true(그 문맥에서는 PBR 그림 없이 0.42.0 셰이더로 그린다) */
+  private pbrBroken = false;
   /** 0.42.0 지난 그리기의 인스턴싱: 모아 그린 그리기 호출 수·그 자리 수(차례마다 센다 — 면·외곽선 깊이·선을 모두) */
   instStats = { draws: 0, items: 0 };
 
@@ -741,6 +765,7 @@ export class Renderer3d {
     this.aniso = an ? { ext: an, max: Number(gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 1 } : null;
     this.parallel = gl.getExtension('KHR_parallel_shader_compile');
     this.instBroken = false;
+    this.pbrBroken = false;
     this.quadWide = this.newBuffer(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW, 'overlay');
     this.quadPoint = this.newBuffer(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW, 'overlay');
     this.capBuf = this.newBuffer(gl.ARRAY_BUFFER, this.capData.byteLength, gl.DYNAMIC_DRAW, 'overlay');
@@ -786,6 +811,7 @@ export class Renderer3d {
     this.skyP = null;
     this.shadowMap = null;
     this.instTex = null;
+    this.white = null;
     this.pendingProgs.clear();
     this.emptyVao = null;
     this.pending = null;
@@ -1059,7 +1085,16 @@ export class Renderer3d {
    */
   private instVariant(base: 'mesh' | 'wide' | 'thin', defs: readonly string[]): Prog | null {
     if (this.instBroken) return null;
-    const all = [...defs, 'INST'];
+    const p = this.asyncVariant(base, [...defs, 'INST']);
+    if (p === false) this.instBroken = true;
+    return p || null;
+  }
+
+  /**
+   * 기다리지 않는 변종 번역(0.42.0 인스턴싱 변종에서 떼어 냄 — 0.43.0 PBR 변종도 쓴다): 다 되었으면 프로그램, 번역 중이면 null(부르는 쪽은 다른 변종으로 그리고
+   * 뷰어가 instPending으로 다음 프레임에 다시 그린다), 번역·연결에 실패하면 false. KHR_parallel_shader_compile가 없으면 variant처럼 바로 번역한다
+   */
+  private asyncVariant(base: 'mesh' | 'wide' | 'thin', all: readonly string[]): Prog | null | false {
     const key = `${base}:${[...all].sort().join(',')}`;
     const have = this.variants.get(key);
     if (have) return have;
@@ -1067,8 +1102,7 @@ export class Renderer3d {
       try {
         return this.variant(base, all);
       } catch {
-        this.instBroken = true;
-        return null;
+        return false;
       }
     }
     const gl = this.gl;
@@ -1092,18 +1126,39 @@ export class Renderer3d {
     }
     // COMPLETION_STATUS_KHR(0x91B1): 기다리지 않고 묻는다
     if (!gl.getProgramParameter(q.p, 0x91b1)) return null;
+    return this.finishPending(key, q);
+  }
+
+  /** 번역이 끝난 변종을 변종 표로 옮긴다(연결에 실패했으면 지우고 false — 문맥을 잃었으면 null) */
+  private finishPending(key: string, q: { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader; defs: readonly string[] }): Prog | null | false {
+    const gl = this.gl;
     this.pendingProgs.delete(key);
     const ok = !!gl.getProgramParameter(q.p, gl.LINK_STATUS);
     gl.deleteShader(q.vs);
     gl.deleteShader(q.fs);
     if (!ok) {
       gl.deleteProgram(q.p);
-      if (!gl.isContextLost()) this.instBroken = true;
-      return null;
+      return gl.isContextLost() ? null : false;
     }
-    const prog: Prog = { p: q.p, u: new Map(), ...progFlags(all) };
+    const prog: Prog = { p: q.p, u: new Map(), ...progFlags(q.defs) };
     this.variants.set(key, prog);
     return prog;
+  }
+
+  /**
+   * 0.43.0 그리기마다 번역을 기다리는 변종을 모두 묻는다. 그 변종을 다시 부르지 않게 된 경우(무늬가 하나씩 올라와 PBR 변종 정의가 바뀌었거나 모드를 바꿈)에도
+   * 기다림이 끝나게 — 남아 있으면 instPending이 0이 되지 않아 뷰어가 프레임마다 다시 그린다(0.42.0에도 모드를 바꾸면 생길 수 있던 일)
+   */
+  private pollPending(): void {
+    if (!this.pendingProgs.size) return;
+    const gl = this.gl;
+    for (const [key, q] of [...this.pendingProgs]) {
+      if (!gl.getProgramParameter(q.p, 0x91b1)) continue;
+      if (this.finishPending(key, q) === false) {
+        if (q.defs.includes('INST')) this.instBroken = true;
+        else this.pbrBroken = true;
+      }
+    }
   }
 
   /** 여러 단면 평면(로컬)을 지금 프로그램에 올린다(u_clips·u_nclip) */
@@ -1237,17 +1292,25 @@ export class Renderer3d {
 
   /**
    * 0.42.0 그물 자리 자료: 자리마다 setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로 instBuf에 11텍셀씩.
+   * 0.43.0: shadow(빛 투영·시점)를 주면 setMeshMatrix의 u_shadowM과 같은 식(빛 · 모형을 double로 곱해 [0, 1]로 맞춘 행렬)을 4텍셀(11~14),
+   * clip(모형 → 로컬 평면)을 주면 setMeshMatrix의 u_clip과 같은 로컬 평면을 맨 끝 1텍셀에 더 쓴다(자리 텍셀 수 = instStride)
    * 올린 첫 텍셀 번호(자리 자료 그림이 모자라면 −1 — 그때는 그물마다 그린다)
    */
-  private instMeshes(f: ViewFrame, models: readonly (ArrayLike<number> | undefined)[]): number {
+  private instMeshes(
+    f: ViewFrame,
+    models: readonly (ArrayLike<number> | undefined)[],
+    extra: { shadow?: ArrayLike<number> | null; clip?: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null } = {},
+  ): number {
     const n = models.length;
-    if (!this.instReserve(n * INST_MESH)) return -1;
+    const shadow = extra.shadow ?? null, clip = extra.clip ?? null;
+    const stride = Renderer3d.instStride(!!shadow, !!clip);
+    if (!this.instReserve(n * stride)) return -1;
     const d = this.instBuf, m3 = this.instM3;
     for (let i = 0; i < n; i++) {
       const model = models[i];
       const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
       const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
-      const o = i * INST_MESH * 4;
+      const o = i * stride * 4;
       for (let k = 0; k < 16; k++) {
         d[o + k] = mvp[k]!;
         d[o + 16 + k] = mv[k]!;
@@ -1260,8 +1323,27 @@ export class Renderer3d {
         d[o + 34 + c * 4] = m3[c * 3 + 2]!;
         d[o + 35 + c * 4] = 0;
       }
+      if (shadow) {
+        // setMeshMatrix의 u_shadowM: 빛 · 모형(double)을 그대로, 앞 세 행은 (행 + w 행) × 0.5를 double로 셈한 뒤 float32로
+        const lv = model ? mat4Mul(shadow, model, this.d4c) : shadow;
+        for (let k = 0; k < 16; k++) d[o + 44 + k] = lv[k]!;
+        for (let j = 0; j < 4; j++) for (let r = 0; r < 3; r++) d[o + 44 + j * 4 + r] = lv[j * 4 + r]! * 0.5 + lv[j * 4 + 3]! * 0.5;
+      }
+      if (clip) {
+        const c = clip(model) ?? NO_CLIP;
+        const q = o + (stride - 1) * 4;
+        d[q] = c[0];
+        d[q + 1] = c[1];
+        d[q + 2] = c[2];
+        d[q + 3] = c[3];
+      }
     }
-    return this.instPut(n * INST_MESH);
+    return this.instPut(n * stride);
+  }
+
+  /** 0.43.0 그물 자리 하나의 텍셀 수: 11(행렬) + 그림자 행렬 4 + 단면 평면 1 — 셰이더 u_instStride */
+  private static instStride(shadow: boolean, clip: boolean): number {
+    return INST_MESH + (shadow ? 4 : 0) + (clip ? 1 : 0);
   }
 
   /** 0.42.0 선 자리 자료: 자리마다 drawLines와 같은 시점·투영 · 모형(그리고 안개면 setLineFog와 같은 시점 · 모형의 z 행)을 5텍셀씩. 올린 첫 텍셀 번호(−1 = 못 올림) */
@@ -1518,7 +1600,7 @@ export class Renderer3d {
       A(m.positions, 'positions'),
       A(!!m.normals && !!normalFormat(m.normals, nv) && m.normals, 'normals'),
       A(!!m.colors && m.colors.length >= nv * 4 && m.colors, 'colors'),
-      A(!!uvComponents(m) && !!m.texture && m.uvs, 'uvs'),
+      A(!!uvComponents(m) && (!!m.texture || pbrNeedsUv(m)) && m.uvs, 'uvs'),
       A(!!buvs && !!uvComponents(m, buvs) && buvs, 'backUvs'),
       m.indices ? { data: m.indices, target: 'element', part: 'indices' } : null,
       A(hasMeshEdges(m) && m.edges, 'edges'),
@@ -1796,7 +1878,7 @@ export class Renderer3d {
    */
   private vertexArrays(m: Mesh3d): ({ data: VertexArray; stride: number } | null)[] {
     const nv = Math.floor(m.positions.length / 3);
-    const uv = m.texture ? uvComponents(m) : 0;
+    const uv = m.texture || pbrNeedsUv(m) ? uvComponents(m) : 0;
     const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
     const buv = buvs ? uvComponents(m, buvs) : 0;
     const nf = m.normals ? normalFormat(m.normals, nv) : null;
@@ -1971,7 +2053,8 @@ export class Renderer3d {
     let uv: WebGLBuffer | null = null;
     let uvN: 0 | 2 | 3 = 0;
     let uvF: AttribFormat | null = null;
-    if (m.texture) {
+    // 0.43.0: 무늬 그림이 없어도 PBR 그림(법선·거칠기·금속)이 있으면 무늬 좌표를 올린다
+    if (m.texture || pbrNeedsUv(m)) {
       const ua = give?.uvs ?? m.uvs;
       const n = uvComponents(m, ua);
       if (n) {
@@ -2071,9 +2154,13 @@ export class Renderer3d {
     const miss = lay ? layoutMiss(lay, { normals: !!attrs.nrm, uv: !!attrs.uv, buv: !!attrs.buv }) : null;
     // 0.42.0 같은 그물 열쇠(버퍼가 같으면 배열이 같고, 속성 꼴은 배열과 정점 수로 정해진다 — 그래도 꼴·값 수를 함께 적는다)
     const fmt = (a: AttribFormat | null): string => (a ? `${a.type}${a.normalized ? 'n' : ''}${a.stride}` : '');
-    const uvT0 = uv ? uvTransformOf(m.uvTransform) : null;
-    const geo = `${this.bufId(attrs.pos)}|${this.bufId(attrs.nrm)}${fmt(attrs.nrmF)}|${this.bufId(attrs.col)}|${this.bufId(attrs.uv)}${fmt(attrs.uvF)}:${uv}|${this.bufId(elem)}|${count}|${uv ? m.texture : ''}|${uvT0 ? uvT0.join() : ''}|${texAlpha ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`;
+    // 0.43.0 PBR 필드(없으면 null — 0.42.0 그물). 무늬 그림이 없어도 PBR 그림이 무늬 좌표를 쓰면 축척·이동을 함께 든다
+    const pbr = pbrSource(m);
+    const uvT0 = uv || (pbr && attrs.uvN) ? uvTransformOf(m.uvTransform) : null;
+    let geo = `${this.bufId(attrs.pos)}|${this.bufId(attrs.nrm)}${fmt(attrs.nrmF)}|${this.bufId(attrs.col)}|${this.bufId(attrs.uv)}${fmt(attrs.uvF)}:${uv}|${this.bufId(elem)}|${count}|${uv ? m.texture : ''}|${uvT0 ? uvT0.join() : ''}|${texAlpha ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`;
+    if (pbr) geo += `|pbr:${attrs.uvN}:${JSON.stringify(pbr)}`;
     return {
+      pbr,
       geo,
       back,
       src: m,
@@ -2312,6 +2399,8 @@ export class Renderer3d {
     this.dropShadow();
     if (this.instTex) gl.deleteTexture(this.instTex.tex);
     this.instTex = null;
+    if (this.white) gl.deleteTexture(this.white);
+    this.white = null;
     for (const q of this.pendingProgs.values()) {
       gl.deleteProgram(q.p);
       gl.deleteShader(q.vs);
@@ -2389,6 +2478,13 @@ export class Renderer3d {
       if (t && (r ? r.attrs.uvN || (r.lay?.uv ?? 0) : uvComponents(m) || (this.laid.get(m)?.uv ?? 0))) used.set(t.id, t);
       const bt = m.backTexture !== undefined ? this.texSrc.get(m.backTexture) : undefined;
       if (bt && (r ? r.attrs.buvN || (r.lay?.buv ?? 0) : uvComponents(m, m.backUvs ?? m.uvs) || (this.laid.get(m)?.buv ?? 0))) used.set(bt.id, bt);
+      // 0.43.0 PBR 그림(법선·거칠기·금속): 앞면 무늬 좌표가 있을 때만 — 무늬 그림과 같은 한 장 한도·전체 예산·놓기·나중에 주기(pending)·문맥 복구를 따른다
+      const ids = pbrTextureIds(r ? r.pbr : pbrSource(m));
+      if (ids.length && (r ? r.attrs.uvN || (r.lay?.uv ?? 0) : uvComponents(m) || (this.laid.get(m)?.uv ?? 0)))
+        for (const id of ids) {
+          const pt = this.texSrc.get(id);
+          if (pt) used.set(pt.id, pt);
+        }
     }
     let dropped = false;
     for (const [id, rec] of this.textures)
@@ -2643,6 +2739,65 @@ export class Renderer3d {
     return t && t.state === 'ready' ? t.tex : null;
   }
 
+  /** 0.43.0 id의 올린 무늬(없거나 아직이면 null — PBR 그림) */
+  private readyTex(id: string | null): WebGLTexture | null {
+    if (!id) return null;
+    const t = this.textures.get(id);
+    return t && t.state === 'ready' ? t.tex : null;
+  }
+
+  /**
+   * 0.43.0 이번 그리기의 PBR 상태(PBR 필드가 없거나 쓸 것이 없으면 null — 0.42.0 셰이더). 올라가지 않은 그림은 없는 것처럼 본다(pbr.ts pbrState)
+   */
+  pbrStateOf(r: MeshRec): PbrState | null {
+    if (!r.pbr || !this.pbr || this.pbrBroken) return null;
+    return pbrState(r.pbr, (id) => !!this.readyTex(id), r.attrs.uvN > 0);
+  }
+
+  /** 0.43.0 흰 1화소 그림(처음 쓸 때 만든다 — 지금 무늬 단위에 묶인 채로 둔다. 부르는 쪽이 PBR 단위를 고른 뒤 부른다) */
+  private whiteTex(): WebGLTexture | null {
+    if (this.white) return this.white;
+    const gl = this.gl;
+    const t = gl.createTexture();
+    if (!t) return null;
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    return (this.white = t);
+  }
+
+  /**
+   * 0.43.0 PBR 변종(p.uv·p.nmap·p.pbr)의 그물마다 균일 변수와 그림(무늬 단위 6·7·8)을 건다. 무늬 그림 변종(TEX)이 아니면 무늬 좌표 값 수·축척도.
+   * 끝나면 무늬 단위 0으로 돌려 둔다(무늬 그림 캐시 lastTex는 단위 0만 본다)
+   */
+  private pbrBind(p: Prog, r: MeshRec, st: PbrState | null): void {
+    if (!p.uv && !p.nmap && !p.pbr) return;
+    const gl = this.gl;
+    if (!p.tex) {
+      gl.uniform1f(this.loc(p, 'u_uvq'), r.attrs.uvN === 3 ? 1 : 0);
+      const ut = r.uvT;
+      gl.uniform4f(this.loc(p, 'u_uvt'), ut ? ut[0] : 1, ut ? ut[1] : 1, ut ? ut[2] : 0, ut ? ut[3] : 0);
+    }
+    if (p.nmap) {
+      gl.activeTexture(gl.TEXTURE0 + NMAP_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.readyTex(st?.normal ?? null));
+      gl.uniform2f(this.loc(p, 'u_nscale'), st ? st.scale[0] : 1, st ? st.scale[1] : 1);
+    }
+    if (p.pbr) {
+      gl.activeTexture(gl.TEXTURE0 + ROUGH_UNIT);
+      const w = this.whiteTex();
+      gl.bindTexture(gl.TEXTURE_2D, this.readyTex(st?.rough ?? null) ?? w);
+      gl.activeTexture(gl.TEXTURE0 + METAL_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.readyTex(st?.metal ?? null) ?? w);
+      const f = st?.factors;
+      gl.uniform3f(this.loc(p, 'u_pbr'), f ? f[0] : 1, f ? f[1] : 0, f ? f[2] : 0);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
   /** 그물의 올린 무늬(없거나 아직이면 null) */
   private texOf(r: MeshRec): WebGLTexture | null {
     if (!r.tex) return null;
@@ -2806,6 +2961,7 @@ export class Renderer3d {
     this.stats = stats;
     this.instRow = 0;
     this.instStats = { draws: 0, items: 0 };
+    this.pollPending();
     const multi = st.sections ?? null;
     const sec = multi ? null : (st.section ?? null);
     const capsOn =
@@ -2873,6 +3029,18 @@ export class Renderer3d {
     };
     const alphaOf = (id: string): number => lookOf(id)?.alpha ?? 1;
     const texOfR = (r: MeshRec): WebGLTexture | null => (noTex || lookOf(r.src.id)?.color ? null : this.texOf(r));
+    /**
+     * 0.43.0 그물의 PBR 상태(무늬 없음·단색·숨은 선 모드와 색을 바꾼 묶음은 무늬처럼 끈다 — PBR 필드가 없는 그물은 늘 null이라 0.42.0 길 그대로).
+     * 한 그리기 안에서는 같은 값이라 그물마다 한 번만 센다
+     */
+    const pbrMemo = new Map<MeshRec, PbrState | null>();
+    const pbrOf = (r: MeshRec): PbrState | null => {
+      if (!r.pbr || noTex || !this.pbr) return null;
+      if (lookOf(r.src.id)?.color) return null;
+      let s = pbrMemo.get(r);
+      if (s === undefined) pbrMemo.set(r, (s = this.pbrStateOf(r)));
+      return s;
+    };
     const transOf = (r: MeshRec): boolean => {
       if (flat) return false;
       const l = lookOf(r.src.id);
@@ -2917,6 +3085,11 @@ export class Renderer3d {
       gl.uniform1f(this.loc(p, 'u_ortho'), ortho);
       if (p.tex) gl.uniform1i(this.loc(p, 'u_tex'), 0);
       if (p.inst) gl.uniform1i(this.loc(p, 'u_inst'), INST_UNIT);
+      if (p.nmap) gl.uniform1i(this.loc(p, 'u_nmap'), NMAP_UNIT);
+      if (p.pbr) {
+        gl.uniform1i(this.loc(p, 'u_rough'), ROUGH_UNIT);
+        gl.uniform1i(this.loc(p, 'u_metal'), METAL_UNIT);
+      }
       if (p.sun && light) {
         // 해 방향을 시점 공간으로(회전만)
         const v = f.view, d = light.dir;
@@ -2990,6 +3163,8 @@ export class Renderer3d {
         const ut = r.uvT;
         gl.uniform4f(this.loc(p, 'u_uvt'), ut ? ut[0] : 1, ut ? ut[1] : 1, ut ? ut[2] : 0, ut ? ut[3] : 0);
       }
+      // 0.43.0 PBR 그림(변종이 아니면 아무것도 하지 않는다)
+      if (p.uv) this.pbrBind(p, r, pbrOf(r));
       if (p.back) {
         const bc = r.back?.color;
         if (bc) gl.uniform4f(this.loc(p, 'u_backColor'), bc[0], bc[1], bc[2], 1);
@@ -3065,12 +3240,30 @@ export class Renderer3d {
     const texProg = (): Prog => progOf(true);
     /** 뒷면 변종이 필요한 그물인지(단색·숨은 선 모드, 색 바꾸기는 뒷면 없이) */
     const backOf = (r: MeshRec): boolean => !!r.back && !mono && !flat && !lookOf(r.src.id)?.color && (!!r.back.color || (!noTex && !!this.backTexOf(r)));
-    /** 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종, 뒷면이 있으면 뒷면 변종) */
-    const progFor = (r: MeshRec): Prog => {
+    /** 0.43.0 그물의 PBR 변종 정의(UV·NMAP·PBR — 쓸 것이 없으면 빈 목록) */
+    const pbrDefsOf = (r: MeshRec): string[] => (r.pbr ? pbrDefines(pbrOf(r)) : []);
+    /**
+     * 그물에 맞는 프로그램(올린 무늬가 있으면 무늬 변종, 뒷면이 있으면 뒷면 변종, 0.43.0 PBR 그림이 있으면 그 변종).
+     * usePbr = false면 PBR 변종을 쓰지 않는다(외곽선 깊이 그림처럼 색을 쓰지 않는 그리기 — 정점 셰이더의 위치 식은 같다)
+     */
+    const progFor = (r: MeshRec, usePbr = true): Prog => {
+      const pd = usePbr ? pbrDefsOf(r) : [];
+      const defs = (): string[] => {
+        const d = [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(texOfR(r) ? ['TEX'] : [])];
+        if (backOf(r)) {
+          d.push('BACK');
+          if (!noTex && this.backTexOf(r)) d.push('BACKTEX');
+        }
+        return d;
+      };
+      if (pd.length && !this.pbrBroken) {
+        // 0.43.0 PBR 변종은 기다리지 않고 번역한다(병렬 번역이면 다 될 때까지 0.42.0 변종으로 — 뷰어가 다음 프레임에 다시 그린다)
+        const p = this.asyncVariant('mesh', [...defs(), ...pd]);
+        if (p) return p;
+        if (p === false) this.pbrBroken = true;
+      }
       if (!backOf(r)) return texOfR(r) ? texProg() : sceneMeshProg();
-      const defs = [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : []), ...(texOfR(r) ? ['TEX'] : []), 'BACK'];
-      if (!noTex && this.backTexOf(r)) defs.push('BACKTEX');
-      return this.variant('mesh', defs);
+      return this.variant('mesh', defs());
     };
     /** 묶음 안 구간이 있으면 [보통, 강조] 그릴 목록(없으면 null — 옛 캐시는 지운다). wire면 와이어프레임용 */
     const meshLists = (r: MeshRec, wire = false): [DrawList, DrawList] | null => {
@@ -3100,6 +3293,8 @@ export class Renderer3d {
       tint: number;
       vcol: boolean;
       tex: boolean;
+      /** 0.43.0 PBR 변종 정의(같은 그물 열쇠는 PBR 필드도 같다 — 색을 바꾼 자리만 PBR이 꺼져 따로 묶인다) */
+      pbr: string[];
       list: MeshRec[];
     }
     const vcolOf = (r: MeshRec): boolean => r.hasColors && !(look && lookOf(r.src.id)?.color) && !mono && !flat;
@@ -3110,13 +3305,15 @@ export class Renderer3d {
       const byVal = new Map<string, MeshBatch>();
       for (const r of list) {
         const color = colOf(r), tint = tintOf(r), vcol = vcolOf(r), tex = !!texOfR(r);
-        const same = (b: MeshBatch): boolean => b.tint === tint && b.vcol === vcol && b.tex === tex;
+        const pbr = pbrDefsOf(r);
+        const pk = pbr.join();
+        const same = (b: MeshBatch): boolean => b.tint === tint && b.vcol === vcol && b.tex === tex && b.pbr.join() === pk;
         let b = byObj.get(color)?.find(same);
         if (!b) {
-          const k = `${tint}|${vcol ? 1 : 0}${tex ? 1 : 0}|${color[0]},${color[1]},${color[2]},${color[3]}`;
+          const k = `${tint}|${vcol ? 1 : 0}${tex ? 1 : 0}|${color[0]},${color[1]},${color[2]},${color[3]}${pk ? `|${pk}` : ''}`;
           b = byVal.get(k);
           if (!b) {
-            out.push((b = { color, tint, vcol, tex, list: [] }));
+            out.push((b = { color, tint, vcol, tex, pbr, list: [] }));
             byVal.set(k, b);
           }
           const a = byObj.get(color);
@@ -3165,18 +3362,20 @@ export class Renderer3d {
      * 모은 자리(같은 그물 열쇠 → 기록들, 장면 차례)를 묶음마다 그리기 한 번으로(불투명 면·외곽선 깊이 그림). 자리 자료 그림이 모자라면 그 묶음은 그물마다(meshDrawParts).
      * 묶음 안 자리 차례는 장면 차례 그대로다(묶음끼리·그물마다 그리는 것과의 차례만 바뀐다)
      */
-    const flushMeshes = (pend: Map<string, MeshRec[]>, tintOf: (r: MeshRec) => number): void => {
+    const flushMeshes = (pend: Map<string, MeshRec[]>, tintOf: (r: MeshRec) => number, usePbr = true): void => {
       for (const list of pend.values())
         for (const b of splitBatches(list, tintOf)) {
           const r0 = b.list[0]!;
           const cull = r0.src.doubleSided === false;
           for (const r of b.list) if (r.parts) this.dropParts(r);
-          // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림)
-          const p = this.instVariant('mesh', [...meshExtra, ...(b.tex ? ['TEX'] : [])]);
-          const base = p ? this.instMeshes(f, b.list.map(mm)) : -1;
+          // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
+          // 0.43.0 그림자(SHADOW)·단면 하나(CLIP)도 — 자리마다 그림자 행렬·로컬 평면을 자리 자료에 더 쓴다(그물마다 그릴 때의 균일 변수와 같은 값)
+          const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
+          const p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
+          const base = p ? this.instMeshes(f, b.list.map(mm), { shadow: shadowVp, clip: sec ? clipOf : null }) : -1;
           if (!p || base < 0) {
             for (const r of b.list) {
-              const q = progFor(r);
+              const q = progFor(r, usePbr);
               if (q !== cur) meshUse(q);
               meshDrawParts(r, b.color, 1, b.tint, cull);
             }
@@ -3184,7 +3383,9 @@ export class Renderer3d {
           }
           if (p !== cur) meshUse(p);
           gl.uniform1i(this.loc(p, 'u_instBase'), base);
+          if (p.shadow || p.clip1) gl.uniform1i(this.loc(p, 'u_instStride'), Renderer3d.instStride(!!p.shadow, !!p.clip1));
           instState(r0, b.color, 1, b.tint, cull, b.vcol);
+          if (p.uv) this.pbrBind(p, r0, pbrOf(r0));
           gl.bindVertexArray(r0.vao);
           const n = b.list.length;
           if (r0.indexed) gl.drawElementsInstanced(gl.TRIANGLES, r0.count, gl.UNSIGNED_INT, 0, n);
@@ -3261,16 +3462,19 @@ export class Renderer3d {
     const instMin = Math.max(2, Math.floor(this.instancing.min) || INSTANCE_MIN);
     let geoN: Map<string, number> | null = null;
     let edgeN: Map<WebGLBuffer, number> | null = null;
-    if (this.instancing.on && !sec && !multi) {
+    // 0.43.0: 단면 하나(sec)·그림자일 때도 면은 모은다(자리마다 로컬 평면·그림자 행렬을 자리 자료에). 선(윤곽선·삼각형 변·숨은 점선)은 단면이 있으면 그물마다(0.42.0 그대로)
+    if (this.instancing.on && !multi) {
       geoN = new Map();
-      edgeN = new Map();
+      if (!sec) edgeN = new Map();
       for (const r of visibleMeshes) {
         geoN.set(r.geo, (geoN.get(r.geo) ?? 0) + 1);
-        if (r.edges) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
+        if (edgeN && r.edges) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
       }
     }
-    /** 면을 모아 그릴 자리인지(같은 그물이 하한 이상 보이고, 묶음 안 구간이 없고, 그림자를 쓰지 않을 때) */
-    const meshInst = (r: MeshRec): boolean => !!geoN && !shadowOn && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id);
+    /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
+    const wireGeoN = sec ? null : geoN;
+    /** 면을 모아 그릴 자리인지(같은 그물이 하한 이상 보이고, 묶음 안 구간이 없을 때 — 0.43.0부터 단면 하나·그림자도) */
+    const meshInst = (r: MeshRec): boolean => !!geoN && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id);
     const pend = new Map<string, MeshRec[]>();
 
     // 1) 불투명 면(무늬 없는 것 먼저, 그다음 올린 무늬가 있는 것 — 프로그램을 한 번씩만 바꾼다). 0.42.0: 모아 그릴 자리는 그 뒤에 묶음마다
@@ -3280,6 +3484,7 @@ export class Renderer3d {
       let textured = false;
       meshUse(sceneMeshProg());
       let backs = false;
+      let pbrs = false;
       const hiOf = (r: MeshRec): number => (st.highlight.has(r.src.id) ? 0.5 : 0);
       for (const r of visibleMeshes) {
         if (transOf(r)) continue;
@@ -3291,6 +3496,11 @@ export class Renderer3d {
           addPend(pend, r.geo, r);
           continue;
         }
+        // 0.43.0 PBR 그림을 쓰는 그물은 아래에서 그물마다 맞는 변종으로(PBR 필드가 없는 그물은 늘 빈 목록)
+        if (r.pbr && pbrDefsOf(r).length) {
+          pbrs = true;
+          continue;
+        }
         if (texOfR(r)) {
           textured = true;
           continue;
@@ -3300,9 +3510,17 @@ export class Renderer3d {
       if (textured) {
         meshUse(texProg());
         for (const r of visibleMeshes)
-          if (!transOf(r) && texOfR(r) && !(r.back && backOf(r)) && !meshInst(r)) meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+          if (!transOf(r) && texOfR(r) && !(r.back && backOf(r)) && !meshInst(r) && !(r.pbr && pbrDefsOf(r).length))
+            meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
       }
       if (pend.size) flushMeshes(pend, hiOf);
+      if (pbrs)
+        for (const r of visibleMeshes) {
+          if (transOf(r) || (r.back && backOf(r)) || meshInst(r) || !pbrDefsOf(r).length) continue;
+          const p = progFor(r);
+          if (p !== cur) meshUse(p);
+          meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+        }
       // 뒷면 색·무늬가 있는 그물(그물마다 맞는 변종)
       if (backs)
         for (const r of visibleMeshes) {
@@ -3419,7 +3637,7 @@ export class Renderer3d {
           }
         } else if (meshLineKind(r.src, mode) === 'triangles') {
           // 윤곽선이 없는 그물: 와이어프레임·숨은 선에서 삼각형 변(X-ray에서는 반투명 면만, triangleEdges: false면 선 없음)
-          if (geoN && (geoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id)) {
+          if (wireGeoN && (wireGeoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id)) {
             if (r.parts) this.dropParts(r);
             addLineBatch(lineBatches, `w${r.geo}`, r, col, 1, alphaOf(r.src.id), model);
             continue;
@@ -3546,11 +3764,12 @@ export class Renderer3d {
               addPend(pend, r.geo, r);
               continue;
             }
-            const p = progFor(r);
+            // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
+            const p = progFor(r, false);
             if (p !== cur) meshUse(p);
             meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
           }
-          if (pend.size) flushMeshes(pend, () => 0);
+          if (pend.size) flushMeshes(pend, () => 0, false);
           gl.disable(gl.CULL_FACE);
         }
         stats.drawCalls = dc;

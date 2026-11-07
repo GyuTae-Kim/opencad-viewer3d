@@ -4,9 +4,13 @@
  * 인스턴싱을 끈다(setRenderOptions({ instancing: false }) — 그 선택이 없는 판은 무시한다).
  *  - open: setScene(incremental { budgetMs }) → 다 올릴 때까지 프레임 수·벽시계·주 스레드 몫(프레임 JS 합·가장 긴 프레임·긴 작업 합)
  *  - steady: 다 올린 뒤 모드마다 조금씩 돌려 renderNow JS 시간·GPU 마침(1화소 읽기)까지·그리기 호출 수·GL 호출 수
+ *    (0.43.0 모드 꼬리: +section = x 가운데 단면 하나(채우기 없음), +shadows = 해 그림자)
  */
+import { checkerBmp } from '../../src/synth';
+import type { Mesh3d } from '../../src/types';
 import { Viewer3d } from '../../src/viewer';
 import { manyScene, type ManySpec } from '../pixels/many';
+import { metalRoughBmp, normalMapBmp } from '../pixels/pbr';
 
 const W = 960, H = 600;
 const host = document.getElementById('view')!;
@@ -14,6 +18,23 @@ host.style.width = `${W}px`;
 host.style.height = `${H}px`;
 const q = new URLSearchParams(location.search);
 const inst = q.get('inst');
+/** 0.43.0 ?pbr=1: 셋째 정의마다 바둑판 무늬에 법선·금속 거칠기 그림(64²)을 단다(그 필드를 모르는 판은 바둑판만), ?pbroff=1이면 setRenderOptions({ pbr: false }) */
+const pbr = q.get('pbr') === '1';
+const pbrOff = q.get('pbroff') === '1';
+
+/** 비용 재기 장면(?pbr=1이면 무늬 정의에 PBR 그림) */
+function benchScene(spec: ManySpec): ReturnType<typeof manyScene> {
+  if (!pbr) return manyScene(spec);
+  const s = manyScene({ ...spec, texture: '바둑판' });
+  s.textures = [
+    { id: '바둑판', data: checkerBmp(), mime: 'image/bmp', width: 64, height: 64 },
+    { id: '법선', data: normalMapBmp(), mime: 'image/bmp', width: 64, height: 64 },
+    { id: '금속 거칠기', data: metalRoughBmp(), mime: 'image/bmp', width: 64, height: 64 },
+  ];
+  // 같은 정의 자리는 같은 PBR 필드(그물 열쇠가 같아 모아 그린다)
+  s.meshes = s.meshes.map((m): Mesh3d => (m.texture ? { ...m, normalTexture: '법선', metallicRoughnessTexture: '금속 거칠기' } : m));
+  return s;
+}
 
 type V = Viewer3d & Record<string, any>;
 
@@ -50,6 +71,7 @@ function countGl(v: Viewer3d, f: () => void): number {
 function newViewer(): V {
   const v = new Viewer3d(host, { animate: false, keyboard: false, viewCube: false, renderMode: 'shadedEdges' }) as V;
   if (inst === '0') v.setRenderOptions({ instancing: false } as never);
+  if (pbrOff) v.setRenderOptions({ pbr: false } as never);
   return v;
 }
 
@@ -70,7 +92,7 @@ interface OpenRes {
 }
 
 async function open(spec: ManySpec, budgetMs: number): Promise<OpenRes & { triangles: number; meshes: number; renderer: string }> {
-  const scene = manyScene(spec);
+  const scene = benchScene(spec);
   const v = newViewer();
   const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext;
   const dbg = gl.getExtension('WEBGL_debug_renderer_info');
@@ -149,12 +171,22 @@ interface SteadyRow {
 async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
   const v = (window as unknown as { last: V }).last;
   const rows: SteadyRow[] = [];
+  // 무늬(?pbr=1의 그림)가 다 풀릴 때까지
+  for (let i = 0; i < 500; i++) {
+    const t = v.stats.textures;
+    if (t.ready + (t.missing ?? 0) + t.failed >= t.count) break;
+    await new Promise((res) => setTimeout(res, 10));
+  }
   for (const mode of modes) {
     const [m, opt] = mode.split('+');
     v.setRenderMode(m as never);
     v.setRenderOptions({ profiles: opt === 'profiles' ? { width: 1 } : null });
     if (opt === 'highlight') v.highlight(['자리 0-0', '자리 3-7']);
     else v.highlight(null);
+    // 0.43.0: 단면 하나(채우기 없음 — 면 그리기만 견준다)·해 그림자
+    if (opt === 'section') v.setSectionAxis('x', 0.5, { caps: 'none' });
+    else v.setSection(null);
+    v.setLighting(opt === 'shadows' ? { sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true } : null);
     v.fit(false);
     for (let i = 0; i < 2; i++) {
       v.orbitBy(0.01, 0);

@@ -8,6 +8,8 @@
  * 비교 페이지(scripts/bench/many.html)를 판마다 묶는다: base는 그 커밋의 src를 git에서 바로 읽고(화소 비교와 같은 gitSource), head는 작업 트리 src.
  * head-noinst는 head 묶음을 ?inst=0(인스턴싱 끔)으로 연다. 판을 번갈아 rounds번 연다(기계 부하가 한쪽에만 몰리지 않게).
  * 장면: full = 정의 12 × 자리 3,000(삼각형 약 184만 — STEP 큰 조립 합성 꼴), small = 정의 12 × 자리 300.
+ * 0.43.0: --pbr이면 셋째 정의마다 바둑판 무늬에 법선·금속 거칠기 그림을 단 장면(모든 판 — 그 필드를 모르는 판은 바둑판만 그린다),
+ * 판 head-nopbr = head 묶음을 PBR 끔(?pbroff=1)으로. 모드 꼬리 +section(x 가운데 단면 하나, 채우기 없음)·+shadows(해 그림자)
  * 결과: out/summary.json(done: true)·summary.md, 표준 출력에 표.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -98,6 +100,7 @@ async function main() {
       out: { type: 'string' },
       backend: { type: 'string' },
       chrome: { type: 'string' },
+      pbr: { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
@@ -137,7 +140,8 @@ async function main() {
           const order = r % 2 ? [...variants].reverse() : variants;
           for (const name of order) {
             const dir = name === 'base' ? 'base' : 'head';
-            const qs = name === 'head-noinst' ? '?inst=0' : '';
+            const params = [...(name === 'head-noinst' ? ['inst=0'] : []), ...(values.pbr ? ['pbr=1'] : []), ...(name === 'head-nopbr' ? ['pbroff=1'] : [])];
+            const qs = params.length ? `?${params.join('&')}` : '';
             await browser.send('Page.navigate', { url: `http://127.0.0.1:${p}/${dir}/many.html${qs}` });
             let ready = false;
             for (let i = 0; i < 300 && !ready; i++) {
@@ -175,7 +179,7 @@ async function main() {
   }
   rmSync(buildDir, { recursive: true, force: true });
   const md = results.map(manyTable).join('\n');
-  writeFileSync(join(out, 'summary.json'), `${JSON.stringify({ done: true, tool: 'scripts/bench/many.mjs', at: new Date().toISOString(), base: baseCommit, size, spec, budget, cpu, rounds, reps, modes, results }, null, 1)}\n`);
+  writeFileSync(join(out, 'summary.json'), `${JSON.stringify({ done: true, tool: 'scripts/bench/many.mjs', at: new Date().toISOString(), base: baseCommit, size, spec, budget, cpu, rounds, reps, modes, pbr: !!values.pbr, results }, null, 1)}\n`);
   writeFileSync(join(out, 'summary.md'), md);
   console.log(md);
   console.log(`결과: ${out}`);

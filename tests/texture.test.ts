@@ -85,7 +85,8 @@ describe('셰이더 변종', () => {
     expect(withDefines(MESH_VS)).toBe(MESH_VS);
     expect(withDefines(MESH_FS, 'CLIP', 'TEX').startsWith('#version 300 es\n#define CLIP\n#define TEX\n')).toBe(true);
     expect(withClip(MESH_VS)).toBe(withDefines(MESH_VS, 'CLIP'));
-    expect(MESH_VS).toContain('#ifdef TEX');
+    // 0.43.0: 무늬 좌표 줄은 TEX 또는 UV(PBR 그림)에서 — TEX만 정의한 변종의 전처리 결과는 0.42.0과 같다(v0430pbr 시험)
+    expect(MESH_VS).toContain('#if defined(TEX) || defined(UV)');
     expect(MESH_FS).toContain('texture(u_tex, v_uv.xy / v_uv.z)');
   });
 });
