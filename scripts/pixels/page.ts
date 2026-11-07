@@ -15,6 +15,7 @@ import { Viewer3d } from '../../src/viewer';
 import { type GridSpec, cutBy, fillGrid, gridMesh, gridX, gridY } from './grid';
 import { type ManySpec, manyScene } from './many';
 import { pbrImages, pbrScene, plateMesh } from './pbr';
+import { SECRANGE_ITEMS, SECRANGE_SPLIT_ITEMS, secRangeScene } from './secrange';
 
 /** 판마다 있을 수도 없을 수도 있는 메서드를 부르려고 느슨하게 본 뷰어 */
 type V = Viewer3d & Record<string, any>;
@@ -43,7 +44,8 @@ type V = Viewer3d & Record<string, any>;
  * many = 같은 그물 자리가 많은 장면(scripts/pixels/many.ts — 정의 12개 × 자리 120, 셋째 정의마다 바둑판 무늬. 0.42.0 인스턴싱: base 판은 그물마다 그리므로
  * base·head 같은 그림이 곧 인스턴싱 켬·끔 같은 그림이다), many-off = 같은 장면을 묶음 원점(1e6대)으로 준 자료(큰 좌표에서도 자리 행렬이 같은 float 값),
  * pbr = PBR 그림 장면(scripts/pixels/pbr.ts — 법선 그림 판·바둑판에 법선·금속 거칠기 그림 판·금속 구·매끈함 그림 구. 0.43.0: base 판은 PBR 필드를 모르므로
- * PBR을 끈 head(setRenderOptions({ pbr: false }))·무늬 없음 모드가 base와 같은 그림이어야 한다)
+ * PBR을 끈 head(setRenderOptions({ pbr: false }))·무늬 없음 모드가 base와 같은 그림이어야 한다),
+ * secrange = 판 위 그룹 A·B 상자를 한 그물로 합친 장면(scripts/pixels/secrange.ts — 0.44.0 묶음 안 구간 단면: B 구간만 자르는 평면)
  */
 type Data =
   | 'base'
@@ -66,7 +68,8 @@ type Data =
   | 'ring50'
   | 'many'
   | 'many-off'
-  | 'pbr';
+  | 'pbr'
+  | 'secrange';
 
 interface Ctx {
   v: V;
@@ -123,6 +126,7 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (!s && d === 'lying12') scenes.set(d, (s = lying12Scene()));
   if (!s && d === 'ring50') scenes.set(d, (s = ring50Scene()));
   if (!s && d === 'pbr') scenes.set(d, (s = pbrScene()));
+  if (!s && d === 'secrange') scenes.set(d, (s = secRangeScene()));
   if (!s && (d === 'many' || d === 'many-off')) {
     s = manyScene({ ...MANY, texture: '바둑판', ...(d === 'many-off' ? { origin: OFFSET } : {}) });
     s.textures = [{ id: '바둑판', data: checkerBmp(), mime: 'image/bmp', width: 64, height: 64 }];
@@ -501,6 +505,21 @@ const extraShots: Shot[] = [
     setup: ({ v }) => {
       v.setTheme('light');
       v.setView('front', false);
+    },
+  },
+  // 0.44.0 손가락으로 큐브 가운데를 누르면 편 큐브(224화소 — 띠 경계·바탕). 마우스 큐브(위 둘)는 0.43.0과 같아야 한다
+  {
+    name: 'base-cube-touch',
+    data: 'base',
+    capture: 'cube',
+    needs: fn('setViewCubeTouch'),
+    setup: ({ host }) => {
+      const el = host.querySelector<HTMLCanvasElement>('canvas.v3d-cube')!;
+      const r = el.getBoundingClientRect();
+      const ev = (type: string): PointerEvent =>
+        new PointerEvent(type, { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerId: 7, pointerType: 'touch', button: 0, buttons: type === 'pointerup' ? 0 : 1, bubbles: true, cancelable: true, isPrimary: true });
+      el.dispatchEvent(ev('pointerdown'));
+      el.dispatchEvent(ev('pointerup'));
     },
   },
 ];
@@ -7800,6 +7819,88 @@ const pbrValues: ValueSet = {
   },
 };
 
+// ───────────── 0.44.0 묶음 안 구간 단면 ─────────────
+/** 0.44.0 setSections items의 묶음 안 구간({ id, start, count })이 있는 판인지(상태 sections[].ranges) */
+const v0440range: Need = (v) => {
+  if (typeof v.setSections !== 'function') return '이 판에 없는 API: setSections';
+  v.setSections([{ normal: [1, 0, 0], offset: 0, items: [{ id: '?', start: 0, count: 1 }] }]);
+  const ok = Array.isArray(v.sections?.[0]?.ranges);
+  v.setSections(null);
+  return ok ? null : '이 판에 없는 선택: 0.44.0 setSections items의 묶음 안 구간';
+};
+/** 합친 판재의 B 구간만 x > 220 쪽을 자른다(판·A·기준선 0은 그대로 — 판과 기준선 0은 평면을 지나도 잘리지 않는다) */
+const secRangeShot: Shot = {
+  name: 'secrange-shadedEdges',
+  data: 'secrange',
+  needs: v0440range,
+  setup: ({ v }) => {
+    v.setRenderMode('shadedEdges');
+    v.setSections([{ normal: [1, 0, 0], offset: 220, items: SECRANGE_ITEMS, caps: 'all' }]);
+  },
+};
+SHOTS.push(secRangeShot);
+
+/**
+ * 0.44.0 구간 단면 값(head만): 한 그물로 합친 판재 + B 구간 단면과, 같은 모양을 묶음으로 나눈 장면 + B 묶음 단면이 같은 그림인지(다른 화소 수·가장 큰 차)와
+ * 화면 격자 고르기(종류·점·법선·잘린 면), 그리기 호출. 평면 하나(B 구간)와 모형 전체 평면(y > 130)을 더한 두 평면, 숨은 선 모드
+ */
+const secRangeValues: ValueSet = {
+  name: 'secrange-values',
+  data: 'secrange',
+  needs: v0440range,
+  run: async ({ v, w, h }) => {
+    const out: unknown[] = [];
+    const r6 = (p: readonly number[] | undefined): number[] | null => (p ? p.map((x) => Math.round(x * 1e6) / 1e6) : null);
+    const picks = (): unknown[] => {
+      const a: unknown[] = [];
+      for (let y = 40; y < h; y += 80)
+        for (let x = 40; x < w; x += 80) {
+          const p = v.pick(x + 0.3, y + 0.2);
+          a.push(p ? [p.kind, r6(p.point), r6(p.normal), !!p.section] : null);
+        }
+      return a;
+    };
+    const cases: [string, 'shadedEdges' | 'hiddenLine', (merged: boolean) => void][] = [
+      ['one', 'shadedEdges', (m) => v.setSections([{ normal: [1, 0, 0], offset: 220, items: m ? SECRANGE_ITEMS : SECRANGE_SPLIT_ITEMS, caps: 'all' }])],
+      [
+        'two',
+        'shadedEdges',
+        (m) =>
+          v.setSections([
+            { normal: [0, 1, 0], offset: 130, caps: 'all' },
+            { normal: [1, 0, 0], offset: 220, items: m ? SECRANGE_ITEMS : SECRANGE_SPLIT_ITEMS, caps: 'all' },
+          ]),
+      ],
+      ['hidden', 'hiddenLine', (m) => v.setSections([{ normal: [1, 0, 0], offset: 220, items: m ? SECRANGE_ITEMS : SECRANGE_SPLIT_ITEMS, caps: 'all' }])],
+    ];
+    for (const [name, mode, set] of cases) {
+      const shots: { img: ImageData; st: number[]; pk: unknown[] }[] = [];
+      for (const merged of [true, false]) {
+        v.setScene(secRangeScene(!merged), { keepView: true });
+        loaded = null;
+        v.setRenderMode(mode);
+        set(merged);
+        v.renderNow();
+        const img = v.renderImage({});
+        shots.push({ img, st: [v.stats.drawCalls, v.stats.triangles, v.stats.segments], pk: picks() });
+      }
+      const [m, s] = shots as [(typeof shots)[0], (typeof shots)[0]];
+      // 다른 화소의 상자(가로·세로 최소·최대 — 다른 화소가 없으면 null)
+      let box: number[] | null = null;
+      for (let i = 0; i < m.img.data.length; i += 4) {
+        let d = 0;
+        for (let k = 0; k < 4; k++) d = Math.max(d, Math.abs(m.img.data[i + k]! - s.img.data[i + k]!));
+        if (!d) continue;
+        const x = (i / 4) % m.img.width, y = Math.floor(i / 4 / m.img.width);
+        box = box ? [Math.min(box[0]!, x), Math.min(box[1]!, y), Math.max(box[2]!, x), Math.max(box[3]!, y)] : [x, y, x, y];
+      }
+      out.push([name, pixelDiff(m.img, s.img), box, m.st, s.st, JSON.stringify(m.pk) === JSON.stringify(s.pk), await sha16(m.img.data), m.pk.filter((x) => x).length]);
+    }
+    v.setSections(null);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -7900,6 +8001,7 @@ const VALUES: ValueSet[] = [
   manyInstValues,
   manyInst43Values,
   pbrValues,
+  secRangeValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -7953,6 +8055,8 @@ function reset(v: V, d: Data): void {
   call('setMeasureFormat', null);
   // 0.32.0: 앱이 포인터를 맡는 처리기도 남는다
   call('setPointerClaim', null);
+  // 0.44.0: 손가락으로 편 뷰 큐브는 접는다(선택은 기본으로)
+  call('setViewCubeTouch', true);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
   // 0.42.0 instancing·0.43.0 pbr은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)

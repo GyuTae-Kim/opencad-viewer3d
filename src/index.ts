@@ -43,6 +43,9 @@ export type {
   ReleaseOptions,
   SectionCaps,
   SectionHandle,
+  SectionItem,
+  SectionItemRange,
+  ViewCubeTouchOptions,
   SectionOptions,
   SectionPlane,
   SectionState,
@@ -114,6 +117,7 @@ export {
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
+export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cubeTargets } from './viewcube';
 export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
 export { INSTANCE_MIN } from './renderer';
 export { PBR_DEFAULT_ROUGHNESS, PBR_MAX_EXPONENT, type PbrSource, type PbrState, pbrSource, pbrState, specExponent } from './pbr';

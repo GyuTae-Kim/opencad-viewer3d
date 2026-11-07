@@ -15,7 +15,7 @@
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
 import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
-import { type IndexRange, mergeRanges, partitionRanges, rangeTester } from './ranges';
+import { type CutRanges, type IndexRange, type RangePart, cutBits, cutMaskAt, cutParts, cutRuns, mergeRanges, partCuts, partitionRanges, rangeTester } from './ranges';
 import { type Bvh, type PrimKind, buildBvh } from './bvh';
 import {
   type CameraState,
@@ -170,7 +170,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
-import { type LastClick, PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
+import { type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import { type PointerHold, PointerHolds, takesBackTouches } from './claim';
 import {
   AXIS_DIRS,
@@ -207,7 +207,7 @@ import {
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
-import { cubeHit, cubeLayout, drawViewCube } from './viewcube';
+import { CUBE_TOUCH_BAND, CUBE_TOUCH_SIZE, cubeHit, cubeLayout, drawViewCube } from './viewcube';
 
 export interface Viewer3dOptions {
   /** 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다 */
@@ -220,6 +220,13 @@ export interface Viewer3dOptions {
   viewCube?: boolean;
   /** 뷰 큐브 한 변(CSS 화소, 기본 112 — 64~160으로 자른다). 좁은 화면에서 줄여 쓴다 */
   viewCubeSize?: number;
+  /**
+   * 0.44.0 손가락 뷰 큐브(기본 켬 — 바뀐 기본 동작): 손가락(pointerType 'touch')으로 큐브를 누르면 고르지 않고 큐브를 CUBE_TOUCH_SIZE(224) 화소로 펴서
+   * 띠 경계를 보이고, 편 큐브를 다시 누르면 그 자리(띠 CUBE_TOUCH_BAND 0.3)의 뷰로 간 뒤 접는다. 편 큐브 밖을 누르거나 Esc면 고르지 않고 접는다.
+   * false면 0.43.0처럼 손가락도 바로 고른다. { size, band }로 편 크기(이 큐브 크기보다 커야 편다 — 뷰어 짧은 변 − 16으로 자른다)·띠를 바꾼다.
+   * 마우스·펜은 늘 0.43.0 그대로다
+   */
+  viewCubeTouch?: boolean | ViewCubeTouchOptions;
   /** 왼쪽 아래 좌표축(기본 true) */
   axes?: boolean;
   /** 키 입력(기본 true, 캔버스에 초점이 있을 때만) */
@@ -299,18 +306,45 @@ export interface SectionState {
   caps: SectionCaps;
   outline: boolean;
   plane: boolean;
-  /** 이 평면이 자르는 묶음 id(setSections에서 정했을 때만) */
+  /** 이 평면이 통째로 자르는 묶음 id(setSections에서 정했을 때만 — 0.44.0: 구간만 준 평면이면 빈 목록) */
   items?: string[];
+  /** 0.44.0 이 평면이 자르는 묶음 안 구간(setSections items에 구간을 주었을 때만 — 묶음·종류마다 합친 것, 통째로 자르는 묶음의 구간은 뺀다) */
+  ranges?: SectionItemRange[];
   /** setSections에서 준 식별자 */
   id?: string;
+}
+
+/**
+ * 0.44.0 단면이 자르는 묶음 안 구간(setSections items에 묶음 id 대신 준다): 그물 = 삼각형, 선분 묶음 = 선분, 점 묶음 = 점 번호 [start, start + count)
+ * (setHiddenRanges·Pick3d.raw와 같은 번호). edges: true면 그물 윤곽선(Mesh3d.edges)의 선분 번호 — 윤곽선은 이것으로 준 구간만 자른다
+ */
+export interface SectionItemRange {
+  id: string;
+  start: number;
+  count: number;
+  edges?: boolean;
+}
+
+/** 0.44.0 setSections items 하나: 묶음 id(통째로 자른다) 또는 묶음 안 구간 */
+export type SectionItem = string | SectionItemRange;
+
+/** 0.44.0 손가락 뷰 큐브 선택(Viewer3dOptions.viewCubeTouch·setViewCubeTouch) */
+export interface ViewCubeTouchOptions {
+  /** 편 큐브 한 변(CSS 화소, 기본 CUBE_TOUCH_SIZE 224) */
+  size?: number;
+  /** 편 큐브의 면 가장자리 띠 폭(면 한 변 대비 0.1~0.4, 기본 CUBE_TOUCH_BAND 0.3) */
+  band?: number;
 }
 
 /** setSections의 평면 하나: normal·p = offset의 법선 쪽을 잘라 낸다 */
 export interface SectionPlane extends SectionOptions {
   normal: readonly number[];
   offset: number;
-  /** 이 평면이 자르는 묶음 id(없으면 모두) */
-  items?: readonly string[] | null;
+  /**
+   * 이 평면이 자르는 묶음 id(없으면 모두). 0.44.0: 묶음 id 대신 묶음 안 구간({ id, start, count, edges? })도 — 그 구간만 자른다(같은 묶음의 다른 구간은 그대로).
+   * 같은 묶음 id를 통째로도 주면 통째로 자른다
+   */
+  items?: readonly SectionItem[] | null;
   /** 앱이 붙이는 식별자(state.id로 돌려준다) */
   id?: string;
 }
@@ -1210,9 +1244,41 @@ interface Section {
   caps: SectionCaps;
   outline: boolean;
   plane: boolean;
-  /** 이 평면이 자르는 묶음 id(없으면 모두) */
+  /** 이 평면이 통째로 자르는 묶음 id(없으면 모두) */
   items: Set<string> | null;
+  /** 0.44.0 이 평면이 자르는 묶음 안 구간(묶음 id → 기본 도형·윤곽선 구간, 합친 것 — 묶음 수로 자르는 것은 쓸 때). 없으면 구간 단면 없음 */
+  ranges?: Map<string, { prims: IndexRange[]; edges: IndexRange[] }> | null;
   id?: string;
+}
+
+/** 0.44.0 구간 단면 한도 없는 합치기(묶음 수로 자르는 것은 쓸 때 — 아직 없는 묶음 id도 받는다) */
+const RANGE_ANY = Number.MAX_SAFE_INTEGER;
+
+/**
+ * 0.44.0 묶음 하나의 구간 단면 갈래: 평면마다 그 묶음에서 자르는 구간(통째로 자르는 평면은 빼고 — 비트 1 << 평면 번호)과 번호 → 갈래 비트,
+ * 갈래 값들(기본 도형·윤곽선, 0 = 통째 평면만인 나머지)
+ */
+interface SecCut {
+  prims: CutRanges[];
+  edges: CutRanges[];
+  primMask: (i: number) => number;
+  edgeMask: (i: number) => number;
+  primMasks: Set<number>;
+  /** 윤곽선 갈래(윤곽선이 있고 윤곽선 구간 단면이 없으면 {0}) */
+  edgeMasks: Set<number>;
+  masks: number[];
+}
+
+/**
+ * 0.44.0 구간 단면 갈래 하나(고르기·단면 테두리): 그 갈래를 자르는 평면 번호들(오름차순 — 통째 평면 ∪ 갈래 비트)과 그 갈래가 아닌 것·숨긴 것을 건너뛰는 판정
+ */
+interface SecClass {
+  mask: number;
+  idx: number[];
+  test: (i: number) => boolean;
+  eTest: ((i: number) => boolean) | null;
+  /** 그 갈래에 기본 도형이 있는지(없으면 윤곽선만) */
+  prims: boolean;
 }
 
 interface Drag {
@@ -1252,6 +1318,14 @@ const TEXTURE_REDRAW_POLL_MS = 50;
 /** 0.30.0 그 울타리를 이만큼(ms) 넘게 기다리면 끝난 것으로 본다(끝났다는 알림이 오지 않는 드라이버에서도 첫 무늬가 나타나게) */
 const TEXTURE_REDRAW_FENCE_MAX_MS = 5000;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
+/** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
+function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
+  if (t === false) return false;
+  const o: ViewCubeTouchOptions = typeof t === 'object' && t ? t : {};
+  const size = typeof o.size === 'number' && Number.isFinite(o.size) ? Math.max(64, Math.min(480, Math.round(o.size))) : CUBE_TOUCH_SIZE;
+  const band = typeof o.band === 'number' && Number.isFinite(o.band) ? Math.max(0.1, Math.min(0.4, o.band)) : CUBE_TOUCH_BAND;
+  return { size, band };
+}
 /** 표준 뷰 키 — 0.10.0부터 작은 모듈 camera.ts에 두고 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
 export { VIEW_KEYS };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
@@ -1286,6 +1360,15 @@ export class Viewer3d {
   private secMore: Section[] = [];
   /** 묶음 id → 자르는 평면 번호(단면이 바뀌면 비운다) */
   private secIdx = new Map<string, number[]>();
+  /** 0.44.0 단면 평면 목록 판(평면을 새로 두거나 지울 때 늘린다 — 위치·뒤집기·표시만 바꾸면 그대로)과 구간 단면이 있는지 */
+  private secRangeVer = 0;
+  private secHasRanges = false;
+  /** 0.44.0 묶음 객체 → 구간 단면 갈래(판이 같으면 다시 쓴다)·렌더러에 넘길 구간(숨김·강조 구간이 같으면)·갈래 목록(숨김 판정이 같으면) */
+  private secCuts = new WeakMap<AnyItem, { ver: number; cut: SecCut | null }>();
+  private secParts = new WeakMap<AnyItem, { ver: number; base: ItemParts | null; parts: ItemParts }>();
+  private secClassCache = new WeakMap<AnyItem, { ver: number; hid: unknown; ehid: unknown; list: SecClass[] }>();
+  /** 0.44.0 고르기 목록의 구간 단면 갈래 대리 묶음(Object.create(원래 묶음)) → 원래 묶음·갈래 */
+  private secWrap = new WeakMap<object, { base: AnyItem; cl: SecClass }>();
   /** 단면 테두리를 다시 계산할지(평면·장면·보이기가 바뀌면) */
   private cutDirty = true;
   /** 묶음 세계 범위·모형 행렬 캐시(장면을 바꾸면 새로) */
@@ -1335,7 +1418,9 @@ export class Viewer3d {
   private touch: { dist: number; cx: number; cy: number } | null = null;
   private lastMiddle = { t: 0, x: 0, y: 0 };
   private cubeHover: V3 | null = null;
-  private cubeDrag: { sx: number; sy: number; lx: number; ly: number; moved: boolean } | null = null;
+  private cubeDrag: { sx: number; sy: number; lx: number; ly: number; moved: boolean; touch: boolean } | null = null;
+  /** 0.44.0 손가락 뷰 큐브를 편 한 변(CSS 화소, 0 = 접힘) */
+  private cubeZoom = 0;
 
   private measuring = false;
   private measurePts: V3[] = [];
@@ -1516,6 +1601,7 @@ export class Viewer3d {
       gridZ: opts.gridZ ?? 'min',
       viewCube: opts.viewCube ?? true,
       viewCubeSize: cubeSize(opts.viewCubeSize ?? CUBE_CSS),
+      viewCubeTouch: cubeTouchOpts(opts.viewCubeTouch),
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
       animate: opts.animate ?? true,
@@ -2437,8 +2523,8 @@ export class Viewer3d {
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
       model: (m) => this.modelOf(m),
       bounds: (it) => this.boundsOf(it),
-      hidden: (m) => this.rangeSel.get(m.id)?.test,
-      clips: this.sec ? (m) => this.clipsFor(m.id) : undefined,
+      hidden: (m) => this.hiddenOf(m),
+      clips: this.sec ? (m) => this.itemClips(m) : undefined,
     });
   }
 
@@ -2543,8 +2629,59 @@ export class Viewer3d {
   }
 
   setViewCubeVisible(on: boolean): void {
+    if (!on) this.foldCube();
     this.opts.viewCube = on;
     this.cube.style.display = on ? '' : 'none';
+    this.invalidate();
+  }
+
+  /**
+   * 0.44.0 손가락 뷰 큐브 선택(Viewer3dOptions.viewCubeTouch와 같다 — false = 0.43.0처럼 손가락도 바로 고르기, true = 기본, { size, band }). 편 큐브는 접는다
+   */
+  setViewCubeTouch(t: boolean | ViewCubeTouchOptions): void {
+    this.foldCube();
+    this.opts.viewCubeTouch = cubeTouchOpts(t);
+  }
+
+  /** 0.44.0 손가락 뷰 큐브 선택(끔이면 false, 아니면 편 한 변·띠) */
+  get viewCubeTouch(): false | Required<ViewCubeTouchOptions> {
+    const t = this.opts.viewCubeTouch;
+    return t === false ? false : { ...(t as Required<ViewCubeTouchOptions>) };
+  }
+
+  /** 0.44.0 손가락으로 뷰 큐브를 편 동안 true(viewCubeRect도 편 자리) */
+  get viewCubeExpanded(): boolean {
+    return this.cubeZoom > 0;
+  }
+
+  /** 0.44.0 지금 큐브 한 변(편 동안은 편 크기)과 누르는 자리 띠(편 동안만 손가락 띠 — 아니면 undefined = 0.43.0 띠) */
+  private cubeSizeNow(): number {
+    return this.cubeZoom || this.opts.viewCubeSize;
+  }
+  private cubeBandNow(): number | undefined {
+    const t = this.opts.viewCubeTouch;
+    return this.cubeZoom && t ? (t as Required<ViewCubeTouchOptions>).band : undefined;
+  }
+
+  /** 0.44.0 손가락 큐브를 편다(편 크기가 지금 큐브보다 크지 않으면 펴지 않고 false) */
+  private unfoldCube(): boolean {
+    const t = this.opts.viewCubeTouch;
+    if (t === false || !this.opts.viewCube) return false;
+    const z = Math.round(Math.min((t as Required<ViewCubeTouchOptions>).size, Math.min(this.cssW, this.cssH) - 2 * CUBE_INSET));
+    if (!(z > this.opts.viewCubeSize)) return false;
+    this.cubeZoom = z;
+    this.cube.style.width = this.cube.style.height = `${z}px`;
+    this.cubeHover = null;
+    this.invalidate();
+    return true;
+  }
+
+  /** 0.44.0 편 손가락 큐브를 접는다 */
+  private foldCube(): void {
+    if (!this.cubeZoom) return;
+    this.cubeZoom = 0;
+    this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
+    this.cubeHover = null;
     this.invalidate();
   }
 
@@ -2563,6 +2700,7 @@ export class Viewer3d {
 
   /** 뷰 큐브 한 변(CSS 화소, 64~160으로 자른다) */
   setViewCubeSize(px: number): void {
+    this.foldCube();
     this.opts.viewCubeSize = cubeSize(px);
     this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
     this.invalidate();
@@ -2735,7 +2873,29 @@ export class Viewer3d {
       const base = { caps: q.caps ?? opts.caps ?? 'closed', outline: q.outline ?? opts.outline ?? true, plane: q.plane ?? opts.plane ?? true };
       const n = this.makeSection(q.normal, q.offset, base);
       if (!n) continue;
-      if (q.items) n.items = new Set(q.items);
+      if (q.items) {
+        // 0.44.0 묶음 id는 통째로, 묶음 안 구간({ id, start, count, edges? })은 묶음·종류마다 합친다(통째로 준 묶음의 구간은 버린다)
+        const ids = new Set<string>();
+        let rg: Map<string, { prims: IndexRange[]; edges: IndexRange[] }> | null = null;
+        for (const x of q.items) {
+          if (typeof x === 'string') ids.add(x);
+          else if (x && typeof x === 'object' && typeof x.id === 'string') {
+            rg ??= new Map();
+            let e = rg.get(x.id);
+            if (!e) rg.set(x.id, (e = { prims: [], edges: [] }));
+            (x.edges ? e.edges : e.prims).push({ start: Number(x.start), count: Number(x.count) });
+          }
+        }
+        n.items = ids;
+        if (rg) {
+          for (const [id, e] of rg) {
+            e.prims = mergeRanges(e.prims, RANGE_ANY);
+            e.edges = mergeRanges(e.edges, RANGE_ANY);
+            if (ids.has(id) || (!e.prims.length && !e.edges.length)) rg.delete(id);
+          }
+          if (rg.size) n.ranges = rg;
+        }
+      }
       if (q.id !== undefined) n.id = q.id;
       out.push(n);
     }
@@ -2832,6 +2992,14 @@ export class Viewer3d {
       plane: s.plane,
     };
     if (s.items) st.items = [...s.items];
+    if (s.ranges) {
+      const out: SectionItemRange[] = [];
+      for (const [id, e] of s.ranges) {
+        for (const r of e.prims) out.push({ id, start: r.start, count: r.count });
+        for (const r of e.edges) out.push({ id, start: r.start, count: r.count, edges: true });
+      }
+      st.ranges = out;
+    }
     if (s.id !== undefined) st.id = s.id;
     return st;
   }
@@ -2906,6 +3074,138 @@ export class Viewer3d {
     return this.secOf(id).map((i) => this.planeOf(all[i]!));
   }
 
+  // ───── 0.44.0 묶음 안 구간 단면 ─────
+
+  /** 지금 평면 목록이 앞에 본 것과 다른 객체들이면(평면을 새로 두거나 지움) 판을 늘린다 — 위치·뒤집기만 바꾼 평면은 같은 객체라 그대로 */
+  private secList: Section[] = [];
+  private secSync(): void {
+    const a = this.sec, m = this.secMore, L = this.secList;
+    let same = (a ? 1 : 0) + m.length === L.length && (!a || L[0] === a);
+    for (let i = 0; same && i < m.length; i++) same = L[i + 1] === m[i];
+    if (same) return;
+    this.secList = a ? [a, ...m] : [];
+    this.secRangeVer++;
+    this.secHasRanges = this.secList.some((s) => !!s.ranges);
+    this.visLists = null;
+  }
+
+  /** 묶음 안 구간 단면이 있는지(여러 단면 경로 — 구간을 준 평면은 늘 범위를 정한 평면이다) */
+  private get secRanged(): boolean {
+    this.secSync();
+    return this.secHasRanges && this.multiSection;
+  }
+
+  /** 묶음의 구간 단면 갈래(그 묶음을 통째로 자르지 않는 평면이 그 묶음의 구간을 자를 때만 — 없으면 null). 평면 목록 판·묶음 객체가 같으면 다시 쓴다 */
+  private secCutOf(it: Item): SecCut | null {
+    if (!this.secRanged) return null;
+    const item = it.item;
+    const c = this.secCuts.get(item);
+    if (c && c.ver === this.secRangeVer) return c.cut;
+    const whole = this.secOf(item.id);
+    const n = primCount(it);
+    const ne = it.kind === 'mesh' && it.item.edges ? Math.floor(it.item.edges.length / 6) : 0;
+    const prims: CutRanges[] = [], edges: CutRanges[] = [];
+    this.allSecs().forEach((s, k) => {
+      const r = s.ranges?.get(item.id);
+      if (!r || whole.includes(k)) return;
+      const p = mergeRanges(r.prims, n);
+      if (p.length) prims.push({ bit: 1 << k, ranges: p });
+      const e = ne ? mergeRanges(r.edges, ne) : [];
+      if (e.length) edges.push({ bit: 1 << k, ranges: e });
+    });
+    let cut: SecCut | null = null;
+    if (prims.length || edges.length) {
+      const primMasks = new Set(partCuts(cutParts([{ start: 0, count: n, hi: false }], prims)));
+      const edgeMasks = ne ? new Set(edges.length ? partCuts(cutParts([{ start: 0, count: ne, hi: false }], edges)) : [0]) : new Set<number>();
+      cut = {
+        prims,
+        edges,
+        primMask: cutMaskAt(cutRuns(prims)),
+        edgeMask: cutMaskAt(cutRuns(edges)),
+        primMasks,
+        edgeMasks,
+        masks: [...new Set([...primMasks, ...edgeMasks])].sort((a, b) => a - b),
+      };
+    }
+    this.secCuts.set(item, { ver: this.secRangeVer, cut });
+    return cut;
+  }
+
+  /**
+   * 묶음의 구간 단면 갈래 목록(고르기 대리 묶음·단면 테두리): 갈래마다 평면 번호들과 그 갈래가 아닌 것·숨긴 것(setHiddenRanges)을 건너뛰는 판정.
+   * 평면 목록 판과 숨김 판정이 같으면 같은 목록(같은 판정 함수 — 단면 테두리 캐시가 알아본다)
+   */
+  private secClasses(it: Item, cut: SecCut): SecClass[] {
+    const r = this.rangeSel.get(it.item.id);
+    const hid = r?.test ?? null, ehid = r?.eTest ?? null;
+    const e = this.secClassCache.get(it.item);
+    if (e && e.ver === this.secRangeVer && e.hid === hid && e.ehid === ehid) return e.list;
+    const whole = this.secOf(it.item.id);
+    const all = () => true;
+    const list = cut.masks.map((m): SecClass => {
+      const idx = [...new Set([...whole, ...cutBits(m)])].sort((a, b) => a - b);
+      const prims = cut.primMasks.has(m);
+      const test = !prims ? all : hid ? (i: number) => hid(i) || cut.primMask(i) !== m : (i: number) => cut.primMask(i) !== m;
+      let eTest: ((i: number) => boolean) | null = null;
+      if (it.kind === 'mesh' && it.item.edges) {
+        if (!cut.edgeMasks.has(m)) eTest = all;
+        else if (!cut.edges.length) eTest = ehid;
+        else eTest = ehid ? (i: number) => ehid(i) || cut.edgeMask(i) !== m : (i: number) => cut.edgeMask(i) !== m;
+      }
+      return { mask: m, idx, test, eTest, prims };
+    });
+    this.secClassCache.set(it.item, { ver: this.secRangeVer, hid, ehid, list });
+    return list;
+  }
+
+  /** 렌더러에 넘길 묶음 구간: 숨김·강조 구간(setHiddenRanges·highlightRanges)에 구간 단면 갈래(RangePart.cut)를 더한 것 */
+  private renderParts(id: string): ItemParts | undefined {
+    const base = this.rangeSel.get(id)?.parts ?? null;
+    const it = this.secRanged ? this.items.get(id) : undefined;
+    const cut = it ? this.secCutOf(it) : null;
+    if (!it || !cut) return base ?? undefined;
+    const e = this.secParts.get(it.item);
+    if (e && e.ver === this.secRangeVer && e.base === base) return e.parts;
+    const n = primCount(it);
+    const full = (k: number): RangePart[] => [{ start: 0, count: k, hi: false }];
+    const prims = cutParts(base ? base.prims : full(n), cut.prims);
+    const ne = it.kind === 'mesh' && it.item.edges ? Math.floor(it.item.edges.length / 6) : 0;
+    const edges = cut.edges.length ? cutParts(base?.edges ?? full(ne), cut.edges) : (base?.edges ?? null);
+    const parts: ItemParts = { ver: ++this.rangeVer, prims, edges };
+    this.secParts.set(it.item, { ver: this.secRangeVer, base, parts });
+    return parts;
+  }
+
+  /** 고르기 목록의 묶음 → 원래 묶음(구간 단면 갈래 대리면 그 원래 묶음) */
+  private baseOf<T extends AnyItem>(it: T): T {
+    return (this.secWrap.get(it)?.base as T | undefined) ?? it;
+  }
+
+  /** 고르기 목록의 묶음을 자르는 세계 평면들(구간 단면 갈래 대리면 그 갈래 평면들) */
+  private itemClips(it: AnyItem): Plane4[] {
+    const w = this.secWrap.get(it);
+    if (!w) return this.clipsFor(it.id);
+    const all = this.allSecs();
+    return w.cl.idx.filter((i) => i < all.length).map((i) => this.planeOf(all[i]!));
+  }
+
+  /** 고르기 목록의 묶음에서 건너뛸 기본 도형 판정(숨긴 구간 — 구간 단면 갈래 대리면 그 갈래가 아닌 것도) */
+  private hiddenOf(it: AnyItem): ((i: number) => boolean) | null | undefined {
+    const w = this.secWrap.get(it);
+    return w ? w.cl.test : this.rangeSel.get(it.id)?.test;
+  }
+
+  /** 고르기 목록의 그물에서 건너뛸 윤곽선 판정 */
+  private edgeHiddenOf(m: Mesh3d): ((i: number) => boolean) | null | undefined {
+    const w = this.secWrap.get(m);
+    return w ? w.cl.eTest : this.rangeSel.get(m.id)?.eTest;
+  }
+
+  /** 고르기 목록의 묶음을 자르는 평면 번호들(clipsOpts의 caps k → 평면) */
+  private itemSecIdx(it: AnyItem): readonly number[] {
+    return this.secWrap.get(it)?.cl.idx ?? this.secOf(it.id);
+  }
+
   /** dir 방향 범위 안 위치 t → dir·p 값 */
   private rangeAt(dir: readonly number[], t: number): number {
     const r = boxRange(this.allBox, dir);
@@ -2940,6 +3240,8 @@ export class Viewer3d {
     this.shadowVer++;
     this.cutDirty = true;
     this.secIdx.clear();
+    // 0.44.0 평면을 새로 두었으면 구간 단면 갈래·고르기 목록을 새로
+    this.secSync();
     this.wheelAnchor = null;
     if (this.measuring) this.measureHover = null;
     this.invalidate();
@@ -3125,8 +3427,9 @@ export class Viewer3d {
    * 그물과 로컬 평면의 교선(로컬 좌표, 고치지 않고 읽기만 한다). 같은 그물 객체·평면·숨긴 구간 판정이면 앞 결과를 다시 쓴다(0.11.0 — 그물 하나를
    * 바꾸거나 넣어도 다른 그물은 다시 자르지 않는다). 그물마다 평면 MAX_SECTION_PLANES개까지 기억한다
    */
-  private meshCut(m: Mesh3d, plane: Plane4): Float32Array {
-    const test = this.rangeSel.get(m.id)?.test;
+  private meshCut(m: Mesh3d, plane: Plane4, skip?: ((i: number) => boolean) | null): Float32Array {
+    // 0.44.0 skip을 주면 그 판정(구간 단면 갈래 — 갈래가 아닌 것·숨긴 것), 아니면 숨긴 구간
+    const test = skip !== undefined ? skip : this.rangeSel.get(m.id)?.test;
     let list = this.cutCache.get(m);
     const hit = list?.find((e) => e.test === test && e.plane[0] === plane[0] && e.plane[1] === plane[1] && e.plane[2] === plane[2] && e.plane[3] === plane[3]);
     if (hit) return hit.segs;
@@ -3153,28 +3456,36 @@ export class Viewer3d {
       for (const it of this.items.values()) {
         if (it.kind !== 'mesh') continue;
         const m = it.item;
-        const idx = this.secOf(m.id);
-        if (!idx.includes(k) || !this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
-        const model = this.modelOf(m);
-        const segs = this.meshCut(m, planeToLocal(plane, model));
-        if (!segs.length) continue;
-        // 로컬 → 세계(double)
-        const w: number[] = new Array(segs.length);
-        const M = model;
-        for (let i = 0; i < segs.length; i += 3) {
-          const x = segs[i]!, y = segs[i + 1]!, z = segs[i + 2]!;
-          if (M) {
-            w[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]!;
-            w[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]!;
-            w[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]!;
-          } else {
-            w[i] = x;
-            w[i + 1] = y;
-            w[i + 2] = z;
+        // 0.44.0 구간 단면 갈래가 있는 그물은 이 평면이 드는 갈래마다(그 갈래의 삼각형만 자르고 그 갈래의 다른 평면들로 다시 자른다)
+        const cut = this.secCutOf(it);
+        const sets: { idx: readonly number[]; skip?: ((i: number) => boolean) | null }[] = cut
+          ? this.secClasses(it, cut).filter((c) => c.prims).map((c) => ({ idx: c.idx, skip: c.test }))
+          : [{ idx: this.secOf(m.id) }];
+        if (!this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
+        for (const set of sets) {
+          const idx = set.idx;
+          if (!idx.includes(k)) continue;
+          const model = this.modelOf(m);
+          const segs = this.meshCut(m, planeToLocal(plane, model), set.skip);
+          if (!segs.length) continue;
+          // 로컬 → 세계(double)
+          const w: number[] = new Array(segs.length);
+          const M = model;
+          for (let i = 0; i < segs.length; i += 3) {
+            const x = segs[i]!, y = segs[i + 1]!, z = segs[i + 2]!;
+            if (M) {
+              w[i] = M[0]! * x + M[4]! * y + M[8]! * z + M[12]!;
+              w[i + 1] = M[1]! * x + M[5]! * y + M[9]! * z + M[13]!;
+              w[i + 2] = M[2]! * x + M[6]! * y + M[10]! * z + M[14]!;
+            } else {
+              w[i] = x;
+              w[i + 1] = y;
+              w[i + 2] = z;
+            }
           }
+          const others = idx.filter((i) => i !== k).map((i) => this.planeOf(all[i]!));
+          for (const v of others.length ? clipSegments(w, others) : w) world.push(v);
         }
-        const others = idx.filter((i) => i !== k).map((i) => this.planeOf(all[i]!));
-        for (const v of others.length ? clipSegments(w, others) : w) world.push(v);
       }
     });
     let out: Float32Array | null = null;
@@ -3784,7 +4095,8 @@ export class Viewer3d {
    */
   get viewCubeRect(): MeasureLabelRect | null {
     if (!this.opts.viewCube) return null;
-    const s = this.opts.viewCubeSize;
+    // 0.44.0 손가락으로 편 동안은 편 자리
+    const s = this.cubeSizeNow();
     return { x: this.cssW - CUBE_INSET - s, y: CUBE_INSET, width: s, height: s };
   }
 
@@ -4388,7 +4700,7 @@ export class Viewer3d {
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
-      hidden: (it) => this.rangeSel.get(it.id)?.test,
+      hidden: (it) => this.hiddenOf(it),
     });
     return od < d - Math.max(Math.abs(d) * 1e-4, worldPerPixel(f, d) * 2, 1e-9);
   }
@@ -4814,7 +5126,8 @@ export class Viewer3d {
   }
 
   /** 묶음 세계 범위(원점·행렬 반영, 장면마다 캐시) */
-  private boundsOf(it: AnyItem): Box3 {
+  private boundsOf(it0: AnyItem): Box3 {
+    const it = this.baseOf(it0);
     let b = this.boxes.get(it);
     if (!b) {
       b = itemBounds(it);
@@ -4841,7 +5154,8 @@ export class Viewer3d {
   }
 
   /** 그물 모형 행렬 = (마주 보기 돌림 ·)(묶음 행렬 setItemMatrix ·) matrix · T(origin)(마주 보기가 아니면 장면마다 캐시) */
-  private modelOf(m: Mesh3d): ArrayLike<number> | undefined {
+  private modelOf(m0: Mesh3d): ArrayLike<number> | undefined {
+    const m = this.baseOf(m0);
     if (hasBillboard(m)) {
       let base = modelMatrix(m.matrix, m.origin);
       const lm = this.looks.get(m.id)?.matrix;
@@ -4875,7 +5189,8 @@ export class Viewer3d {
   }
 
   /** 선분·점 묶음의 모형 행렬: 묶음 행렬(setItemMatrix)이 있을 때만(원점 포함), 없으면 undefined(예전처럼 원점만 옮긴다) */
-  private lineModel(it: LineSet3d | PointSet3d): ArrayLike<number> | undefined {
+  private lineModel(it0: LineSet3d | PointSet3d): ArrayLike<number> | undefined {
+    const it = this.baseOf(it0);
     const lm = this.looks.get(it.id)?.matrix;
     if (!lm) return undefined;
     let e = this.lineModels.get(it);
@@ -4892,10 +5207,25 @@ export class Viewer3d {
 
   /** 보이는 묶음 목록(고르기용, 보이기를 바꿀 때까지 다시 쓴다) */
   private visibleItems(): ScenePickItems {
+    // 0.44.0 평면을 새로 두었으면 목록을 새로(구간 단면 갈래 대리 묶음)
+    this.secSync();
     if (this.visLists) return this.visLists;
     const meshes: Mesh3d[] = [], lines: LineSet3d[] = [], points: PointSet3d[] = [];
+    const ranged = this.secRanged;
     for (const it of this.items.values()) {
       if (!this.visible(it.item.id, it.item.group) || this.looks.get(it.item.id)?.pickable === false) continue;
+      // 0.44.0 구간 단면이 있는 묶음은 갈래마다 대리 묶음(같은 배열·id — 그 갈래 평면들로 자르고 그 갈래가 아닌 기본 도형·윤곽선은 건너뛴다)
+      const cut = ranged ? this.secCutOf(it) : null;
+      if (cut) {
+        for (const cl of this.secClasses(it, cut)) {
+          const w = Object.create(it.item) as AnyItem;
+          this.secWrap.set(w, { base: it.item, cl });
+          if (it.kind === 'mesh') meshes.push(w as Mesh3d);
+          else if (it.kind === 'line') lines.push(w as LineSet3d);
+          else points.push(w as PointSet3d);
+        }
+        continue;
+      }
       if (it.kind === 'mesh') meshes.push(it.item);
       else if (it.kind === 'line') lines.push(it.item);
       else points.push(it.item);
@@ -4922,7 +5252,7 @@ export class Viewer3d {
     const t = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance);
     const items = this.visibleItems();
     return pickScene(this.frame(), x, y, meshesOnly ? { meshes: items.meshes, lines: [], points: [] } : items, {
-      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
+      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.edgeHiddenOf(m) } : {}),
       ...(midpoints ? { midpoints: true } : {}),
       tol: t.tol,
       snap: t.snap,
@@ -4941,7 +5271,7 @@ export class Viewer3d {
             pickThrough: (m: Mesh3d) => this.looks.get(m.id)?.pickThroughTest,
           }
         : {}),
-      hidden: (it) => this.rangeSel.get(it.id)?.test,
+      hidden: (it) => this.hiddenOf(it),
     });
   }
 
@@ -5875,7 +6205,7 @@ export class Viewer3d {
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
-      hidden: (it) => this.rangeSel.get(it.id)?.test,
+      hidden: (it) => this.hiddenOf(it),
     }, tolPx, max);
     return hits.map((h) => {
       const t: NearTriangle = { corners: h.corners, wpp: worldPerPixel(f, h.depth), id: h.id, index: h.index, normal: h.normal };
@@ -6000,13 +6330,13 @@ export class Viewer3d {
    */
   private segmentsAround(f: ViewFrame, x: number, y: number, tolPx: number, edges: boolean, chord = 0): NearSegment[] {
     const segs = segmentsNear(f, x, y, this.visibleItems(), {
-      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.rangeSel.get(m.id)?.eTest } : {}),
+      ...(edges ? { edges: true, edgeHidden: (m: Mesh3d) => this.edgeHiddenOf(m) } : {}),
       bvh: (kind, positions, indices) => this.bvhFor(kind, positions, indices, true),
       limit: (id) => this.ranges.get(id)?.count,
       bounds: (it) => this.boundsOf(it),
       model: (m) => this.modelOf(m),
       ...this.clipOpts(),
-      hidden: (it) => this.rangeSel.get(it.id)?.test,
+      hidden: (it) => this.hiddenOf(it),
     }, tolPx, chord > 0 ? LENS_SEGMENTS : undefined, chord);
     return segs.map((s) => ({ a: s.a, b: s.b, id: s.id, keep: s.keep, wpp: worldPerPixel(f, s.depth), kind: s.kind, index: s.index, raw: s.raw, ...(s.sag !== undefined ? { sag: s.sag } : {}) }));
   }
@@ -6122,7 +6452,8 @@ export class Viewer3d {
     const lk = this.looks.size ? { opaque: (m: Mesh3d) => this.meshOpaque(m), itemModel: (it: LineSet3d | PointSet3d) => this.lineModel(it) } : {};
     if (!this.multiSection) return { clip: this.sectionPlane(), caps: (m) => this.capped(m), capGroup: (m) => m.capGroup, ...lk };
     const all = this.allSecs();
-    return { clips: (it) => this.clipsFor(it.id), caps: (m, k) => this.cappedBy(m, all[this.secOf(m.id)[k ?? 0]!]), capGroup: (m) => m.capGroup, ...lk };
+    // 0.44.0 구간 단면 갈래 대리 묶음이면 그 갈래 평면들(평면 번호 k도 그 갈래 목록 안 번호)
+    return { clips: (it) => this.itemClips(it), caps: (m, k) => this.cappedBy(m, all[this.itemSecIdx(m)[k ?? 0]!]), capGroup: (m) => m.capGroup, ...lk };
   }
 
   /**
@@ -6293,7 +6624,8 @@ export class Viewer3d {
       const p = this.local(e, cube);
       const cd = this.cubeDrag;
       if (cd) {
-        if (!cd.moved && Math.hypot(p.x - cd.sx, p.y - cd.sy) < 3) return;
+        // 0.44.0 손가락은 끌기 시작 거리 10화소(마우스·펜은 0.43.0 그대로 3화소) — 누르다 조금 밀린 손가락이 큐브를 돌리지 않게
+        if (!cd.moved && Math.hypot(p.x - cd.sx, p.y - cd.sy) < (cd.touch ? TOUCH_DRAG_START_PX : 3)) return;
         cd.moved = true;
         this.finishAnim();
         this.wheelAnchor = null;
@@ -6303,7 +6635,7 @@ export class Viewer3d {
         this.invalidate();
         return;
       }
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
       const d = h ? h.dir : null;
       if ((d === null) !== (this.cubeHover === null) || (d && this.cubeHover && dot(d, this.cubeHover) < 0.9999)) {
         this.cubeHover = d;
@@ -6319,17 +6651,25 @@ export class Viewer3d {
     this.on<PointerEvent>(cube, 'pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
-      cube.setPointerCapture(e.pointerId);
+      try {
+        cube.setPointerCapture(e.pointerId);
+      } catch {
+        /* 이미 놓친 포인터·앱이 보낸 합성 사건(0.44.0 — 잡지 못해도 누르기는 이어 간다) */
+      }
       const p = this.local(e, cube);
-      this.cubeDrag = { sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false };
+      this.cubeDrag = { sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false, touch: isTouch(e.pointerType) };
     });
     const cubeUp = (e: PointerEvent, cancel: boolean): void => {
       const cd = this.cubeDrag;
       this.cubeDrag = null;
       if (!cd || cd.moved || cancel) return;
+      // 0.44.0 손가락으로 접힌 큐브를 누르면 고르지 않고 편다(편 큐브를 다시 눌러 고른다)
+      if (cd.touch && !this.cubeZoom && this.unfoldCube()) return;
       const p = this.local(e, cube);
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), p.x, p.y);
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
       if (h) this.setViewDir(h.dir);
+      // 편 큐브는 고르거나 큐브 밖을 누르면 접는다
+      this.foldCube();
     };
     this.on<PointerEvent>(cube, 'pointerup', (e) => cubeUp(e, false));
     this.on<PointerEvent>(cube, 'pointercancel', (e) => cubeUp(e, true));
@@ -6338,6 +6678,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
+    // 0.44.0 편 손가락 뷰 큐브는 3D 보기를 누르면 접는다(누르기는 그대로 이어 간다)
+    this.foldCube();
     // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.1 — 키보드로 이미 초점이 있던 캔버스도 data-v3d-focus="pointer"로 감춘다)
     pointerFocus(this.canvas);
     try {
@@ -6599,6 +6941,8 @@ export class Viewer3d {
     }
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
+    // 0.44.0: 손가락으로 편 뷰 큐브를 먼저 접는다
+    else if (e.key === 'Escape' && this.cubeZoom) this.foldCube();
     // 0.16.0: 첫 점 전이라도 끌어온 점이 있으면 Esc가 지운다
     else if (e.key === 'Escape' && (this.measurePts.length || (this.measuring && this.tracker?.size))) this.clearMeasure();
     else return false;
@@ -6778,7 +7122,8 @@ export class Viewer3d {
       sections: this.multiSection
         ? { planes: this.allSecs().map((q) => ({ plane: this.planeOf(q), caps: q.caps })), of: (id) => this.secOf(id), color: this.sectionColor, width: 2 }
         : null,
-      parts: this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
+      // 0.44.0 구간 단면이 있으면 그 갈래(RangePart.cut)도 구간으로 넘긴다(없으면 0.43.0 그대로 숨김·강조 구간만)
+      parts: this.secRanged ? (id) => this.renderParts(id) : this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
       look: this.bbList.length ? this.billboardLook() : this.looks.size ? (id) => this.looks.get(id) : null,
       hiddenEdges: this.renderOpts.hiddenEdges,
@@ -6812,7 +7157,8 @@ export class Viewer3d {
 
   private drawCube(): void {
     const dpr = this.dpr;
-    const size = this.opts.viewCubeSize;
+    // 0.44.0 손가락으로 편 동안은 편 크기(띠 경계를 옅게 — 바탕을 깔아 3D 보기 위에서도 읽힌다)
+    const size = this.cubeSizeNow();
     const n = Math.round(size * dpr);
     if (this.cube.width !== n || this.cube.height !== n) {
       this.cube.width = n;
@@ -6823,7 +7169,24 @@ export class Viewer3d {
     ctx.clearRect(0, 0, n, n);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const th = this.theme;
-    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(this.opts.viewCubeSize), { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover }, this.cubeHover, `600 ${((27 * size) / CUBE_CSS).toFixed(1)}px ${FONT}`);
+    const colors = { face: th.cubeFace, edge: th.cubeEdge, text: th.cubeText, hover: th.cubeHover };
+    const font = `600 ${((27 * size) / CUBE_CSS).toFixed(1)}px ${FONT}`;
+    if (!this.cubeZoom) {
+      drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(size), colors, this.cubeHover, font);
+      return;
+    }
+    ctx.save();
+    ctx.globalAlpha = 0.86;
+    ctx.fillStyle = th.background;
+    ctx.beginPath();
+    ctx.roundRect(0.5, 0.5, size - 1, size - 1, 10);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = th.cubeEdge;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+    drawViewCube(ctx, cameraBasis(this.cam), cubeLayout(size), colors, this.cubeHover, font, { band: this.cubeBandNow(), grid: true });
   }
 
   private drawOverlay(f: ViewFrame): void {

@@ -14,6 +14,120 @@ export interface RangePart {
   start: number;
   count: number;
   hi: boolean;
+  /**
+   * 0.44.0 구간 단면 갈래: 이 구간만 더 자르는 단면 평면 비트(평면 번호 k → 1 << k)의 합. 0·없으면 묶음 통째를 자르는 평면만(0.43.0 그대로).
+   * 렌더러는 갈래마다 그 평면들을 균일 변수로 올리고 그 갈래의 구간만 그린다
+   */
+  cut?: number;
+}
+
+/** 0.44.0 구간 단면: 평면 하나(비트 1 << 평면 번호)가 그 묶음에서 자르는 구간(mergeRanges로 합친 것) */
+export interface CutRanges {
+  bit: number;
+  ranges: readonly IndexRange[];
+}
+
+/** 0.44.0 구간 단면 갈래의 번호 구간 [start, end)와 그 구간을 자르는 평면 비트 합(0인 구간은 넣지 않는다) */
+export interface CutRun {
+  start: number;
+  end: number;
+  mask: number;
+}
+
+/** 0.44.0 평면마다의 구간들을 번호 차례의 갈래 구간으로(겹치면 비트를 합치고, 같은 비트의 이웃은 합친다) */
+export function cutRuns(cuts: readonly CutRanges[]): CutRun[] {
+  const out: CutRun[] = [];
+  if (!cuts.length) return out;
+  const set = new Set<number>();
+  for (const c of cuts)
+    for (const r of c.ranges) {
+      set.add(r.start);
+      set.add(r.start + r.count);
+    }
+  const pts = [...set].sort((a, b) => a - b);
+  const at = cuts.map(() => 0);
+  for (let j = 0; j + 1 < pts.length; j++) {
+    const s = pts[j]!, e = pts[j + 1]!;
+    let mask = 0;
+    for (let k = 0; k < cuts.length; k++) {
+      const R = cuts[k]!.ranges;
+      while (at[k]! < R.length && R[at[k]!]!.start + R[at[k]!]!.count <= s) at[k]!++;
+      if (at[k]! < R.length && R[at[k]!]!.start <= s) mask |= cuts[k]!.bit;
+    }
+    if (!mask) continue;
+    const last = out[out.length - 1];
+    if (last && last.end === s && last.mask === mask) last.end = e;
+    else out.push({ start: s, end: e, mask });
+  }
+  return out;
+}
+
+/**
+ * 0.44.0 보이는 구간 목록을 구간 단면 갈래로 더 나눈다: 구간마다 그 구간을 자르는 평면 비트의 합(cut — 0이면 두지 않는다)을 붙이고,
+ * 같은 종류(hi)·같은 갈래의 이웃은 합친다. 갈래가 없으면 parts를 그대로(같은 배열) 돌려준다
+ */
+export function cutParts(parts: readonly RangePart[], cuts: readonly CutRanges[]): readonly RangePart[] {
+  const runs = cutRuns(cuts);
+  if (!runs.length) return parts;
+  const out: RangePart[] = [];
+  const push = (s: number, e: number, hi: boolean, cut: number): void => {
+    if (e <= s) return;
+    const last = out[out.length - 1];
+    if (last && last.hi === hi && (last.cut ?? 0) === cut && last.start + last.count === s) last.count += e - s;
+    else out.push(cut ? { start: s, count: e - s, hi, cut } : { start: s, count: e - s, hi });
+  };
+  let j = 0;
+  for (const p of parts) {
+    let s = p.start;
+    const e = p.start + p.count;
+    while (j < runs.length && runs[j]!.end <= s) j++;
+    let k = j;
+    while (s < e) {
+      const r = runs[k];
+      if (!r || r.start >= e) {
+        push(s, e, p.hi, 0);
+        break;
+      }
+      if (r.start > s) {
+        push(s, r.start, p.hi, 0);
+        s = r.start;
+      }
+      const t = Math.min(e, r.end);
+      push(s, t, p.hi, r.mask);
+      s = t;
+      if (r.end <= e) k++;
+    }
+  }
+  return out;
+}
+
+/** 0.44.0 구간 목록의 갈래(cut — 없으면 0) 값들(작은 것부터, 겹치지 않게). 구간이 없으면 빈 목록 */
+export function partCuts(parts: readonly RangePart[]): number[] {
+  const s = new Set<number>();
+  for (const p of parts) s.add(p.cut ?? 0);
+  return [...s].sort((a, b) => a - b);
+}
+
+/** 0.44.0 번호 → 그 번호를 자르는 평면 비트 합(갈래 구간 밖이면 0 — 이분 탐색). 갈래가 없으면 늘 0 */
+export function cutMaskAt(runs: readonly CutRun[]): (i: number) => number {
+  if (!runs.length) return () => 0;
+  return (i: number): number => {
+    let lo = 0, hi = runs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (runs[mid]!.start <= i) lo = mid + 1;
+      else hi = mid;
+    }
+    const r = runs[lo - 1];
+    return r && i < r.end ? r.mask : 0;
+  };
+}
+
+/** 0.44.0 평면 비트 합 → 평면 번호들(작은 것부터) */
+export function cutBits(mask: number): number[] {
+  const out: number[] = [];
+  for (let k = 0; mask >> k; k++) if (mask & (1 << k)) out.push(k);
+  return out;
 }
 
 /** [0, n) 안으로 자르고, 정렬하고, 겹치거나 맞닿은 구간을 합친다(빈 구간·NaN은 버린다) */
@@ -80,10 +194,10 @@ export function partitionRanges(n: number, hidden: readonly IndexRange[], hi: re
   return out;
 }
 
-/** 보이는 구간 목록에서 한 종류만(차례대로) */
-export function partsOf(parts: readonly RangePart[], hi: boolean): IndexRange[] {
+/** 보이는 구간 목록에서 한 종류만(차례대로). 0.44.0: cut을 주면 그 구간 단면 갈래만(cut이 없는 구간은 0) */
+export function partsOf(parts: readonly RangePart[], hi: boolean, cut?: number): IndexRange[] {
   const out: IndexRange[] = [];
-  for (const p of parts) if (p.hi === hi) out.push({ start: p.start, count: p.count });
+  for (const p of parts) if (p.hi === hi && (cut === undefined || (p.cut ?? 0) === cut)) out.push({ start: p.start, count: p.count });
   return out;
 }
 
