@@ -9,10 +9,11 @@
  * 주소 인자: ?w=폭&h=높이(CSS 화소, 장치 화소 비율 1).
  */
 import type { Annotation3d } from '../../src/annotate';
-import { boxMesh, syntheticScene } from '../../src/synth';
+import { boxMesh, checkerBmp, syntheticScene } from '../../src/synth';
 import type { LineSet3d, Mesh3d, Scene3d } from '../../src/types';
 import { Viewer3d } from '../../src/viewer';
 import { type GridSpec, cutBy, fillGrid, gridMesh, gridX, gridY } from './grid';
+import { type ManySpec, manyScene } from './many';
 
 /** 판마다 있을 수도 없을 수도 있는 메서드를 부르려고 느슨하게 본 뷰어 */
 type V = Viewer3d & Record<string, any>;
@@ -37,9 +38,31 @@ type V = Viewer3d & Record<string, any>;
  * 0.37.0 칸을 얕게 뚫는 첫 점 X축의 닫힌 면 교차 넓힌 받기 — tests/v0370shallow.test.ts),
  * lying12 = 반투명 판(600 × 400 × 18)에 누운 작은 구멍(반지름 2.5, 길이 12, 12토막 원기둥 고체)과 판 윗면의 기운 기준 선분(27°)뿐인 자료
  * (0.37.0 긴 칸을 따라가는 안내 선의 비켜 가는 삼각형 힌트 — tests/v0370shallow.test.ts와 같은 장면),
- * ring50 = 50토막 원 꺾은선(반지름 30, z 0 — 토막 0이 −90°를 가운데에)뿐인 자료(0.38.0 현을 얕게 가로지르는 첫 점 X축의 닫힌 선분 교차 넓힌 받기 — tests/v0380edge.test.ts와 같은 꼴)
+ * ring50 = 50토막 원 꺾은선(반지름 30, z 0 — 토막 0이 −90°를 가운데에)뿐인 자료(0.38.0 현을 얕게 가로지르는 첫 점 X축의 닫힌 선분 교차 넓힌 받기 — tests/v0380edge.test.ts와 같은 꼴),
+ * many = 같은 그물 자리가 많은 장면(scripts/pixels/many.ts — 정의 12개 × 자리 120, 셋째 정의마다 바둑판 무늬. 0.42.0 인스턴싱: base 판은 그물마다 그리므로
+ * base·head 같은 그림이 곧 인스턴싱 켬·끔 같은 그림이다), many-off = 같은 장면을 묶음 원점(1e6대)으로 준 자료(큰 좌표에서도 자리 행렬이 같은 float 값)
  */
-type Data = 'base' | 'off' | 'tex' | 'cross' | 'big' | 'edit' | 'edit-big' | 'arc' | 'arc2' | 'post' | 'globe' | 'compact' | 'apex' | 'hole' | 'ring12' | 'lowcyl' | 'lying12' | 'ring50';
+type Data =
+  | 'base'
+  | 'off'
+  | 'tex'
+  | 'cross'
+  | 'big'
+  | 'edit'
+  | 'edit-big'
+  | 'arc'
+  | 'arc2'
+  | 'post'
+  | 'globe'
+  | 'compact'
+  | 'apex'
+  | 'hole'
+  | 'ring12'
+  | 'lowcyl'
+  | 'lying12'
+  | 'ring50'
+  | 'many'
+  | 'many-off';
 
 interface Ctx {
   v: V;
@@ -83,6 +106,8 @@ host.style.width = `${W}px`;
 host.style.height = `${H}px`;
 
 const OFFSET: [number, number, number] = [1e6, -5e5, 1e4];
+/** 0.42.0 자리 많은 장면 크기(CI 시간이 늘지 않게 작게 — 정의마다 자리 10개로 하한 8을 넘는다) */
+const MANY: ManySpec = { defs: 12, modules: 4, perModule: 30, triangles: 200 };
 const scenes = new Map<Data, ReturnType<typeof syntheticScene>>();
 function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (d === 'edit' || d === 'edit-big') return editScene(d === 'edit-big' ? EDIT_BIG : EDIT_GRID, flatTop);
@@ -93,6 +118,11 @@ function sceneOf(d: Data): ReturnType<typeof syntheticScene> {
   if (!s && d === 'lowcyl') scenes.set(d, (s = lowCylScene()));
   if (!s && d === 'lying12') scenes.set(d, (s = lying12Scene()));
   if (!s && d === 'ring50') scenes.set(d, (s = ring50Scene()));
+  if (!s && (d === 'many' || d === 'many-off')) {
+    s = manyScene({ ...MANY, texture: '바둑판', ...(d === 'many-off' ? { origin: OFFSET } : {}) });
+    s.textures = [{ id: '바둑판', data: checkerBmp(), mime: 'image/bmp', width: 64, height: 64 }];
+    scenes.set(d, s);
+  }
   if (!s) {
     const base = { segments: d === 'big' ? 400_000 : 20_000, sphereSeg: 48 };
     s = syntheticScene(d === 'off' ? { ...base, offset: OFFSET } : d === 'tex' ? { ...base, textures: true } : d === 'compact' ? { ...base, textures: true, compact: true } : base);
@@ -974,6 +1004,85 @@ const editValues: ValueSet = {
   },
 };
 
+// ───────────── 0.42.0 같은 그물 자리가 많은 장면(인스턴싱) ─────────────
+/** 자리 많은 장면의 겉모습 섞기: 강조(굵은 윤곽선)·자리 색·반투명 자리·옮긴 자리·숨긴 모듈·묶음 안 숨긴 구간 */
+function manyLooks(v: V): void {
+  v.highlight(['자리 0-0', '자리 1-5', '자리 2-11']);
+  v.setItemColor('자리 0-3', '#e0245e');
+  v.setItemColor('자리 3-15', '#22aa66');
+  v.setItemOpacity('자리 1-1', 0.4);
+  v.setItemMatrix('자리 2-2', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 20, 1]);
+  v.setGroupVisible('모듈 3', false);
+  v.setHiddenRanges('자리 0-6', [{ start: 0, count: 20 }]);
+}
+
+/**
+ * 자리 많은 장면 화면: base 판은 그물마다, head는 같은 그물 자리를 모아 그린다(같은 그림이어야 한다). 모드·겉모습·해·안개·그림자(면은 그물마다)·
+ * X-ray(면은 반투명 차례)·단면(모두 그물마다)·큰 좌표(묶음 원점)
+ */
+const manyShots: Shot[] = [
+  { name: 'many-shaded', data: 'many', setup: () => undefined },
+  { name: 'many-shadedEdges', data: 'many', setup: ({ v }) => v.setRenderMode('shadedEdges') },
+  {
+    name: 'many-looks',
+    data: 'many',
+    needs: fn('setItemColor', 'setItemOpacity', 'setItemMatrix', 'setHiddenRanges', 'setGroupVisible'),
+    setup: ({ v }) => {
+      v.setRenderMode('shadedEdges');
+      manyLooks(v);
+    },
+  },
+  {
+    name: 'many-wire-profiles',
+    data: 'many',
+    needs: fn('setRenderOptions'),
+    setup: ({ v }) => {
+      v.setRenderMode('wireframe');
+      v.setRenderOptions({ profiles: { width: 1 } });
+    },
+  },
+  {
+    name: 'many-hidden',
+    data: 'many',
+    needs: fn('setRenderOptions'),
+    setup: ({ v }) => {
+      v.setRenderMode('hiddenLine');
+      v.setRenderOptions({ hiddenEdges: true });
+    },
+  },
+  {
+    name: 'many-sun-fog',
+    data: 'many',
+    needs: fn('setLighting', 'setFog'),
+    setup: ({ v }) => {
+      v.setRenderMode('shadedEdges');
+      v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] } });
+      const cam = v.getCamera();
+      v.setFog({ start: cam.distance * 0.8, end: cam.distance * 1.4 });
+    },
+  },
+  {
+    name: 'many-shadows',
+    data: 'many',
+    needs: fn('setLighting'),
+    setup: ({ v }) => {
+      v.setRenderMode('shadedEdges');
+      v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true });
+    },
+  },
+  { name: 'many-xray', data: 'many', setup: ({ v }) => v.setRenderMode('xray') },
+  {
+    name: 'many-section',
+    data: 'many',
+    needs: fn('setSection'),
+    setup: ({ v }) => {
+      v.setRenderMode('shadedEdges');
+      v.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' });
+    },
+  },
+  { name: 'many-off-shadedEdges', data: 'many-off', setup: ({ v }) => v.setRenderMode('shadedEdges') },
+];
+
 const SHOTS: Shot[] = [
   ...classicShots('base'),
   ...classicShots('off'),
@@ -993,6 +1102,7 @@ const SHOTS: Shot[] = [
   ...edgeLockShots('base'),
   ...edgeLockShots('off'),
   ...labelShots,
+  ...manyShots,
 ];
 
 // ───────────── 값(고르기·측정·화면 위치·걷기) ─────────────
@@ -7402,6 +7512,110 @@ const priorityValues: ValueSet = {
   },
 };
 
+/** 0.42.0 인스턴싱 변종 번역을 기다린다(그동안은 그물마다 그린다 — 없는 판은 바로) */
+async function instancingReady(v: V): Promise<void> {
+  for (let i = 0; i < 500 && (v.stats?.instanced?.pending ?? 0) > 0; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    v.renderNow();
+  }
+}
+
+/** 0.42.0 자리 많은 장면 고르기(두 판 같음 — 고르기는 BVH라 그리기와 상관없다): 화면 격자 20곳(마우스·터치)과 그 자리를 강조·숨긴 뒤 다시 */
+function manyPickValues(d: 'many' | 'many-off'): ValueSet {
+  return {
+    name: `${d}-picks`,
+    data: d,
+    needs: fn('setGroupVisible', 'highlight'),
+    run: ({ v, w, h }) => {
+      const out: unknown[] = [];
+      const r3 = (p: readonly number[]): number[] => p.map((x) => Math.round(x * 1000) / 1000);
+      const grid = (): unknown[] => {
+        const res: unknown[] = [];
+        for (let j = 1; j <= 4; j++)
+          for (let i = 1; i <= 5; i++) {
+            const p = v.pick((w * i) / 6 + 0.37, (h * j) / 5 + 0.21);
+            res.push(p ? [p.kind, p.id, p.index, r3(p.point)] : null);
+          }
+        return res;
+      };
+      v.setRenderMode('shadedEdges');
+      out.push(grid());
+      v.highlight(['자리 0-0', '자리 1-5']);
+      v.setGroupVisible('모듈 1', false);
+      out.push(grid());
+      return out;
+    },
+  };
+}
+
+/** SHA-256 앞 16자(그림 같음 견주기) */
+async function sha16(data: Uint8ClampedArray): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', data as Uint8ClampedArray<ArrayBuffer>);
+  return Array.from(new Uint8Array(d).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** 0.42.0 인스턴싱 선택(renderOptions.instancing)이 있는 판인지 */
+const v0420inst: Need = (v) => (typeof v.setRenderOptions === 'function' && v.renderOptions?.instancing ? null : '이 판에 없는 선택: 0.42.0 setRenderOptions({ instancing })');
+
+/**
+ * 0.42.0 인스턴싱 켬·끔(같은 판 head): 모드·겉모습마다 그리기 호출·삼각형·선분·모아 그린 그리기·자리 수와 그림 해시, 다른 화소 수(같으면 0).
+ * 면·선 수는 같고 그리기 호출만 줄어야 한다. 하한(min)을 자리 수보다 크게 하면 모두 그물마다(끔과 같은 호출 수)
+ */
+const manyInstValues: ValueSet = {
+  name: 'many-instancing',
+  data: 'many',
+  needs: v0420inst,
+  run: async ({ v }) => {
+    const out: unknown[] = [];
+    const cases: [string, (v: V) => void][] = [
+      ['shaded', (x) => x.setRenderMode('shaded')],
+      ['shadedEdges', (x) => x.setRenderMode('shadedEdges')],
+      ['looks', (x) => (x.setRenderMode('shadedEdges'), manyLooks(x))],
+      ['wire-profiles', (x) => (x.setRenderMode('wireframe'), x.setRenderOptions({ profiles: { width: 1 } }))],
+      ['hidden', (x) => (x.setRenderMode('hiddenLine'), x.setRenderOptions({ hiddenEdges: true }))],
+      ['xray', (x) => x.setRenderMode('xray')],
+      ['section', (x) => (x.setRenderMode('shadedEdges'), x.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' }))],
+    ];
+    const snap = async (): Promise<{ st: unknown[]; img: ImageData }> => {
+      await texturesReady(v);
+      v.renderNow();
+      await instancingReady(v);
+      v.renderNow();
+      const s = v.stats;
+      const img = v.renderImage({});
+      return { st: [s.drawCalls, s.triangles, s.segments, s.instanced.draws, s.instanced.items], img };
+    };
+    for (const [name, set] of cases) {
+      reset(v, 'many');
+      set(v);
+      const on = await snap();
+      v.setRenderOptions({ instancing: false });
+      const off = await snap();
+      // 하한이 자리 수보다 크면 모두 그물마다(그림은 끔과 같은 길이라 수만 본다)
+      v.setRenderOptions({ instancing: { min: 1000 } });
+      v.renderNow();
+      const hs = v.stats;
+      const high = { st: [hs.drawCalls, hs.triangles, hs.segments, hs.instanced.draws, hs.instanced.items] };
+      let diff = 0, maxd = 0;
+      const at: number[][] = [];
+      for (let i = 0; i < on.img.data.length; i += 4) {
+        let m = 0;
+        for (let k = 0; k < 4; k++) m = Math.max(m, Math.abs(on.img.data[i + k]! - off.img.data[i + k]!));
+        if (m) {
+          diff++;
+          // 처음 몇 화소의 자리(가로, 세로)
+          if (at.length < 3) at.push([(i / 4) % on.img.width, Math.floor(i / 4 / on.img.width)]);
+        }
+        maxd = Math.max(maxd, m);
+      }
+      out.push([name, on.st, off.st, high.st, await sha16(on.img.data), await sha16(off.img.data), diff, maxd, at]);
+    }
+    v.setRenderOptions({ instancing: true });
+    out.push(v.renderOptions.instancing);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -7497,6 +7711,9 @@ const VALUES: ValueSet[] = [
   ringLensFarValues,
   ringLensOffValues,
   priorityValues,
+  manyPickValues('many'),
+  manyPickValues('many-off'),
+  manyInstValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -7552,7 +7769,8 @@ function reset(v: V, d: Data): void {
   call('setPointerClaim', null);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
-  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null });
+  // 0.42.0 instancing은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
+  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true });
   call('setSections', null);
   call('setSection', null);
   call('setTheme', 'dark');
@@ -7655,6 +7873,8 @@ async function shot(name: string): Promise<Result<{ w: number; h: number; rgba: 
     await texturesReady(c.v);
     // 화면 그리기 한 번: 측정 미리 보기(마우스 아래 붙잡을 점)·뷰 큐브는 그릴 때 정한다(사용자가 보는 그대로)
     c.v.renderNow();
+    // 0.42.0 인스턴싱 변종을 번역하는 중이면 다 될 때까지(모아 그린 그림을 찍는다 — 없는 판·모을 것이 없는 장면은 그대로)
+    await instancingReady(c.v);
     let img: ImageData;
     if (s.capture === 'cube' || s.capture === 'overlay') {
       const el = c.host.querySelector<HTMLCanvasElement>(`canvas.v3d-${s.capture}`);

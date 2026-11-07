@@ -114,7 +114,8 @@ export {
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
-export type { GpuBufferPart, GpuBufferStats, RenderMode, TextureSource, TextureStats } from './renderer';
+export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
+export { INSTANCE_MIN } from './renderer';
 export type { MeshArrays } from './release';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';

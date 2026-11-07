@@ -1,0 +1,185 @@
+/**
+ * 같은 그물 자리가 아주 많은 장면 비용 재기 페이지(0.42.0 — scripts/bench/many.mjs가 base·head 두 판으로 묶어 헤드리스 Chrome에서 연다).
+ * 장면: scripts/pixels/many.ts(정의 12개 × 자리 3,000, 삼각형 약 184만 — STEP 큰 조립 합성과 같은 꼴). 주소 인자 ?inst=0이면
+ * 인스턴싱을 끈다(setRenderOptions({ instancing: false }) — 그 선택이 없는 판은 무시한다).
+ *  - open: setScene(incremental { budgetMs }) → 다 올릴 때까지 프레임 수·벽시계·주 스레드 몫(프레임 JS 합·가장 긴 프레임·긴 작업 합)
+ *  - steady: 다 올린 뒤 모드마다 조금씩 돌려 renderNow JS 시간·GPU 마침(1화소 읽기)까지·그리기 호출 수·GL 호출 수
+ */
+import { Viewer3d } from '../../src/viewer';
+import { manyScene, type ManySpec } from '../pixels/many';
+
+const W = 960, H = 600;
+const host = document.getElementById('view')!;
+host.style.width = `${W}px`;
+host.style.height = `${H}px`;
+const q = new URLSearchParams(location.search);
+const inst = q.get('inst');
+
+type V = Viewer3d & Record<string, any>;
+
+function syncGpu(v: Viewer3d): void {
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext;
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+}
+
+const frame = (): Promise<number> => new Promise((r) => requestAnimationFrame(r));
+
+/** GL 호출 수(그리기 한 번) — 문맥 메서드를 잠깐 세는 함수로 덮는다 */
+function countGl(v: Viewer3d, f: () => void): number {
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext & Record<string, any>;
+  let n = 0;
+  const names = Object.getOwnPropertyNames(WebGL2RenderingContext.prototype).filter((k) => {
+    const d = Object.getOwnPropertyDescriptor(WebGL2RenderingContext.prototype, k);
+    return d && typeof d.value === 'function' && k !== 'constructor';
+  });
+  for (const k of names) {
+    const orig = gl[k] as (...a: unknown[]) => unknown;
+    gl[k] = (...a: unknown[]) => {
+      n++;
+      return orig.apply(gl, a);
+    };
+  }
+  try {
+    f();
+  } finally {
+    for (const k of names) delete gl[k];
+  }
+  return n;
+}
+
+function newViewer(): V {
+  const v = new Viewer3d(host, { animate: false, keyboard: false, viewCube: false, renderMode: 'shadedEdges' }) as V;
+  if (inst === '0') v.setRenderOptions({ instancing: false } as never);
+  return v;
+}
+
+interface OpenRes {
+  callMs: number;
+  doneMs: number;
+  frames: number;
+  drawSumMs: number;
+  drawMaxMs: number;
+  longSumMs: number;
+  longCount: number;
+  firstFrameMs: number;
+  /** 모아 그리기 시작까지(변종 번역을 기다렸으면, 아니면 0) */
+  instMs: number;
+  /** 다 연 뒤 JS 힙·GPU 버퍼(MB) */
+  heapMB: number;
+  gpuMB: number;
+}
+
+async function open(spec: ManySpec, budgetMs: number): Promise<OpenRes & { triangles: number; meshes: number; renderer: string }> {
+  const scene = manyScene(spec);
+  const v = newViewer();
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext;
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const renderer = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+  // 장면 없이 한 번 그려 셰이더를 데운다(두 판이 같게)
+  v.renderNow();
+  syncGpu(v);
+  let frames = 0, drawSum = 0, drawMax = 0, firstFrame = 0;
+  // 뷰어의 그리기(requestAnimationFrame이 부르는 비공개 draw)를 재는 함수로 잠깐 덮는다
+  const vd = v as unknown as { draw: (t: number) => void };
+  const draw = vd.draw;
+  let t0 = 0;
+  vd.draw = (t: number) => {
+    const a = performance.now();
+    draw.call(v, t);
+    const d = performance.now() - a;
+    frames++;
+    drawSum += d;
+    drawMax = Math.max(drawMax, d);
+    if (frames === 1) firstFrame = performance.now() - t0;
+  };
+  let longSum = 0, longCount = 0;
+  const po = new PerformanceObserver((l) => {
+    for (const e of l.getEntries()) {
+      longSum += e.duration;
+      longCount++;
+    }
+  });
+  try {
+    po.observe({ type: 'longtask', buffered: false });
+  } catch {
+    /* 긴 작업 관찰 없음 */
+  }
+  t0 = performance.now();
+  let done = 0;
+  const finished = new Promise<void>((res) => {
+    v.setScene(scene, {
+      incremental: { budgetMs },
+      onProgress: (d: number, t: number) => {
+        if (d >= t && !done) {
+          done = performance.now() - t0;
+          res();
+        }
+      },
+    });
+  });
+  const callMs = performance.now() - t0;
+  const timeout = new Promise<void>((res) => setTimeout(res, 600_000));
+  await Promise.race([finished, timeout]);
+  await frame();
+  await frame();
+  // 0.42.0: 인스턴싱 변종 번역을 기다리는 동안은 그물마다 그린다 — 모아 그리기 시작까지(그 선택이 없는 판·끔은 0)
+  let instMs = 0;
+  for (let i = 0; i < 600 && ((v.stats as { instanced?: { pending: number } }).instanced?.pending ?? 0) > 0; i++) {
+    await frame();
+    instMs = performance.now() - t0;
+  }
+  syncGpu(v);
+  po.disconnect();
+  vd.draw = draw;
+  // 메모리: JS 힙(Chrome performance.memory — 쓰레기 수집 차이로 흔들린다)·GPU 버퍼 바이트(stats.buffers)
+  const heapMB = +(((performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0) / 1048576).toFixed(1);
+  const gpuMB = +(v.stats.buffers.bytes / 1048576).toFixed(1);
+  (window as unknown as { last: V }).last = v;
+  return { callMs, doneMs: done, frames, drawSumMs: drawSum, drawMaxMs: drawMax, longSumMs: longSum, longCount, firstFrameMs: firstFrame, instMs, heapMB, gpuMB, triangles: scene.triangles, meshes: scene.meshes.length, renderer };
+}
+
+interface SteadyRow {
+  mode: string;
+  js: number[];
+  total: number[];
+  drawCalls: number;
+  glCalls: number;
+}
+
+async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
+  const v = (window as unknown as { last: V }).last;
+  const rows: SteadyRow[] = [];
+  for (const mode of modes) {
+    const [m, opt] = mode.split('+');
+    v.setRenderMode(m as never);
+    v.setRenderOptions({ profiles: opt === 'profiles' ? { width: 1 } : null });
+    if (opt === 'highlight') v.highlight(['자리 0-0', '자리 3-7']);
+    else v.highlight(null);
+    v.fit(false);
+    for (let i = 0; i < 2; i++) {
+      v.orbitBy(0.01, 0);
+      v.renderNow();
+      syncGpu(v);
+    }
+    const r: SteadyRow = { mode, js: [], total: [], drawCalls: 0, glCalls: 0 };
+    for (let i = 0; i < reps; i++) {
+      v.orbitBy(0.02, 0.005);
+      const a = performance.now();
+      v.renderNow();
+      const b = performance.now();
+      syncGpu(v);
+      const c = performance.now();
+      r.js.push(b - a);
+      r.total.push(c - a);
+      await new Promise((res) => setTimeout(res, 0));
+    }
+    r.drawCalls = v.stats.drawCalls;
+    r.glCalls = countGl(v, () => v.renderNow());
+    syncGpu(v);
+    rows.push(r);
+  }
+  v.highlight(null);
+  return rows;
+}
+
+(window as unknown as { bench: unknown }).bench = { ready: true, open, steady };
