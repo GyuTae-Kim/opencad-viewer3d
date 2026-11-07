@@ -11,6 +11,7 @@
  * packNormals·packUvs는 앱(해석 워커)과 시험이 Float32 배열을 줄일 때 쓰는 도우미다.
  */
 
+import { hypot3 } from './math';
 import type { NormalArray, UvArray, UvTransform } from './types';
 
 export type { NormalArray, UvArray, UvTransform };
@@ -101,13 +102,14 @@ export function packNormals(n: ArrayLike<number>, type: 'int8' | 'int16' = 'int8
   const nv = Math.floor(n.length / 3);
   const max = type === 'int8' ? 127 : 32767;
   const out = type === 'int8' ? new Int8Array(nv * per) : new Int16Array(nv * per);
-  for (let i = 0; i < nv; i++) {
-    const x = n[i * 3]!, y = n[i * 3 + 1]!, z = n[i * 3 + 2]!;
-    const l = Math.hypot(x, y, z);
+  // 0.51.0 길이는 hypot3(Math.hypot과 비트 같은 셈 — 정점마다 인자 배열을 잡지 않는다). 나머지 셈·차례는 0.50.0 그대로(같은 출력 바이트)
+  for (let i = 0, j = 0, o = 0; i < nv; i++, j += 3, o += per) {
+    const x = n[j]!, y = n[j + 1]!, z = n[j + 2]!;
+    const l = hypot3(x, y, z);
     if (!(l > 0) || !Number.isFinite(l)) continue;
-    out[i * per] = Math.round((x / l) * max);
-    out[i * per + 1] = Math.round((y / l) * max);
-    out[i * per + 2] = Math.round((z / l) * max);
+    out[o] = Math.round((x / l) * max);
+    out[o + 1] = Math.round((y / l) * max);
+    out[o + 2] = Math.round((z / l) * max);
   }
   return out;
 }
@@ -119,36 +121,50 @@ export function packNormals(n: ArrayLike<number>, type: 'int8' | 'int16' = 'int8
  */
 export function packUvs(uvs: ArrayLike<number>, nv: number, type: 'int16' | 'uint16' = 'int16'): { uvs: Int16Array | Uint16Array; transform: UvTransform } {
   const k: 2 | 3 = nv > 0 && uvs.length >= nv * 3 ? 3 : 2;
-  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  // 0.51.0 축마다 닫힘 함수·배열 대신 축 둘을 풀어 쓴 같은 셈(Math.min·max의 −0·NaN 규칙까지 그대로 — 같은 출력 바이트·같은 uvTransform)
+  let lo0 = Infinity, lo1 = Infinity, hi0 = -Infinity, hi1 = -Infinity;
   let qmax = 0;
-  for (let i = 0; i < nv; i++) {
-    const q = k === 3 ? uvs[i * 3 + 2]! : 1;
-    if (k === 3) qmax = Math.max(qmax, Math.abs(q));
-    for (let c = 0; c < 2; c++) {
-      const u = uvs[i * k + c]! / q;
-      if (!Number.isFinite(u)) continue;
-      lo[c] = Math.min(lo[c]!, u);
-      hi[c] = Math.max(hi[c]!, u);
+  for (let i = 0, j = 0; i < nv; i++, j += k) {
+    const q = k === 3 ? uvs[j + 2]! : 1;
+    if (k === 3) {
+      // Math.max(qmax, |q|): NaN이면 그 뒤로 늘 NaN
+      const aq = Math.abs(q);
+      if (aq > qmax || aq !== aq) qmax = aq;
+    }
+    const u = uvs[j]! / q, v = uvs[j + 1]! / q;
+    if (Number.isFinite(u)) {
+      // Math.min·max: 같은 0이면 min은 −0, max는 +0 쪽
+      if (u < lo0 || (u === lo0 && u === 0 && 1 / u < 0)) lo0 = u;
+      if (u > hi0 || (u === hi0 && u === 0 && 1 / u > 0)) hi0 = u;
+    }
+    if (Number.isFinite(v)) {
+      if (v < lo1 || (v === lo1 && v === 0 && 1 / v < 0)) lo1 = v;
+      if (v > hi1 || (v === hi1 && v === 0 && 1 / v > 0)) hi1 = v;
     }
   }
   const signed = type === 'int16';
-  const scale = [0, 1].map((c) => {
-    const w = hi[c]! - lo[c]!;
-    return Number.isFinite(w) && w > 0 ? (signed ? w / 2 : w) : 1;
-  });
-  const off = [0, 1].map((c) => (Number.isFinite(lo[c]!) ? (signed ? (lo[c]! + hi[c]!) / 2 : lo[c]!) : 0));
+  const w0 = hi0 - lo0, w1 = hi1 - lo1;
+  const scale0 = Number.isFinite(w0) && w0 > 0 ? (signed ? w0 / 2 : w0) : 1;
+  const scale1 = Number.isFinite(w1) && w1 > 0 ? (signed ? w1 / 2 : w1) : 1;
+  const off0 = Number.isFinite(lo0) ? (signed ? (lo0 + hi0) / 2 : lo0) : 0;
+  const off1 = Number.isFinite(lo1) ? (signed ? (lo1 + hi1) / 2 : lo1) : 0;
   const max = signed ? 32767 : 65535;
-  const lim = (x: number): number => (signed ? Math.min(32767, Math.max(-32767, x)) : Math.min(65535, Math.max(0, x)));
+  // 한도(Math.min(한도, Math.max(아래, x))와 같은 값 — NaN은 그대로 NaN, 배열에 0으로 들어간다)
+  const minV = signed ? -32767 : 0;
   const out = signed ? new Int16Array(nv * k) : new Uint16Array(nv * k);
-  for (let i = 0; i < nv; i++) {
-    const q = k === 3 ? uvs[i * 3 + 2]! : 1;
+  for (let i = 0, j = 0; i < nv; i++, j += k) {
+    const q = k === 3 ? uvs[j + 2]! : 1;
     const qn = k === 3 && qmax > 0 ? q / qmax : 1;
-    for (let c = 0; c < 2; c++) {
-      const u = uvs[i * k + c]! / q;
-      const s = Number.isFinite(u) ? (u - off[c]!) / scale[c]! : 0;
-      out[i * k + c] = lim(Math.round(s * qn * max));
+    const u = uvs[j]! / q, v = uvs[j + 1]! / q;
+    const su = Number.isFinite(u) ? (u - off0) / scale0 : 0;
+    const sv = Number.isFinite(v) ? (v - off1) / scale1 : 0;
+    const xu = Math.round(su * qn * max), xv = Math.round(sv * qn * max);
+    out[j] = xu < minV ? minV : xu > max ? max : xu;
+    out[j + 1] = xv < minV ? minV : xv > max ? max : xv;
+    if (k === 3) {
+      const xq = Math.round(qn * max);
+      out[j + 2] = xq < minV ? minV : xq > max ? max : xq;
     }
-    if (k === 3) out[i * 3 + 2] = lim(Math.round(qn * max));
   }
-  return { uvs: out, transform: [scale[0]!, scale[1]!, off[0]!, off[1]!] };
+  return { uvs: out, transform: [scale0, scale1, off0, off1] };
 }
