@@ -1916,8 +1916,8 @@ export class Viewer3d {
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
   private rangeVer = 0;
-  /** 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림 */
-  private upload: { budget: number; cb: ((done: number, total: number) => void) | null } | null = null;
+  /** 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림. 0.51.0 first = 첫 프레임 몫(쓰고 나면 null) */
+  private upload: { budget: number; first: number | null; cb: ((done: number, total: number) => void) | null } | null = null;
   private measureCbs = new Set<(m: MeasureResult | null) => void>();
   private camCbs = new Set<(c: CameraState) => void>();
   private lastCamKey = '';
@@ -2061,12 +2061,15 @@ export class Viewer3d {
    * 코어가 장면 객체에서 지우고(delete — 무늬의 푼 그림은 close, textures: 'bitmap'이면 푼 그림만) 다시 읽지 않는다. 고르기·측정·범위·단면은 위치·색인만 쓰므로 그대로다.
    * 이 장면에 setMesh로 넣는 그물도 같다. 문맥을 잃었다 되찾으면 위치·색으로 먼저 그리고 onContextRestore로 다시 받는다.
    * 주지 않으면 0.24.0과 같다(장면 배열을 붙잡고 문맥 복구 때 그대로 다시 올린다)
+   *
+   * 0.51.0 incremental.firstMs: 첫 프레임의 올리기 몫만 따로(예: budgetMs 100 · firstMs 8 — 첫 그림은 곧, 나머지는 큰 몫으로 걸음 수를 줄여 빨리 끝낸다.
+   * 나눠 올리는 동안 프레임마다 그때까지 올린 것을 다시 그리므로 걸음이 많으면 다 올리기까지 오래 걸린다). 주지 않으면 0.50.0과 같다(모든 프레임 budgetMs)
    */
   setScene(
     scene: Scene3d,
     opts: {
       keepView?: boolean;
-      incremental?: boolean | { budgetMs?: number };
+      incremental?: boolean | { budgetMs?: number; firstMs?: number };
       onProgress?: (done: number, total: number) => void;
       release?: boolean | ReleaseOptions;
     } = {},
@@ -2113,7 +2116,9 @@ export class Viewer3d {
     this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
     const inc = opts.incremental;
-    this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), cb: opts.onProgress ?? null } : null;
+    // 0.51.0 firstMs(유한한 양수만 — 아니면 0.50.0처럼 모든 프레임 budgetMs)
+    const first = typeof inc === 'object' && typeof inc.firstMs === 'number' && Number.isFinite(inc.firstMs) && inc.firstMs > 0 ? Math.max(1, inc.firstMs) : null;
+    this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), first, cb: opts.onProgress ?? null } : null;
     // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
@@ -8181,7 +8186,16 @@ export class Viewer3d {
       // 0.16.0 끌어온 축: 점 붙잡기 위 머무르기(켰을 때만)
       if (this.tracker) this.dwell(this.measureHover, this.lastHoverAt);
     }
-    if (this.renderer.uploading) this.pumpUpload(this.renderer.uploadProgress ? (this.upload?.budget ?? 8) : this.meshBudget);
+    if (this.renderer.uploading) {
+      // 0.51.0 장면 나눠 올리기의 첫 프레임은 firstMs(주었으면 — 한 번 쓰고 비운다)
+      const up = this.upload;
+      let b = this.meshBudget;
+      if (this.renderer.uploadProgress) {
+        b = up?.first ?? up?.budget ?? 8;
+        if (up) up.first = null;
+      }
+      this.pumpUpload(b);
+    }
     if (this.cutDirty) {
       if (this.sec) this.updateCut();
       else {
