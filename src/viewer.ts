@@ -77,6 +77,7 @@ import {
   withinSnapLimit,
 } from './snap';
 import {
+  EXACT_SNAP_SCALE,
   MeasureTracker,
   type OpenEdgeCandidate,
   type OpenEdgeSnap,
@@ -523,6 +524,15 @@ export interface MeasureSnapOptions {
    * 곧은 꺾은선(앱이 null)과 꼭짓점에서 곡선을 가로지르는 선(앱 점이 꼭짓점과 반 화소 안)은 그대로 끝점이다. 주지 않거나 false면 0.32.0과 같다
    */
   refineEnds?: boolean;
+  /**
+   * 0.39.0(기본 꺼짐 — true이고 refine·refineFace가 있을 때만): 선(첫 점 축 — inference.axisEdges·axisFaces, 끌어온 축 — track, 잠근 선 — lockEdges·lockFaces,
+   * 끌어온 점 안내 선 — trackDirs { meets })이 꺾은선 토막(현)이나 그물 칸을 얕게 가로지르는 코어 교차 X가 커서에서 붙잡기 거리 안이라 그 교차를 골랐는데,
+   * 앱 refine('axisEdge')·refineFace('axisFace')가 준 같은 교차의 정확한 자리 Q가 커서에서 붙잡기 거리 밖이면(0.37.0·0.38.0 넓힌 받기에서 빠지는 자리 — 커서가 X 쪽)
+   * 표식·결과를 Q로 옮긴다(refined). 같은 교차라는 판정은 넓힌 받기와 같은 조각 자리 규칙(그 선 위로 내린 자리가 그 토막 곡선 조각·그 칸 위 곡면 조각 자리)이고,
+   * Q는 X에서 세계 거리로 그 토막 길이·칸 크기 안, 화면 거리로 EXACT_SNAP_SCALE(3) × 붙잡기 거리 안이어야 한다. 가림·단면은 넓힌 받기와 같다.
+   * 앱 호출·기억 열쇠·후보 차례(X의 커서 거리로 견준다)·값의 꼴은 그대로다(이미 부르던 닫힌 답을 받는 규칙만 넓힌다). 주지 않거나 false면 0.38.0과 같다
+   */
+  refineSnapToExact?: boolean;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
@@ -1338,6 +1348,8 @@ export class Viewer3d {
     through: boolean;
     /** 0.33.0 선이 꺾은선 꼭짓점을 지나는 자리를 앱 refine에 묻는지(refineEnds — refine이 있을 때만 true) */
     ends: boolean;
+    /** 0.39.0 닫힌 선분·면 교차의 앱 점이 커서에서 붙잡기 거리 밖이어도 같은 교차의 정확한 자리면 옮기는지(refineSnapToExact — refine·refineFace가 있을 때만 true) */
+    exact: boolean;
   } | null = null;
   /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
@@ -3252,6 +3264,7 @@ export class Viewer3d {
         ofMemo: null,
         through: !!o.throughTranslucent,
         ends: o.refineEnds === true && !!o.refine,
+        exact: o.refineSnapToExact === true && !!(o.refine || o.refineFace),
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
@@ -5364,7 +5377,8 @@ export class Viewer3d {
    * 그 묶음 단면에서 남는 쪽)이면 그 자리. 아니면 null(코어 점 그대로). 결과는 커서 광선을 뺀 입력(종류·코어 점·토막·축 직선·첫 점)으로 기억한다(0.15.0 열린 후보의
    * RefineMemo — 커서가 그 둘레를 움직이는 동안 다시 부르지 않는다). 가림은 다시 따지지 않는다(0.14.0과 같다 — 코어 점이 보이므로 그 바로 둘레다).
    * 0.38.0: 앱 점이 코어 점에서 화면 붙잡기 거리 밖이면(선이 현을 얕게 가로지른다) 열린 교차와 같은 규칙으로 한 번 더 본다(track.ts acceptEdgePatch — 그 선 위·
-   * 그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 그때는 열린 교차와 같은 가림(snapVisible)을 본다
+   * 그 토막 곡선 조각 자리·커서에서 붙잡기 거리 안). 그때는 열린 교차와 같은 가림(snapVisible)을 본다.
+   * 0.39.0 refineSnapToExact(so.exact): 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면 EXACT_SNAP_SCALE × 붙잡기 거리·토막 길이 안이면 받는다(같은 교차의 정확한 자리)
    */
   private axisEdgeRefined(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5398,8 +5412,9 @@ export class Viewer3d {
     const p = acceptOnLine(f, core, q, line, snapPx);
     if (p) return this.clippedAway(p, sg.id) ? null : p;
     // 0.38.0: 현을 얕게 가로지르는 선 — 앱 점이 그 토막 곡선 조각 자리이고 커서에서 붙잡기 거리 안이면 받는다(코어 점에서는 붙잡기 거리 밖).
-    // 코어 점에서 멀 수 있으므로 열린 교차와 같은 가림(snapVisible)을 본다
-    const w = acceptEdgePatch(f, core, q, line, sg.ends, x, y, snapPx);
+    // 코어 점에서 멀 수 있으므로 열린 교차와 같은 가림(snapVisible)을 본다. 0.39.0 refineSnapToExact: 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면
+    // EXACT_SNAP_SCALE × 붙잡기 거리·토막 길이 안이면(같은 교차의 정확한 자리) 받는다
+    const w = acceptEdgePatch(f, core, q, line, sg.ends, x, y, snapPx, so.exact ? EXACT_SNAP_SCALE * snapPx : null);
     if (!w || this.clippedAway(w.p, sg.id)) return null;
     const sp = projectToScreen(f, w.p);
     return sp && this.snapVisible(f, w.p, sp[0], sp[1], sg.id) ? w.p : null;
@@ -5411,7 +5426,8 @@ export class Viewer3d {
    * 가림은 다시 따지지 않는다(곡면 위 점은 삼각형으로 만든 면에서 처짐만큼 벗어나 면 깊이와 어긋날 수 있다 — 코어 점이 보이므로 그 바로 둘레다).
    * 0.37.0: 앱 점이 코어 점에서 화면 붙잡기 거리 밖이면(선이 칸을 얕게 뚫는다) 열린 면 교차와 같은 규칙으로 한 번 더 본다(track.ts acceptFacePatch — 그 선 위·그 칸 위 곡면 조각 자리·
    * 커서에서 붙잡기 거리 안, hit의 꼭짓점과 같은 평면 짝은 그 세 변 가운데 자리에서 모은다 — edgeNeighbors). 그때는 열린 면 교차와 같은 가림(openFaceVisible)을 보고,
-   * 앱 점이 같은 평면 짝 위면 face가 그 삼각형이다. hit이 없거나 꼭짓점이 없으면 0.36.0 그대로
+   * 앱 점이 같은 평면 짝 위면 face가 그 삼각형이다. hit이 없거나 꼭짓점이 없으면 0.36.0 그대로.
+   * 0.39.0 refineSnapToExact(so.exact): 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면 EXACT_SNAP_SCALE × 붙잡기 거리·칸 크기 안이면 받는다(같은 교차의 정확한 자리)
    */
   private axisFaceRefined(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -5449,7 +5465,8 @@ export class Viewer3d {
     if (!hit?.corners || hit.id !== face.id || hit.index !== face.index) return null;
     const t: NearTriangle = { corners: hit.corners, wpp: worldPerPixel(f, viewDepth(f, core)), id: face.id, index: face.index, normal: [face.normal[0], face.normal[1], face.normal[2]] };
     const mates = this.edgeNeighbors(f, t);
-    const w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx);
+    // 0.39.0 refineSnapToExact: 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면 EXACT_SNAP_SCALE × 붙잡기 거리·칸 크기 안이면(같은 교차의 정확한 자리) 받는다
+    const w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx, so.exact ? EXACT_SNAP_SCALE * snapPx : null);
     if (!w) return null;
     const on = w.cell ? mates[w.cell - 1]! : t;
     if (this.clippedAway(w.p, on.id) || !this.openFaceVisible(f, w.p, on)) return null;

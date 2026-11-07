@@ -7137,6 +7137,99 @@ const ringChordValues: ValueSet = {
   },
 };
 
+// ───────────── 0.39.0 refineSnapToExact(커서가 X 쪽인 얕은 교차를 같은 교차의 정확한 자리로) ─────────────
+/** 화면에서 X 쪽(Q 반대쪽)으로 k화소 옮긴 자리(0.31·0.17화소 비킴) */
+function beyondX(c: Ctx, X: readonly number[], Q: readonly number[], k: number): [number, number] | null {
+  const a = c.at(X), b = c.at(Q);
+  if (!a || !b) return null;
+  const l = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+  return [a.x + ((a.x - b.x) / l) * k + 0.31, a.y + ((a.y - b.y) / l) * k + 0.17];
+}
+/** 0.39.0 refineSnapToExact가 있는 판인지 — 거리 15에서 첫 점 X축이 현과 만나는 X 쪽(Q에서 먼 쪽 3화소)을 가리켜 원 위 교차인지(없는 판은 X 그대로) */
+const v0390exact: Need = (v, c) => {
+  const why = fn('setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { edges: true, refine: r12Refine, refineSnapToExact: true }, [-45, -LS_D, 0]);
+  const Q = [-30 * Math.sin(LS_W), -LS_D, 0];
+  lsCamera(c, Q, 15);
+  const s = beyondX(c, lsPierce(0, Q), Q, 3);
+  if (s) c.hover(s[0], s[1]);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && Math.abs(Math.hypot(h.point[0], h.point[1]) - 30) < 1e-9;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.39.0 refineSnapToExact(커서가 X 쪽이어도 같은 교차의 정확한 자리)';
+};
+/** 거리 15에서 X 쪽을 가리킨 그림 — 켜면 표식이 원 위 근 Q(새 장면) */
+SHOTS.push({
+  name: 'ring50-measure-exact',
+  data: 'ring50',
+  needs: v0390exact,
+  setup: (c) => {
+    r12First(c, { edges: true, refine: r12Refine, refineSnapToExact: true }, [-45, -LS_D, 0]);
+    const Q = [-30 * Math.sin(LS_W), -LS_D, 0];
+    lsCamera(c, Q, 15);
+    const s = beyondX(c, lsPierce(0, Q), Q, 3);
+    if (s) c.hover(s[0], s[1]);
+  },
+});
+/** 0.39.0 값(ring50 — 새 값): refineSnapToExact를 켜고 첫 점 X축이 이웃 토막 현과 만나는 두 X 둘레 5 × 5(2.5화소 칸) 미리 보기(거리 15·40), 잠근 X축도 */
+const ringExactValues: ValueSet = {
+  name: 'ring50-measure-exact',
+  data: 'ring50',
+  needs: v0390exact,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const lock of [false, true]) {
+      r12First(c, { edges: true, refine: r12Refine, refineSnapToExact: true }, [-45, -LS_D, 0]);
+      if (lock) c.v.setMeasureInferenceLock('x');
+      for (const d of [15, 40])
+        for (const sgn of [-1, 1]) {
+          const Q = [sgn * 30 * Math.sin(LS_W), -LS_D, 0];
+          lsCamera(c, Q, d);
+          out.push([lock, d, sgn, r12Grid(c, lsPierce(0, Q), 2, 2.5)]);
+        }
+      r12Done(c.v);
+    }
+    return out;
+  },
+};
+/** 0.39.0 refineSnapToExact가 있는 판인지(lowcyl 자료) — 높이 5·거리 15에서 첫 점 X축이 그물을 뚫는 X 쪽(Q에서 먼 쪽 3화소)을 가리켜 원기둥 위 교차인지 */
+const v0390exactCell: Need = (v, c) => {
+  const why = fn('setCamera', 'getCamera', 'project', 'setMeasureSnap', 'clearMeasure')(v, c);
+  if (why) return why;
+  r12First(c, { refineFace: lcRefine, refineSnapToExact: true }, [-45, -LS_D, 5]);
+  const Q = [-30 * Math.sin(LS_W), -LS_D, 5];
+  lsCamera(c, Q, 15);
+  const s = beyondX(c, lsPierce(5, Q), Q, 3);
+  if (s) c.hover(s[0], s[1]);
+  v.renderNow();
+  const h = v.measureHoverSnap;
+  const ok = !!h?.refined && Math.abs(Math.hypot(h.point[0], h.point[1]) - 30) < 1e-9;
+  r12Done(v);
+  return ok ? null : '이 판에 없는 동작: 0.39.0 refineSnapToExact(커서가 X 쪽이어도 같은 교차의 정확한 자리)';
+};
+/** 0.39.0 값(lowcyl — 새 값): refineSnapToExact를 켜고 높이 5·21의 첫 점 X축이 이웃 칸을 얕게 뚫는 두 X 둘레 5 × 5(2.5화소 칸) 미리 보기(거리 15·40) */
+const lowExactValues: ValueSet = {
+  name: 'lowcyl-measure-exact',
+  data: 'lowcyl',
+  needs: v0390exactCell,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const z of [5, 21]) {
+      r12First(c, { refineFace: lcRefine, refineSnapToExact: true }, [-45, -LS_D, z]);
+      for (const d of [15, 40])
+        for (const sgn of [-1, 1]) {
+          const Q = [sgn * 30 * Math.sin(LS_W), -LS_D, z];
+          lsCamera(c, Q, d);
+          out.push([z, d, sgn, r12Grid(c, lsPierce(z, Q), 2, 2.5)]);
+        }
+      r12Done(c.v);
+    }
+    return out;
+  },
+};
+
 // ───────────── 0.38.0 pointsFor의 첫 점(pointsForFirst)·접점 붙잡기 종류('tangent') ─────────────
 /** 0.38.0 API가 있는 판인지(pointsFor 기억만 비우기 clearMeasurePointsFor — pointsForFirst·'tangent' 표식과 같은 판) */
 const v0380: Need = fn('setMeasureSnap', 'project', 'clearMeasurePointsFor');
@@ -7284,6 +7377,8 @@ const VALUES: ValueSet[] = [
   lyingCellValues,
   ringChordValues,
   pointsFirstValues,
+  ringExactValues,
+  lowExactValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

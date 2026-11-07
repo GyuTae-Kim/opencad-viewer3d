@@ -1519,6 +1519,35 @@ export interface FacePatchAccept {
   p: V3;
   cell: number;
   distPx: number;
+  /** 0.39.0: 커서에서 붙잡기 거리 밖이라 exactPx(코어 점에서의 화면 상한 — refineSnapToExact)로 받았으면 true */
+  exact?: true;
+}
+
+/**
+ * 0.39.0 refineSnapToExact(기본 꺼짐)의 화면 상한 — 붙잡기 거리의 배수: 선이 토막·칸을 얕게 가로지르는 코어 교차 X가 커서에서 붙잡기 거리 안이라 그 교차를 골랐는데
+ * 앱이 준 같은 교차의 정확한 자리 Q(그 토막·칸 곡선·곡면 조각 자리)가 커서에서 붙잡기 거리 밖이면, X에서 Q까지 화면 거리가 이 배수 × 붙잡기 거리 안일 때 Q로 옮긴다.
+ * 같은 교차라는 근거는 조각 자리 규칙(현·삼각형에 내린 발이 그 토막·칸 안, 현·평면에서 0.1 × 토막 길이·가장 긴 변 안 — 선이 현·삼각형을 한 번 지나면 그 조각의
+ * 곡선·곡면은 한 번만 지난다)이고 세계 거리는 그 토막 길이·칸 크기 안이다(exactReach). 화면 상한은 아주 가까이 확대해 현과 곡선이 화면에서 갈라져 보이는 자리에서
+ * 표식이 커서·그린 꺾은선·그물에서 멀리 뛰지 않게 둔다(39차 넓은 탐색 — 보통 거리의 얕은 교차는 X와 Q 사이가 거의 모두 30화소 안이었다. README 0.39.0)
+ */
+export const EXACT_SNAP_SCALE = 3;
+
+/**
+ * 0.39.0: 코어 교차 core에서 앱의 정확한 자리 p로 옮겨도 되는지(refineSnapToExact — acceptEdgePatch·acceptFacePatch의 exactPx): 둘의 세계 거리가 span(그 토막 길이·
+ * 칸 크기) 안이고 화면 거리가 maxPx 안. 화면에 비치지 않으면 false
+ */
+function exactReach(f: ViewFrame, core: readonly number[], p: readonly number[], maxPx: number, span: number): boolean {
+  if (!(dist3(core, p) <= span)) return false;
+  const a = projectToScreen(f, core), b = projectToScreen(f, p);
+  return !!a && !!b && Math.hypot(a[0] - b[0], a[1] - b[1]) <= maxPx;
+}
+
+/** 꼭짓점 묶음에서 가장 먼 두 점 사이 거리(0.39.0 칸 크기 — 뚫은 삼각형, 같은 평면 짝이면 둘의 꼭짓점) */
+function cornerSpan(cs: readonly (readonly (readonly number[])[])[]): number {
+  const v = cs.flat();
+  let s = 0;
+  for (let i = 0; i < v.length; i++) for (let j = i + 1; j < v.length; j++) s = Math.max(s, dist3(v[i]!, v[j]!));
+  return s;
 }
 
 /**
@@ -1532,6 +1561,9 @@ export interface FacePatchAccept {
  *   FLAT_COS)에 내린 발이 그 안, 평면에서 OPEN_FACE_CHORD × 가장 긴 변 안). 이웃 칸 위 교차는 받지 않는다(그 칸의 열린 교차가 맡는다)
  * - p가 커서에서 snapPx 안이다(코어 점에서가 아니라 — 받는 점이 커서 붙잡기 거리 안이라는 모든 붙잡기의 규칙)
  * 가림·단면은 부르는 쪽이 본다(뷰어는 열린 면 교차와 같은 가림 판정). 아니면 null
+ * 0.39.0: exactPx(수 — 뷰어는 refineSnapToExact를 켰을 때 EXACT_SNAP_SCALE × snapPx)를 주면 p가 커서에서 snapPx 밖이어도 core에서 화면 exactPx 안이고 세계 거리가
+ * 그 칸 크기(받은 조각의 꼭짓점 사이 가장 먼 거리 — 같은 평면 짝이면 두 삼각형의 꼭짓점) 안이면 받는다(exact: true). 조각 자리 규칙은 같다 — core가 커서에서
+ * 붙잡기 거리 안이라는 것이 그 교차를 고른 근거이고 p는 같은 교차의 정확한 자리다. 주지 않으면 0.38.0과 같다
  */
 export function acceptFacePatch(
   f: ViewFrame,
@@ -1543,6 +1575,7 @@ export function acceptFacePatch(
   x: number,
   y: number,
   snapPx: number,
+  exactPx?: number | null,
 ): FacePatchAccept | null {
   if (tri.length < 3) return null;
   const p = acceptOnLine(f, core, q, line, Infinity);
@@ -1550,8 +1583,13 @@ export function acceptFacePatch(
   const tol = meetTol(f, p);
   if (dist3(p, line.origin) <= tol) return null;
   const distPx = screenDistance(f, p, x, y);
-  if (distPx === null || distPx > snapPx) return null;
-  if (onFacePatch(p, tri, tol)) return { p, cell: 0, distPx };
+  if (distPx === null) return null;
+  const far = distPx > snapPx;
+  if (far && !(typeof exactPx === 'number' && exactPx >= 0)) return null;
+  // 0.39.0: 커서에서 붙잡기 거리 밖이면 코어 점에서 화면 exactPx·그 칸 크기 안일 때만
+  const take = (cell: number, cs: readonly (readonly (readonly number[])[])[]): FacePatchAccept | null =>
+    !far ? { p, cell, distPx } : exactReach(f, core, p, exactPx!, cornerSpan(cs)) ? { p, cell, distPx, exact: true } : null;
+  if (onFacePatch(p, tri, tol)) return take(0, [tri]);
   const nt = triNormal(tri);
   const shareTol = 1e-6 * longestEdge(tri);
   for (let i = 0; i < around.length; i++) {
@@ -1559,7 +1597,7 @@ export function acceptFacePatch(
     if (c.length < 3 || Math.abs(dot3(triNormal(c), nt)) < FLAT_COS) continue;
     let shared = 0;
     for (const V of c) if (tri.some((W) => dist3(V, W) <= shareTol)) shared++;
-    if (shared === 2 && onFacePatch(p, c, tol)) return { p, cell: i + 1, distPx };
+    if (shared === 2 && onFacePatch(p, c, tol)) return take(i + 1, [tri, c]);
   }
   return null;
 }
@@ -1568,6 +1606,8 @@ export function acceptFacePatch(
 export interface EdgePatchAccept {
   p: V3;
   distPx: number;
+  /** 0.39.0: 커서에서 붙잡기 거리 밖이라 exactPx(코어 점에서의 화면 상한 — refineSnapToExact)로 받았으면 true */
+  exact?: true;
 }
 
 /**
@@ -1581,6 +1621,8 @@ export interface EdgePatchAccept {
  *   (선이 현을 가로질러 들어간 활꼴은 그 토막의 것이다 — 이웃 토막 활꼴 위 교차는 받지 않는다)
  * - p가 커서에서 snapPx 안이다(코어 점에서가 아니라 — 받는 점이 커서 붙잡기 거리 안이라는 모든 붙잡기의 규칙)
  * 가림·단면은 부르는 쪽이 본다(뷰어는 열린 교차와 같은 가림 판정). 아니면 null
+ * 0.39.0: exactPx(수 — 뷰어는 refineSnapToExact를 켰을 때 EXACT_SNAP_SCALE × snapPx)를 주면 p가 커서에서 snapPx 밖이어도 core에서 화면 exactPx 안이고
+ * 세계 거리가 토막 길이 안이면 받는다(exact: true). 곡선 조각 자리 규칙은 같다. 주지 않으면 0.38.0과 같다
  */
 export function acceptEdgePatch(
   f: ViewFrame,
@@ -1591,6 +1633,7 @@ export function acceptEdgePatch(
   x: number,
   y: number,
   snapPx: number,
+  exactPx?: number | null,
 ): EdgePatchAccept | null {
   const p = acceptOnLine(f, core, q, line, Infinity);
   if (!p) return null;
@@ -1604,8 +1647,10 @@ export function acceptEdgePatch(
   const off = Math.hypot(p[0] - a[0]! - g0 * u, p[1] - a[1]! - g1 * u, p[2] - a[2]! - g2 * u);
   if (!(off <= OPEN_EDGE_CHORD * Math.sqrt(C) + tol)) return null;
   const distPx = screenDistance(f, p, x, y);
-  if (distPx === null || distPx > snapPx) return null;
-  return { p, distPx };
+  if (distPx === null) return null;
+  if (distPx <= snapPx) return { p, distPx };
+  // 0.39.0: 커서에서 붙잡기 거리 밖이면 코어 점에서 화면 exactPx·토막 길이 안일 때만
+  return typeof exactPx === 'number' && exactPx >= 0 && exactReach(f, core, p, exactPx, Math.sqrt(C)) ? { p, distPx, exact: true } : null;
 }
 
 /**
