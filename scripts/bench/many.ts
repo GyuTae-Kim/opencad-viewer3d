@@ -173,6 +173,21 @@ interface OpenRes {
   /** 다 연 뒤 JS 힙·GPU 버퍼(MB) */
   heapMB: number;
   gpuMB: number;
+  /** 0.51.0 열기 동안 장면을 그린 수(렌더러 render)와 마지막 장면 그리기가 끝난 때(다 올린 뒤 그림 — redrawMs면 다 올린 다음 프레임) */
+  renders: number;
+  settleMs: number;
+}
+
+/**
+ * 0.51.0 ?up=step: 걸음마다 몫 함수(STEP 59차 꼴 — 앞 두 걸음 8 ms, 그다음 그물 1,000개마다 1 ms, 8~100 ms), ?redraw=<ms>|inf: redrawMs
+ * (그 API가 없는 판 — base — 에는 쓰지 않는다: many.mjs가 head 판에만 붙인다)
+ */
+const upStep = q.get('up') === 'step';
+const redrawQ = q.get('redraw');
+function incOf(budgetMs: number): object {
+  if (!upStep) return { budgetMs };
+  const fn = (s: number, n: number): number => (s < 2 ? 8 : Math.min(100, Math.max(8, Math.round(n / 1000))));
+  return redrawQ ? { budgetMs: fn, redrawMs: redrawQ === 'inf' ? Infinity : Number(redrawQ) } : { budgetMs: fn };
 }
 
 async function open(spec: ManySpec | FlatSpec, budgetMs: number): Promise<OpenRes & { triangles: number; meshes: number; renderer: string }> {
@@ -198,6 +213,15 @@ async function open(spec: ManySpec | FlatSpec, budgetMs: number): Promise<OpenRe
     drawMax = Math.max(drawMax, d);
     if (frames === 1) firstFrame = performance.now() - t0;
   };
+  // 0.51.0 장면 그리기(렌더러 render) 수와 마지막으로 끝난 때
+  const rr = (v as unknown as { renderer: { render: (...a: unknown[]) => void } }).renderer;
+  const render0 = rr.render;
+  let renders = 0, lastRender = 0;
+  rr.render = function (this: unknown, ...a: unknown[]) {
+    render0.apply(this, a);
+    renders++;
+    lastRender = performance.now();
+  };
   let longSum = 0, longCount = 0;
   const po = new PerformanceObserver((l) => {
     for (const e of l.getEntries()) {
@@ -214,7 +238,7 @@ async function open(spec: ManySpec | FlatSpec, budgetMs: number): Promise<OpenRe
   let done = 0;
   const finished = new Promise<void>((res) => {
     v.setScene(scene, {
-      incremental: { budgetMs },
+      incremental: incOf(budgetMs) as { budgetMs: number },
       onProgress: (d: number, t: number) => {
         if (d >= t && !done) {
           done = performance.now() - t0;
@@ -237,11 +261,29 @@ async function open(spec: ManySpec | FlatSpec, budgetMs: number): Promise<OpenRe
   syncGpu(v);
   po.disconnect();
   vd.draw = draw;
+  rr.render = render0;
   // 메모리: JS 힙(Chrome performance.memory — 쓰레기 수집 차이로 흔들린다)·GPU 버퍼 바이트(stats.buffers)
   const heapMB = +(((performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0) / 1048576).toFixed(1);
   const gpuMB = +(v.stats.buffers.bytes / 1048576).toFixed(1);
   (window as unknown as { last: V }).last = v;
-  return { callMs, doneMs: done, frames, drawSumMs: drawSum, drawMaxMs: drawMax, longSumMs: longSum, longCount, firstFrameMs: firstFrame, instMs, heapMB, gpuMB, triangles: scene.triangles, meshes: scene.meshes.length, renderer };
+  return {
+    callMs,
+    doneMs: done,
+    frames,
+    drawSumMs: drawSum,
+    drawMaxMs: drawMax,
+    longSumMs: longSum,
+    longCount,
+    firstFrameMs: firstFrame,
+    instMs,
+    heapMB,
+    gpuMB,
+    renders,
+    settleMs: lastRender - t0,
+    triangles: scene.triangles,
+    meshes: scene.meshes.length,
+    renderer,
+  };
 }
 
 interface SteadyRow {

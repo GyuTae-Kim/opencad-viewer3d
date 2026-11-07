@@ -12,7 +12,9 @@
  * 판 head-nopbr = head 묶음을 PBR 끔(?pbroff=1)으로. 모드 꼬리 +section(x 가운데 단면 하나, 채우기 없음)·+shadows(해 그림자)
  * 0.51.0: --size d10k·d80k(자리마다 서로 다른 배열)·m10k·m80k(짝수 자리는 같은 배열 — 섞음)·s10k·s80k(모두 같은 배열 — STEP 58차 표본 꼴, scripts/bench/flat.ts),
  * 모드 꼬리 +zoom(8배 확대 — 자리 대부분이 화면 밖), 판 head-nocull = head 묶음을 화면 밖 잘라내기 끔(?cull=0)으로,
- * --parts면 steady 대신 프레임 비용 나누기(GL 호출 종류별 수와 그 종류를 비운 JS 시간·GL 없는 JS·뷰어 몫·고르기 — many.ts의 parts)
+ * --parts면 steady 대신 프레임 비용 나누기(GL 호출 종류별 수와 그 종류를 비운 JS 시간·GL 없는 JS·뷰어 몫·고르기 — many.ts의 parts),
+ * --profile이면 모드마다 CPU 프로필, --open-only면 처음 열기만. 판 head-step(나눠 올리기 걸음 몫 함수 — 앞 두 걸음 8 ms, 그다음 그물 1,000개마다 1 ms)·
+ * head-step-r250(+ redrawMs 250)·head-step-once(+ redrawMs Infinity — 첫 그림과 다 올린 뒤만 그리기). 열기 표에 첫 그림·다 올린 뒤 그림 끝·장면 그리기 수
  * 결과: out/summary.json(done: true)·summary.md, 표준 출력에 표.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -107,9 +109,9 @@ export function manyTable(res) {
     return `${s.median} (${s.min}~${s.max})`;
   };
   let md = `### ${res.backend} — ${res.renderer}\n\n그물 ${res.meshes.toLocaleString('en-US')}개(자리), 삼각형 ${res.triangles.toLocaleString('en-US')}개, CPU ${res.cpu ?? 1}배 느리게, 판마다 ${res.rounds}번(가운데값 (최소~최대) ms)\n\n`;
-  md += '| 판 | 처음 열기 다 올림 | 프레임 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+  md += '| 판 | 처음 열기 다 올림 | 첫 그림 | 다 올린 뒤 그림 끝 | 프레임 수 | 장면 그리기 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
   for (const [name, r] of Object.entries(res.variants))
-    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
+    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.firstFrameMs))} | ${f(r.open.map((/** @type {any} */ o) => o.settleMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.renders ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
   if (Object.values(res.variants).some((/** @type {any} */ r) => Object.keys(r.steady).length)) {
     md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 그리기 호출 | GL 호출 |\n|---|---|---:|---:|---:|---:|\n';
     for (const [name, r] of Object.entries(res.variants))
@@ -159,6 +161,7 @@ async function main() {
       pbr: { type: 'boolean' },
       parts: { type: 'boolean' },
       profile: { type: 'boolean' },
+      'open-only': { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
@@ -203,6 +206,9 @@ async function main() {
               ...(values.pbr ? ['pbr=1'] : []),
               ...(name === 'head-nopbr' ? ['pbroff=1'] : []),
               ...(name === 'head-nocull' ? ['cull=0'] : []),
+              // 0.51.0 나눠 올리기 걸음 몫 함수(STEP 59차 꼴)·다시 그리기 간격
+              ...(name.startsWith('head-step') ? ['up=step'] : []),
+              ...(name === 'head-step-r250' ? ['redraw=250'] : name === 'head-step-once' ? ['redraw=inf'] : []),
             ];
             const qs = params.length ? `?${params.join('&')}` : '';
             await browser.send('Page.navigate', { url: `http://127.0.0.1:${p}/${dir}/many.html${qs}` });
@@ -222,6 +228,8 @@ async function main() {
             res.triangles = o.triangles;
             const v = (res.variants[name] ??= { open: [], steady: {}, parts: {} });
             v.open.push(o);
+            // 0.51.0 --open-only: 처음 열기만(나눠 올리기 걸음 견주기)
+            if (values['open-only']) continue;
             if (values.profile) {
               // 0.51.0 CPU 프로필(모드마다 reps × 2번 그리기 — 함수별 자기 시간 위 20)
               for (const mode of modes) {
