@@ -1916,8 +1916,20 @@ export class Viewer3d {
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
   private rangeVer = 0;
-  /** 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림 */
-  private upload: { budget: number; cb: ((done: number, total: number) => void) | null } | null = null;
+  /**
+   * 나눠 올리기(setScene incremental): 한 프레임에 쓸 시간과 진행 알림. 0.51.0 fn = 걸음마다 몫 함수(없으면 budget), step = 다음 걸음 번호,
+   * redraw = 올리기만으로 생긴 다시 그리기 간격(0이면 걸음마다 — 0.50.0), lastDraw = 마지막으로 장면을 그린 때(performance.now)
+   */
+  private upload: {
+    budget: number;
+    fn: ((step: number, meshes: number) => number) | null;
+    step: number;
+    redraw: number;
+    lastDraw: number;
+    cb: ((done: number, total: number) => void) | null;
+  } | null = null;
+  /** 0.51.0 기다리는 그리기가 나눠 올리기 걸음만으로 생겼는지(다른 까닭의 invalidate가 끼면 false — redrawMs가 이 그리기만 건너뛴다) */
+  private upOnly = false;
   private measureCbs = new Set<(m: MeasureResult | null) => void>();
   private camCbs = new Set<(c: CameraState) => void>();
   private lastCamKey = '';
@@ -2061,12 +2073,19 @@ export class Viewer3d {
    * 코어가 장면 객체에서 지우고(delete — 무늬의 푼 그림은 close, textures: 'bitmap'이면 푼 그림만) 다시 읽지 않는다. 고르기·측정·범위·단면은 위치·색인만 쓰므로 그대로다.
    * 이 장면에 setMesh로 넣는 그물도 같다. 문맥을 잃었다 되찾으면 위치·색으로 먼저 그리고 onContextRestore로 다시 받는다.
    * 주지 않으면 0.24.0과 같다(장면 배열을 붙잡고 문맥 복구 때 그대로 다시 올린다)
+   *
+   * 0.51.0 나눠 올리기 걸음(STEP 58·59차): 나눠 올리는 동안 프레임마다 그때까지 올린 것을 다시 그리므로 걸음이 많으면 다 올리기까지 오래 걸린다(그물 수의 제곱).
+   * - incremental.budgetMs에 함수 `(step, meshes) => ms`를 주면 걸음마다 몫을 정한다(step = 0부터 센 걸음, meshes = 장면 그물 수 — 예: 앞 두 걸음은 8 ms로 첫 그림을 곧,
+   *   그다음은 그물 1,000개마다 1 ms). 돌려준 값이 유한한 양수가 아니거나 함수가 예외를 내면 그 걸음은 8 ms
+   * - incremental.redrawMs: 나눠 올리는 동안 올리기만으로 생긴 다시 그리기를 이 간격(ms)에 한 번만 한다(첫 걸음은 그린다 — 첫 그림). 다 올린 걸음은 그리지 않고 다음 프레임에
+   *   장면 전체를 그린다(올리기와 장면 그리기를 두 작업으로 — 가장 긴 작업이 둘의 합이 아니게). 카메라·고르기·무늬 등 다른 까닭의 다시 그리기는 그대로 그린다. Infinity면 첫 그림과 다 올린 뒤만
+   * 주지 않으면 0.50.0과 같다(모든 걸음 budgetMs 숫자, 걸음마다 그리기)
    */
   setScene(
     scene: Scene3d,
     opts: {
       keepView?: boolean;
-      incremental?: boolean | { budgetMs?: number };
+      incremental?: boolean | { budgetMs?: number | ((step: number, meshes: number) => number); redrawMs?: number };
       onProgress?: (done: number, total: number) => void;
       release?: boolean | ReleaseOptions;
     } = {},
@@ -2113,7 +2132,12 @@ export class Viewer3d {
     this.usesOrigin = scene.meshes.some((m) => hasOrigin(m.origin)) || scene.lines.some((l) => hasOrigin(l.origin)) || (scene.points ?? []).some((p) => hasOrigin(p.origin));
     this.wheelAnchor = null;
     const inc = opts.incremental;
-    this.upload = inc ? { budget: Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8), cb: opts.onProgress ?? null } : null;
+    // 0.51.0 걸음마다 몫(함수 — 숫자 몫 budget은 8 ms로 두고 함수가 쓸 수 없는 값을 내면 그것을 쓴다)·다시 그리기 간격(유한한 양수 또는 Infinity — 아니면 0.50.0처럼 걸음마다)
+    const io = typeof inc === 'object' ? inc : null;
+    const fn = typeof io?.budgetMs === 'function' ? io.budgetMs : null;
+    const num = typeof io?.budgetMs === 'number' ? io.budgetMs : undefined;
+    const redraw = typeof io?.redrawMs === 'number' && io.redrawMs > 0 ? io.redrawMs : 0;
+    this.upload = inc ? { budget: Math.max(1, num ?? 8), fn, step: 0, redraw, lastDraw: -Infinity, cb: opts.onProgress ?? null } : null;
     // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
@@ -2806,6 +2830,9 @@ export class Viewer3d {
    * 서로 다른 그물이 같은 깊이로 겹치는 곳(맞닿은 면, 반투명 모서리 선이 엇갈린 몇 화소)은 보이는 쪽·섞임이 끔과 다를 수 있다
    * 0.43.0 pbr(기본 켬): Mesh3d의 PBR 필드(normalTexture·roughness·metallic·metallicRoughnessTexture 등)를 쓴다. false·null이면 끄고 그 그물도 0.42.0 셰이더 그대로 그린다
    * (그림은 그대로 올라가 있어 다시 켜면 바로 쓴다 — 휴대 기기에서 조각 셰이더 몫을 줄일 때). PBR 필드가 없는 그물은 켬·끔과 상관없이 0.42.0과 같다
+   * 0.51.0 culling(기본 켬): 화면 밖 잘라내기 — 그물(삼각형 정점과 윤곽선 끝점의 범위를 모형·겉모습 행렬로 옮긴 상자)이 시야 옆 네 평면 가운데 하나의 확실히 바깥이면
+   * 면·윤곽선·삼각형 변·숨은 점선·외곽선·주변 가림 깊이·반투명 면을 그리지 않는다(src/cull.ts — 화면에 화소를 내지 않는 그물이라 그림은 끔과 같다. 굵은 선 반폭·
+   * float32 셈 어긋남만큼 여유를 둔다). 그림자 깊이 그림·잘린 면 채우기는 그대로 모두 그린다. 뺀 그물 수는 stats.culled, 그리기 호출 수는 그만큼 준다. false·null이면 끈다
    */
   setRenderOptions(o: {
     profiles?: boolean | { width?: number; color?: Rgba | string } | null;
@@ -2813,6 +2840,7 @@ export class Viewer3d {
     edgeColor?: Rgba | string | null;
     instancing?: boolean | { min?: number } | null;
     pbr?: boolean | null;
+    culling?: boolean | null;
   }): void {
     if ('profiles' in o) {
       const p = o.profiles;
@@ -2837,6 +2865,7 @@ export class Viewer3d {
       this.renderer.instancing = { on: i !== false && i !== null, min };
     }
     if ('pbr' in o) this.renderer.pbr = o.pbr !== false && o.pbr !== null;
+    if ('culling' in o) this.renderer.culling = o.culling !== false && o.culling !== null;
     this.invalidate();
   }
 
@@ -2900,7 +2929,7 @@ export class Viewer3d {
     return this.aoOpt ? { ...this.aoOpt } : null;
   }
 
-  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr) */
+  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr, 0.51.0 culling) */
   get renderOptions(): {
     profiles: { width: number; color: Rgba | string | null } | null;
     hiddenEdges: number;
@@ -2909,6 +2938,7 @@ export class Viewer3d {
     edgeColor: Rgba | string | null;
     instancing: { on: boolean; min: number };
     pbr: boolean;
+    culling: boolean;
   } {
     const r = this.renderOpts;
     return {
@@ -2919,6 +2949,7 @@ export class Viewer3d {
       edgeColor: r.edgeColor,
       instancing: { ...this.renderer.instancing },
       pbr: this.renderer.pbr,
+      culling: this.renderer.culling,
     };
   }
 
@@ -3820,7 +3851,7 @@ export class Viewer3d {
    * 나눠 올리기를 budgetMs만큼 이어 가고 진행을 알린다(다 올리면 끝 알림 뒤 그만). onProgress는 장면 나눠 올리기만 알린다
    * (0.11.0 그물 바꾸기 나눠 올리기는 알리지 않는다)
    */
-  private pumpUpload(budgetMs: number): void {
+  private pumpUpload(budgetMs: number): boolean {
     const scene = !!this.renderer.uploadProgress;
     const done = this.renderer.uploadSome(budgetMs);
     this.shadowVer++;
@@ -3834,9 +3865,15 @@ export class Viewer3d {
         cb?.(total, total);
       } else cb?.(p.done, p.total);
     }
-    if (!done) this.invalidate();
+    if (!done) {
+      // 0.51.0 다음 걸음 그리기는 올리기만으로 생긴 것(기다리는 그리기가 없었을 때 — 다른 까닭의 invalidate가 끼면 풀린다)
+      const fresh = !this.raf;
+      this.invalidate();
+      if (fresh && this.raf) this.upOnly = true;
+    }
     // 0.29.0: 나눠 올리기를 마쳤으면 되찾은 뒤 끝 알림(다시 받을 것·풀 무늬가 남았으면 그것을 기다린다)
     else this.checkRestoreDone();
+    return done;
   }
 
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
@@ -5523,6 +5560,8 @@ export class Viewer3d {
       cancelAnimationFrame(this.raf);
       this.raf = 0;
     }
+    // 0.51.0 바로 그리기는 늘 그린다(나눠 올리기 redrawMs가 건너뛰지 않는다)
+    this.upOnly = false;
     this.draw(performance.now());
   }
 
@@ -7705,6 +7744,8 @@ export class Viewer3d {
       this.renderer.init();
       // 0.25.0: 놓기 선택이 있으면 그대로 다시 건다(코어가 지운 배열·원본은 없이 위치·색으로 올리고, 아래 emitRestore로 앱에 알려 다시 받는다)
       if (this.sceneRef) this.renderer.setScene(this.sceneRef, { incremental: !!this.upload, release: this.releaseOpt });
+      // 0.51.0 다시 나눠 올리기는 걸음 번호를 0부터(몫 함수의 앞 걸음 — 되찾은 첫 그림도 곧)
+      if (this.upload) this.upload.step = 0;
       if (this.segHi) this.renderer.setHighlightSegments(this.segHi.positions, this.segHi.opts.origin);
       this.uploadAnnotations();
       // 단면 테두리도 GPU 자료라 다시 올린다
@@ -8114,6 +8155,8 @@ export class Viewer3d {
   // ───────────────────────── 내부: 그리기 ─────────────────────────
 
   private invalidate(): void {
+    // 0.51.0 다른 까닭의 다시 그리기가 끼면 그 그리기는 나눠 올리기 걸음만의 것이 아니다(redrawMs가 건너뛰지 않는다)
+    this.upOnly = false;
     if (this.raf || this.disposed || this.lost) return;
     this.raf = requestAnimationFrame((t) => {
       this.raf = 0;
@@ -8124,6 +8167,9 @@ export class Viewer3d {
   private draw(now: number): void {
     if (this.disposed || this.lost) return;
     const t0 = performance.now();
+    // 0.51.0 이 그리기가 나눠 올리기 걸음만으로 생겼는지(읽고 비운다)
+    const upOnly = this.upOnly;
+    this.upOnly = false;
     if (this.anim) {
       const a = this.anim;
       const t = Math.min(1, (now - a.t0) / a.dur);
@@ -8174,7 +8220,35 @@ export class Viewer3d {
       // 0.16.0 끌어온 축: 점 붙잡기 위 머무르기(켰을 때만)
       if (this.tracker) this.dwell(this.measureHover, this.lastHoverAt);
     }
-    if (this.renderer.uploading) this.pumpUpload(this.renderer.uploadProgress ? (this.upload?.budget ?? 8) : this.meshBudget);
+    if (this.renderer.uploading) {
+      const up = this.upload;
+      const sceneUp = !!this.renderer.uploadProgress;
+      let b = this.meshBudget;
+      if (sceneUp) {
+        b = up?.budget ?? 8;
+        // 0.51.0 걸음마다 몫 함수(쓸 수 없는 값·예외면 숫자 몫)
+        if (up?.fn) {
+          let v: unknown;
+          try {
+            v = up.fn(up.step, this.sceneRef?.meshes.length ?? 0);
+          } catch {
+            v = undefined;
+          }
+          if (typeof v === 'number' && Number.isFinite(v) && v > 0) b = Math.max(1, v);
+        }
+        if (up) up.step++;
+      }
+      const done = this.pumpUpload(b);
+      // 0.51.0 redrawMs: 올리기 걸음만으로 생긴 그리기는 간격 안이면 건너뛰고, 다 올린 걸음은 그리지 않고 다음 프레임에 장면 전체를 그린다
+      if (sceneUp && up && up.redraw > 0 && upOnly) {
+        if (done) {
+          this.invalidate();
+          return;
+        }
+        if (t0 - up.lastDraw < up.redraw) return;
+      }
+    }
+    if (this.upload) this.upload.lastDraw = t0;
     if (this.cutDirty) {
       if (this.sec) this.updateCut();
       else {

@@ -8576,6 +8576,59 @@ const inputFuzzValues: ValueSet = {
   },
 };
 
+// ───────────── 0.51.0 화면 밖 잘라내기 ─────────────
+/** 0.51.0 화면 밖 잘라내기 선택(renderOptions.culling)이 있는 판인지 */
+const v0510cull: Need = (v) => (typeof v.setRenderOptions === 'function' && typeof v.renderOptions?.culling === 'boolean' ? null : '이 판에 없는 선택: 0.51.0 setRenderOptions({ culling })');
+
+/**
+ * 0.51.0 화면 밖 잘라내기 켬·끔(같은 판 head — 자리 많은 장면 자료를 다시 쓴다, 새 장면 없음): 돌려 8배 가까이 확대한 카메라에서 모드·겉모습·잘린 면 채우기·
+ * 외곽선·주변 가림과 그림자·평행 투영마다 [이름, 켬 [잘라낸 그물, 그리기 호출, 삼각형, 선분, 모아 그린 그리기, 자리], 끔 같은 꼴, 켬 그림 해시, 켬·끔 다른 화소 수(같으면 0)].
+ * 잘라낸 그물만큼 그리기 호출이 줄고 그림은 바이트까지 같아야 한다
+ */
+const manyCullValues: ValueSet = {
+  name: 'many-culling',
+  data: 'many',
+  needs: v0510cull,
+  run: async ({ v }) => {
+    const out: unknown[] = [];
+    const cases: [string, (x: V) => void][] = [
+      ['shadedEdges', (x) => x.setRenderMode('shadedEdges')],
+      ['looks', (x) => (x.setRenderMode('shadedEdges'), manyLooks(x))],
+      ['wire-profiles', (x) => (x.setRenderMode('wireframe'), x.setRenderOptions({ profiles: { width: 1 } }))],
+      ['hidden', (x) => (x.setRenderMode('hiddenLine'), x.setRenderOptions({ hiddenEdges: true }))],
+      ['xray', (x) => x.setRenderMode('xray')],
+      ['section-caps', (x) => (x.setRenderMode('shadedEdges'), x.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' }))],
+      ['ao-shadows', (x) => (x.setRenderMode('shadedEdges'), x.setAmbientOcclusion({}), x.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true }))],
+      ['ortho-profiles', (x) => (x.setRenderMode('shadedEdges'), x.setProjection('orthographic'), x.setRenderOptions({ profiles: { width: 2 } }))],
+    ];
+    const snap = async (): Promise<{ st: unknown[]; img: ImageData }> => {
+      await texturesReady(v);
+      v.renderNow();
+      await instancingReady(v);
+      v.renderNow();
+      const s = v.stats;
+      const img = v.renderImage({});
+      return { st: [s.culled, s.drawCalls, s.triangles, s.segments, s.instanced.draws, s.instanced.items], img };
+    };
+    for (const [name, set] of cases) {
+      reset(v, 'many');
+      set(v);
+      v.fit(false);
+      v.orbitBy(0.3, 0.1);
+      v.zoomBy(0.2);
+      v.setRenderOptions({ culling: true });
+      const on = await snap();
+      v.setRenderOptions({ culling: false });
+      const off = await snap();
+      v.setRenderOptions({ culling: true });
+      out.push([name, on.st, off.st, await sha16(on.img.data), pixelDiff(on.img, off.img)[0]]);
+      v.setAmbientOcclusion(null);
+    }
+    out.push(v.renderOptions.culling);
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8683,6 +8736,7 @@ const VALUES: ValueSet[] = [
   themeMotionValues,
   aoFlyEndValues,
   inputFuzzValues,
+  manyCullValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -8740,8 +8794,8 @@ function reset(v: V, d: Data): void {
   call('setViewCubeTouch', true);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
-  // 0.42.0 instancing·0.43.0 pbr은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
-  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true });
+  // 0.42.0 instancing·0.43.0 pbr·0.51.0 culling은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
+  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true, culling: true });
   call('setSections', null);
   call('setSection', null);
   call('setTheme', 'dark');

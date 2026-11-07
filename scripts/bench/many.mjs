@@ -10,6 +10,11 @@
  * 장면: full = 정의 12 × 자리 3,000(삼각형 약 184만 — STEP 큰 조립 합성 꼴), small = 정의 12 × 자리 300.
  * 0.43.0: --pbr이면 셋째 정의마다 바둑판 무늬에 법선·금속 거칠기 그림을 단 장면(모든 판 — 그 필드를 모르는 판은 바둑판만 그린다),
  * 판 head-nopbr = head 묶음을 PBR 끔(?pbroff=1)으로. 모드 꼬리 +section(x 가운데 단면 하나, 채우기 없음)·+shadows(해 그림자)
+ * 0.51.0: --size d10k·d80k(자리마다 서로 다른 배열)·m10k·m80k(짝수 자리는 같은 배열 — 섞음)·s10k·s80k(모두 같은 배열 — STEP 58차 표본 꼴, scripts/bench/flat.ts),
+ * 모드 꼬리 +zoom(8배 확대 — 자리 대부분이 화면 밖), 판 head-nocull = head 묶음을 화면 밖 잘라내기 끔(?cull=0)으로,
+ * --parts면 steady 대신 프레임 비용 나누기(GL 호출 종류별 수와 그 종류를 비운 JS 시간·GL 없는 JS·뷰어 몫·고르기 — many.ts의 parts),
+ * --profile이면 모드마다 CPU 프로필, --open-only면 처음 열기만. 판 head-step(나눠 올리기 걸음 몫 함수 — 앞 두 걸음 8 ms, 그다음 그물 1,000개마다 1 ms)·
+ * head-step-r250(+ redrawMs 250)·head-step-once(+ redrawMs Infinity — 첫 그림과 다 올린 뒤만 그리기). 열기 표에 첫 그림·다 올린 뒤 그림 끝·장면 그리기 수
  * 결과: out/summary.json(done: true)·summary.md, 표준 출력에 표.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -27,6 +32,13 @@ const log = (/** @type {string} */ s) => console.error(`[bench] ${s}`);
 export const SIZES = {
   full: { defs: 12, modules: 30, perModule: 100, triangles: 613 },
   small: { defs: 12, modules: 6, perModule: 50, triangles: 613 },
+  // 0.51.0 자리가 많은 평평한 장면(scripts/bench/flat.ts — 자리 하나 삼각형 약 60)
+  d10k: { flat: 10000, share: 'distinct' },
+  m10k: { flat: 10000, share: 'mixed' },
+  s10k: { flat: 10000, share: 'same' },
+  d80k: { flat: 80000, share: 'distinct' },
+  m80k: { flat: 80000, share: 'mixed' },
+  s80k: { flat: 80000, share: 'same' },
 };
 
 /** @param {string} root @param {number} port @returns {Promise<import('node:http').Server>} */
@@ -65,6 +77,31 @@ async function bundle(outDir, commit, cacheDir) {
   });
 }
 
+/**
+ * 0.51.0 CPU 프로필(Profiler.stop의 profile)에서 함수별 자기 시간(ms) 위 n개 — 이름·파일:줄로 묶는다(GL 메서드는 이름만)
+ * @param {any} profile @param {number} n
+ */
+export function topSelf(profile, n) {
+  /** @type {Map<number, any>} */
+  const byId = new Map(profile.nodes.map((/** @type {any} */ x) => [x.id, x]));
+  /** @type {Map<string, number>} */
+  const self = new Map();
+  let total = 0;
+  const samples = profile.samples ?? [], deltas = profile.timeDeltas ?? [];
+  for (let i = 0; i < samples.length; i++) {
+    const node = byId.get(samples[i]);
+    const dt = (deltas[i + 1] ?? deltas[i] ?? 0) / 1000;
+    if (!node) continue;
+    const cf = node.callFrame;
+    const file = cf.url ? cf.url.split('/').pop() : '';
+    const key = file ? `${cf.functionName || '(익명)'} ${file}:${cf.lineNumber + 1}` : cf.functionName || '(익명)';
+    self.set(key, (self.get(key) ?? 0) + dt);
+    total += dt;
+  }
+  const top = [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
+  return { total: Math.round(total), top: top.map(([k, ms]) => [k, Math.round(ms * 10) / 10]) };
+}
+
 /** 표(가운데값 (최소~최대)) @param {any} res */
 export function manyTable(res) {
   const f = (/** @type {number[]} */ a) => {
@@ -72,14 +109,38 @@ export function manyTable(res) {
     return `${s.median} (${s.min}~${s.max})`;
   };
   let md = `### ${res.backend} — ${res.renderer}\n\n그물 ${res.meshes.toLocaleString('en-US')}개(자리), 삼각형 ${res.triangles.toLocaleString('en-US')}개, CPU ${res.cpu ?? 1}배 느리게, 판마다 ${res.rounds}번(가운데값 (최소~최대) ms)\n\n`;
-  md += '| 판 | 처음 열기 다 올림 | 프레임 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+  md += '| 판 | 처음 열기 다 올림 | 첫 그림 | 다 올린 뒤 그림 끝 | 프레임 수 | 장면 그리기 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
   for (const [name, r] of Object.entries(res.variants))
-    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
-  md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 그리기 호출 | GL 호출 |\n|---|---|---:|---:|---:|---:|\n';
+    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.firstFrameMs))} | ${f(r.open.map((/** @type {any} */ o) => o.settleMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.renders ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
+  if (Object.values(res.variants).some((/** @type {any} */ r) => Object.keys(r.steady).length)) {
+    md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 그리기 호출 | GL 호출 |\n|---|---|---:|---:|---:|---:|\n';
+    for (const [name, r] of Object.entries(res.variants))
+      for (const mode of Object.keys(r.steady)) {
+        const s = r.steady[mode];
+        md += `| ${name} | ${mode} | ${f(s.js)} | ${f(s.total)} | ${s.drawCalls.join('·')} | ${s.glCalls.join('·')} |\n`;
+      }
+  }
+  // 0.51.0 프레임 비용 나누기(가운데값 ms — 몫 = 보통 renderNow JS − 그 종류 GL 호출을 비운 JS, GL 없는 JS = 모두 비운 JS, 뷰어 몫 = renderNow − 렌더러 render)
+  if (Object.values(res.variants).some((/** @type {any} */ r) => Object.keys(r.parts ?? {}).length)) {
+    const m = (/** @type {number[]} */ a) => stats(a).median;
+    md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 렌더러 | 뷰어 몫 | GL 없는 JS | 그리기 몫 | uniform 몫 | 묶기 몫 | 상태 몫 | GL 호출(그리기·uniform·묶기·상태·기타) | 잘라냄 | 고르기 처음·뒤 |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|\n';
+    for (const [name, r] of Object.entries(res.variants))
+      for (const mode of Object.keys(r.parts ?? {})) {
+        const s = r.parts[mode];
+        const js = m(s.js);
+        const share = (/** @type {string} */ k) => Math.round((js - m(s.stub[k])) * 10) / 10;
+        const c = s.calls[0];
+        md += `| ${name} | ${mode} | ${f(s.js)} | ${m(s.total)} | ${m(s.render)} | ${Math.round((js - m(s.render)) * 10) / 10} | ${m(s.stub.all)} | ${share('draw')} | ${share('uniform')} | ${share('bind')} | ${share('state')} | ${c.draw}·${c.uniform}·${c.bind}·${c.state}·${c.upload + c.other} | ${s.culled.join('·')} | ${m(s.pickFirst)}·${m(s.pick)} |\n`;
+      }
+  }
+  // 0.51.0 그림 해시(판·차례마다 — 같은 모드는 판끼리 같아야 한다)
   for (const [name, r] of Object.entries(res.variants))
-    for (const mode of Object.keys(r.steady)) {
-      const s = r.steady[mode];
-      md += `| ${name} | ${mode} | ${f(s.js)} | ${f(s.total)} | ${s.drawCalls.join('·')} | ${s.glCalls.join('·')} |\n`;
+    if (r.hashes?.length) md += `\n**${name} 그림 해시**: ${r.hashes.map((/** @type {any[]} */ hs) => hs.map((h) => `${h.mode} ${h.hash}(${h.lit})`).join(' · ')).join(' / ')}\n`;
+  // 0.51.0 CPU 프로필(마지막 차례의 것 — 함수별 자기 시간 ms, 프레임 수로 나누지 않은 합)
+  for (const [name, r] of Object.entries(res.variants))
+    for (const [mode, p] of Object.entries(r.profile ?? {})) {
+      const pp = /** @type {any} */ (p);
+      md += `\n**${name} ${mode} 프로필**(그리기 ${pp.frames}번, 벽시계 ${pp.wall} ms, 표본 합 ${pp.top.total} ms): ${pp.top.top.map((/** @type {any} */ x) => `${x[0]} ${x[1]}`).join(' · ')}\n`;
     }
   return md;
 }
@@ -101,13 +162,17 @@ async function main() {
       backend: { type: 'string' },
       chrome: { type: 'string' },
       pbr: { type: 'boolean' },
+      parts: { type: 'boolean' },
+      profile: { type: 'boolean' },
+      'open-only': { type: 'boolean' },
+      hash: { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
   const reps = Math.max(1, Math.min(50, Number(values.reps ?? 5) || 5));
   const budget = Math.max(1, Number(values.budget ?? 8) || 8);
   const cpu = Math.max(1, Math.min(20, Number(values.cpu ?? 1) || 1));
-  const size = values.size === 'small' ? 'small' : 'full';
+  const size = /** @type {keyof typeof SIZES} */ (values.size && values.size in SIZES ? values.size : 'full');
   const spec = SIZES[size];
   const modes = (values.modes ?? 'shadedEdges,shaded,shadedEdges+profiles,shadedEdges+highlight').split(',').filter(Boolean);
   const variants = (values.variants ?? (values.base ? 'base,head,head-noinst' : 'head,head-noinst')).split(',').filter(Boolean);
@@ -140,7 +205,15 @@ async function main() {
           const order = r % 2 ? [...variants].reverse() : variants;
           for (const name of order) {
             const dir = name === 'base' ? 'base' : 'head';
-            const params = [...(name === 'head-noinst' ? ['inst=0'] : []), ...(values.pbr ? ['pbr=1'] : []), ...(name === 'head-nopbr' ? ['pbroff=1'] : [])];
+            const params = [
+              ...(name === 'head-noinst' ? ['inst=0'] : []),
+              ...(values.pbr ? ['pbr=1'] : []),
+              ...(name === 'head-nopbr' ? ['pbroff=1'] : []),
+              ...(name === 'head-nocull' ? ['cull=0'] : []),
+              // 0.51.0 나눠 올리기 걸음 몫 함수(STEP 59차 꼴)·다시 그리기 간격
+              ...(name.startsWith('head-step') ? ['up=step'] : []),
+              ...(name === 'head-step-r250' ? ['redraw=250'] : name === 'head-step-once' ? ['redraw=inf'] : []),
+            ];
             const qs = params.length ? `?${params.join('&')}` : '';
             await browser.send('Page.navigate', { url: `http://127.0.0.1:${p}/${dir}/many.html${qs}` });
             let ready = false;
@@ -154,12 +227,50 @@ async function main() {
             log(`${backend} ${name} ${r + 1}/${rounds}: 처음 열기…`);
             const o = await browser.evaluate(`bench.open(${JSON.stringify(spec)}, ${budget})`, 900_000);
             log(`  다 올림 ${o.doneMs.toFixed(0)} ms, 프레임 ${o.frames}, 프레임 JS 합 ${o.drawSumMs.toFixed(0)} ms`);
-            const st = await browser.evaluate(`bench.steady(${reps}, ${JSON.stringify(modes)})`, 900_000);
             res.renderer = o.renderer;
             res.meshes = o.meshes;
             res.triangles = o.triangles;
-            const v = (res.variants[name] ??= { open: [], steady: {} });
+            const v = (res.variants[name] ??= { open: [], steady: {}, parts: {} });
             v.open.push(o);
+            // 0.51.0 --hash: 모드마다 그림 해시(판끼리 같은 그림인지 — 기계 GPU에서도)
+            if (values.hash) {
+              const hs = await browser.evaluate(`bench.hashes(${JSON.stringify(modes)})`, 900_000);
+              (v.hashes ??= []).push(hs);
+            }
+            // 0.51.0 --open-only: 처음 열기만(나눠 올리기 걸음 견주기)
+            if (values['open-only']) continue;
+            if (values.profile) {
+              // 0.51.0 CPU 프로필(모드마다 reps × 2번 그리기 — 함수별 자기 시간 위 20)
+              for (const mode of modes) {
+                await browser.evaluate(`bench.prep(${JSON.stringify(mode)})`, 900_000);
+                await browser.send('Profiler.enable');
+                await browser.send('Profiler.setSamplingInterval', { interval: 200 });
+                await browser.send('Profiler.start');
+                const t0 = Date.now();
+                await browser.evaluate(`bench.spin(${reps * 2})`, 900_000);
+                const wall = Date.now() - t0;
+                const { profile } = await browser.send('Profiler.stop', {}, 300_000);
+                (v.profile ??= {})[mode] = { frames: reps * 2, wall, top: topSelf(profile, 20) };
+              }
+            }
+            if (values.parts) {
+              // 0.51.0 프레임 비용 나누기
+              const pr = await browser.evaluate(`bench.parts(${reps}, ${JSON.stringify(modes)})`, 1_800_000);
+              for (const row of pr) {
+                const s = (v.parts[row.mode] ??= { js: [], total: [], render: [], stub: {}, calls: [], drawCalls: [], culled: [], pickFirst: [], pick: [] });
+                s.js.push(...row.js);
+                s.total.push(...row.total);
+                s.render.push(...row.render);
+                for (const [k, a] of Object.entries(row.stub)) (s.stub[k] ??= []).push(...a);
+                s.calls.push(row.calls);
+                if (!s.drawCalls.includes(row.drawCalls)) s.drawCalls.push(row.drawCalls);
+                if (!s.culled.includes(row.culled)) s.culled.push(row.culled);
+                s.pickFirst.push(row.pickFirst);
+                s.pick.push(...row.pick);
+              }
+              continue;
+            }
+            const st = await browser.evaluate(`bench.steady(${reps}, ${JSON.stringify(modes)})`, 900_000);
             for (const row of st) {
               const s = (v.steady[row.mode] ??= { js: [], total: [], drawCalls: [], glCalls: [] });
               s.js.push(...row.js);
@@ -179,14 +290,18 @@ async function main() {
   }
   rmSync(buildDir, { recursive: true, force: true });
   const md = results.map(manyTable).join('\n');
-  writeFileSync(join(out, 'summary.json'), `${JSON.stringify({ done: true, tool: 'scripts/bench/many.mjs', at: new Date().toISOString(), base: baseCommit, size, spec, budget, cpu, rounds, reps, modes, pbr: !!values.pbr, results }, null, 1)}\n`);
+  writeFileSync(join(out, 'summary.json'), `${JSON.stringify({ done: true, tool: 'scripts/bench/many.mjs', at: new Date().toISOString(), base: baseCommit, size, spec, budget, cpu, rounds, reps, modes, pbr: !!values.pbr, parts: !!values.parts, results }, null, 1)}\n`);
   writeFileSync(join(out, 'summary.md'), md);
   console.log(md);
   console.log(`결과: ${out}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
-  main().catch((e) => {
-    console.error(`[bench] 오류: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
-    process.exit(2);
-  });
+  main().then(
+    // 0.51.0: 결과를 다 쓴 뒤에는 바로 끝낸다(묶기 서비스·남은 연결이 이벤트 고리를 붙잡아 끝나지 않은 적이 있다)
+    () => process.exit(0),
+    (e) => {
+      console.error(`[bench] 오류: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+      process.exit(2);
+    },
+  );
