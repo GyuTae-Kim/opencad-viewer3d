@@ -62,6 +62,7 @@ import {
   withDefines,
 } from './shaders';
 import { AO_MAX_PIXELS, type AoParams, aoSize } from './ao';
+import { segmentFix, triangleFix } from './sceneissues';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { contrastLineColor } from './theme';
 import { type BufferSink, type BufferTarget, CHUNK_BYTES, CHUNK_MIN_BYTES, ChunkedUpload, type UploadArray, newArrays } from './upload';
@@ -531,6 +532,8 @@ interface MeshRec {
   vao: WebGLVertexArrayObject;
   count: number;
   indexed: boolean;
+  /** 0.50.0 깨진 삼각형을 넓이 0으로 바꾼 색인 사본(sceneissues.triangleFix — 그릴 때·와이어·구간 모으기에 src.indices 대신). 멀쩡하면 null */
+  tri: Uint32Array | null;
   hasNormals: boolean;
   hasColors: boolean;
   /** 무늬 좌표 정점당 값 수(0 = 무늬 없음) */
@@ -689,6 +692,8 @@ export class Renderer3d {
   private profileP: Prog | null = null;
   /** 0.49.0 주변 가림: 반 해상도 R8 그림 둘(가림 → 가로 흐림 → 세로 흐림 — 번갈아)과 그 프로그램 셋(처음 켤 때 만든다) */
   private aoTex: { a: { tex: WebGLTexture; fb: WebGLFramebuffer }; b: { tex: WebGLTexture; fb: WebGLFramebuffer }; w: number; h: number } | null = null;
+  /** 0.50.0 움직이는 동안 'low'의 ¼ 해상도 그림 둘(반 해상도 그림과 따로 둔다 — 움직임을 시작·멈출 때마다 다시 만들지 않게) */
+  private aoLow: Renderer3d['aoTex'] = null;
   private aoFailed = '';
   private aoP: Prog | null = null;
   private aoBlurP: Prog | null = null;
@@ -869,6 +874,7 @@ export class Renderer3d {
     this.profCol = null;
     this.profileP = null;
     this.aoTex = null;
+    this.aoLow = null;
     this.aoFailed = '';
     this.aoP = null;
     this.aoBlurP = null;
@@ -1120,13 +1126,17 @@ export class Renderer3d {
     this.profTex = null;
   }
 
-  /** 0.49.0 주변 가림 반 해상도 그림 둘(크기가 바뀌면 다시 만든다). 만들지 못하면 null(그 크기는 다시 시도하지 않는다 — 가림 없이 그린다) */
-  private aoTargets(w: number, h: number): NonNullable<Renderer3d['aoTex']> | null {
-    const [hw, hh] = aoSize(w, h);
-    const t = this.aoTex;
+  /**
+   * 0.49.0 주변 가림 반 해상도 그림 둘(크기가 바뀌면 다시 만든다). 만들지 못하면 null(그 크기는 다시 시도하지 않는다 — 가림 없이 그린다).
+   * 0.50.0 div 4(움직이는 동안 'low')는 ¼ 해상도 그림 둘을 따로 둔다
+   */
+  private aoTargets(w: number, h: number, div = 2): NonNullable<Renderer3d['aoTex']> | null {
+    const low = div !== 2;
+    const [hw, hh] = aoSize(w, h, div);
+    const t = low ? this.aoLow : this.aoTex;
     if (t && t.w === hw && t.h === hh) return t;
-    this.dropAo();
-    if (this.aoFailed === `${hw}x${hh}`) return null;
+    this.dropAo(low);
+    if (this.aoFailed === `${low ? 'low:' : ''}${hw}x${hh}`) return null;
     const gl = this.gl;
     const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     const made: { tex: WebGLTexture; fb: WebGLFramebuffer }[] = [];
@@ -1152,21 +1162,27 @@ export class Renderer3d {
         gl.deleteFramebuffer(m.fb);
         gl.deleteTexture(m.tex);
       }
-      this.aoFailed = `${hw}x${hh}`;
+      this.aoFailed = `${low ? 'low:' : ''}${hw}x${hh}`;
       return null;
     }
-    this.aoTex = { a: made[0]!, b: made[1]!, w: hw, h: hh };
-    return this.aoTex;
+    const rec = { a: made[0]!, b: made[1]!, w: hw, h: hh };
+    if (low) this.aoLow = rec;
+    else this.aoTex = rec;
+    return rec;
   }
 
-  private dropAo(): void {
-    const t = this.aoTex;
-    if (!t) return;
-    for (const m of [t.a, t.b]) {
-      this.gl.deleteFramebuffer(m.fb);
-      this.gl.deleteTexture(m.tex);
+  /** 가림 그림을 놓는다: low를 주면 그 하나(false = 반 해상도, true = ¼), 없으면 둘 다 */
+  private dropAo(low?: boolean): void {
+    for (const k of low === undefined ? ([false, true] as const) : [low]) {
+      const t = k ? this.aoLow : this.aoTex;
+      if (!t) continue;
+      for (const m of [t.a, t.b]) {
+        this.gl.deleteFramebuffer(m.fb);
+        this.gl.deleteTexture(m.tex);
+      }
+      if (k) this.aoLow = null;
+      else this.aoTex = null;
     }
-    this.aoTex = null;
   }
 
   /**
@@ -1175,7 +1191,7 @@ export class Renderer3d {
    */
   private drawAo(f: ViewFrame, devW: number, devH: number, ao: AoParams, target: WebGLFramebuffer | null, transparent: boolean, stats: RenderStats): boolean {
     const gl = this.gl;
-    const t = this.aoTargets(devW, devH);
+    const t = this.aoTargets(devW, devH, ao.div ?? 2);
     const inv = mat4Invert(f.proj);
     if (!t || !this.profTex || !inv) return false;
     const invProj = Float32Array.from(inv);
@@ -1779,19 +1795,22 @@ export class Renderer3d {
     if (kind === 'line') {
       const l = item as LineSet3d;
       const n = Math.floor(l.positions.length / 6);
-      return [A(l.positions, 'lines'), A(l.colors && l.colors.length >= n * 8 && l.colors, 'lineColors')];
+      // 0.50.0: 깨진 끝점 선분을 NaN으로 바꾼 사본(lineRec와 같은 배열)
+      return [A(segmentFix(l.positions).fix ?? l.positions, 'lines'), A(l.colors && l.colors.length >= n * 8 && l.colors, 'lineColors')];
     }
     const m = item as Mesh3d;
     const nv = Math.floor(m.positions.length / 3);
     const buvs = m.backTexture ? (m.backUvs ?? m.uvs) : undefined;
+    // 0.50.0: 깨진 삼각형을 넓이 0으로 바꾼 색인 사본(meshRec와 같은 배열)
+    const I = triangleFix(m.positions, m.indices)?.indices ?? m.indices;
     return [
       A(m.positions, 'positions'),
       A(!!m.normals && !!normalFormat(m.normals, nv) && m.normals, 'normals'),
       A(!!m.colors && m.colors.length >= nv * 4 && m.colors, 'colors'),
       A(!!uvComponents(m) && (!!m.texture || pbrNeedsUv(m)) && m.uvs, 'uvs'),
       A(!!buvs && !!uvComponents(m, buvs) && buvs, 'backUvs'),
-      m.indices ? { data: m.indices, target: 'element', part: 'indices' } : null,
-      A(hasMeshEdges(m) && m.edges, 'edges'),
+      I ? { data: I, target: 'element', part: 'indices' } : null,
+      A(hasMeshEdges(m) && (segmentFix(m.edges!).fix ?? m.edges), 'edges'),
     ];
   }
 
@@ -2026,7 +2045,7 @@ export class Renderer3d {
     const rec = this.sceneMeshRec(m, { from: old, keep: o.keep, give: o.give });
     if (old) {
       const w = old.wire;
-      if (w && old.src.indices === m.indices && old.count === rec.count && old.indexed === rec.indexed) {
+      if (w && old.src.indices === m.indices && old.tri === rec.tri && old.count === rec.count && old.indexed === rec.indexed) {
         const gl = this.gl;
         gl.bindVertexArray(w.vao);
         gl.bindBuffer(gl.ARRAY_BUFFER, rec.attrs.pos);
@@ -2307,13 +2326,18 @@ export class Renderer3d {
     const hasNormals = !!attrs.nrm;
     const hasColors = !!attrs.col;
     let count: number;
-    const indexed = !!m.indices;
+    // 0.50.0: 정점 수 밖 색인(0xffffffff — WebGL2는 늘 도형 다시 시작으로 읽는다)이나 깨진 정점(NaN·무한대·한도 밖)을 쓰는 삼각형은 넓이 0으로 바꾼 색인 사본을 올린다
+    // (색인 없는 그물이면 0, 1, 2… 사본 — 삼각형 번호는 그대로). 멀쩡한 그물은 null(0.49.0과 같은 버퍼)
+    const tri = triangleFix(m.positions, m.indices)?.indices ?? null;
+    const I = tri ?? m.indices;
+    const indexed = !!I;
     let elem: WebGLBuffer | null = null;
-    if (m.indices) {
-      elem = this.elemBuf(m.indices, 'indices');
+    if (I) {
+      elem = this.elemBuf(I, 'indices');
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elem);
-      slots[5] = { key: this.keyOf(m.indices), target: 'element', stride: 0 };
-      count = m.indices.length - (m.indices.length % 3);
+      slots[5] = { key: this.keyOf(I), target: 'element', stride: 0 };
+      // 0.50.0: 정점이 하나도 없으면(빈 positions에 색인만) 그리지 않는다 — 넓이 0 삼각형도 가리킬 정점이 없다
+      count = nv > 0 ? I.length - (I.length % 3) : 0;
     } else count = nv - (nv % 3);
     gl.bindVertexArray(null);
     const uv = m.texture && this.texSrc.has(m.texture) ? attrs.uvN : 0;
@@ -2329,7 +2353,8 @@ export class Renderer3d {
         }
     }
     const edges = hasMeshEdges(m) ? this.lineRec(m.id, m.group, m.edges!, undefined, 'edges') : null;
-    if (edges) slots[6] = { key: this.keyOf(m.edges!), target: 'array', stride: 0 };
+    // 0.50.0: 윤곽선 버퍼는 깨진 끝점 선분을 NaN으로 바꾼 사본일 수 있다(lineRec — segmentFix)
+    if (edges) slots[6] = { key: this.keyOf(segmentFix(m.edges!).fix ?? m.edges!), target: 'array', stride: 0 };
     const box = meshBounds(m);
     // 뒷면 색·무늬(없으면 null — 예전 그대로)
     const buv = m.backTexture && this.texSrc.has(m.backTexture) ? attrs.buvN : 0;
@@ -2355,6 +2380,7 @@ export class Renderer3d {
       vao,
       count,
       indexed,
+      tri,
       hasNormals,
       hasColors,
       uv,
@@ -2378,7 +2404,8 @@ export class Renderer3d {
   private lineRec(id: string, group: string | undefined, positions: Float32Array, colors: Float32Array | undefined, part: GpuBufferPart): LineRec {
     const gl = this.gl;
     const n = Math.floor(positions.length / 6);
-    const pos = this.arrayBuf(positions, part);
+    // 0.50.0: 끝점이 NaN·무한대·한도 밖인 선분은 여섯 값을 NaN으로 바꾼 사본을 올린다(그리지 않는다 — 한도 밖 유한한 끝점은 화면을 가로질렀다). 멀쩡하면 그 배열 그대로
+    const pos = this.arrayBuf(segmentFix(positions).fix ?? positions, part);
     const col = colors && colors.length >= n * 8 ? this.arrayBuf(colors, 'lineColors') : null;
     const wide = this.vao();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadWide);
@@ -2613,7 +2640,8 @@ export class Renderer3d {
     const m = r.src;
     const tris = r.count / 3;
     const idx = new Uint32Array(tris * 6);
-    const I = m.indices;
+    // 0.50.0: 깨진 삼각형을 넓이 0으로 바꾼 색인(있으면 — 그 변은 길이 0이라 그리지 않는다)
+    const I = r.tri ?? m.indices;
     // 삼각형마다 작은 배열을 만들지 않고 바로 채운다(삼각형 수백만 개에서 쓰레기 수집이 길어지지 않게)
     for (let t = 0, o = 0; t < tris; t++, o += 6) {
       const a = I ? I[t * 3]! : t * 3;
@@ -3021,12 +3049,13 @@ export class Renderer3d {
     const key = `${wire ? 'w' : 'f'}${hi ? 'h' : 'n'}${cut ?? ''}`;
     let l = c.lists.get(key);
     if (l) return l;
-    const runs = partsOf(parts, hi, cut);
+    // 0.50.0: 이 그물의 삼각형 수로 자른다(같은 id가 둘인 장면은 구간이 다른 항목의 수로 정해져 색인 버퍼 밖을 그렸다 — GL 오류)
+    const runs = clipRanges(partsOf(parts, hi, cut), 0, Math.floor(r.count / 3));
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (runs.length > RUN_LIMIT && total > 0) {
       const gl = this.gl;
-      const idx = compactTriIndices(r.src.indices, runs, wire);
+      const idx = compactTriIndices(r.tri ?? r.src.indices, runs, wire);
       const vao = gl.createVertexArray()!;
       gl.bindVertexArray(vao);
       if (wire) {
@@ -3050,11 +3079,12 @@ export class Renderer3d {
     const key = `${hi ? 'h' : 'n'}${cut ?? ''}`;
     let l = c.lists.get(key);
     if (l) return l;
-    const runs = partsOf(parts, hi, cut);
+    // 0.50.0: 이 묶음의 선분 수로 자른다(meshList와 같다)
+    const runs = clipRanges(partsOf(parts, hi, cut), 0, rec.n);
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (runs.length > RUN_LIMIT && total > 0) {
-      const cr = this.dynLines(`${rec.id}__part`, compactStride(positions, runs, 6), null, rec.col && colors ? compactStride(colors, runs, 8) : null, 'ranges');
+      const cr = this.dynLines(`${rec.id}__part`, compactStride(segmentFix(positions).fix ?? positions, runs, 6), null, rec.col && colors ? compactStride(colors, runs, 8) : null, 'ranges');
       if (cr) {
         c.vaos.push(cr.wide, cr.thin);
         c.bufs.push(cr.pos);
@@ -3072,7 +3102,8 @@ export class Renderer3d {
     const key = `${hi ? 'h' : 'n'}${cut ?? ''}`;
     let l = c.lists.get(key);
     if (l) return l;
-    const runs = partsOf(parts, hi, cut);
+    // 0.50.0: 이 묶음의 점 수로 자른다(meshList와 같다)
+    const runs = clipRanges(partsOf(parts, hi, cut), 0, r.n);
     const total = rangesTotal(runs);
     let compact: DrawList['compact'] = null;
     if (total > 0) {
@@ -3705,7 +3736,9 @@ export class Renderer3d {
     } else if (this.shadowMap) this.dropShadow();
     // 0.49.0 주변 가림: 음영 계열(숨은 선 빼고)에서만. 끄면 그 그림도 놓는다
     const aoOn = !!st.ao && shadedLike && mode !== 'hiddenLine';
-    if (!aoOn && this.aoTex) this.dropAo();
+    if (!aoOn && (this.aoTex || this.aoLow)) this.dropAo();
+    // 0.50.0 움직이는 동안 'off'(hold): 이 그림은 가림 없이 — 그림·깊이 버퍼는 놓지 않고 둔다(멈추면 다시 쓴다)
+    const aoDraw = aoOn && !st.ao!.hold;
     // 외곽선을 끄면 깊이 그림 버퍼도 놓는다(0.49.0 주변 가림이 쓰는 동안은 둔다)
     if (!st.profiles && !aoOn && this.profTex) this.dropProfile();
 
@@ -3835,7 +3868,7 @@ export class Renderer3d {
     // 1d) 0.49.0 주변 가림: 불투명 그물 깊이(외곽선과 같은 깊이 그림 — 아래 2c가 다시 쓴다)에서 셈해 지금 그림에 곱한다.
     // 선·점·격자·반투명 면은 이 뒤에 그려 가리지 않는다. 깊이를 그리는 그리기 수·삼각형·인스턴싱 셈은 늘리지 않는다(2c와 같다)
     let depthDone = false;
-    if (aoOn && st.ao && visibleMeshes.some((r) => !transOf(r))) {
+    if (aoDraw && st.ao && visibleMeshes.some((r) => !transOf(r))) {
       const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
       const fb = this.profileTarget(devW, devH);
       if (fb) {

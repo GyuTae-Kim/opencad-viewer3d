@@ -14,7 +14,7 @@
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
-import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, sceneBounds, transformBox, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, okCoord, sceneBounds, transformBox, unionBox } from './bounds';
 import { type CutRanges, type IndexRange, type RangePart, cutBits, cutMaskAt, cutParts, cutRuns, mergeRanges, partCuts, partitionRanges, rangeTester } from './ranges';
 import { type Bvh, type PrimKind, buildBvh, primCount as bvhPrimCount } from './bvh';
 import {
@@ -193,6 +193,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { type AmbientOcclusionOptions, aoParams } from './ao';
+import { type SceneIssue, boundsOk, checkMesh, checkScene } from './sceneissues';
 import { countIdsUpTo } from './playback';
 import { type AnimateSetting, CAMERA_MOVE_MS, type FlyToOptions, moveDuration, normalizeAnimate, resolveAnimate, watchReducedMotion } from './motion';
 import { DRAG_START_PX, type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
@@ -1501,6 +1502,16 @@ interface RangeState {
 }
 
 /** 쓸 수 있는 마주 보기 설정인지(origin이 수 셋 이상 — 배열·형식 배열 모두) */
+/** 0.50.0 탭(문서)이 숨었는지 — 브라우저가 requestAnimationFrame을 멈춘다 */
+function docHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+/** 0.50.0 앱이 준 점이 유한한 수 셋(한도 COORD_LIMIT 안)인지 */
+function okPoint3(p: readonly number[] | ArrayLike<number> | null | undefined): boolean {
+  return !!p && p.length >= 3 && okCoord(p[0]!) && okCoord(p[1]!) && okCoord(p[2]!);
+}
+
 function hasBillboard(m: Mesh3d): boolean {
   const o = m.billboard?.origin as ArrayLike<number> | undefined;
   return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
@@ -1683,6 +1694,10 @@ export class Viewer3d {
   private bvhTimer = 0;
   /** 쉬는 틈에 만들 BVH 일(작은 것부터) */
   private bvhTasks: { n: number; run: () => void }[] = [];
+  /** 0.50.0 bvhTasks에서 이미 한 일 수(앞 자리 번호 — shift 대신) */
+  private bvhHead = 0;
+  /** 0.50.0 문서 visibilitychange를 듣는지(움직임을 처음 시작할 때 건다 — listenHidden) */
+  private hiddenOn = false;
   /** 그물마다 단면 교선(로컬 좌표) — 평면·숨긴 구간이 같으면 다시 쓴다(0.11.0: 그물 하나를 바꿔도 다른 그물은 다시 자르지 않는다) */
   private cutCache = new WeakMap<Mesh3d, { plane: Plane4; test: ((i: number) => boolean) | null | undefined; segs: Float32Array }[]>();
   /** 그물 바꾸기 나눠 올리기의 프레임 몫(ms, setMesh의 incremental.budgetMs) */
@@ -1906,6 +1921,9 @@ export class Viewer3d {
   private measureCbs = new Set<(m: MeasureResult | null) => void>();
   private camCbs = new Set<(c: CameraState) => void>();
   private lastCamKey = '';
+  /** 0.50.0 지금 장면의 입력 알림(sceneIssues)과 듣는 함수(onSceneIssues) */
+  private issues: SceneIssue[] = [];
+  private issueCbs = new Set<(issues: readonly SceneIssue[]) => void>();
 
   private ro: ResizeObserver;
   private hostPos: string | null = null;
@@ -2055,6 +2073,11 @@ export class Viewer3d {
   ): void {
     if (this.disposed) return;
     const hadSection = !!this.sec;
+    // 0.50.0 입력 검사: 놓을 자리를 모르는 항목(유한하지 않은 원점·행렬)은 빼고, 깨진 색·굵기·크기·재질 값·정점 색은 고친 얕은 사본으로(배열은 같은 객체).
+    // 고칠 것이 없으면 받은 장면 객체 그대로다. 깨진 좌표·색인은 범위에서 건너뛰고(bounds) 그리기 사본을 올린다(renderer — triangleFix·segmentFix)
+    const chk = checkScene(scene);
+    scene = chk.scene;
+    this.issues = chk.issues;
     this.sceneRef = scene;
     this.releaseOpt = releaseFlags(opts.release);
     this.rebuildItems();
@@ -2094,7 +2117,8 @@ export class Viewer3d {
     // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
-    this.allBox = scene.bounds && !boxIsEmpty(scene.bounds) ? scene.bounds : sceneBounds(scene);
+    // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(0.49.0은 무한 범위에서 격자를 만들다 예외를 냈다)
+    this.allBox = boundsOk(scene.bounds) ? scene.bounds! : sceneBounds(scene);
     this.visBox = null;
     this.rebuildGrid();
     if (!opts.keepView) {
@@ -2109,6 +2133,30 @@ export class Viewer3d {
     this.invalidate();
     // 0.29.0: 되찾은 뒤 다시 올리는 중에 새 장면을 주면 그 장면을 다 올렸을 때 끝 알림
     this.checkRestoreDone();
+    this.emitIssues(chk.issues);
+  }
+
+  /**
+   * 0.50.0 지금 장면의 입력 알림(setScene이 새로 만들고 setMesh·removeMesh가 그 그물 것을 바꾼다, clear·dispose면 빈 배열).
+   * 앱이 깨진 파일에서 만든 값(NaN·무한대·1e15 넘는 좌표, 정점 수 밖 색인, 길이가 맞지 않는 배열, 유한하지 않은 색·원점·행렬·굵기 등)을 코어가 어떻게 했는지
+   * (빼고 그림·고쳐 그림·쓰지 않음 — SceneIssue.action) 항목마다 하나씩 적는다. 멀쩡한 장면은 빈 배열이다. 글은 sceneIssueText(SCENE_ISSUE_MESSAGES)
+   */
+  get sceneIssues(): readonly SceneIssue[] {
+    return this.issues;
+  }
+
+  /**
+   * 0.50.0 입력 알림 듣기: setScene·setMesh가 깨진 값을 찾으면 그 호출이 끝나기 전에(동기) 그 호출이 찾은 알림으로 부른다(멀쩡하면 부르지 않는다).
+   * 돌려준 함수로 그만 듣는다
+   */
+  onSceneIssues(cb: (issues: readonly SceneIssue[]) => void): () => void {
+    this.issueCbs.add(cb);
+    return () => this.issueCbs.delete(cb);
+  }
+
+  private emitIssues(list: readonly SceneIssue[]): void {
+    if (!list.length) return;
+    for (const cb of [...this.issueCbs]) cb(list);
   }
 
   /** 장면 비우기(단면도 끈다) */
@@ -2122,6 +2170,7 @@ export class Viewer3d {
     this.releaseOpt = null;
     this.texReset();
     this.sceneRef = null;
+    this.issues = [];
     this.items.clear();
     this.bbList = [];
     this.hi.clear();
@@ -2147,6 +2196,7 @@ export class Viewer3d {
     this.wheelAnchor = null;
     this.bvhGen++;
     this.bvhTasks = [];
+    this.bvhHead = 0;
     clearTimeout(this.bvhTimer);
     if (this.gpu) this.renderer.clear();
     this.allBox = emptyBox();
@@ -2200,6 +2250,15 @@ export class Viewer3d {
         }
       }
     }
+    // 0.50.0 입력 검사(setScene과 같다): 놓을 자리를 모르는 그물(유한하지 않은 원점·행렬)은 넣지 않고 false(앞 그물·알림은 그대로), 깨진 필드는 고친 얕은 사본으로
+    const found: SceneIssue[] = [];
+    const fixed = checkMesh(mesh, found);
+    if (!fixed) {
+      this.emitIssues(found);
+      return false;
+    }
+    mesh = fixed;
+    this.issues = [...this.issues.filter((i) => i.id !== mesh.id || i.kind !== 'mesh'), ...found];
     if (prev) {
       this.boxes.delete(prev);
       this.models.delete(prev);
@@ -2243,6 +2302,7 @@ export class Viewer3d {
     this.queueBvh(mesh);
     // 0.29.0: 다시 받을 그물을 새 배열로 바꿨으면 되찾은 뒤 끝일 수 있다
     this.checkRestoreDone();
+    this.emitIssues(found);
     return true;
   }
 
@@ -2258,6 +2318,8 @@ export class Viewer3d {
     const m = it.item;
     this.sceneRef = { ...s, meshes: s.meshes.filter((x) => x !== m) };
     this.items.delete(id);
+    // 0.50.0: 뺀 그물의 입력 알림도 뺀다
+    if (this.issues.length) this.issues = this.issues.filter((i) => i.id !== id || i.kind !== 'mesh');
     this.rangeSel.delete(id);
     this.looks.delete(id);
     this.lookMoved.delete(id);
@@ -2495,7 +2557,8 @@ export class Viewer3d {
     this.visBox = null;
     this.cutDirty = true;
     this.shadowVer++;
-    const box = s.bounds && !boxIsEmpty(s.bounds) ? s.bounds : sceneBounds(s);
+    // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(빈 상자·뒤집힌 상자는 0.49.0도 다시 셌다)
+    const box = boundsOk(s.bounds) ? s.bounds! : sceneBounds(s);
     const moved = !sameBox(box, this.allBox);
     this.allBox = box;
     if (moved || hadOrigin !== this.usesOrigin) this.rebuildGrid();
@@ -2532,6 +2595,8 @@ export class Viewer3d {
     this.upload = null;
     this.measureCbs.clear();
     this.camCbs.clear();
+    this.issueCbs.clear();
+    this.issues = [];
     this.restoreCbs.clear();
     this.lostCbs.clear();
     this.restoreDoneCbs.clear();
@@ -2560,6 +2625,7 @@ export class Viewer3d {
     this.models = new WeakMap();
     this.cutCache = new WeakMap();
     this.bvhTasks = [];
+    this.bvhHead = 0;
     this.visLists = null;
     // 0.49.0: 옮기던 움직임의 Promise는 false로 푼다(앱이 기다리던 끝 알림이 남지 않게)
     this.dropAnim();
@@ -2821,7 +2887,8 @@ export class Viewer3d {
   /**
    * 0.49.0 주변 가림(SSAO, 기본 꺼짐 — SKP 45차 요청): 면이 만나는 구석·틈을 어둡게 해 깊이를 읽기 쉽게 한다. 음영 계열 모드(음영·음영+윤곽·단색·무늬 없음)의 불투명 면만,
    * 선·점·격자·반투명 면은 그대로. radius = 가림을 보는 거리(세계 단위, 기본 보이는 범위 대각선의 2%), intensity = 세기(기본 1, 0~4 — 0이면 끔).
-   * true·{}면 기본 값, null·false면 끈다(끄면 그림·GL 호출이 0.48.0과 같다). 반 해상도로 셈하고 흐려 장치 화소에 곱한다(src/ao.ts)
+   * true·{}면 기본 값, null·false면 끈다(끄면 그림·GL 호출이 0.48.0과 같다). 반 해상도로 셈하고 흐려 장치 화소에 곱한다(src/ao.ts).
+   * 0.50.0 moving: 카메라를 옮기는 동안 'off'(가림 없이 — 멈춘 첫 그림부터 다시)·'low'(¼ 해상도). 기본 'keep'은 0.49.0과 같다
    */
   setAmbientOcclusion(o: AmbientOcclusionOptions | boolean | null): void {
     this.aoOpt = !o ? null : o === true ? {} : { ...o };
@@ -3232,7 +3299,8 @@ export class Viewer3d {
 
   /** 공구 위치 표시(null이면 지움). kind: 'cone'(기본)·'cylinder'·'ball' */
   setMarker(pos: readonly number[] | null, kind: MarkerKind = 'cone', opts: MarkerOptions = {}): void {
-    this.marker = pos ? { pos: [pos[0]!, pos[1]!, pos[2]!], kind, opts } : null;
+    // 0.50.0: 유한한 수 셋(한도 안)이 아닌 자리는 null과 같다(0.49.0은 NaN 행렬로 그려 보이지 않았다)
+    this.marker = pos && okPoint3(pos) ? { pos: [pos[0]!, pos[1]!, pos[2]!], kind, opts } : null;
     this.invalidate();
   }
 
@@ -4031,7 +4099,8 @@ export class Viewer3d {
       let n = 0;
       for (const sp of pts) {
         const q = sp.point;
-        if (!q || !Number.isFinite(q[0]) || !Number.isFinite(q[1]) || !Number.isFinite(q[2])) continue;
+        // 유한하지 않은 점은 0.8.0부터 건너뛴다 — 0.50.0: 좌표 한도(COORD_LIMIT) 밖 점도(색인 가운데가 그 점으로 쏠려 다른 점의 정밀도를 잃는다)
+        if (!q || !okPoint3(q)) continue;
         xyz[n * 3] = q[0]!;
         xyz[n * 3 + 1] = q[1]!;
         xyz[n * 3 + 2] = q[2]!;
@@ -4911,7 +4980,9 @@ export class Viewer3d {
   setItemColor(id: string, color: Rgba | string | null): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
-    if (color === null) delete l.color;
+    // 0.50.0: 유한하지 않은 값이 든 색 배열은 null(되돌림)과 같다(0.49.0은 그 색으로 그려 검게 보였다)
+    const bad = typeof color !== 'string' && color !== null && ![color[0], color[1], color[2], color[3] ?? 1].every((x) => Number.isFinite(x));
+    if (color === null || bad) delete l.color;
     else l.color = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
@@ -5518,7 +5589,9 @@ export class Viewer3d {
     if (this.disposed) return Promise.resolve(false);
     this.wheelAnchor = null;
     this.dropAnim();
-    if (animate && ms > 0) {
+    // 0.50.0: 탭이 숨었거나(브라우저가 그림을 멈춘다) 문맥을 잃은 동안은 움직이지 않고 바로 끝 자리로 옮긴다(곧바로 true — 0.49.0은 보일 때까지 풀리지 않았다)
+    if (animate && ms > 0 && !this.lost && !docHidden()) {
+      this.listenHidden();
       const from = this.getCamera();
       const p = new Promise<boolean>((done) => {
         this.anim = { from, to: c, t0: performance.now(), dur: ms, done };
@@ -5537,6 +5610,18 @@ export class Viewer3d {
     if (!a) return;
     this.anim = null;
     a.done(false);
+  }
+
+  /**
+   * 0.50.0 움직임을 처음 시작할 때 한 번 문서 visibilitychange를 듣는다(뷰어가 없어질 때까지): 탭이 숨으면 옮기던 움직임을 끝 자리로 마친다(true — 다시 보이면 그 자리를 그린다).
+   * 움직임을 쓰지 않는 뷰어는 듣지 않는다(0.49.0과 같은 듣기)
+   */
+  private listenHidden(): void {
+    if (this.hiddenOn || typeof document === 'undefined') return;
+    this.hiddenOn = true;
+    this.on(document, 'visibilitychange', () => {
+      if (docHidden()) this.finishAnim();
+    });
   }
 
   /** 옮기던 움직임을 끝 자리로 마친다(0.49.0 그 Promise는 true) */
@@ -5631,6 +5716,7 @@ export class Viewer3d {
   private scheduleBvh(): void {
     ++this.bvhGen;
     this.bvhTasks = [];
+    this.bvhHead = 0;
     const s = this.sceneRef;
     if (!s) {
       clearTimeout(this.bvhTimer);
@@ -5665,19 +5751,28 @@ export class Viewer3d {
   private runBvhTasks(): void {
     clearTimeout(this.bvhTimer);
     const gen = this.bvhGen;
+    // 0.50.0: 이미 한 일(앞 bvhHead개)을 떼어 낸 뒤 정렬한다 — 0.49.0이 shift로 앞에서 하나씩 뺀 줄과 같은 줄·같은 차례(정렬은 안정)
+    if (this.bvhHead) {
+      this.bvhTasks = this.bvhTasks.slice(this.bvhHead);
+      this.bvhHead = 0;
+    }
     const tasks = this.bvhTasks;
     tasks.sort((a, b) => a.n - b.n);
     const step = (): void => {
-      if (gen !== this.bvhGen || this.disposed) return;
+      if (gen !== this.bvhGen || this.disposed || tasks !== this.bvhTasks) return;
       // 끄는 중이면 미룬다
       if (this.drag || this.interacting) {
         this.bvhTimer = window.setTimeout(step, 120);
         return;
       }
-      // 한 틈에 약 10 ms어치(작은 것은 여러 개, 큰 것은 하나)
+      // 한 틈에 약 10 ms어치(작은 것은 여러 개, 큰 것은 하나). 0.50.0: 앞 자리 번호로 꺼낸다 — shift는 일이 많으면(부품 자리 8만 = 일 16만) 남은 줄을 매번 당겨 O(n²)였다
       const t0 = performance.now();
-      while (tasks.length && performance.now() - t0 < 10) tasks.shift()!.run();
-      if (tasks.length) this.bvhTimer = window.setTimeout(step, 16);
+      while (this.bvhHead < tasks.length && performance.now() - t0 < 10) tasks[this.bvhHead++]!.run();
+      if (this.bvhHead < tasks.length) this.bvhTimer = window.setTimeout(step, 16);
+      else {
+        tasks.length = 0;
+        this.bvhHead = 0;
+      }
     };
     this.bvhTimer = window.setTimeout(step, 200);
   }
@@ -7592,6 +7687,8 @@ export class Viewer3d {
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
+      // 0.50.0: 잃은 동안은 그리지 않으므로 옮기던 움직임은 끝 자리로 마친다(true — 되찾으면 그 자리를 그린다. 0.49.0은 되찾을 때까지 풀리지 않았다)
+      this.finishAnim();
       // 0.29.0: 되찾은 뒤 다시 올리기가 끝날 때까지(onContextRestoreDone·restorePending)
       if (!this.disposed) this.restoreWait = true;
       this.renderer.forget();
@@ -8162,7 +8259,8 @@ export class Viewer3d {
         : null,
       ...this.lineColorState(colors.background),
       // 0.49.0 주변 가림(끄면 필드를 넣지 않는다 — 0.48.0과 같은 상태). 기본 거리는 보이는 범위 대각선의 2%
-      ...(this.aoOpt ? { ao: aoParams(this.aoOpt, boxSphere(this.visibleBox()).radius * 2) } : {}),
+      // 0.50.0: 카메라를 옮기는 동안(끌기·휠·손가락 몸짓 — interacting, flyTo 등 움직임 — anim)이면 moving 선택('off'·'low')을 따른다(없거나 'keep'이면 0.49.0과 같은 값)
+      ...(this.aoOpt ? { ao: aoParams(this.aoOpt, boxSphere(this.visibleBox()).radius * 2, this.interacting || !!this.anim) } : {}),
     };
   }
 

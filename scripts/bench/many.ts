@@ -6,7 +6,8 @@
  *  - steady: 다 올린 뒤 모드마다 조금씩 돌려 renderNow JS 시간·GPU 마침(1화소 읽기)까지·그리기 호출 수·GL 호출 수
  *    (0.43.0 모드 꼬리: +section = x 가운데 단면 하나(채우기 없음), +shadows = 해 그림자.
  *    0.44.0: +items = 그 평면이 열째 자리마다(300곳) 그물 통째, +secrange = 같은 자리의 앞 절반 삼각형 구간만.
- *    0.49.0: +ao = 주변 가림(기본 값), 꼬리 여럿 잇기 — 예 shadedEdges+profiles+ao)
+ *    0.49.0: +ao = 주변 가림(기본 값), 꼬리 여럿 잇기 — 예 shadedEdges+profiles+ao.
+ *    0.50.0: +aolow = 주변 가림 moving 'low'에 카메라를 옮기는 중으로 둔 그림 — ¼ 해상도 가림)
  */
 import { checkerBmp } from '../../src/synth';
 import type { Mesh3d } from '../../src/types';
@@ -182,11 +183,13 @@ async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
   for (const mode of modes) {
     // 0.49.0: 꼬리를 여럿 이을 수 있다(예: shadedEdges+profiles+ao) — 단면·그림자·강조 갈래는 그 가운데 첫 것
     const [m, ...tails] = mode.split('+');
-    const opt = tails.find((t) => t !== 'profiles' && t !== 'ao');
+    const opt = tails.find((t) => t !== 'profiles' && t !== 'ao' && t !== 'aolow');
     v.setRenderMode(m as never);
     v.setRenderOptions({ profiles: tails.includes('profiles') ? { width: 1 } : null });
-    // 0.49.0 +ao = 주변 가림(기본 값 — 그 API가 없는 판은 무시한다)
-    (v as { setAmbientOcclusion?: (o: object | null) => void }).setAmbientOcclusion?.(tails.includes('ao') ? {} : null);
+    // 0.49.0 +ao = 주변 가림(기본 값 — 그 API가 없는 판은 무시한다).
+    // 0.50.0 +aolow = moving: 'low'를 켜고 카메라를 옮기는 중으로 둔 그림(¼ 해상도 가림 — 끌기 중 그림의 비용. 재는 동안만 뷰어 안 상태를 켠다)
+    (v as { setAmbientOcclusion?: (o: object | null) => void }).setAmbientOcclusion?.(tails.includes('ao') ? {} : tails.includes('aolow') ? { moving: 'low' } : null);
+    (v as unknown as { interacting: boolean }).interacting = tails.includes('aolow');
     if (opt === 'highlight') v.highlight(['자리 0-0', '자리 3-7']);
     else v.highlight(null);
     // 0.43.0: 단면 하나(채우기 없음 — 면 그리기만 견준다)·해 그림자

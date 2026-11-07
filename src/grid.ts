@@ -57,6 +57,9 @@ export interface GridLines {
   axisY: Float32Array;
 }
 
+/** 0.50.0 한 방향 격자 선 수 한도(gridSpec은 10칸 × 작은 칸 4~5 + 둘레라 백 남짓 — 이보다 많으면 범위가 깨진 것) */
+export const GRID_MAX_LINES = 4096;
+
 /** 격자 선분(xyz,xyz…). origin을 주면 그 점 기준 좌표로 낸다(세계 = origin + 값 — 큰 좌표에서 float32 정밀도를 지킨다) */
 export function gridLines(g: GridSpec, origin?: readonly number[] | null): GridLines {
   const major: number[] = [];
@@ -69,6 +72,11 @@ export function gridLines(g: GridSpec, origin?: readonly number[] | null): GridL
   const nx = Math.round((g.x1 - g.x0) / g.minorStep);
   const ny = Math.round((g.y1 - g.y0) / g.minorStep);
   const ratio = Math.round(g.step / g.minorStep);
+  // 0.50.0: 칸 수가 유한하지 않거나 터무니없이 많으면(유한하지 않은 범위·높이 — 0.49.0은 선분을 끝없이 쌓다 배열 길이 예외를 냈다) 격자 없이
+  if (!(nx >= 0 && nx <= GRID_MAX_LINES && ny >= 0 && ny <= GRID_MAX_LINES && ratio >= 1) || !Number.isFinite(g.z)) {
+    const none = new Float32Array(0);
+    return { major: none, minor: none, axisX: none, axisY: none };
+  }
   for (let i = 0; i <= nx; i++) {
     const x = g.x0 + i * g.minorStep;
     if (hasY && Math.abs(x) < eps) continue;
