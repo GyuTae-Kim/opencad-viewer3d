@@ -28,7 +28,8 @@ jobs:
     # 라벨을 붙이거나 떼면 다시 찍어 판정한다. 다른 라벨일 때 작업을 건너뛰면(skipped) PR 화면에서
     # 앞의 실패가 가려지므로 건너뛰지 않는다
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 장면·값이 늘어 판마다 두 번 찍기가 10분을 넘는다(장면 147개 — 한 번 175~188초, 네 번 약 12분). 비교 단계 25분 + 설치 몫
+    timeout-minutes: 35
     steps:
       # PR이면 GitHub가 만든 병합 커밋을 받는다: 첫 부모(HEAD^1) = PR이 들어갈 base, HEAD = 병합 결과
       - uses: actions/checkout@v5
@@ -43,7 +44,7 @@ jobs:
         run: google-chrome --version
       - name: 화소·값 비교(base = HEAD^1)
         id: pixels
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
           base=$(git rev-parse HEAD^1)
           set +e
