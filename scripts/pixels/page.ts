@@ -7975,6 +7975,128 @@ const secRangeSnapValues: ValueSet = {
   },
 };
 
+// ───────────── 0.46.0 키보드로 3D 붙잡기·고르기 ─────────────
+/**
+ * 0.46.0 키보드 붙잡기 값(head만 — 기존 base 장면을 다시 쓴다): 0.41.0 우선 묶음과 같은 붙잡기 선택(가운데 점·pointsFor·앱 점 둘·교차점·수직 발·축)으로
+ * - 화면 격자 90자리: 마우스 미리 보기 = 측정 후보 목록 첫째인지, 목록(종류·점), 목록을 구해도 미리 보기가 그대로인지, pointsFor 호출 수
+ * - 가상 커서(handleKey에 KeyboardEvent): 켜기(가운데) · Tab으로 한 바퀴 = 목록 차례 · Enter로 둘째 후보 찍기 = commitMeasureCandidate · 알림 글
+ * - 가상 커서 표식: 화면 덧그림에만(켠 때와 끈 때 다른 화소 수 > 0, 그림 저장은 같다)
+ */
+const keySnapValues: ValueSet = {
+  name: 'keysnap-values',
+  data: 'base',
+  needs: fn('setKeyboardSnap', 'measureCandidates', 'commitMeasureCandidate'),
+  run: async (c) => {
+    const { v, w, h } = c;
+    const calls = { n: 0 };
+    const base = pickPoints(c, calls);
+    const snap = {
+      midpoints: true,
+      pointsFor: (pick: any) => base(pick),
+      points: [
+        { point: c.world([60, 40, 40]), kind: 'center' },
+        { point: c.world([0, 0, 40]), kind: 'point', priority: 'low' },
+      ],
+      inference: { intersections: true, perpendicular: true, axes: true },
+    };
+    const one = (s: any): unknown => (s ? [s.snap, r10s(s.point), s.axis ?? null, s.locked ?? false] : null);
+    v.setRenderMode('shaded');
+    v.setMeasureMode(true);
+    v.setMeasureSnap(snap as any);
+    const vv = v as any;
+    // 화면 격자: 마우스 미리 보기 = 목록 첫째, 목록을 구한 뒤에도 미리 보기 그대로
+    let same = 0, kept = 0;
+    const lists: unknown[] = [];
+    const counts: Record<string, number> = {};
+    for (let j = 0; j < 9; j++)
+      for (let i = 0; i < 10; i++) {
+        const x = ((i + 0.5) * w) / 10, y = ((j + 0.5) * h) / 9;
+        c.hover(x, y);
+        v.renderNow();
+        const hv = JSON.stringify(one(v.measureHoverSnap));
+        const list = vv.measureCandidates(x, y) as any[];
+        if (JSON.stringify(one(list[0] ?? null)) === hv) same++;
+        if (JSON.stringify(one(v.measureHoverSnap)) === hv) kept++;
+        counts[String(list.length)] = (counts[String(list.length)] ?? 0) + 1;
+        lists.push(list.map(one));
+      }
+    const gridCalls = calls.n;
+    // 가상 커서
+    const said: string[] = [];
+    vv.setKeyboardSnap({ announce: (a: any) => said.push(`${a.reason}:${a.index}/${a.count}:${a.text}`) });
+    const key = (k: string, shiftKey = false): boolean => v.handleKey(new KeyboardEvent('keydown', { key: k, shiftKey, cancelable: true }));
+    // 가운데에서 켜고 앱 중심 점(상자 구석 (60, 40, 40)) 둘레까지 걸음으로 옮긴다(가로 → 세로)
+    const ok: boolean[] = [key('ArrowRight')];
+    const cx = w / 2, cy = h / 2;
+    const target = c.at(c.world([60, 40, 40]));
+    const steps: string[] = [];
+    if (target) {
+      for (let n = 0; n < 200 && Math.abs(vv.keyboardCursor.x - target.x) >= 5; n++) {
+        const k = vv.keyboardCursor.x < target.x ? 'ArrowRight' : 'ArrowLeft';
+        key(k);
+        steps.push(k);
+      }
+      for (let n = 0; n < 200 && Math.abs(vv.keyboardCursor.y - target.y) >= 5; n++) {
+        const k = vv.keyboardCursor.y < target.y ? 'ArrowDown' : 'ArrowUp';
+        key(k);
+        steps.push(k);
+      }
+    }
+    const cur = vv.keyboardCursor;
+    const list = (vv.measureCandidates(cur.x, cur.y) as any[]).map(one);
+    const tabbed: unknown[] = [one(v.measureHoverSnap)];
+    for (let i = 0; i < list.length; i++) {
+      ok.push(key('Tab'));
+      tabbed.push(one(v.measureHoverSnap));
+    }
+    ok.push(key('Tab', true));
+    const back = one(v.measureHoverSnap);
+    // 둘째 후보 찍기(차례 1로 돌린 뒤 Enter) = 같은 자리 commitMeasureCandidate(1)
+    const pickAt = Math.max(0, Math.min(1, list.length - 1));
+    for (let n = 0; n < list.length && vv.keyboardCursor.index !== pickAt; n++) key('Tab');
+    ok.push(key('Enter'));
+    const byKey = v.measurePoints.map((p: any) => [p.snap, r10s(p.point)]);
+    v.clearMeasure();
+    vv.commitMeasureCandidate(cur.x, cur.y, pickAt);
+    const byApi = v.measurePoints.map((p: any) => [p.snap, r10s(p.point)]);
+    v.clearMeasure();
+    // 표식: 화면 덧그림에만 — 커서를 끄고 같은 자리 마우스 미리 보기(같은 첫째 후보)와 견준다
+    v.renderNow();
+    const overlay = c.host.querySelector<HTMLCanvasElement>('canvas.v3d-overlay')!;
+    const screen = (): ImageData => overlay.getContext('2d')!.getImageData(0, 0, overlay.width, overlay.height);
+    const withCursor = screen();
+    const shotWith = await sha16(v.renderImage({}).data);
+    ok.push(key('Escape'));
+    c.hover(cur.x, cur.y);
+    v.renderNow();
+    const mouseSame = JSON.stringify(one(v.measureHoverSnap)) === JSON.stringify(list[0] ?? null);
+    const noCursor = screen();
+    const shotWithout = await sha16(v.renderImage({}).data);
+    v.setKeyboardSnap(null);
+    v.setMeasureSnap(null);
+    v.setMeasureMode(false);
+    return [
+      same,
+      kept,
+      counts,
+      gridCalls,
+      lists,
+      [Math.round(cx), Math.round(cy), steps.length, Math.round(cur.x), Math.round(cur.y)],
+      list,
+      JSON.stringify(tabbed.slice(0, list.length)) === JSON.stringify(list) && JSON.stringify(tabbed[list.length]) === JSON.stringify(list[0]),
+      JSON.stringify(back) === JSON.stringify(list[list.length - 1] ?? null),
+      byKey,
+      JSON.stringify(byKey) === JSON.stringify(byApi),
+      ok,
+      mouseSame,
+      pixelDiff(withCursor, noCursor)[0] > 0,
+      shotWith === shotWithout,
+      said.slice(0, 3),
+      said.at(-1),
+    ];
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8077,6 +8199,7 @@ const VALUES: ValueSet[] = [
   pbrValues,
   secRangeValues,
   secRangeSnapValues,
+  keySnapValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

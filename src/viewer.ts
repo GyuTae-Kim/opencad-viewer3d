@@ -173,7 +173,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
-import { type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
+import { DRAG_START_PX, type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import { type PointerHold, PointerHolds, takesBackTouches } from './claim';
 import {
   AXIS_DIRS,
@@ -211,6 +211,25 @@ import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } fr
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
 import { CUBE_TOUCH_BAND, CUBE_TOUCH_SIZE, cubeHit, cubeLayout, drawViewCube } from './viewcube';
+import {
+  KEY_BIG_STEP_PX,
+  KEY_CANDIDATES_MAX,
+  KEY_POINTER,
+  KEY_STEP_PX,
+  type KeySnapAction,
+  type KeySnapKeys,
+  PICK_KIND_LABELS,
+  candidateText,
+  inPoints,
+  keySnapAction,
+  keySnapHint,
+  moveKeyCursor,
+  normalizeKeySnapKeys,
+  pointText,
+  samePoint3,
+  skipPoints,
+  snapKindText,
+} from './keysnap';
 
 export interface Viewer3dOptions {
   /** 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다 */
@@ -707,6 +726,67 @@ export interface MeasurePoint {
   trackGuide?: TrackDirLine;
 }
 
+/**
+ * 키보드로 3D 붙잡기·고르기 선택(0.46.0, Viewer3d.setKeyboardSnap — 기본 꺼짐). 3D 보기(캔버스)에 초점이 있을 때 키로 가상 커서를 옮기고
+ * 그 자리의 측정 붙잡기 후보를 차례로 돌려 고르고 찍는다(측정 모드가 아니면 그 자리를 고른다 — onPick)
+ */
+export interface KeyboardSnapOptions {
+  /** 화살표 한 번에 가상 커서가 움직이는 CSS 화소(기본 KEY_STEP_PX 5) */
+  step?: number;
+  /** Shift+화살표 한 번(기본 KEY_BIG_STEP_PX 50) */
+  bigStep?: number;
+  /**
+   * 키 바꾸기: 할 일 → KeyboardEvent.key 목록(앞에 'Shift+'·'Alt+'·'Ctrl+'·'Meta+'). 준 할 일만 기본(KEY_SNAP_KEYS)을 바꾸고, 빈 목록·null이면 그 할 일을 끈다.
+   * 옮기기·찍기는 Shift를 적지 않아도 Shift와 함께 받는다(옮기기는 bigStep, 찍기는 고르기 알림 shiftKey)
+   */
+  keys?: Partial<Record<KeySnapAction, readonly string[] | null>>;
+  /** 화면 읽기 프로그램에 읽힐 알림(앱이 text를 aria-live 영역에 넣거나 값으로 제 글을 만든다). 키를 받을 때마다 부른다 */
+  announce?: (a: KeyboardSnapAnnouncement) => void;
+}
+
+/** 키보드 붙잡기 알림(0.46.0) */
+export interface KeyboardSnapAnnouncement {
+  /**
+   * 'start' 가상 커서를 켰다 · 'move' 옮겼다 · 'cycle' 후보를 돌렸다 · 'commit' 찍었다(고르기) · 'end' 껐다 ·
+   * 'refresh' 커서는 그대로인데 후보가 다시 정해졌다(Shift·setMeasureInferenceLock 잠금, 붙잡기 한도 등 — 마우스 미리 보기를 다시 구하는 때와 같다)
+   */
+  reason: 'start' | 'move' | 'cycle' | 'commit' | 'end' | 'refresh';
+  /** 'measure' = 측정 점 붙잡기(측정 모드), 'pick' = 고르기 */
+  mode: 'measure' | 'pick';
+  /** 가상 커서 자리(캔버스 왼쪽 위 기준 CSS 화소). 'end'면 끈 자리 */
+  x: number;
+  y: number;
+  /** 지금 후보(measureHoverSnap과 같은 꼴 — 측정 모드에서 후보가 없거나 고르기 모드면 null) */
+  snap: MeasureHoverSnap | null;
+  /** 지금 후보 차례(0부터)와 후보 수(측정 모드 — 고르기 모드나 후보가 없으면 0·0) */
+  index: number;
+  count: number;
+  /** 고르기 모드에서 커서 아래 고른 것(없으면 null — 측정 모드는 늘 null) */
+  pick: Pick3d | null;
+  /** 'commit'(측정): 찍은 점(measurePoints의 마지막 것), 두 점째면 측정 결과도 */
+  point?: MeasurePoint;
+  measurement?: MeasureResult;
+  /** 코어 기본 한국어 글(앱이 다른 말로 읽게 하려면 위 값으로 만든다) */
+  text: string;
+}
+
+/** 가상 커서 상태(0.46.0, Viewer3d.keyboardCursor) */
+export interface KeyboardCursorState {
+  x: number;
+  y: number;
+  mode: 'measure' | 'pick';
+  index: number;
+  count: number;
+}
+
+/** 측정 후보 목록 선택(0.46.0, Viewer3d.measureCandidates·commitMeasureCandidate) */
+export interface MeasureCandidatesOptions {
+  /** 후보 수 한도(기본 KEY_CANDIDATES_MAX 16) */
+  max?: number;
+  /** 허용 거리를 정할 포인터 종류(기본 'mouse' — 'touch'면 손가락 거리) */
+  pointerType?: string;
+}
+
 /** 측정 거리 글상자의 화면 자리(0.12.0, Viewer3d.measureLabelRect): 캔버스 왼쪽 위 기준 CSS 화소 */
 export type { MeasureLabelRect, LabelSpotName, LabelFallback };
 
@@ -1131,6 +1211,15 @@ type MeasurePick = {
   face?: SnapFace;
   trackGuide?: TrackDirLine;
 };
+/**
+ * 0.46.0 후보 돌리기 한 번(measureAt의 다섯째 인자): skip = 앞 후보로 고른 점 붙잡기 자리(이 자리의 점 후보 — 고르기가 붙잡은 점·앱 점·추론 점 — 는 뺀다),
+ * lines = 점 붙잡기가 없을 때 선 추론(축·나란함·끌어온 축·잠근 선 교차)을 보는지. src = 이번에 고른 점 붙잡기 자리(measureAt이 채운다 — 없으면 null)
+ */
+type KeyPass = { skip: readonly V3[]; lines: boolean; src: V3 | null };
+/** 측정 붙잡기가 기억하는 기준 선분(0.10.0 나란함·0.27.0 끌어온 점·0.29.0 첫 점 나란함) — 후보마다 같은 앞 상태에서 구하려고 두었다가 되돌린다 */
+type KeyRefs = { parallel: [V3, V3] | null; track: [V3, V3] | null; own: [V3, V3] | null };
+/** 0.46.0 한 자리의 측정 후보 하나: 고른 결과, 그 결과를 낸 돌리기(skip·lines), 그 뒤의 기준 선분 상태 */
+type KeyEntry = { pick: MeasurePick; skip: readonly V3[]; lines: boolean; after: KeyRefs };
 /** 측정 점 고르기 결과 → 측정 결과에 실을 붙잡기(종류, 축, 0.10.0 방향·잠금, 0.14.0 다듬었는지, 0.16.0 선분 식별자·끌어온 점 — 있는 것만) */
 const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   const r: MeasurePointSnap = { kind: s.kind };
@@ -1148,6 +1237,110 @@ const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   if (s.trackGuide) r.trackGuide = s.trackGuide;
   return r;
 };
+/**
+ * 측정 붙잡기 표식 하나를 (x, y)에 그린다(0.46.0에 drawMeasure 안에서 떼었다 — 그리는 명령은 그대로).
+ * 0.8.0: 가운데 점 = 세모, 중심 = 동그라미 테 + 십자(⊕), 그 밖의 앱 점 = 마름모. 0.9.0 추론: 교차점 = 엇갈린 십자(×), 수직 발 = ⊥.
+ * 0.38.0 접점: 동그라미 테와 꼭대기 가로선. 0.46.0 가상 커서('cursor'): 가운데를 비운 십자(점 표식과 같은 바탕 테 위 측정 색 선 — 붙잡기 거리 10화소보다 조금 길게)
+ */
+function drawSnapMark(
+  ctx: CanvasRenderingContext2D,
+  th: Viewer3dTheme,
+  x: number,
+  y: number,
+  kind: 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'tangent' | 'cursor',
+): void {
+  ctx.fillStyle = th.measure;
+  ctx.strokeStyle = th.textBg;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  if (kind === 'tangent') {
+    // 바탕 테(대비) 위에 측정 색 테와 위 접선(중심 ⊕와 같은 반지름 — 십자 대신 꼭대기 가로선이 테 밖으로 나간다)
+    for (const [color, w] of [
+      [th.textBg, 4],
+      [th.measure, 2],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.moveTo(x - 10, y - 6);
+      ctx.lineTo(x + 10, y - 6);
+      ctx.stroke();
+    }
+  } else if (kind === 'intersection' || kind === 'perpendicular') {
+    // 바탕 테(대비) 위에 측정 색 선
+    for (const [color, w] of [
+      [th.textBg, 4.5],
+      [th.measure, 2],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      if (kind === 'intersection') {
+        ctx.moveTo(x - 6, y - 6);
+        ctx.lineTo(x + 6, y + 6);
+        ctx.moveTo(x + 6, y - 6);
+        ctx.lineTo(x - 6, y + 6);
+      } else {
+        ctx.moveTo(x - 7, y);
+        ctx.lineTo(x + 7, y);
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y - 10);
+      }
+      ctx.stroke();
+    }
+  } else if (kind === 'midpoint') {
+    ctx.moveTo(x, y - 6);
+    ctx.lineTo(x + 5.5, y + 4);
+    ctx.lineTo(x - 5.5, y + 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === 'point') {
+    ctx.moveTo(x, y - 6);
+    ctx.lineTo(x + 6, y);
+    ctx.lineTo(x, y + 6);
+    ctx.lineTo(x - 6, y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === 'cursor') {
+    // 바탕 테(대비) 위에 측정 색 십자 — 가운데 3화소는 비워 붙잡은 점 표식을 가리지 않는다
+    for (const [color, w] of [
+      [th.textBg, 4],
+      [th.measure, 2],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(x - 13, y);
+      ctx.lineTo(x - 3, y);
+      ctx.moveTo(x + 3, y);
+      ctx.lineTo(x + 13, y);
+      ctx.moveTo(x, y - 13);
+      ctx.lineTo(x, y - 3);
+      ctx.moveTo(x, y + 3);
+      ctx.lineTo(x, y + 13);
+      ctx.stroke();
+    }
+  } else {
+    // 바탕 테(대비) 위에 측정 색 테와 십자
+    for (const [color, w] of [
+      [th.textBg, 4],
+      [th.measure, 2],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.moveTo(x - 9, y);
+      ctx.lineTo(x + 9, y);
+      ctx.moveTo(x, y - 9);
+      ctx.lineTo(x, y + 9);
+      ctx.stroke();
+    }
+  }
+}
 /** 끌어온 축 하나의 복사본(0.17.0) */
 const copyGuide = (g: TrackGuide): TrackGuide => ({ from: [g.from[0], g.from[1], g.from[2]], axis: g.axis });
 /** 끌어온 점 안내 선 하나의 복사본(0.30.0) */
@@ -1476,6 +1669,15 @@ export class Viewer3d {
    * 예를 들어 마우스로 앱 단추를 누를 때 쓴다). 점을 찍거나 측정을 지우면 잊는다
    */
   private lastLockable: InferenceLock | null = null;
+  /** 0.46.0 키보드 붙잡기 선택(setKeyboardSnap — 없으면 꺼짐: 키·그리기·포인터 처리가 0.45.0 그대로) */
+  private keySnap: { step: number; bigStep: number; keys: KeySnapKeys; announce: ((a: KeyboardSnapAnnouncement) => void) | null; src: KeyboardSnapOptions } | null = null;
+  /**
+   * 0.46.0 가상 커서(켰을 때만): 자리(CSS 화소)·지금 후보 차례·그 자리 측정 후보 목록, 고르기 모드면 커서 아래 고른 것,
+   * 켤 때 포인터 자리(모르면 켠 뒤 처음 본 자리 — 거기서 4화소 넘게 움직이면 끈다)
+   */
+  private keyCur: { x: number; y: number; index: number; list: KeyEntry[]; pick: Pick3d | null; ptr: { x: number; y: number } | null } | null = null;
+  /** 0.46.0 바로 앞 포인터 이동 자리(캔버스를 떠나면 null — 가상 커서를 켤 때의 포인터 자리) */
+  private lastPtr: { x: number; y: number } | null = null;
   /**
    * 끌어온 축(0.16.0 — inference.track을 켰을 때만, 끄면 null이라 상태가 없다): 기억한 점과 머무르기, 머무르기 타이머(dwellMs 뒤 commit)
    */
@@ -3839,6 +4041,83 @@ export class Viewer3d {
   get measureHoverSnap(): MeasureHoverSnap | null {
     const h = this.measuring ? this.measureHover : null;
     if (!h) return null;
+    return this.hoverSnapOf(h);
+  }
+
+  /**
+   * 0.46.0 키보드로 3D 붙잡기·고르기(기본 꺼짐 — 끄면 키·그리기·포인터 처리가 0.45.0 그대로). 켜면 3D 보기(캔버스)에 초점이 있을 때(handleKey로 넘긴 키도 대상이 캔버스일 때만):
+   * - 화살표: 가상 커서를 켠다(처음 — 캔버스 가운데) · 옮긴다(step 화소, Shift와 함께면 bigStep). 측정 모드면 그 자리에서 마우스 미리 보기와 같은 규칙으로 붙잡을 점을 보인다
+   * - Tab·Shift+Tab(커서가 켜진 측정 모드에서만): 그 자리의 붙잡기 후보를 차례로 돌린다(measureCandidates와 같은 차례 — AutoCAD 객체 스냅 Tab 돌리기).
+   *   커서를 켜기 전·끈 뒤 Tab은 브라우저 초점 이동 그대로다
+   * - Enter: 측정 모드면 지금 후보를 측정 점으로 찍고(onMeasure), 아니면 그 자리를 누른 것처럼 고른다(onPick — pointerType 'keyboard', clicks 1, Shift+Enter면 shiftKey).
+   *   커서가 꺼져 있으면 켠다
+   * - Esc: 뷰 큐브 접기·측정 지우기(뷰어 Esc)가 먼저, 지울 것이 없으면 커서를 끈다. 포인터가 캔버스에서 움직이거나(4화소 이상) 누르거나 캔버스가 초점을 잃어도 끈다
+   * 걷기 중에는 받지 않는다(화살표는 걷기). 키는 keys로 바꾸거나 끈다. true = 기본값, false·null = 끈다(켜진 커서도 알리지 않고 끈다)
+   */
+  setKeyboardSnap(o: KeyboardSnapOptions | boolean | null): void {
+    if (!o) {
+      this.keyEnd(false);
+      this.keySnap = null;
+      return;
+    }
+    const src: KeyboardSnapOptions = o === true ? {} : { ...o };
+    const pos = (v: unknown, d: number): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
+    this.keySnap = {
+      step: pos(src.step, KEY_STEP_PX),
+      bigStep: pos(src.bigStep, KEY_BIG_STEP_PX),
+      keys: normalizeKeySnapKeys(src.keys),
+      announce: typeof src.announce === 'function' ? src.announce : null,
+      src,
+    };
+  }
+
+  /** 지금 키보드 붙잡기 선택(0.46.0 — 걸음·키 표는 기본값을 채운 꼴, 꺼져 있으면 null) */
+  get keyboardSnap(): (KeyboardSnapOptions & { step: number; bigStep: number; keys: Record<KeySnapAction, string[]> }) | null {
+    const k = this.keySnap;
+    if (!k) return null;
+    const keys = {} as Record<KeySnapAction, string[]>;
+    for (const [a, l] of Object.entries(k.keys) as [KeySnapAction, readonly string[]][]) keys[a] = [...l];
+    return { ...k.src, step: k.step, bigStep: k.bigStep, keys };
+  }
+
+  /** 가상 커서(0.46.0 — 켜져 있을 때 자리·모드·후보 차례와 수, 아니면 null). 앱 키가 화살표를 함께 쓸 때 커서가 켜졌는지 본다 */
+  get keyboardCursor(): KeyboardCursorState | null {
+    const c = this.keyCur;
+    if (!c) return null;
+    const count = this.measuring ? c.list.length : 0;
+    return { x: c.x, y: c.y, mode: this.keyMode, index: count ? c.index : 0, count };
+  }
+
+  /**
+   * 0.46.0 화면 자리(캔버스 CSS 화소)의 측정 붙잡기 후보 목록(차례대로 — 가상 커서의 Tab 차례와 같다). 첫째는 그 자리 마우스 미리 보기(measureHoverSnap)와 같고,
+   * 다음은 앞 후보 자리를 빼고 같은 규칙(차례·우선·다듬기·잠금·구간 단면)으로 고른 것, 점 붙잡기가 다하면 선 추론 하나와 붙잡지 않은 자리다. 측정 모드가 아니면 빈 배열.
+   * 뷰어 상태(미리 보기·찍은 점·기준 선분)를 바꾸지 않는다 — 앱이 제 UI(목록·단추)로 고르게 할 때 쓴다(고른 것은 commitMeasureCandidate로 찍는다).
+   * pointsFor·다듬기 앱 함수는 미리 보기처럼 부를 수 있다(같은 입력이면 기억을 다시 쓴다)
+   */
+  measureCandidates(x: number, y: number, o: MeasureCandidatesOptions = {}): MeasureHoverSnap[] {
+    if (!this.measuring || !Number.isFinite(x) || !Number.isFinite(y)) return [];
+    const max = typeof o.max === 'number' && o.max >= 1 ? Math.floor(o.max) : KEY_CANDIDATES_MAX;
+    return this.keyCandidates(x, y, o.pointerType || 'mouse', max).map((e) => this.hoverSnapOf(e.pick));
+  }
+
+  /**
+   * 0.46.0 화면 자리의 측정 후보 가운데 index번째(measureCandidates와 같은 차례)를 측정 점으로 찍는다(누르기와 같다 — onMeasure). 찍었으면 true,
+   * 측정 모드가 아니거나 그 차례의 후보가 없으면 false
+   */
+  commitMeasureCandidate(x: number, y: number, index: number, o: MeasureCandidatesOptions = {}): boolean {
+    if (!this.measuring || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isInteger(index) || index < 0) return false;
+    const max = Math.max(index + 1, typeof o.max === 'number' && o.max >= 1 ? Math.floor(o.max) : KEY_CANDIDATES_MAX);
+    const e = this.keyCandidates(x, y, o.pointerType || 'mouse', max)[index];
+    if (!e) return false;
+    this.refsSet(e.after);
+    this.commitMeasure(e.pick);
+    // 가상 커서가 켜져 있으면 그 자리 미리 보기를 다시 구한다(Enter로 찍은 뒤와 같다 — 알리지 않는다)
+    if (this.keyCur) this.keyRecompute();
+    return true;
+  }
+
+  /** 측정 점 고르기 결과 → 앱에 주는 미리 보기 붙잡기(복사본) */
+  private hoverSnapOf(h: MeasurePick): MeasureHoverSnap {
     const r: MeasureHoverSnap = { point: [...h.p] as V3, snap: h.kind };
     if (h.axis) r.axis = h.axis;
     if (h.direction) r.direction = [...h.direction] as V3;
@@ -3978,6 +4257,8 @@ export class Viewer3d {
     this.measuring = on;
     this.canvas.style.cursor = on ? 'crosshair' : '';
     if (!on) this.clearMeasure();
+    // 0.46.0: 가상 커서가 켜져 있으면 새 모드로 그 자리를 다시 구한다(알리지 않는다)
+    if (this.keyCur) this.keyRecompute();
     this.invalidate();
   }
 
@@ -4226,6 +4507,8 @@ export class Viewer3d {
     this.lastLockable = null;
     this.clearTrack();
     if (had) for (const cb of this.measureCbs) cb(null);
+    // 0.46.0: 가상 커서가 켜져 있으면 그 자리 미리 보기를 다시 구한다(알리지 않는다)
+    if (this.keyCur && this.measuring && !this.disposed) this.keyRecompute();
     this.invalidate();
   }
 
@@ -5376,17 +5659,29 @@ export class Viewer3d {
 
   /**
    * 측정 점 고르기: 화면 점에서 찍을 점과 붙잡은 종류. 붙잡기 선택(setMeasureSnap)이 없으면 0.7.2 그대로(고르기의 꼭짓점·끝점 붙잡기 — d를 주면 그것을 쓴다).
-   * 있으면 고르기(윤곽선·가운데 점 선택 반영)의 붙잡은 점, pointsFor 점, 늘 후보인 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것
+   * 있으면 고르기(윤곽선·가운데 점 선택 반영)의 붙잡은 점, pointsFor 점, 늘 후보인 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것.
+   * 0.46.0 kc(키보드 후보 돌리기 — 주지 않으면 0.45.0 그대로): kc.skip 자리의 점 후보를 빼고 같은 규칙으로 고른다(점 붙잡기가 다하면 선 추론, kc.lines가 false면 그것도 빼고
+   * 'fallback' 앱 점·붙잡지 않은 자리). 고른 점 붙잡기 자리를 kc.src에 둔다
    */
-  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null): MeasurePick | null {
+  private measureAt(x: number, y: number, pointerType: string | undefined, d0?: PickDetail | null, kc?: KeyPass): MeasurePick | null {
     const so = this.snapOpt;
     if (!so) {
       const d = d0 !== undefined ? d0 : this.pickDetail(x, y, true, pointerType);
+      // 0.46.0: 붙잡은 꼭짓점·끝점을 앞 후보로 뺐으면 고른 자리 그대로(붙잡지 않은 점)
+      if (kc && d) {
+        if (d.snapKind && !inPoints(kc.skip, d.snap)) {
+          kc.src = d.snap;
+          return { p: d.snap, vertex: d.vertex, kind: d.snapKind };
+        }
+        return { p: d.pick.point, vertex: false, kind: null };
+      }
       return d ? { p: d.snap, vertex: d.vertex, kind: d.snapKind } : null;
     }
     if (!this.sceneRef) return null;
     const edges = so.edges ?? this.opts.pickEdges;
-    const d = this.pickDetail(x, y, true, pointerType, edges, so.midpoints, false, so.through);
+    const dp = this.pickDetail(x, y, true, pointerType, edges, so.midpoints, false, so.through);
+    // 0.46.0: 고르기가 붙잡은 점(꼭짓점·끝점·가운데 점)을 앞 후보로 뺐으면 붙잡지 않은 고르기(고른 자리 그대로 — 선분·면 위 점)로 본다
+    const d: PickDetail | null = kc && dp && dp.snapKind && inPoints(kc.skip, dp.snap) ? { ...dp, snap: dp.pick.point, vertex: false, snapKind: null } : dp;
     const snapPx = pickTolerance(pointerType, this.opts.pickTolerance, this.opts.touchPickTolerance).snap;
     const f = this.frame();
     const inf = so.inference;
@@ -5423,13 +5718,22 @@ export class Viewer3d {
       refine && inf && !lock && (inf.intersections || (inf.perpendicular && first))
         ? (): SnapCandidate[] => refineOpen(openCandidates(nearSegs(), first, inf, snapPx), first, screenRay(f, x, y), refine, so.openMemo, budget)
         : null;
-    const cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app, open) : app;
+    let cands: Iterable<SnapCandidate> = inf ? this.withInference(inf, first, nearSegs, app, open) : app;
+    // 0.46.0: 앞 후보 자리의 점 후보는 뺀다(차례는 그대로)
+    if (kc && kc.skip.length) cands = skipPoints(cands, kc.skip);
     // 0.45.0: 앱 점의 기본 도형 번호(raw — 구간 단면·숨긴 구간)도 넘긴다
     const appVisible = (p: V3, sx: number, sy: number, id: string | undefined, c: SnapCandidate): boolean => this.snapVisible(f, p, sx, sy, id, c.raw, c.rawEdges === true);
     let r: MeasureSnapPick | null = chooseMeasureSnap(f, x, y, snapPx, d ? { p: d.snap, kind: d.snapKind } : null, cands, appVisible);
-    // 0.41.0: 모아 둔 'fallback' 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것(같으면 앞의 것 — 0.8.0 규칙), 없으면 null
-    const fallbackAt = (): MeasureSnapPick | null =>
-      fb.length ? chooseMeasureSnap(f, x, y, snapPx, null, fb, appVisible) : null;
+    if (kc) kc.src = r && r.kind ? r.p : null;
+    // 0.41.0: 모아 둔 'fallback' 앱 점 가운데 붙잡기 거리 안에서 화면에 가장 가까운 보이는 것(같으면 앞의 것 — 0.8.0 규칙), 없으면 null.
+    // 0.46.0: 앞 후보 자리의 것은 빼고, 고르면 그 자리를 kc.src에
+    const fallbackAt = (): MeasureSnapPick | null => {
+      if (!kc) return fb.length ? chooseMeasureSnap(f, x, y, snapPx, null, fb, appVisible) : null;
+      const list = kc.skip.length ? fb.filter((c) => !inPoints(kc.skip, c.p)) : fb;
+      const q = list.length ? chooseMeasureSnap(f, x, y, snapPx, null, list, appVisible) : null;
+      if (q && q.kind) kc.src = q.p;
+      return q;
+    };
     const lockOut = (p: V3): MeasurePick => {
       const m: MeasurePick = { p, vertex: true, kind: lock!.kind, direction: [...lock!.direction] as V3, locked: true };
       if (lock!.axis) m.axis = lock!.axis;
@@ -5456,7 +5760,8 @@ export class Viewer3d {
       // 0.19.0: 점 붙잡기가 없으면 잠근 선이 커서 둘레 선분과 만나는 점(lockEdges)·커서 아래 면을 뚫는 점(lockFaces)이 커서에 가까운 선 위 점보다 먼저.
       // 0.21.0: 잠근 선이 끌어온 축과 만나는 점(lockTracks — 끌어온 점이 있을 때)도 — 그 셋보다 먼저 견준다
       const lockTracks = inf?.lockTracks && this.tracker?.size ? this.tracker.view : null;
-      if (!q && (inf?.lockEdges || inf?.lockFaces || lockTracks)) {
+      // 0.46.0: 후보 돌리기가 선 추론을 넘겼으면(kc.lines false) 보지 않는다
+      if (!q && (inf?.lockEdges || inf?.lockFaces || lockTracks) && (!kc || kc.lines)) {
         const m = this.lockedMeet(so, inf!, f, x, y, snapPx, first, lock, d, nearSegs, pointerType, lockOut, budget, lockTracks, lensSegs);
         if (m) return m;
       }
@@ -5480,11 +5785,13 @@ export class Viewer3d {
     // 그 셋 뒤 차례로 함께 견준다
     const tracks = this.tracker?.size ? this.tracker.view : null;
     const noPoint = !r || !r.kind;
+    // 0.46.0: 후보 돌리기가 선 추론을 넘겼으면(kc.lines false) 아래 선 붙잡기(끌어온 축·첫 점 축·나란함)를 보지 않는다
+    const noPointLine = noPoint && (!kc || kc.lines);
     const axisEdges = !!(first && inf?.axisEdges);
     const under = inf?.axisFaces && (first || tracks) ? faceHitOf(d) : null;
     // 0.22.0 면의 열린 교차: refineFace가 있으면 커서가 그물 면 위가 아니어도(실루엣 바깥) 축이 삼각형을 비켜 가며 곡면만 뚫는 자리를 본다
     const openFaces = !!(so.refineFace && inf?.axisFaces && (first || tracks));
-    if ((tracks || axisEdges || under || openFaces) && noPoint) {
+    if ((tracks || axisEdges || under || openFaces) && noPointLine) {
       const vis = (p: V3, sg: NearSegment): boolean => {
         const sp = projectToScreen(f, p);
         return !!sp && this.snapVisible(f, p, sp[0], sp[1], sg.id, sg.raw, sg.kind === 'edge');
@@ -5678,7 +5985,7 @@ export class Viewer3d {
       if (t && lens && t === lens.snap) return lens.line.guide ? this.openEdgePick(f, lens, first, null, openRef, refsBefore) : this.openEdgePick(f, lens, first, null, null, null);
     }
     // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
-    if (first && noPoint && (inf?.axes || inf?.parallel)) {
+    if (first && noPointLine && (inf?.axes || inf?.parallel)) {
       const a = inf.axes ? axisSnap(f, first, x, y, snapPx) : null;
       // 0.29.0: 첫 점 나란함 기준 거르기를 줬으면 그것이 받은 기준(parallelOwn), 아니면 지나간 선분(0.28.0)
       const ref = inf.parallel ? (inf.parallelEdge ? this.parallelOwn : this.parallelRef) : null;
@@ -5687,7 +5994,7 @@ export class Viewer3d {
       if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
     }
     // 끌어온 점을 지나는 축(0.16.0): 첫 점 축·나란함 다음(첫 점 전에도). 첫 점 축이 아니므로 방향(잠글 것)이 없다
-    if (tracks && noPoint) {
+    if (tracks && noPointLine) {
       const t = trackAxisSnap(f, tracks, x, y, snapPx, first);
       // 0.27.0 끌어온 점에서 기준 선분과 나란함·수직(inference.trackDirs): 끌어온 축과 화면에서 가까운 것(같으면 끌어온 축). 첫 점을 지나지 않아 방향(잠글 것)이 없다
       // 0.28.0: 기준 선분 거르기를 줬으면 그것이 받은 기준(trackDirRef), 아니면 0.27.0처럼 지나간 선분(parallelRef)
@@ -6633,11 +6940,272 @@ export class Viewer3d {
     return p;
   }
 
-  private click(x: number, y: number, e?: PointerEvent): void {
+  /** 측정 점 하나를 찍는다(누르기·0.46.0 가상 커서 Enter·commitMeasureCandidate가 함께 쓴다 — 0.45.0 누르기의 찍기 그대로) */
+  private commitMeasure(s: MeasurePick): void {
+    if (this.measurePts.length >= 2) {
+      this.measurePts = [];
+      for (const cb of this.measureCbs) cb(null);
+    }
+    // 같은 점 객체가 두 번 찍혀도 종류를 따로 지키도록 복사해 넣는다(붙잡기 선택이 있을 때만 — 없으면 0.7.2 그대로)
+    const p: V3 = this.snapOpt ? [s.p[0], s.p[1], s.p[2]] : s.p;
+    this.measureSnaps.set(p, pointSnapOf(s));
+    this.measurePts.push(p);
+    this.measureHover = null;
+    // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다. 마지막으로 본 방향 추론은 첫 점이 바뀌면 잊는다.
+    // 0.16.0: 끌어온 점도 두 점째에서 잊는다(첫 점에서는 남긴다 — 첫 점 축과 나란한 자리에 쓴다). 누르면 머무르기는 버린다
+    if (this.measurePts.length === 2) {
+      this.inferLock = null;
+      this.clearTrack();
+    } else if (this.tracker) {
+      clearTimeout(this.dwellTimer);
+      this.dwellTimer = 0;
+      this.tracker.cancel();
+    }
+    this.lastLockable = null;
+    const m = this.measurement();
+    if (m) for (const cb of this.measureCbs) cb(m);
+    this.invalidate();
+  }
+
+  // ───────────────────────── 내부: 키보드 붙잡기(0.46.0) ─────────────────────────
+
+  private refsNow(): KeyRefs {
+    return { parallel: this.parallelRef, track: this.trackDirRef, own: this.parallelOwn };
+  }
+
+  private refsSet(r: KeyRefs): void {
+    this.parallelRef = r.parallel;
+    this.trackDirRef = r.track;
+    this.parallelOwn = r.own;
+  }
+
+  /**
+   * 한 화면 자리의 측정 후보(차례대로, max개까지): 첫째는 그 자리 마우스 미리 보기와 같은 것(measureAt 그대로), 다음은 앞 후보로 고른 점 붙잡기 자리를 빼고 같은 measureAt —
+   * 그래서 붙잡기 차례·우선(0.41.0)·다듬기·잠금·구간 단면이 그대로다. 점 붙잡기가 다하면 선 추론(축·나란함·끌어온 축·잠근 선 교차) 하나, 그다음 선 추론 없이
+   * 'fallback' 앱 점과 붙잡지 않은 자리(선분·면 위 점, 잠근 동안이면 커서를 잠근 선에 내린 자리). 자리가 꼭 같은 결과는 앞의 것만 둔다.
+   * 후보마다 같은 앞 상태(기준 선분 — refsBefore)에서 구하고, 끝나면 그 상태로 되돌린다(entry.after = 그 후보를 고른 뒤 상태)
+   */
+  private keyCandidates(x: number, y: number, pointerType: string, max: number): KeyEntry[] {
+    const refs0 = this.refsNow();
+    const out: KeyEntry[] = [];
+    const skip: V3[] = [];
+    let lines = true;
+    for (let guard = 0; out.length < max && guard < 2 * max + 2; guard++) {
+      this.refsSet(refs0);
+      const kc: KeyPass = { skip: skip.slice(), lines, src: null };
+      const m = this.measureAt(x, y, pointerType, undefined, kc);
+      if (!m) break;
+      if (!out.some((e) => samePoint3(e.pick.p, m.p))) out.push({ pick: m, skip: kc.skip, lines, after: this.refsNow() });
+      const src = kc.src;
+      if (src) {
+        if (inPoints(skip, src)) break;
+        skip.push([src[0], src[1], src[2]]);
+      } else if (lines && m.kind) lines = false;
+      else break;
+    }
+    this.refsSet(refs0);
+    return out;
+  }
+
+  /** 측정 모드면 측정, 아니면 고르기 */
+  private get keyMode(): 'measure' | 'pick' {
+    return this.measuring ? 'measure' : 'pick';
+  }
+
+  /** 가상 커서 자리에서 후보를 다시 구하고(차례는 처음으로, keep이면 같은 점 후보를 찾아 그 차례) 보인다. 알림은 부르는 쪽이 */
+  private keyRecompute(keep = false): void {
+    const c = this.keyCur;
+    if (!c) return;
+    if (this.measuring) {
+      const shown = keep ? (c.list[c.index]?.pick ?? null) : null;
+      c.list = this.keyCandidates(c.x, c.y, KEY_POINTER, KEY_CANDIDATES_MAX);
+      const i = shown ? c.list.findIndex((e) => samePoint3(e.pick.p, shown.p) && e.pick.kind === shown.kind) : 0;
+      c.index = Math.max(0, i);
+      c.pick = null;
+      this.keyShow();
+    } else {
+      c.list = [];
+      c.index = 0;
+      const d = this.sceneRef ? this.pickDetail(c.x, c.y, true, KEY_POINTER) : null;
+      c.pick = d ? d.pick : null;
+    }
+  }
+
+  /**
+   * 지금 차례의 후보를 측정 미리 보기로(마우스 미리 보기와 같은 뒤처리 — 잠글 방향 기억). 끌어온 축 머무르기(0.16.0)는 하지 않는다 —
+   * 손가락처럼 시간으로 정하는 몸짓이라(화면 읽기 프로그램이 알림을 읽는 동안 머문 점이 모두 끌려온다) 앱이 setMeasureTrackPoints로 준다
+   */
+  private keyShow(): void {
+    const c = this.keyCur!;
+    const e = c.list[c.index];
+    if (e) this.refsSet(e.after);
+    this.measureHover = e ? e.pick : null;
+    this.lastHoverAt = { x: c.x, y: c.y, pointerType: KEY_POINTER };
+    this.hoverAt = null;
+    if (this.measurePts.length === 1 && !this.measureHover?.locked) this.lastLockable = this.hoverLock(this.measureHover) ?? this.lastLockable;
+    if (this.tracker) this.dwell(this.measureHover, null);
+  }
+
+  /** 가상 커서를 켠다(캔버스 가운데) */
+  private keyStart(): void {
+    const lp = this.lastPtr;
+    this.keyCur = { x: this.cssW / 2, y: this.cssH / 2, index: 0, list: [], pick: null, ptr: lp ? { x: lp.x, y: lp.y } : null };
+    this.keyRecompute();
+    this.invalidate();
+    this.keyAnnounce('start');
+  }
+
+  /** 가상 커서를 끈다(측정 미리 보기도 지운다). say = 알릴지 */
+  private keyEnd(say: boolean): void {
+    const c = this.keyCur;
+    if (!c) return;
+    const mode = this.keyMode;
+    this.keyCur = null;
+    if (this.lastHoverAt?.pointerType === KEY_POINTER) {
+      this.measureHover = null;
+      this.lastHoverAt = null;
+      if (this.tracker) this.dwell(null, null);
+    }
+    this.invalidate();
+    if (say && this.keySnap?.announce) this.keySnap.announce({ reason: 'end', mode, x: c.x, y: c.y, snap: null, index: 0, count: 0, pick: null, text: '가상 커서를 껐습니다' });
+  }
+
+  /** 측정 모드의 첫 점에서 지금 후보까지 거리(첫 점만 찍었을 때) */
+  private keyDistance(p: readonly number[] | null): number | null {
+    const a = this.measurePts.length === 1 ? this.measurePts[0]! : null;
+    return a && p ? Math.hypot(p[0]! - a[0], p[1]! - a[1], p[2]! - a[2]) : null;
+  }
+
+  /** 고른 것의 글: '이름 면'(이름이 없으면 id) */
+  private pickText(p: Pick3d): string {
+    const it = this.items.get(p.id);
+    const name = (it?.item.name || p.id).trim() || p.id;
+    return `${name} ${p.section ? '잘린 면' : PICK_KIND_LABELS[p.kind]}`;
+  }
+
+  /** 알림을 만들어 앱에 넘긴다(extra = 찍은 점·측정 결과, lead = 지금 후보 글 대신 쓸 글) */
+  private keyAnnounce(reason: KeyboardSnapAnnouncement['reason'], extra?: { point?: MeasurePoint; measurement?: MeasureResult | null; lead?: string }): void {
+    const ks = this.keySnap, c = this.keyCur;
+    if (!ks?.announce || !c) return;
+    const mode = this.keyMode;
+    const num = (v: number): string => this.fmt(v);
+    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
+    const snap = mode === 'measure' ? this.measureHoverSnap : null;
+    const count = mode === 'measure' ? c.list.length : 0;
+    const index = count ? c.index : 0;
+    let body: string;
+    if (mode === 'measure') body = candidateText(snap ? { kind: snap.snap, axis: snap.axis, locked: snap.locked, point: snap.point } : null, index, count, num, this.keyDistance(snap?.point ?? null), unit);
+    else body = c.pick ? `${this.pickText(c.pick)}: ${pointText(c.pick.point, num)}` : '고를 것이 없습니다';
+    let text = body;
+    if (reason === 'start') text = `가상 커서를 켰습니다. ${body}. ${keySnapHint(ks.keys, mode)}`;
+    else if (extra?.lead) text = extra.lead;
+    else if (reason === 'cycle' && count === 1) text = `${body} (후보 하나)`;
+    const a: KeyboardSnapAnnouncement = { reason, mode, x: c.x, y: c.y, snap, index, count, pick: c.pick ? { ...c.pick, point: [...c.pick.point] as V3 } : null, text };
+    if (extra?.point) a.point = extra.point;
+    if (extra?.measurement) a.measurement = extra.measurement;
+    ks.announce(a);
+  }
+
+  /**
+   * 키보드 붙잡기 키(켰을 때만 — handleKey 맨 앞). 걷기 중·앱이 이미 기본 동작을 막은 키·캔버스가 아닌 대상의 키(앱이 다른 칸에서 넘긴 Tab·Enter)는 받지 않는다.
+   * 처리했으면 true(handleKey가 기본 동작을 막는다)
+   */
+  private keyboardKey(e: KeyboardEvent): boolean {
+    const ks = this.keySnap!;
+    if (this.nav === 'walk') {
+      // 걷기의 화살표는 걷기 키다(켜 둔 커서는 끈다)
+      this.keyEnd(true);
+      return false;
+    }
+    if (this.disposed || e.defaultPrevented) return false;
+    const t = e.target;
+    if (t && t !== this.canvas) return false;
+    const a = keySnapAction(e, ks.keys);
+    if (!a) return false;
+    const c = this.keyCur;
+    switch (a.action) {
+      case 'left':
+      case 'right':
+      case 'up':
+      case 'down': {
+        if (!c) {
+          this.keyStart();
+          return true;
+        }
+        const n = moveKeyCursor(c, a.action, a.big, ks.step, ks.bigStep, this.cssW, this.cssH);
+        c.x = n.x;
+        c.y = n.y;
+        this.keyRecompute();
+        this.invalidate();
+        this.keyAnnounce('move');
+        return true;
+      }
+      case 'next':
+      case 'prev': {
+        // 커서가 켜진 측정 모드에서만(그 밖의 Tab은 브라우저 초점 이동 그대로 — 키보드 덫을 만들지 않는다)
+        if (!c || !this.measuring) return false;
+        const n = c.list.length;
+        if (n) {
+          c.index = (c.index + (a.action === 'next' ? 1 : -1) + n) % n;
+          this.keyShow();
+          this.invalidate();
+        }
+        this.keyAnnounce('cycle');
+        return true;
+      }
+      case 'commit':
+        if (!c) this.keyStart();
+        else this.keyCommit(e);
+        return true;
+      case 'exit':
+        if (!c) return false;
+        // Esc는 뷰어 Esc(뷰 큐브 접기·측정 지우기)가 먼저 — 지울 것이 없을 때 커서를 끈다
+        if (e.key === 'Escape' && (this.cubeZoom || this.measurePts.length || (this.measuring && this.tracker?.size))) return false;
+        this.keyEnd(true);
+        return true;
+    }
+    return false;
+  }
+
+  /** 가상 커서 Enter: 측정 모드면 지금 후보를 찍고(그 자리에서 다시 구해 보인 후보와 같은 점을 찍는다), 아니면 그 자리를 누른 것처럼 고른다(onPick) */
+  private keyCommit(e: KeyboardEvent): void {
+    const c = this.keyCur!;
+    if (!this.measuring) {
+      const ev = { pointerType: KEY_POINTER, button: 0, altKey: e.altKey, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, metaKey: e.metaKey } as unknown as PointerEvent;
+      this.keyRecompute();
+      this.click(c.x, c.y, ev, true);
+      if (this.keyCur !== c) return;
+      this.keyAnnounce('commit', { lead: c.pick ? `골랐습니다: ${this.pickText(c.pick)}` : '빈 곳을 골랐습니다' });
+      return;
+    }
+    this.keyRecompute(true);
+    const ent = c.list[c.index];
+    if (!ent) {
+      this.keyAnnounce('commit', { lead: '찍을 점이 없습니다' });
+      return;
+    }
+    this.refsSet(ent.after);
+    this.commitMeasure(ent.pick);
+    const pts = this.measurePoints;
+    const point = pts[pts.length - 1]!;
+    const m = this.measurement();
+    // 찍은 뒤 같은 자리에서 다음 미리 보기(마우스는 다음 이동에서 — 키보드는 커서를 옮기지 않아도 들리게)
+    this.keyRecompute();
+    const num = (v: number): string => this.fmt(v);
+    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
+    const u = unit ? ` ${unit}` : '';
+    const lead = m
+      ? `둘째 점을 찍었습니다. 거리 ${num(m.distance)}${u}, X 차 ${num(m.dx)}, Y 차 ${num(m.dy)}, Z 차 ${num(m.dz)}`
+      : `첫 점을 찍었습니다. ${snapKindText(point.snap, point.axis, point.locked)}: ${pointText(point.point, num)}`;
+    this.keyAnnounce('commit', { point, measurement: m, lead });
+  }
+
+  /** key = 0.46.0 가상 커서 Enter(늘 한 번 누르기 — 바로 앞 누르기와 두 번 누르기로 짝짓지 않고, 다음 누르기의 짝도 되지 않는다) */
+  private click(x: number, y: number, e?: PointerEvent, key = false): void {
     const now = performance.now();
     const type = e?.pointerType || 'mouse';
-    const n = clickCount(this.lastClick, now, x, y, type);
-    this.lastClick = { t: now, x, y, n };
+    const n = key ? 1 : clickCount(this.lastClick, now, x, y, type);
+    this.lastClick = key ? { t: 0, x: 0, y: 0, n: 0 } : { t: now, x, y, n };
     const d = this.pickDetail(x, y, true, type);
     // 걷기: 두 번 누르면 그 자리에 선다(눈높이 위)
     // 서기에 쓴 두 번째 누르기는 고르기·측정으로 알리지 않는다(첫 누르기는 이미 clicks 1로 알렸다)
@@ -6650,29 +7218,7 @@ export class Viewer3d {
     if (this.measuring) {
       const s = this.measureAt(x, y, type, this.snapOpt ? undefined : d);
       if (!s) return;
-      if (this.measurePts.length >= 2) {
-        this.measurePts = [];
-        for (const cb of this.measureCbs) cb(null);
-      }
-      // 같은 점 객체가 두 번 찍혀도 종류를 따로 지키도록 복사해 넣는다(붙잡기 선택이 있을 때만 — 없으면 0.7.2 그대로)
-      const p: V3 = this.snapOpt ? [s.p[0], s.p[1], s.p[2]] : s.p;
-      this.measureSnaps.set(p, pointSnapOf(s));
-      this.measurePts.push(p);
-      this.measureHover = null;
-      // 추론 잠금(0.10.0)은 그 측정의 두 점째에서 끝난다. 마지막으로 본 방향 추론은 첫 점이 바뀌면 잊는다.
-      // 0.16.0: 끌어온 점도 두 점째에서 잊는다(첫 점에서는 남긴다 — 첫 점 축과 나란한 자리에 쓴다). 누르면 머무르기는 버린다
-      if (this.measurePts.length === 2) {
-        this.inferLock = null;
-        this.clearTrack();
-      } else if (this.tracker) {
-        clearTimeout(this.dwellTimer);
-        this.dwellTimer = 0;
-        this.tracker.cancel();
-      }
-      this.lastLockable = null;
-      const m = this.measurement();
-      if (m) for (const cb of this.measureCbs) cb(m);
-      this.invalidate();
+      this.commitMeasure(s);
       return;
     }
     const ev: PickEvent = {
@@ -6726,6 +7272,9 @@ export class Viewer3d {
     this.on<PointerEvent>(cv, 'pointerup', (e) => this.onUp(e, false));
     this.on<PointerEvent>(cv, 'pointercancel', (e) => this.onUp(e, true));
     this.on(cv, 'pointerleave', () => {
+      this.lastPtr = null;
+      // 0.46.0: 가상 커서의 미리 보기는 포인터가 떠나도 둔다
+      if (this.keyCur) return;
       if (this.measureHover || this.hoverAt) {
         this.measureHover = null;
         this.hoverAt = null;
@@ -6748,6 +7297,8 @@ export class Viewer3d {
       focusLeft(cv);
       this.walkKeys.clear();
       this.listenWalkRelease(false);
+      // 0.46.0: 초점이 문서 안 다른 곳으로 가면 가상 커서를 끈다(창만 흐려진 것 — 다른 앱·탭 — 이면 둔다, focusLeft와 같은 판정)
+      if (this.keyCur && cv.ownerDocument?.activeElement !== cv) this.keyEnd(true);
     });
     this.on(cv, 'webglcontextlost', (e) => {
       e.preventDefault();
@@ -6838,6 +7389,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
+    // 0.46.0: 포인터로 누르면 가상 커서를 끈다(포인터가 이어받는다)
+    if (this.keyCur) this.keyEnd(true);
     // 0.44.0 편 손가락 뷰 큐브는 3D 보기를 누르면 접는다(누르기는 그대로 이어 간다)
     this.foldCube();
     // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.1 — 키보드로 이미 초점이 있던 캔버스도 data-v3d-focus="pointer"로 감춘다)
@@ -6924,6 +7477,18 @@ export class Viewer3d {
 
   private onMove(e: PointerEvent): void {
     const p = this.local(e);
+    // 0.46.0: 가상 커서가 켜진 동안 포인터가 켤 때 자리(모르면 처음 본 자리)에서 DRAG_START_PX(4화소) 넘게 움직이면 끄고 포인터가 이어받는다.
+    // 그 안의 사건(화면이 바뀌어 브라우저가 보내는 제자리 이동 등)은 넘긴다
+    this.lastPtr = { x: p.x, y: p.y };
+    const kc = this.keyCur;
+    if (kc && !this.drag && !this.holds.size) {
+      if (!kc.ptr) {
+        kc.ptr = { x: p.x, y: p.y };
+        return;
+      }
+      if (Math.hypot(p.x - kc.ptr.x, p.y - kc.ptr.y) < DRAG_START_PX) return;
+      this.keyEnd(true);
+    }
     // 0.32.0: 앱이 맡은 포인터는 앱에만 넘긴다(끌기·측정 미리 보기 없음)
     if (this.holds.size) {
       const h = this.holds.move(e.pointerId, p.x, p.y);
@@ -7082,6 +7647,11 @@ export class Viewer3d {
    * 캔버스에 초점이 없을 때 앱이 창 키를 넘겨 같은 규칙을 쓰게 한다(입력 칸 걸러내기는 앱 몫).
    */
   handleKey(e: KeyboardEvent): boolean {
+    // 0.46.0 키보드 붙잡기(setKeyboardSnap을 켰을 때만 — 캔버스가 받은 키): 화살표 가상 커서·Tab 후보 돌리기·Enter 찍기·Esc 끄기
+    if (this.keySnap && this.keyboardKey(e)) {
+      e.preventDefault();
+      return true;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     // Shift(0.10.0): 측정 추론 잠금(setMeasureSnap({ inference: { lock: true } })일 때). 기본 동작은 막지 않으므로 false
     if (e.key === 'Shift') {
@@ -7202,7 +7772,12 @@ export class Viewer3d {
     }
     const f = this.frame();
     // 측정 중 커서 아래 붙잡을 점
-    if (this.measuring && this.hoverAt && !this.drag) {
+    // 0.46.0: 가상 커서 자리를 다시 구할 때(잠금·붙잡기 한도 등 — rehover)는 후보 목록을 다시 구하고 같은 점 후보를 지킨다
+    if (this.measuring && this.hoverAt && !this.drag && this.keyCur && this.hoverAt.pointerType === KEY_POINTER) {
+      this.hoverAt = null;
+      this.keyRecompute(true);
+      this.keyAnnounce('refresh');
+    } else if (this.measuring && this.hoverAt && !this.drag) {
       this.measureHover = this.measureAt(this.hoverAt.x, this.hoverAt.y, this.hoverAt.pointerType);
       this.lastHoverAt = this.hoverAt;
       this.hoverAt = null;
@@ -7367,6 +7942,13 @@ export class Viewer3d {
     if (this.annos) this.drawAnnotations(ctx, f, screen);
     else if (screen) this.annoLabels = [];
     this.drawMeasure(ctx, f, screen);
+    // 0.46.0 가상 커서(화면 덧그림만 — 그림 저장에는 그리지 않는다)
+    const kc = screen ? this.keyCur : null;
+    if (kc) {
+      ctx.save();
+      drawSnapMark(ctx, this.theme, kc.x, kc.y, 'cursor');
+      ctx.restore();
+    }
   }
 
   /**
@@ -7606,79 +8188,7 @@ export class Viewer3d {
      */
     const snapMarkAt = (p: V3 | null, kind: 'midpoint' | 'center' | 'point' | 'intersection' | 'perpendicular' | 'tangent'): void => {
       if (!p) return;
-      const [x, y] = p;
-      ctx.fillStyle = th.measure;
-      ctx.strokeStyle = th.textBg;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      if (kind === 'tangent') {
-        // 바탕 테(대비) 위에 측정 색 테와 위 접선(중심 ⊕와 같은 반지름 — 십자 대신 꼭대기 가로선이 테 밖으로 나간다)
-        for (const [color, w] of [
-          [th.textBg, 4],
-          [th.measure, 2],
-        ] as const) {
-          ctx.strokeStyle = color;
-          ctx.lineWidth = w;
-          ctx.beginPath();
-          ctx.arc(x, y, 6, 0, Math.PI * 2);
-          ctx.moveTo(x - 10, y - 6);
-          ctx.lineTo(x + 10, y - 6);
-          ctx.stroke();
-        }
-      } else if (kind === 'intersection' || kind === 'perpendicular') {
-        // 바탕 테(대비) 위에 측정 색 선
-        for (const [color, w] of [
-          [th.textBg, 4.5],
-          [th.measure, 2],
-        ] as const) {
-          ctx.strokeStyle = color;
-          ctx.lineWidth = w;
-          ctx.beginPath();
-          if (kind === 'intersection') {
-            ctx.moveTo(x - 6, y - 6);
-            ctx.lineTo(x + 6, y + 6);
-            ctx.moveTo(x + 6, y - 6);
-            ctx.lineTo(x - 6, y + 6);
-          } else {
-            ctx.moveTo(x - 7, y);
-            ctx.lineTo(x + 7, y);
-            ctx.moveTo(x, y);
-            ctx.lineTo(x, y - 10);
-          }
-          ctx.stroke();
-        }
-      } else if (kind === 'midpoint') {
-        ctx.moveTo(x, y - 6);
-        ctx.lineTo(x + 5.5, y + 4);
-        ctx.lineTo(x - 5.5, y + 4);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      } else if (kind === 'point') {
-        ctx.moveTo(x, y - 6);
-        ctx.lineTo(x + 6, y);
-        ctx.lineTo(x, y + 6);
-        ctx.lineTo(x - 6, y);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      } else {
-        // 바탕 테(대비) 위에 측정 색 테와 십자
-        for (const [color, w] of [
-          [th.textBg, 4],
-          [th.measure, 2],
-        ] as const) {
-          ctx.strokeStyle = color;
-          ctx.lineWidth = w;
-          ctx.beginPath();
-          ctx.arc(x, y, 6, 0, Math.PI * 2);
-          ctx.moveTo(x - 9, y);
-          ctx.lineTo(x + 9, y);
-          ctx.moveTo(x, y - 9);
-          ctx.lineTo(x, y + 9);
-          ctx.stroke();
-        }
-      }
+      drawSnapMark(ctx, th, p[0], p[1], kind);
     };
     /** seg = 두 점의 화면 자리(0.13.0 — 피할 영역과 겹치면 이 선분을 따라 옮겨 본다) */
     const label = (at: V3 | null, lines: string[], seg: [V3, V3] | null): void => {
