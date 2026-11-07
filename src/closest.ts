@@ -26,6 +26,15 @@ export interface ClosestResult {
   /** 둘째 묶음 위 점(세계) */
   b: V3;
   distance: number;
+  /**
+   * 0.41.0(indices를 줬을 때만): 두 점이 놓인 기본 도형의 배열 안 번호(Pick3d.raw와 같은 뜻 — 그물은 삼각형 번호, 선분 묶음·점 묶음은 segmentIds·pointIds를 거치기 전 번호).
+   * 두 묶음이 걸치면(거리 0) 처음 찾은 걸친 쌍
+   */
+  rawA?: number;
+  rawB?: number;
+  /** 0.41.0(Viewer3d.closestPoints에 indices를 줬을 때만): 원본 식별 번호(Pick3d.index와 같은 뜻 — segmentIds·pointIds를 거친 번호, 그물이면 삼각형 번호) */
+  indexA?: number;
+  indexB?: number;
 }
 
 const EPS = 1e-30;
@@ -282,59 +291,216 @@ function boxDist2(a: Float64Array, b: Float64Array): number {
 
 const boxSize = (b: Float64Array): number => b[3]! - b[0]! + (b[4]! - b[1]!) + (b[5]! - b[2]!);
 
+/** 최근접점 찾기 선택(0.41.0 — indices: 결과에 두 기본 도형의 배열 안 번호 rawA·rawB를 싣는다) */
+export interface ClosestOptions {
+  maxDistance?: number;
+  indices?: boolean;
+}
+
 /**
- * 두 묶음 사이 가장 가까운 두 점(세계). maxDistance를 주면 그보다 먼 결과는 찾지 않고 null.
- * 기본 도형이 없으면 null.
+ * 두 묶음 사이 최근접점 찾기를 나눠 돌리는 상태(0.41.0). closestBetween은 이것을 한 번에 끝까지 돌린다(step(Infinity)).
+ * 마디 쌍 더미(stack)·지금 최솟값·세계 상자·정점 기억을 들고 있어, step(n)으로 마디 쌍 n개씩 이어 꺼내도 한 번에 돌린 것과
+ * 같은 차례로 같은 쌍을 보고 같은 답(두 점·거리·기본 도형 번호 — 바이트까지)을 낸다. 모양(정점·BVH·행렬·숨김)은 끝날 때까지 바뀌지 않아야 한다
  */
-export function closestBetween(A: ClosestShape, B: ClosestShape, opts: { maxDistance?: number } = {}): ClosestResult | null {
-  if (!A.bvh.count || !B.bvh.count) return null;
-  const wa = new WorldShape(A), wb = new WorldShape(B);
-  const max = opts.maxDistance;
-  let best2 = max !== undefined && max >= 0 ? max * max : Infinity;
-  let best: { c1: V3; c2: V3 } | null = null;
-  const na = A.bvh.node, nb = B.bvh.node;
-  const stack: number[] = [0, 0];
-  while (stack.length) {
-    const j = stack.pop()!, i = stack.pop()!;
-    const ba = wa.box(i), bb = wb.box(j);
-    if (boxDist2(ba, bb) > best2 || (best && boxDist2(ba, bb) === best2)) continue;
-    const aa = na[i * 2]!, ak = na[i * 2 + 1]!, ba0 = nb[j * 2]!, bk = nb[j * 2 + 1]!;
-    const leafA = ak > 0 || aa === 0xffffffff, leafB = bk > 0 || ba0 === 0xffffffff;
-    if (leafA && leafB) {
-      if (ak === 0 || bk === 0) continue;
-      for (let x = aa; x < aa + ak; x++) {
-        const pi = A.bvh.order[x]!;
-        if (A.skip && A.skip(pi)) continue;
-        const PA = wa.prim(pi);
-        for (let y = ba0; y < ba0 + bk; y++) {
-          const pj = B.bvh.order[y]!;
-          if (B.skip && B.skip(pj)) continue;
-          const r = closestPrims(PA, wb.prim(pj));
-          if (r.d2 < best2 || (!best && r.d2 <= best2)) {
-            best2 = r.d2;
-            best = { c1: r.c1, c2: r.c2 };
-            if (best2 === 0) return { a: r.c1, b: r.c2, distance: 0 };
+export class ClosestSearch {
+  private readonly A: ClosestShape;
+  private readonly B: ClosestShape;
+  private readonly wa: WorldShape | null;
+  private readonly wb: WorldShape | null;
+  private readonly indices: boolean;
+  private best2: number;
+  private best: { c1: V3; c2: V3; ia: number; ib: number } | null = null;
+  private readonly stack: number[];
+  private out: ClosestResult | null | undefined;
+  /** 지금까지 꺼낸 마디 쌍 수 */
+  visited = 0;
+
+  constructor(A: ClosestShape, B: ClosestShape, opts: ClosestOptions = {}) {
+    this.A = A;
+    this.B = B;
+    this.indices = opts.indices === true;
+    const max = opts.maxDistance;
+    this.best2 = max !== undefined && max >= 0 ? max * max : Infinity;
+    if (!A.bvh.count || !B.bvh.count) {
+      this.wa = this.wb = null;
+      this.stack = [];
+      this.out = null;
+    } else {
+      this.wa = new WorldShape(A);
+      this.wb = new WorldShape(B);
+      this.stack = [0, 0];
+      this.out = undefined;
+    }
+  }
+
+  /** 끝났는지 */
+  get done(): boolean {
+    return this.out !== undefined;
+  }
+
+  /** 답(끝나기 전에는 undefined) — 가장 가까운 두 점(세계)·거리, indices면 기본 도형 번호. maxDistance보다 멀거나 기본 도형이 없으면 null */
+  get result(): ClosestResult | null | undefined {
+    return this.out;
+  }
+
+  private finish(c1: V3, c2: V3, d2: number, ia: number, ib: number): void {
+    const r: ClosestResult = { a: c1, b: c2, distance: d2 === 0 ? 0 : Math.sqrt(d2) };
+    if (this.indices) {
+      r.rawA = ia;
+      r.rawB = ib;
+    }
+    this.out = r;
+    this.stack.length = 0;
+  }
+
+  /** 마디 쌍을 n개까지 꺼내 본다(잎끼리면 그 기본 도형 쌍을 모두 잰다). 끝났으면 true */
+  step(n = Infinity): boolean {
+    if (this.out !== undefined) return true;
+    const A = this.A, B = this.B, wa = this.wa!, wb = this.wb!;
+    const na = A.bvh.node, nb = B.bvh.node;
+    const stack = this.stack;
+    let best2 = this.best2;
+    let best = this.best;
+    let k = 0;
+    while (stack.length && k < n) {
+      k++;
+      const j = stack.pop()!, i = stack.pop()!;
+      const ba = wa.box(i), bb = wb.box(j);
+      if (boxDist2(ba, bb) > best2 || (best && boxDist2(ba, bb) === best2)) continue;
+      const aa = na[i * 2]!, ak = na[i * 2 + 1]!, ba0 = nb[j * 2]!, bk = nb[j * 2 + 1]!;
+      const leafA = ak > 0 || aa === 0xffffffff, leafB = bk > 0 || ba0 === 0xffffffff;
+      if (leafA && leafB) {
+        if (ak === 0 || bk === 0) continue;
+        for (let x = aa; x < aa + ak; x++) {
+          const pi = A.bvh.order[x]!;
+          if (A.skip && A.skip(pi)) continue;
+          const PA = wa.prim(pi);
+          for (let y = ba0; y < ba0 + bk; y++) {
+            const pj = B.bvh.order[y]!;
+            if (B.skip && B.skip(pj)) continue;
+            const r = closestPrims(PA, wb.prim(pj));
+            if (r.d2 < best2 || (!best && r.d2 <= best2)) {
+              best2 = r.d2;
+              best = { c1: r.c1, c2: r.c2, ia: pi, ib: pj };
+              if (best2 === 0) {
+                this.visited += k;
+                this.finish(r.c1, r.c2, 0, pi, pj);
+                return true;
+              }
+            }
           }
         }
+        continue;
       }
-      continue;
+      // 큰 쪽(또는 잎이 아닌 쪽)을 나누고, 가까운 쌍을 나중에 넣어 먼저 꺼낸다
+      const splitA = !leafA && (leafB || boxSize(ba) >= boxSize(bb));
+      const pairs: [number, number][] = splitA
+        ? [
+            [aa, j],
+            [aa + 1, j],
+          ]
+        : [
+            [i, ba0],
+            [i, ba0 + 1],
+          ];
+      const d0 = boxDist2(wa.box(pairs[0]![0]), wb.box(pairs[0]![1]));
+      const d1 = boxDist2(wa.box(pairs[1]![0]), wb.box(pairs[1]![1]));
+      const order = d0 <= d1 ? [pairs[1]!, pairs[0]!] : [pairs[0]!, pairs[1]!];
+      for (const [p, q] of order) stack.push(p, q);
     }
-    // 큰 쪽(또는 잎이 아닌 쪽)을 나누고, 가까운 쌍을 나중에 넣어 먼저 꺼낸다
-    const splitA = !leafA && (leafB || boxSize(ba) >= boxSize(bb));
-    const pairs: [number, number][] = splitA
-      ? [
-          [aa, j],
-          [aa + 1, j],
-        ]
-      : [
-          [i, ba0],
-          [i, ba0 + 1],
-        ];
-    const d0 = boxDist2(wa.box(pairs[0]![0]), wb.box(pairs[0]![1]));
-    const d1 = boxDist2(wa.box(pairs[1]![0]), wb.box(pairs[1]![1]));
-    const order = d0 <= d1 ? [pairs[1]!, pairs[0]!] : [pairs[0]!, pairs[1]!];
-    for (const [p, q] of order) stack.push(p, q);
+    this.visited += k;
+    this.best2 = best2;
+    this.best = best;
+    if (stack.length) return false;
+    if (!best) this.out = null;
+    else this.finish(best.c1, best.c2, best2, best.ia, best.ib);
+    return true;
   }
-  if (!best) return null;
-  return { a: best.c1, b: best.c2, distance: Math.sqrt(best2) };
 }
+
+/**
+ * 두 묶음 사이 가장 가까운 두 점(세계). maxDistance를 주면 그보다 먼 결과는 찾지 않고 null.
+ * 기본 도형이 없으면 null. 0.41.0: indices면 두 기본 도형의 배열 안 번호(rawA·rawB)도 싣는다
+ */
+export function closestBetween(A: ClosestShape, B: ClosestShape, opts: ClosestOptions = {}): ClosestResult | null {
+  const s = new ClosestSearch(A, B, opts);
+  s.step(Infinity);
+  return s.result!;
+}
+
+/** 나눠 돌리기 사이에 쉴 틈(0.41.0 closestBetweenAsync) */
+export type ClosestYield = () => Promise<void>;
+
+/** 한 조각에서 시계를 보는 간격(마디 쌍 수) — performance.now()를 너무 자주 부르지 않게 */
+const CLOCK_EVERY = 64;
+
+/**
+ * 두 묶음 사이 최근접점을 시간 조각으로 나눠 찾는다(0.41.0, 순수 — 쉬는 길 wait는 부르는 쪽이 준다). 조각마다 sliceMs(기본 8)를 넘기 전에 멈추고
+ * wait()를 기다린 뒤 이어 간다. 답은 closestBetween(같은 입력)과 바이트까지 같다(같은 ClosestSearch를 같은 차례로 돌린다).
+ * signal이 멈추면 signal.reason으로 거절한다. now는 시계(기본 performance.now — 시험에서 바꾼다). 조각 수·가장 긴 조각은 stats에 적는다
+ */
+export async function closestBetweenAsync(
+  A: ClosestShape,
+  B: ClosestShape,
+  opts: ClosestOptions & { signal?: AbortSignal | null; sliceMs?: number; wait: ClosestYield; now?: () => number; stats?: ClosestSliceStats },
+): Promise<ClosestResult | null> {
+  const s = new ClosestSearch(A, B, opts);
+  const now = opts.now ?? (() => performance.now());
+  const ms = sliceRange(opts.sliceMs);
+  for (;;) {
+    opts.signal?.throwIfAborted();
+    if (closestSlice(s, ms, now, opts.stats)) return s.result!;
+    await opts.wait();
+  }
+}
+
+/** 조각 하나(0.41.0): 끝나거나 ms가 지날 때까지 마디 쌍을 CLOCK_EVERY개씩 꺼낸다. 끝났으면 true. stats를 주면 조각 수·가장 긴 조각·꺼낸 수를 적는다 */
+export function closestSlice(s: ClosestSearch, ms: number, now: () => number, stats?: ClosestSliceStats | null): boolean {
+  const t0 = now();
+  while (!s.step(CLOCK_EVERY) && now() - t0 < ms);
+  if (stats) {
+    stats.slices++;
+    stats.longest = Math.max(stats.longest, now() - t0);
+    stats.visited = s.visited;
+  }
+  return s.done;
+}
+
+/**
+ * 나눠 돌린 기록(0.41.0 — 부르는 쪽이 0으로 채운 객체를 주면 그 자리에 적는다): 조각 수, 가장 긴 조각(ms — 그 시계로 잰 것), 마지막 찾기에서 꺼낸 마디 쌍 수,
+ * 모양이 바뀌어 처음부터 다시 찾은 횟수(Viewer3d.closestPointsAsync만 — 순수 함수는 세지 않는다)
+ */
+export interface ClosestSliceStats {
+  slices: number;
+  longest: number;
+  visited: number;
+  restarts: number;
+}
+
+/** 나눠 돌리는 동안 모양이 바뀌었는지 볼 열쇠(0.41.0): 정점·번호 배열·BVH·숨김 함수는 같은 객체여야 하고, 모형 행렬은 값으로 견준다 */
+export interface ClosestKey {
+  s: ClosestShape;
+  model: number[] | null;
+}
+
+export function closestKey(s: ClosestShape): ClosestKey {
+  return { s, model: s.model ? Array.from(s.model, Number) : null };
+}
+
+export function sameClosestKey(a: ClosestKey, b: ClosestKey): boolean {
+  const s = a.s, t = b.s;
+  if (s.kind !== t.kind || s.positions !== t.positions || s.indices !== t.indices || s.bvh !== t.bvh || (s.skip ?? null) !== (t.skip ?? null)) return false;
+  const m = a.model, n = b.model;
+  if (!m || !n) return !m && !n;
+  if (m.length !== n.length) return false;
+  for (let i = 0; i < m.length; i++) if (!Object.is(m[i], n[i])) return false;
+  return true;
+}
+
+/** 조각 시간(ms) 고르기: 수이고 0보다 크면 그대로(1000 위는 1000), 아니면 기본 8 */
+export function sliceRange(v: unknown): number {
+  return typeof v === 'number' && v > 0 ? Math.min(v, 1000) : CLOSEST_SLICE_MS;
+}
+
+/** 나눠 돌리기 기본 조각 시간(ms, 0.41.0) — 60 Hz 한 프레임(16.7 ms)의 절반 남짓이라 그리기·입력 틈이 남는다 */
+export const CLOSEST_SLICE_MS = 8;

@@ -7370,6 +7370,38 @@ const pointsFirstValues: ValueSet = {
   },
 };
 
+// ───────────── 0.41.0 앱 붙잡기 점의 우선(SnapPoint.priority) ─────────────
+/** 0.41.0 판인지(같은 판에 들어온 API — closestPointsAsync가 있으면 SnapPoint.priority도 있다) */
+const v0410: Need = fn('setMeasureSnap', 'closestPointsAsync');
+/**
+ * 0.41.0 값(새 값): pickPoints와 같은 앱 점(고른 점을 4 단위로 반올림한 점·묶음 앞 중심 점)과 늘 후보인 점 둘에 우선을 달아(없음·'normal'·'low'·'fallback')
+ * 가운데 점·교차점·수직 발·축 방향과 함께 격자 미리 보기·누르기. 없음과 'normal'은 0.40.0 길과 같은 값이어야 한다(같은 판 안에서 견준다)
+ */
+const priorityValues: ValueSet = {
+  name: 'base-measure-priority',
+  data: 'base',
+  needs: v0410,
+  run: (c) => {
+    const out: unknown[] = [];
+    for (const pr of [null, 'normal', 'low', 'fallback'] as const) {
+      const calls = { n: 0 };
+      const base = pickPoints(c, calls);
+      const tag = pr ? { priority: pr } : {};
+      c.v.setMeasureSnap({
+        midpoints: true,
+        pointsFor: (pick: any) => base(pick).map((p) => ({ ...p, ...tag })),
+        points: [
+          { point: c.world([60, 40, 40]), kind: 'center', ...tag },
+          { point: c.world([0, 0, 40]), kind: 'point', ...tag },
+        ],
+        inference: { intersections: true, perpendicular: true, axes: true },
+      });
+      out.push([pr, hoverClicks(c), calls.n]);
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -7464,6 +7496,7 @@ const VALUES: ValueSet[] = [
   lowExactValues,
   ringLensFarValues,
   ringLensOffValues,
+  priorityValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

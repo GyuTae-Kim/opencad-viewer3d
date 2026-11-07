@@ -1,12 +1,14 @@
 /**
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
-export type { Box3, LineSet3d, Mesh3d, NormalArray, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, Texture3d, UvArray, UvTransform } from './types';
+export type { Box3, LineSet3d, Mesh3d, NormalArray, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, SnapPriority, Texture3d, UvArray, UvTransform } from './types';
 export { packNormals, packUvs } from './attribs';
 export { SNAPSHOT_MAX_PIXELS, TEXTURE_REDRAW_MS, TEXTURE_REDRAW_SLOW, Viewer3d } from './viewer';
 export type {
   AnnotationOptions,
   BackgroundOptions,
+  ClosestPointsAsyncOptions,
+  ClosestPointsOptions,
   ContextRestoreNeed,
   FogOptions,
   GroupInfo,
@@ -65,6 +67,7 @@ export type {
   TrackDirEdgeFilter,
 } from './inference';
 export type { SnapFace, SnapRefineFaceInput, SnapRefineFaceKind, SnapRefineInput, SnapRefineKind, SnapRefineLine, SnapSegment } from './snap';
+export { LOW_PRIORITY_YIELD_PX } from './snap';
 export type {
   AxisEdgeSnap,
   AxisFaceSnap,
@@ -98,7 +101,16 @@ export type {
 export { MAX_SECTION_PLANES } from './section';
 export type { IndexRange } from './ranges';
 export { segmentsById } from './segments';
-export { type ClosestResult, closestBetween } from './closest';
+export {
+  CLOSEST_SLICE_MS,
+  type ClosestOptions,
+  type ClosestResult,
+  ClosestSearch,
+  type ClosestSliceStats,
+  type ClosestYield,
+  closestBetween,
+  closestBetweenAsync,
+} from './closest';
 export { type Annotation3d, type AnnotationKind, angleAt, annotationGeometry, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection, ViewName } from './camera';
 export { VIEW_KEYS, VIEW_LABELS } from './camera';
