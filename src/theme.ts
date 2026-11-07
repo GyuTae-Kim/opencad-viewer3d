@@ -59,17 +59,22 @@ export const DARK_THEME: Viewer3dTheme = {
   inference: '#f062f0',
 };
 
+/**
+ * 밝은 테마. 0.48.0: Y축(0.47.0 rgba(40,150,40,0.75) — 바탕 위 2.52:1)과 고른 것 강조색(#e07800 — 2.81:1)을 바탕과 3:1(WCAG 1.4.11 그래픽) 넘게 진하게 했다
+ * (Y축 3.91:1·강조색 3.39:1). Y축은 같은 초록 색상에서 X축(빨강)보다 어둡게 두어 적록 색맹 모의(Machado 2009)에서도 X·Y가 갈리고(CIEDE2000 제2색맹 3.4 → 9.3),
+ * 강조색은 주황 계열(어두운 테마 #ffb44c와 같은 계열)에서 측정색·공구 표시색과 정상 시각 차가 0.47.0보다 크게 노란 쪽으로 옮겼다. 그 밖의 색은 그대로다
+ */
 export const LIGHT_THEME: Viewer3dTheme = {
   background: '#f4f5f7',
   grid: 'rgba(0,0,0,0.18)',
   gridMinor: 'rgba(0,0,0,0.065)',
   axisX: 'rgba(205,50,50,0.75)',
-  axisY: 'rgba(40,150,40,0.75)',
+  axisY: 'rgba(25,120,25,0.85)',
   axisZ: 'rgba(40,90,220,0.85)',
   edge: 'rgba(20,24,30,0.7)',
   text: '#1d2530',
   textBg: 'rgba(255,255,255,0.88)',
-  highlight: '#e07800',
+  highlight: '#b87700',
   measure: '#c25e00',
   marker: '#e0602a',
   cubeFace: '#e2e6ec',

@@ -193,6 +193,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { countIdsUpTo } from './playback';
+import { type AnimateSetting, normalizeAnimate, resolveAnimate, watchReducedMotion } from './motion';
 import { DRAG_START_PX, type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
 import { type PointerHold, PointerHolds, takesBackTouches } from './claim';
 import {
@@ -279,8 +280,12 @@ export interface Viewer3dOptions {
   keyboard?: boolean;
   projection?: Projection;
   renderMode?: RenderMode;
-  /** 표준 뷰·전체 보기를 부드럽게(기본 true) */
-  animate?: boolean;
+  /**
+   * 카메라를 날리는 길(표준 뷰·전체 보기·맞춰 보기·뷰 큐브·키 F·1~7·가운데 단추 두 번·창 확대·flyTo)을 부드럽게(기본 true — 0.47.0 그대로).
+   * false면 바로 옮긴다. 0.48.0 'auto'면 사용자의 움직임 줄이기 선호(prefers-reduced-motion: reduce)일 때 바로 옮기고, 뷰어를 연 뒤 OS·브라우저 설정이 바뀌어도
+   * 따라간다(WCAG 2.3.3). setAnimate로 바꾸고 animate로 지금 값을 읽는다. 각 함수에 animate 인자를 주면 그 값이 이긴다
+   */
+  animate?: AnimateSetting;
   /** 고르기 허용 거리(화면 화소, 기본 6) — 마우스·펜 */
   pickTolerance?: number;
   /**
@@ -1620,7 +1625,11 @@ export class Viewer3d {
   private cctx: CanvasRenderingContext2D;
   private gl: WebGL2RenderingContext;
   private renderer: Renderer3d;
-  private opts: Required<Omit<Viewer3dOptions, 'theme' | 'projection' | 'renderMode' | 'formatMeasure'>>;
+  private opts: Required<Omit<Viewer3dOptions, 'theme' | 'projection' | 'renderMode' | 'formatMeasure' | 'animate'>>;
+  /** 0.48.0 카메라 움직임 설정(true·false·'auto'), 'auto'일 때 듣는 움직임 줄이기 선호와 그만 듣기 */
+  private motion: AnimateSetting = true;
+  private reduceMotion = false;
+  private motionOff: (() => void) | null = null;
   private themeOpt: Viewer3dOptions['theme'];
   private theme: Viewer3dTheme = DARK_THEME;
   private colors!: RenderColors;
@@ -1908,7 +1917,6 @@ export class Viewer3d {
       viewCubeTouch: cubeTouchOpts(opts.viewCubeTouch),
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
-      animate: opts.animate ?? true,
       pickTolerance: opts.pickTolerance ?? PICK_TOLERANCE_PX,
       touchPickTolerance: opts.touchPickTolerance ?? TOUCH_PICK_TOLERANCE_PX,
       pickEdges: opts.pickEdges ?? false,
@@ -1917,6 +1925,7 @@ export class Viewer3d {
       textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
     };
     this.themeOpt = opts.theme;
+    this.motion = normalizeAnimate(opts.animate);
     this.measureFmt = opts.formatMeasure ?? null;
     this.gridOn = this.opts.grid;
     this.mode = opts.renderMode ?? 'shadedEdges';
@@ -2005,6 +2014,8 @@ export class Viewer3d {
     });
     this.ro.observe(wrap);
     this.watchDpr();
+    // 0.48.0: 'auto'일 때만 움직임 줄이기 선호를 듣는다(true·false면 0.47.0처럼 matchMedia를 부르지 않는다)
+    this.listenMotion(this.motion === 'auto');
     this.bindInput();
     this.invalidate();
   }
@@ -2500,6 +2511,7 @@ export class Viewer3d {
     this.disposed = true;
     this.listenWalkRelease(false);
     this.listenShiftRelease(false);
+    this.listenMotion(false);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     clearTimeout(this.bvhTimer);
@@ -2567,6 +2579,7 @@ export class Viewer3d {
     return { ...this.cam, target: [...this.cam.target] as V3 };
   }
 
+  /** 카메라를 바로 바꾼다(움직임 없음 — 옮기던 움직임은 그만둔다). 저장된 보기로 날아가려면 flyTo */
   setCamera(c: CameraState): void {
     this.anim = null;
     this.wheelAnchor = null;
@@ -2574,13 +2587,67 @@ export class Viewer3d {
     this.invalidate();
   }
 
+  /**
+   * 0.48.0 주어진 카메라로 날아간다(앱의 홈 보기·저장된 보기·장면 탭): 다른 카메라 길과 같은 움직임(0.32초, 같은 고르기 곡선)이고 animate 설정을 따른다
+   * (주지 않으면 지금 animate — 'auto'면 움직임 줄이기 선호). 끌기·휠·다른 카메라 호출이 오면 옮기던 움직임을 끝 자리로 마치거나 바꾼다
+   */
+  flyTo(c: CameraState, animate = this.animate): void {
+    this.goto({ ...c, target: [...c.target] as V3 }, animate);
+  }
+
+  /**
+   * 0.48.0 카메라 움직임 설정을 바꾼다(Viewer3dOptions.animate와 같다 — true·false·'auto'). 'auto'면 움직임 줄이기 선호(prefers-reduced-motion: reduce)를
+   * 듣기 시작하고 바뀔 때마다 따른다. 바뀐 값이 "움직이지 않음"이면 옮기던 움직임을 바로 끝 자리로 마친다. 뷰 큐브·키 F·1~7도 다음 누르기부터 따른다
+   */
+  setAnimate(v: AnimateSetting): void {
+    if (this.disposed) return;
+    this.motion = normalizeAnimate(v);
+    this.listenMotion(this.motion === 'auto');
+    this.motionChanged();
+  }
+
+  /** 0.48.0 지금 카메라를 부드럽게 옮기는지(설정이 'auto'면 움직임 줄이기 선호를 따른 값) — 앱이 제 카메라 움직임도 같은 값으로 정할 때 */
+  get animate(): boolean {
+    return resolveAnimate(this.motion, this.reduceMotion);
+  }
+
+  /** 0.48.0 카메라 움직임 설정(true·false·'auto' — 준 그대로) */
+  get animateSetting(): AnimateSetting {
+    return this.motion;
+  }
+
+  /** 'auto'일 때만 움직임 줄이기 선호를 듣는다(한 번만 — 이미 듣고 있으면 그대로) */
+  private listenMotion(on: boolean): void {
+    if (on === !!this.motionOff) return;
+    if (!on) {
+      this.motionOff?.();
+      this.motionOff = null;
+      this.reduceMotion = false;
+      return;
+    }
+    const w = watchReducedMotion(typeof matchMedia === 'function' ? (q) => matchMedia(q) : null, (reduce) => {
+      if (this.disposed) return;
+      this.reduceMotion = reduce;
+      this.motionChanged();
+    });
+    this.reduceMotion = w.reduce;
+    this.motionOff = w.off;
+  }
+
+  /** 움직이지 않게 바뀌었으면 옮기던 카메라를 끝 자리로 마친다 */
+  private motionChanged(): void {
+    if (this.animate || !this.anim) return;
+    this.finishAnim();
+    this.invalidate();
+  }
+
   /** 보이는 것 전체 보기 */
-  fit(animate = this.opts.animate): void {
+  fit(animate = this.animate): void {
     this.goto(fitCamera(this.cam, this.visibleBox(), this.cssW / this.cssH), animate);
   }
 
   /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기 */
-  fitItems(ids: readonly string[], animate = this.opts.animate): void {
+  fitItems(ids: readonly string[], animate = this.animate): void {
     let b = emptyBox();
     for (const id of new Set(ids)) {
       const it = this.items.get(id);
@@ -2591,12 +2658,12 @@ export class Viewer3d {
   }
 
   /** 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기 */
-  setView(name: ViewName, animate = this.opts.animate): void {
+  setView(name: ViewName, animate = this.animate): void {
     this.setViewDir(VIEW_DIRS[name], animate);
   }
 
   /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로) */
-  setViewDir(dir: readonly number[], animate = this.opts.animate): void {
+  setViewDir(dir: readonly number[], animate = this.animate): void {
     const a = dirToAngles(dir, 0);
     const { roll: _r, shiftX: _x, shiftY: _y, ...base } = this.cam;
     void _r, _x, _y;
@@ -5343,7 +5410,7 @@ export class Viewer3d {
    * 창 확대: 화면 사각형(캔버스 CSS 화소 두 구석)이 화면을 채우게 한다. 사각형 가운데 아래 점(없으면 대상점 깊이)을 화면 가운데로 옮기고
    * 그 깊이에서 사각형이 꼭 맞게 확대한다. 너무 작은 사각형(2화소 미만)은 무시한다
    */
-  zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.opts.animate): void {
+  zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.animate): void {
     if (this.disposed || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return;
     this.finishAnim();
     const f = this.frame();

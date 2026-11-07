@@ -10,6 +10,7 @@
  */
 import type { Annotation3d } from '../../src/annotate';
 import { boxMesh, checkerBmp, syntheticScene } from '../../src/synth';
+import { DARK_THEME, LIGHT_THEME, parseColor } from '../../src/theme';
 import type { LineSet3d, Mesh3d, Scene3d } from '../../src/types';
 import { Viewer3d } from '../../src/viewer';
 import { type GridSpec, cutBy, fillGrid, gridMesh, gridX, gridY } from './grid';
@@ -8223,6 +8224,105 @@ const hiddenLabelCycleValues: ValueSet = {
   },
 };
 
+// ───────────── 0.48.0 테마 축·고른 것 강조색 그린 대비 · 카메라 움직임 설정 ─────────────
+/** 그림에서 가장 흔한 색(바탕)의 [r, g, b] */
+function commonColor(img: ImageData): [number, number, number] {
+  const d = img.data, count = new Map<number, number>();
+  for (let i = 0; i < d.length; i += 4) {
+    const key = (d[i]! << 16) | (d[i + 1]! << 8) | d[i + 2]!;
+    count.set(key, (count.get(key) ?? 0) + 1);
+  }
+  let bgKey = 0, best = -1;
+  for (const [key, n] of count) if (n > best) [bgKey, best] = [key, n];
+  return [(bgKey >> 16) & 255, (bgKey >> 8) & 255, bgKey & 255];
+}
+const ratio255 = (a: number, b: number): number => Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100;
+
+/**
+ * 0.48.0 값(기존 base 자료를 다시 쓴다 — 새 장면 없음):
+ * (1) 두 테마에서 음영+윤곽 모드로 '상자'를 강조하고 그림 저장(renderImage)해 바탕(가장 흔한 색)과의 그린 대비:
+ *     왼쪽 아래 좌표축 칸(100 CSS 화소)의 X·Y·Z 화소(그 채널이 다른 둘보다 20 넘게 큰 화소) 가운데 바탕과 가장 대비가 큰 것,
+ *     강조를 켜고 끈 두 그림에서 바뀐 화소 가운데 주황 쪽(r ≥ g ≥ b, r − b ≥ 24)인 것의 수·바탕과 3:1 이상인 수·가장 큰 대비,
+ *     바뀐 화소 가운데 그 판 테마 강조색과 채널마다 12 안인 화소(고른 그물 윤곽선)의 수와 그 평균색의 바탕 대비.
+ *     0.47.0 밝은 테마 Y축·강조색은 3:1 아래 — 이 묶음은 base 49b3375와 값이 다른 것이 의도한 변화다(pixels-changed)
+ * (2) 카메라 움직임 설정(setAnimate가 있는 판만 — 없으면 'no-api'): 실제 Chrome의 matchMedia로 'auto'를 켠 값, flyTo가 움직임으로 시작하는지,
+ *     setAnimate(false)가 옮기던 카메라를 끝 자리로 마치는지
+ */
+const themeMotionValues: ValueSet = {
+  name: 'theme-contrast-motion-values',
+  data: 'base',
+  needs: fn('renderImage', 'highlight', 'setTheme', 'setRenderMode'),
+  run: (c) => {
+    const { v, w, h } = c;
+    const out: unknown[] = [];
+    v.setRenderMode('shadedEdges');
+    for (const theme of ['dark', 'light'] as const) {
+      v.setTheme(theme);
+      v.highlight(null);
+      v.renderNow();
+      const off: ImageData = v.renderImage({});
+      v.highlight(['상자']);
+      v.renderNow();
+      const img: ImageData = v.renderImage({});
+      const k = img.width / w, d = img.data, W = img.width;
+      const bg = commonColor(img);
+      const lb = lum255(new Uint8ClampedArray(bg), 0);
+      // 좌표축 칸
+      const axes = [0, 1, 2].map((ch) => {
+        let best = 1, n = 0;
+        for (let y = Math.floor((h - 100) * k); y < img.height; y++)
+          for (let x = 0; x < Math.ceil(100 * k); x++) {
+            const i = (y * W + x) * 4;
+            const me = d[i + ch]!, o1 = d[i + ((ch + 1) % 3)]!, o2 = d[i + ((ch + 2) % 3)]!;
+            if (me - Math.max(o1, o2) <= 20) continue;
+            n++;
+            best = Math.max(best, ratio255(lum255(d, i), lb));
+          }
+        return [n, best];
+      });
+      // 강조로 바뀐 주황 화소와 그 판 강조색 화소(윤곽선)
+      const hc = parseColor((theme === 'light' ? LIGHT_THEME : DARK_THEME).highlight)!.map((x) => Math.round(x * 255));
+      let changed = 0, orange = 0, over3 = 0, best = 1, near = 0;
+      const sum = [0, 0, 0];
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] === off.data[i] && d[i + 1] === off.data[i + 1] && d[i + 2] === off.data[i + 2]) continue;
+        changed++;
+        if (Math.abs(d[i]! - hc[0]!) <= 12 && Math.abs(d[i + 1]! - hc[1]!) <= 12 && Math.abs(d[i + 2]! - hc[2]!) <= 12) {
+          near++;
+          for (let ch = 0; ch < 3; ch++) sum[ch] = sum[ch]! + d[i + ch]!;
+        }
+        if (!(d[i]! >= d[i + 1]! && d[i + 1]! >= d[i + 2]! && d[i]! - d[i + 2]! >= 24)) continue;
+        orange++;
+        const r = ratio255(lum255(d, i), lb);
+        if (r >= 3) over3++;
+        best = Math.max(best, r);
+      }
+      const mean = new Uint8ClampedArray(sum.map((s) => Math.round(s / Math.max(1, near))));
+      out.push([theme, bg, axes, [changed, orange, over3, best], [near, near ? ratio255(lum255(mean, 0), lb) : null]]);
+    }
+    v.highlight(null);
+    v.setTheme('dark');
+    v.setRenderMode('shaded');
+    v.renderNow();
+    if (typeof v.setAnimate !== 'function') return [...out, 'no-api'];
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    v.setAnimate('auto');
+    const auto = [v.animateSetting, v.animate, v.animate === !reduce];
+    const start = v.getCamera();
+    const to = { ...start, yaw: start.yaw + 1, pitch: start.pitch * 0.5, distance: start.distance * 1.5 };
+    v.setAnimate(true);
+    v.flyTo(to);
+    const key = (cam: any): string => JSON.stringify([cam.yaw, cam.pitch, cam.distance].map((x: number) => Math.round(x * 1e6) / 1e6));
+    const moving = key(v.getCamera()) === key(start);
+    v.setAnimate(false);
+    const done = key(v.getCamera()) === key(to);
+    v.setCamera(start);
+    v.setAnimate(false);
+    v.renderNow();
+    return [...out, reduce, auto, moving, done];
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8327,6 +8427,7 @@ const VALUES: ValueSet[] = [
   secRangeSnapValues,
   keySnapValues,
   hiddenLabelCycleValues,
+  themeMotionValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
