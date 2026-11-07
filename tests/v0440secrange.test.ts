@@ -134,7 +134,7 @@ const K = (w: W, name: string): number => (w.gl as unknown as Record<string, num
 /** 여러 단면 그물 면 그리기(CLIPN 그물 프로그램 — 잘린 면 홀짝(CLIP)·채운 다각형은 아니다)의 [색인 수, 바이트 자리, 평면 수, 첫 평면] */
 function faceDraws(w: W, d: DrawEntry[]): [number, number, number, number[]][] {
   return d
-    .filter((e) => e.op === 'drawElements' && e.args[0] === K(w, 'TRIANGLES') && uni(e, 'u_nclip') !== undefined && uni(e, 'u_m') !== undefined)
+    .filter((e) => e.op === 'drawElements' && e.args[0] === K(w, 'TRIANGLES') && uni(e, 'u_nclip') !== undefined && uni(e, 'u_mv') !== undefined)
     .map((e) => [e.args[1]!, e.args[3]!, (uni(e, 'u_nclip') as number[])[0]!, ((uni(e, 'u_clips') as number[][])[0] ?? []).slice(0, 4)]);
 }
 const at = (w: W, p: readonly number[]): [number, number] => {

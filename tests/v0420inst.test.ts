@@ -94,8 +94,9 @@ describe('0.42.0 같은 그물 자리 모아 그리기', () => {
     for (let i = 0; i < 12; i++) {
       const e = per[i]!;
       const t = data[i]!;
-      // 0.51.0: 그물마다 그릴 때도 행렬 셋을 u_m(11 × vec4 — 자리 자료와 같은 꼴) 한 번에 보낸다
-      expect(t).toEqual(mat(e, 'u_m'));
+      expect(t.slice(0, 16)).toEqual(mat(e, 'u_mvp'));
+      expect(t.slice(16, 32)).toEqual(mat(e, 'u_mv'));
+      expect([t[32], t[33], t[34], t[36], t[37], t[38], t[40], t[41], t[42]]).toEqual(mat(e, 'u_nmat'));
     }
   });
 

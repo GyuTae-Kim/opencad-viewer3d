@@ -761,9 +761,8 @@ export class Renderer3d {
   stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0, culled: 0 };
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
+  private m4b = new Float32Array(16);
   private m3 = new Float32Array(9);
-  /** 0.51.0 그물 행렬 셋을 한 번에 보내는 자리(u_m — 11 × vec4: u_mvp 4열·u_mv 4열·u_nmat 3열(넷째 값 0)) */
-  private mPack = new Float32Array(44);
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
   /** 0.43.0 자리 자료의 그림자 행렬(빛 · 모형) 셈 자리 */
@@ -1392,26 +1391,18 @@ export class Renderer3d {
   }
 
   /**
-   * 0.51.0 그물 프로그램(INST 아님)의 행렬 셋을 균일 변수 한 번에(u_m — 0.50.0의 u_mvp·u_mv·u_nmat 세 번과 같은 float 값:
-   * 시점·투영 · 모형과 시점 · 모형은 double을 float32로, 법선 행렬은 float32 배열에 곧바로 — 자리 자료 그림 instMeshes와 같은 꼴)
+   * 그물 프로그램(INST 아님)의 행렬 셋(u_mvp·u_mv·u_nmat — 시점·투영 · 모형과 시점 · 모형은 double을 float32로, 법선 행렬은 float32 배열에 곧바로).
+   * 0.51.0: 한 균일 변수 배열(u_m)로 묶어 보내 보았으나 Apple GPU(ANGLE Metal)에서 셰이더가 만든 행렬과 균일 행렬의 곱이 깊이 마지막 자리에서 달라
+   * 면 위 윤곽선의 깊이 겨루기 화소가 바뀌어(SwiftShader는 같음) 0.50.0처럼 셋으로 보낸다
    */
   private meshMats(p: Prog, mvp: ArrayLike<number>, mv: ArrayLike<number>): void {
-    const u = this.mPack, m3 = this.m3;
-    for (let k = 0; k < 16; k++) {
-      u[k] = mvp[k]!;
-      u[16 + k] = mv[k]!;
-    }
-    normalMatrix(mv, m3);
-    u[32] = m3[0]!;
-    u[33] = m3[1]!;
-    u[34] = m3[2]!;
-    u[36] = m3[3]!;
-    u[37] = m3[4]!;
-    u[38] = m3[5]!;
-    u[40] = m3[6]!;
-    u[41] = m3[7]!;
-    u[42] = m3[8]!;
-    this.gl.uniform4fv(this.loc(p, 'u_m'), u);
+    const gl = this.gl;
+    this.m4a.set(mvp);
+    this.m4b.set(mv);
+    normalMatrix(mv, this.m3);
+    gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
+    gl.uniformMatrix4fv(this.loc(p, 'u_mv'), false, this.m4b);
+    gl.uniformMatrix3fv(this.loc(p, 'u_nmat'), false, this.m3);
   }
 
   /** 여러 단면 평면(로컬)을 지금 프로그램에 올린다(u_clips·u_nclip) */
@@ -3421,7 +3412,6 @@ export class Renderer3d {
       const p = cur;
       const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
       const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
-      // 0.51.0 행렬 셋을 균일 변수 한 번에(u_m — 같은 float 값)
       this.meshMats(p, mvp, mv);
       if (p.shadow && this.shadowMap) {
         // 깊이 그림 좌표 = [0, 1] 맞춤 · 빛 투영·시점 · 모형(double로 합친 뒤 float)

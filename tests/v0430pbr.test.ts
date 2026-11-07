@@ -101,22 +101,8 @@ const hashAll = (src: string): string => {
 
 describe('그물 셰이더 변종(0.43.0 UV·NMAP·PBR, INST+CLIP·INST+SHADOW)', () => {
   it('0.42.0 렌더러가 쓰던 변종(예전 정의 10개의 부분 집합 — INST는 단면·그림자·뒷면 없이)은 전처리 뒤 0.42.0 원본과 글자까지 같다(e4780f4에서 같은 식으로 잰 해시)', () => {
-    // 0.51.0은 INST 아닌 변종의 행렬 셋을 u_m(11 × vec4) 한 번에 받는다 — 그 줄만 0.50.0 줄로 되돌리면 나머지는 글자까지 같다
-    const unpack051 = (src: string): string => {
-      const a = src.replace(/\/\/ 0\.51\.0 그물마다 행렬 셋[^\n]*\nuniform vec4 u_m\[11\];\n/, 'uniform mat4 u_mvp;\nuniform mat4 u_mv;\nuniform mat3 u_nmat;\n');
-      const b = a.replace('#else\n  mat4 u_mvp = mat4(u_m[0], u_m[1], u_m[2], u_m[3]);\n  mat4 u_mv = mat4(u_m[4], u_m[5], u_m[6], u_m[7]);\n  mat3 u_nmat = mat3(u_m[8].xyz, u_m[9].xyz, u_m[10].xyz);\n#endif', '#endif');
-      expect(a).not.toBe(src);
-      expect(b).not.toBe(a);
-      return b;
-    };
-    expect(hashAll(unpack051(MESH_VS))).toBe('d3db9caf');
+    expect(hashAll(MESH_VS)).toBe('d3db9caf');
     expect(hashAll(MESH_FS)).toBe('c50375cf');
-    // INST 아닌 변종은 u_m에서 INST와 같은 식으로 행렬을 만든다(INST 변종에는 u_m이 없다)
-    const plain = preprocess(MESH_VS, []);
-    expect(plain).toContain('uniform vec4 u_m[11];');
-    expect(plain).toContain('mat4 u_mvp = mat4(u_m[0], u_m[1], u_m[2], u_m[3]);');
-    expect(plain).not.toContain('uniform mat4 u_mvp;');
-    expect(preprocess(withDefines(MESH_VS, 'INST'), ['INST'])).not.toContain('u_m[');
   });
 
   it('INST+CLIP·INST+SHADOW는 자리 자료에서 u_clip(맨 끝 텍셀)·u_shadowM(11~14)을 읽는 지역 변수(균일 변수 선언 없이), 텍셀 수는 u_instStride', () => {
