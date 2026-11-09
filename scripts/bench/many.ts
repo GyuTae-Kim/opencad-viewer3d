@@ -12,6 +12,7 @@
  *  - 0.51.0 parts: 프레임 비용 나누기 — GL 호출을 종류별(그리기·uniform·묶기·상태)로 세고, 그 종류만 아무것도 하지 않는 함수로 바꿔 줄어든 JS 시간을 그 몫으로,
  *    모두 바꾼 시간을 JS 몫(GL 없이)으로, 뷰어 그리기(renderNow) − 렌더러 그리기를 뷰어 몫으로, 화면 가운데 고르기 시간(처음·그 뒤)을 고르기 몫으로 잰다.
  *  - 0.51.0 ?flat 꼴(scripts/bench/flat.ts — 자리 1만·8만, 서로 다른 배열·같은 배열 섞음·모두 같은 배열), ?cull=0이면 화면 밖 잘라내기를 끈다
+ *  - 0.52.0 ?merge=1이면 묶어 그리기(기본 한도), ?merge=all이면 한도 없이 — 열기는 묶음 굽기를 마칠 때까지 기다린다(mergeMs·bakeMs)
  */
 import { checkerBmp } from '../../src/synth';
 import type { Mesh3d } from '../../src/types';
@@ -31,6 +32,8 @@ const pbr = q.get('pbr') === '1';
 const pbrOff = q.get('pbroff') === '1';
 /** 0.51.0 ?cull=0이면 화면 밖 잘라내기를 끈다(setRenderOptions({ culling: false }) — 그 선택이 없는 판은 무시한다) */
 const cullOff = q.get('cull') === '0';
+/** 0.52.0 ?merge=1이면 묶어 그리기를 늘 켜고(true), ?merge=off면 끈다(false) — 주지 않으면 판 기본(0.52.0은 'auto'). 그 선택이 없는 판은 무시한다 */
+const mergeQ = q.get('merge');
 
 /** 비용 재기 장면(?pbr=1이면 무늬 정의에 PBR 그림, 0.51.0 flat 꼴이면 자리가 많은 평평한 장면) */
 function benchScene(spec: ManySpec | FlatSpec): ReturnType<typeof manyScene> {
@@ -156,6 +159,7 @@ function newViewer(): V {
   if (inst === '0') v.setRenderOptions({ instancing: false } as never);
   if (pbrOff) v.setRenderOptions({ pbr: false } as never);
   if (cullOff) v.setRenderOptions({ culling: false } as never);
+  if (mergeQ) v.setRenderOptions({ merging: mergeQ !== 'off' } as never);
   return v;
 }
 
@@ -176,6 +180,12 @@ interface OpenRes {
   /** 0.51.0 열기 동안 장면을 그린 수(렌더러 render)와 마지막 장면 그리기가 끝난 때(다 올린 뒤 그림 — redrawMs면 다 올린 다음 프레임) */
   renders: number;
   settleMs: number;
+  /** 0.52.0 묶어 그리기: 묶음 굽기를 마친 때(열기 시작부터 — 끄면 0)·굽기 벽시계 합·묶은 그물 수·묶음 수·묶음 버퍼 MB */
+  mergeMs: number;
+  bakeMs: number;
+  mergedMeshes: number;
+  mergedGroups: number;
+  mergedMB: number;
 }
 
 /**
@@ -258,6 +268,13 @@ async function open(spec: ManySpec | FlatSpec, budgetMs: number): Promise<OpenRe
     await frame();
     instMs = performance.now() - t0;
   }
+  // 0.52.0 묶음 굽기를 기다린다(프레임마다 몫 안에서 — 그동안 그물마다 그린다)
+  let mergeMs = 0;
+  const mergedOf = (): { pending: number; bakeMs: number; meshes: number; groups: number; bytes: number } | undefined => (v.stats as { merged?: { pending: number; bakeMs: number; meshes: number; groups: number; bytes: number } }).merged;
+  for (let i = 0; i < 6000 && (mergedOf()?.pending ?? 0) > 0; i++) {
+    await frame();
+    mergeMs = performance.now() - t0;
+  }
   syncGpu(v);
   po.disconnect();
   vd.draw = draw;
@@ -280,6 +297,11 @@ async function open(spec: ManySpec | FlatSpec, budgetMs: number): Promise<OpenRe
     gpuMB,
     renders,
     settleMs: lastRender - t0,
+    mergeMs,
+    bakeMs: mergedOf()?.bakeMs ?? 0,
+    mergedMeshes: mergedOf()?.meshes ?? 0,
+    mergedGroups: mergedOf()?.groups ?? 0,
+    mergedMB: +((mergedOf()?.bytes ?? 0) / 1048576).toFixed(1),
     triangles: scene.triangles,
     meshes: scene.meshes.length,
     renderer,
@@ -292,6 +314,8 @@ interface SteadyRow {
   total: number[];
   drawCalls: number;
   glCalls: number;
+  /** 0.52.0 묶음 구간 그리기 호출 수(그 셈이 없는 판은 0) */
+  mergedDraws: number;
 }
 
 /** 모드 하나 맞추기(꼬리 — 위 머리말) */
@@ -339,7 +363,7 @@ async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
       v.renderNow();
       syncGpu(v);
     }
-    const r: SteadyRow = { mode, js: [], total: [], drawCalls: 0, glCalls: 0 };
+    const r: SteadyRow = { mode, js: [], total: [], drawCalls: 0, glCalls: 0, mergedDraws: 0 };
     for (let i = 0; i < reps; i++) {
       v.orbitBy(0.02, 0.005);
       const a = performance.now();
@@ -352,6 +376,7 @@ async function steady(reps: number, modes: string[]): Promise<SteadyRow[]> {
       await new Promise((res) => setTimeout(res, 0));
     }
     r.drawCalls = v.stats.drawCalls;
+    r.mergedDraws = (v.stats as { merged?: { draws: number } }).merged?.draws ?? 0;
     r.glCalls = countGl(v, () => v.renderNow());
     syncGpu(v);
     rows.push(r);
@@ -373,6 +398,8 @@ interface PartsRow {
   drawCalls: number;
   /** 0.51.0 화면 밖으로 잘라낸 그물 수(그 셈이 없는 판은 null) */
   culled: number | null;
+  /** 0.52.0 묶음 구간 그리기 호출 수(그 셈이 없는 판은 0) */
+  mergedDraws: number;
   /** 화면 가운데·네 곳 고르기(처음 한 번 — BVH를 만들 수 있다 — 와 그 뒤 가운데값) */
   pickFirst: number;
   pick: number[];
@@ -399,7 +426,7 @@ async function parts(reps: number, modes: string[]): Promise<PartsRow[]> {
         v.renderNow();
         syncGpu(v);
       }
-      const row: PartsRow = { mode, js: [], total: [], render: [], stub: {}, calls: countKinds(v, () => v.renderNow()), drawCalls: v.stats.drawCalls, culled: (v.stats as { culled?: number }).culled ?? null, pickFirst: 0, pick: [] };
+      const row: PartsRow = { mode, js: [], total: [], render: [], stub: {}, calls: countKinds(v, () => v.renderNow()), drawCalls: v.stats.drawCalls, culled: (v.stats as { culled?: number }).culled ?? null, mergedDraws: (v.stats as { merged?: { draws: number } }).merged?.draws ?? 0, pickFirst: 0, pick: [] };
       syncGpu(v);
       for (let i = 0; i < reps; i++) {
         v.orbitBy(0.02, 0.005);
@@ -489,6 +516,45 @@ function hashes(modes: string[]): { mode: string; hash: string; lit: number }[] 
   return out;
 }
 
+/**
+ * 0.52.0 묶어 그리기 켬·끔 그림 차이(모드마다 같은 페이지·같은 카메라에서 끔으로 그려 읽고, 켜서 묶음을 다 구운 뒤 그려 읽는다):
+ * 다른 화소 수·가장 큰 채널 차·그 모드의 묶음 구간 그리기 수. 기계 GPU에서 셰이더가 자리 자료로 만든 행렬의 곱이 균일 행렬과 같은지 본다
+ */
+async function mergeDiff(modes: string[]): Promise<{ mode: string; diff: number; max: number; merged: number; lit: number }[]> {
+  const v = (window as unknown as { last: V }).last;
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext;
+  const out: { mode: string; diff: number; max: number; merged: number; lit: number }[] = [];
+  const read = (): Uint8Array => {
+    v.renderNow();
+    const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+    gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return px;
+  };
+  const merged = (): { draws: number; pending: number } => (v.stats as unknown as { merged: { draws: number; pending: number } }).merged;
+  for (const mode of modes) {
+    setMode(v, mode);
+    v.setRenderOptions({ merging: false } as never);
+    const a = read();
+    v.setRenderOptions({ merging: true } as never);
+    for (let i = 0; i < 6000 && (merged().pending > 0 || v.stats.instanced.pending > 0); i++) {
+      v.renderNow();
+      await frame();
+    }
+    const b = read();
+    let diff = 0, max = 0, lit = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      let d = 0;
+      for (let k = 0; k < 4; k++) d = Math.max(d, Math.abs(a[i + k]! - b[i + k]!));
+      if (d) diff++;
+      if (d > max) max = d;
+      if (a[i] !== a[0] || a[i + 1] !== a[1] || a[i + 2] !== a[2]) lit++;
+    }
+    out.push({ mode, diff, max, merged: merged().draws, lit });
+  }
+  v.highlight(null);
+  return out;
+}
+
 /** n번 돌려 그리고 GPU 마침을 기다린다 */
 function spin(n: number): void {
   const v = (window as unknown as { last: V }).last;
@@ -499,4 +565,19 @@ function spin(n: number): void {
   }
 }
 
-(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes };
+/**
+ * 0.52.0 페이지를 떠나기 전에 뷰어를 놓고 WebGL 문맥을 잃게 해 GPU 자원을 곧 돌려준다(52차 GPU 안전 — 판을 바꿀 때 앞 페이지 자원이 늦게 풀려 쌓이지 않게).
+ * 살아 있는 GL 객체 수를 알 수 없어 stats.buffers 수·바이트를 돌려준다
+ */
+function close(): { buffers: number; bytes: number } | null {
+  const v = (window as unknown as { last?: V }).last;
+  if (!v) return null;
+  const s = { buffers: v.stats.buffers.count, bytes: v.stats.buffers.bytes };
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext | null;
+  v.dispose();
+  gl?.getExtension('WEBGL_lose_context')?.loseContext();
+  (window as unknown as { last?: V }).last = undefined;
+  return s;
+}
+
+(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes, mergeDiff, close };

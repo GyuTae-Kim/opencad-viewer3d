@@ -15,6 +15,10 @@
  * --parts면 steady 대신 프레임 비용 나누기(GL 호출 종류별 수와 그 종류를 비운 JS 시간·GL 없는 JS·뷰어 몫·고르기 — many.ts의 parts),
  * --profile이면 모드마다 CPU 프로필, --open-only면 처음 열기만. 판 head-step(나눠 올리기 걸음 몫 함수 — 앞 두 걸음 8 ms, 그다음 그물 1,000개마다 1 ms)·
  * head-step-r250(+ redrawMs 250)·head-step-once(+ redrawMs Infinity — 첫 그림과 다 올린 뒤만 그리기). 열기 표에 첫 그림·다 올린 뒤 그림 끝·장면 그리기 수
+ * 0.52.0: 판 head-merge(묶어 그리기 늘 켬 ?merge=1)·head-off(끔 ?merge=off — head는 기본 'auto'). 기본 백엔드는 SwiftShader만(기계 GPU는 OPENCAD_BENCH_GPU=1일 때만),
+ * 판을 바꿀 때 앞 페이지 뷰어를 놓고 문맥을 잃게 한 뒤 빈 페이지를 거친다, 띄운 Chrome 묶음 RSS가 3 GB(CHROME_RSS_LIMIT_MB)를 넘으면 그 Chrome을 끄고 실패.
+ * 열기 표에 묶음 굽기 끝·굽기 합·묶은 그물 수·묶음 수·묶음 MB,
+ * 프레임 표에 묶음 구간 그리기 호출 수
  * 결과: out/summary.json(done: true)·summary.md, 표준 출력에 표.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -39,6 +43,9 @@ export const SIZES = {
   d80k: { flat: 80000, share: 'distinct' },
   m80k: { flat: 80000, share: 'mixed' },
   s80k: { flat: 80000, share: 'same' },
+  // 0.52.0 서로 다른 배열에 그리기 상태가 섞인 꼴(반투명·정점 색·같은 정의 배열이 흩어져 있다)
+  v10k: { flat: 10000, share: 'varied' },
+  v80k: { flat: 80000, share: 'varied' },
 };
 
 /** @param {string} root @param {number} port @returns {Promise<import('node:http').Server>} */
@@ -109,33 +116,36 @@ export function manyTable(res) {
     return `${s.median} (${s.min}~${s.max})`;
   };
   let md = `### ${res.backend} — ${res.renderer}\n\n그물 ${res.meshes.toLocaleString('en-US')}개(자리), 삼각형 ${res.triangles.toLocaleString('en-US')}개, CPU ${res.cpu ?? 1}배 느리게, 판마다 ${res.rounds}번(가운데값 (최소~최대) ms)\n\n`;
-  md += '| 판 | 처음 열기 다 올림 | 첫 그림 | 다 올린 뒤 그림 끝 | 프레임 수 | 장면 그리기 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+  md += '| 판 | 처음 열기 다 올림 | 첫 그림 | 다 올린 뒤 그림 끝 | 프레임 수 | 장면 그리기 수 | 프레임 JS 합 | 가장 긴 프레임 | 긴 작업 합 | 모아 그리기 시작 | 묶음 굽기 끝 · 굽기 합 | 묶은 그물 · 묶음 · MB | JS 힙 MB | GPU 버퍼 MB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
   for (const [name, r] of Object.entries(res.variants))
-    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.firstFrameMs))} | ${f(r.open.map((/** @type {any} */ o) => o.settleMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.renders ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
+    md += `| ${name} | ${f(r.open.map((/** @type {any} */ o) => o.doneMs))} | ${f(r.open.map((/** @type {any} */ o) => o.firstFrameMs))} | ${f(r.open.map((/** @type {any} */ o) => o.settleMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.frames))} | ${f(r.open.map((/** @type {any} */ o) => o.renders ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.drawSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.drawMaxMs))} | ${f(r.open.map((/** @type {any} */ o) => o.longSumMs))} | ${f(r.open.map((/** @type {any} */ o) => o.instMs ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.mergeMs ?? 0))} · ${f(r.open.map((/** @type {any} */ o) => o.bakeMs ?? 0))} | ${r.open[0].mergedMeshes ?? 0} · ${r.open[0].mergedGroups ?? 0} · ${r.open[0].mergedMB ?? 0} | ${f(r.open.map((/** @type {any} */ o) => o.heapMB ?? 0))} | ${f(r.open.map((/** @type {any} */ o) => o.gpuMB ?? 0))} |\n`;
   if (Object.values(res.variants).some((/** @type {any} */ r) => Object.keys(r.steady).length)) {
-    md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 그리기 호출 | GL 호출 |\n|---|---|---:|---:|---:|---:|\n';
+    md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 그리기 호출 | 묶음 구간 | GL 호출 |\n|---|---|---:|---:|---:|---:|---:|\n';
     for (const [name, r] of Object.entries(res.variants))
       for (const mode of Object.keys(r.steady)) {
         const s = r.steady[mode];
-        md += `| ${name} | ${mode} | ${f(s.js)} | ${f(s.total)} | ${s.drawCalls.join('·')} | ${s.glCalls.join('·')} |\n`;
+        md += `| ${name} | ${mode} | ${f(s.js)} | ${f(s.total)} | ${s.drawCalls.join('·')} | ${(s.mergedDraws ?? []).join('·')} | ${s.glCalls.join('·')} |\n`;
       }
   }
   // 0.51.0 프레임 비용 나누기(가운데값 ms — 몫 = 보통 renderNow JS − 그 종류 GL 호출을 비운 JS, GL 없는 JS = 모두 비운 JS, 뷰어 몫 = renderNow − 렌더러 render)
   if (Object.values(res.variants).some((/** @type {any} */ r) => Object.keys(r.parts ?? {}).length)) {
     const m = (/** @type {number[]} */ a) => stats(a).median;
-    md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 렌더러 | 뷰어 몫 | GL 없는 JS | 그리기 몫 | uniform 몫 | 묶기 몫 | 상태 몫 | GL 호출(그리기·uniform·묶기·상태·기타) | 잘라냄 | 고르기 처음·뒤 |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|\n';
+    md += '\n| 판 | 모드 | 그리기 JS | GPU 마침까지 | 렌더러 | 뷰어 몫 | GL 없는 JS | 그리기 몫 | uniform 몫 | 묶기 몫 | 상태 몫 | GL 호출(그리기·uniform·묶기·상태·기타) | 잘라냄 | 묶음 구간 | 고르기 처음·뒤 |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|\n';
     for (const [name, r] of Object.entries(res.variants))
       for (const mode of Object.keys(r.parts ?? {})) {
         const s = r.parts[mode];
         const js = m(s.js);
         const share = (/** @type {string} */ k) => Math.round((js - m(s.stub[k])) * 10) / 10;
         const c = s.calls[0];
-        md += `| ${name} | ${mode} | ${f(s.js)} | ${m(s.total)} | ${m(s.render)} | ${Math.round((js - m(s.render)) * 10) / 10} | ${m(s.stub.all)} | ${share('draw')} | ${share('uniform')} | ${share('bind')} | ${share('state')} | ${c.draw}·${c.uniform}·${c.bind}·${c.state}·${c.upload + c.other} | ${s.culled.join('·')} | ${m(s.pickFirst)}·${m(s.pick)} |\n`;
+        md += `| ${name} | ${mode} | ${f(s.js)} | ${m(s.total)} | ${m(s.render)} | ${Math.round((js - m(s.render)) * 10) / 10} | ${m(s.stub.all)} | ${share('draw')} | ${share('uniform')} | ${share('bind')} | ${share('state')} | ${c.draw}·${c.uniform}·${c.bind}·${c.state}·${c.upload + c.other} | ${s.culled.join('·')} | ${(s.mergedDraws ?? []).join('·')} | ${m(s.pickFirst)}·${m(s.pick)} |\n`;
       }
   }
   // 0.51.0 그림 해시(판·차례마다 — 같은 모드는 판끼리 같아야 한다)
   for (const [name, r] of Object.entries(res.variants))
     if (r.hashes?.length) md += `\n**${name} 그림 해시**: ${r.hashes.map((/** @type {any[]} */ hs) => hs.map((h) => `${h.mode} ${h.hash}(${h.lit})`).join(' · ')).join(' / ')}\n`;
+  // 0.52.0 묶어 그리기 끔·켬 차이(모드 — 다른 화소 수 / 바탕 아닌 화소, 가장 큰 채널 차, 묶음 구간 그리기 수)
+  for (const [name, r] of Object.entries(res.variants))
+    if (r.mergeDiff?.length) md += `\n**${name} 묶어 그리기 끔·켬 차이**: ${r.mergeDiff.map((/** @type {any[]} */ ds) => ds.map((d) => `${d.mode} ${d.diff}/${d.lit}(최대 ${d.max}, 구간 ${d.merged})`).join(' · ')).join(' / ')}\n`;
   // 0.51.0 CPU 프로필(마지막 차례의 것 — 함수별 자기 시간 ms, 프레임 수로 나누지 않은 합)
   for (const [name, r] of Object.entries(res.variants))
     for (const [mode, p] of Object.entries(r.profile ?? {})) {
@@ -166,6 +176,7 @@ async function main() {
       profile: { type: 'boolean' },
       'open-only': { type: 'boolean' },
       hash: { type: 'boolean' },
+      mergediff: { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
@@ -178,7 +189,10 @@ async function main() {
   const variants = (values.variants ?? (values.base ? 'base,head,head-noinst' : 'head,head-noinst')).split(',').filter(Boolean);
   if (variants.includes('base') && !values.base) throw new Error('base 판을 재려면 --base <git 판>을 주세요');
   const port = Number(values.port ?? 0) || 0;
-  const backends = values.backend === 'gpu' ? ['gpu'] : values.backend === 'swiftshader' ? ['swiftshader'] : ['swiftshader', 'gpu'];
+  // 0.52.0(52차 GPU 안전): 기본은 SwiftShader만. 기계 GPU(gpu·both)는 그물이 아주 많은 장면에서 기계를 멈춘 일이 있어 OPENCAD_BENCH_GPU=1을 줄 때만
+  const wantGpu = values.backend === 'gpu' || values.backend === 'both';
+  if (wantGpu && process.env.OPENCAD_BENCH_GPU !== '1') throw new Error('기계 GPU 재기는 OPENCAD_BENCH_GPU=1일 때만 합니다(그물이 아주 많은 장면은 기계를 멈출 수 있다 — SwiftShader로 잰다)');
+  const backends = values.backend === 'gpu' ? ['gpu'] : values.backend === 'both' ? ['swiftshader', 'gpu'] : ['swiftshader'];
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
   const out = resolve(values.out ?? join(repo, '.runtime/bench', `many-${stamp}`));
   if (existsSync(join(out, 'summary.json'))) throw new Error(`이미 결과가 있습니다(덮어쓰지 않습니다): ${out}`);
@@ -210,11 +224,17 @@ async function main() {
               ...(values.pbr ? ['pbr=1'] : []),
               ...(name === 'head-nopbr' ? ['pbroff=1'] : []),
               ...(name === 'head-nocull' ? ['cull=0'] : []),
+              // 0.52.0 묶어 그리기 늘 켬·끔(주지 않으면 판 기본 — 0.52.0은 'auto')
+              ...(name === 'head-merge' ? ['merge=1'] : name === 'head-off' ? ['merge=off'] : []),
               // 0.51.0 나눠 올리기 걸음 몫 함수(STEP 59차 꼴)·다시 그리기 간격
               ...(name.startsWith('head-step') ? ['up=step'] : []),
               ...(name === 'head-step-r250' ? ['redraw=250'] : name === 'head-step-once' ? ['redraw=inf'] : []),
             ];
             const qs = params.length ? `?${params.join('&')}` : '';
+            // 0.52.0 앞 판 페이지의 뷰어를 놓고 문맥을 잃게 한 뒤 빈 페이지로(GPU 자원이 판마다 쌓이지 않게)
+            await browser.evaluate('window.bench && window.bench.close ? window.bench.close() : null').catch(() => null);
+            await browser.send('Page.navigate', { url: 'about:blank' });
+            await new Promise((ok) => setTimeout(ok, 500));
             await browser.send('Page.navigate', { url: `http://127.0.0.1:${p}/${dir}/many.html${qs}` });
             let ready = false;
             for (let i = 0; i < 300 && !ready; i++) {
@@ -237,6 +257,11 @@ async function main() {
               const hs = await browser.evaluate(`bench.hashes(${JSON.stringify(modes)})`, 900_000);
               (v.hashes ??= []).push(hs);
             }
+            // 0.52.0 --mergediff: 같은 페이지에서 묶어 그리기 끔·켬 그림 차이(head 묶음 판만 — 그 선택을 모르는 판은 건너뛴다)
+            if (values.mergediff && name !== 'base') {
+              const md = await browser.evaluate(`bench.mergeDiff(${JSON.stringify(modes)})`, 1_800_000);
+              (v.mergeDiff ??= []).push(md);
+            }
             // 0.51.0 --open-only: 처음 열기만(나눠 올리기 걸음 견주기)
             if (values['open-only']) continue;
             if (values.profile) {
@@ -257,7 +282,7 @@ async function main() {
               // 0.51.0 프레임 비용 나누기
               const pr = await browser.evaluate(`bench.parts(${reps}, ${JSON.stringify(modes)})`, 1_800_000);
               for (const row of pr) {
-                const s = (v.parts[row.mode] ??= { js: [], total: [], render: [], stub: {}, calls: [], drawCalls: [], culled: [], pickFirst: [], pick: [] });
+                const s = (v.parts[row.mode] ??= { js: [], total: [], render: [], stub: {}, calls: [], drawCalls: [], culled: [], mergedDraws: [], pickFirst: [], pick: [] });
                 s.js.push(...row.js);
                 s.total.push(...row.total);
                 s.render.push(...row.render);
@@ -265,6 +290,7 @@ async function main() {
                 s.calls.push(row.calls);
                 if (!s.drawCalls.includes(row.drawCalls)) s.drawCalls.push(row.drawCalls);
                 if (!s.culled.includes(row.culled)) s.culled.push(row.culled);
+                if (!s.mergedDraws.includes(row.mergedDraws ?? 0)) s.mergedDraws.push(row.mergedDraws ?? 0);
                 s.pickFirst.push(row.pickFirst);
                 s.pick.push(...row.pick);
               }
@@ -272,15 +298,19 @@ async function main() {
             }
             const st = await browser.evaluate(`bench.steady(${reps}, ${JSON.stringify(modes)})`, 900_000);
             for (const row of st) {
-              const s = (v.steady[row.mode] ??= { js: [], total: [], drawCalls: [], glCalls: [] });
+              const s = (v.steady[row.mode] ??= { js: [], total: [], drawCalls: [], glCalls: [], mergedDraws: [] });
               s.js.push(...row.js);
               s.total.push(...row.total);
               if (!s.drawCalls.includes(row.drawCalls)) s.drawCalls.push(row.drawCalls);
               if (!s.glCalls.includes(row.glCalls)) s.glCalls.push(row.glCalls);
+              if (!s.mergedDraws.includes(row.mergedDraws ?? 0)) s.mergedDraws.push(row.mergedDraws ?? 0);
             }
           }
         }
       } finally {
+        // 0.52.0 띄운 Chrome 묶음 RSS 가장 큰 값(지킴이 — 한도를 넘으면 그 Chrome을 끄고 실패로 끝난다)
+        res.rssPeakMB = browser.rssPeakMB();
+        log(`${backend} Chrome RSS 가장 큰 값 ${res.rssPeakMB} MB`);
         await browser.close();
       }
       results.push(res);

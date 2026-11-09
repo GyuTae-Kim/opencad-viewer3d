@@ -8629,6 +8629,73 @@ const manyCullValues: ValueSet = {
   },
 };
 
+/** 0.52.0 묶어 그리기 선택(renderOptions.merging)이 있는 판인지 */
+const v0520merge: Need = (v) => (typeof v.setRenderOptions === 'function' && v.renderOptions?.merging ? null : '이 판에 없는 선택: 0.52.0 setRenderOptions({ merging })');
+
+/**
+ * 0.52.0 묶어 그리기 값(head만 — 새 장면 없이 기존 'many' 자료를 배열만 새로 만든 사본으로 다시 올린다: 같은 정의 자리가 아니라 서로 다른 그물이 되어 묶음 대상이다).
+ * 경우마다 끔·켬(묶음을 다 구운 뒤)의 다른 화소 수(SwiftShader에서는 0이어야 한다)와 통계(그리기 호출·삼각형·선분·묶음 구간 그리기·묶은 그물 수·묶음 수)
+ */
+const manyMergeValues: ValueSet = {
+  name: 'many-merging',
+  data: 'many',
+  needs: v0520merge,
+  run: async ({ v }) => {
+    const out: unknown[] = [];
+    const src = sceneOf('many');
+    // 같은 내용의 배열 사본(그물마다 다른 배열 — 무늬 그물은 묶지 않는다)
+    const distinct = { ...src, meshes: src.meshes.map((m) => ({ ...m, positions: m.positions.slice(), normals: m.normals?.slice(), indices: m.indices?.slice(), edges: m.edges?.slice() })) };
+    v.setScene(distinct);
+    loaded = null;
+    try {
+      const cases: [string, (x: V) => void][] = [
+        ['shadedEdges', (x) => x.setRenderMode('shadedEdges')],
+        ['looks', (x) => (x.setRenderMode('shadedEdges'), manyLooks(x))],
+        ['wire-profiles', (x) => (x.setRenderMode('wireframe'), x.setRenderOptions({ profiles: { width: 1 } }))],
+        ['hidden', (x) => (x.setRenderMode('hiddenLine'), x.setRenderOptions({ hiddenEdges: true }))],
+        ['xray', (x) => x.setRenderMode('xray')],
+        ['section-caps', (x) => (x.setRenderMode('shadedEdges'), x.setSection({ normal: [1, 0, 0], offset: 300 }, { caps: 'all' }))],
+        ['ao-shadows', (x) => (x.setRenderMode('shadedEdges'), x.setAmbientOcclusion({}), x.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true }))],
+        ['fog-ortho-profiles', (x) => (x.setRenderMode('shadedEdges'), x.setFog({ start: 200, end: 1500 }), x.setProjection('orthographic'), x.setRenderOptions({ profiles: { width: 2 } }))],
+      ];
+      const snap = async (): Promise<{ st: unknown[]; img: ImageData }> => {
+        await texturesReady(v);
+        v.renderNow();
+        for (let i = 0; i < 500 && ((v.stats?.instanced?.pending ?? 0) > 0 || (v.stats?.merged?.pending ?? 0) > 0); i++) {
+          await new Promise((r) => setTimeout(r, 10));
+          v.renderNow();
+        }
+        v.renderNow();
+        const s = v.stats;
+        const img = v.renderImage({});
+        return { st: [s.drawCalls, s.triangles, s.segments, s.merged.draws, s.merged.meshes, s.merged.groups], img };
+      };
+      for (const [name, set] of cases) {
+        reset(v, 'many');
+        set(v);
+        v.fit(false);
+        v.orbitBy(0.3, 0.1);
+        for (const zoom of [1, 0.2]) {
+          if (zoom !== 1) v.zoomBy(zoom);
+          v.setRenderOptions({ merging: false });
+          const off = await snap();
+          v.setRenderOptions({ merging: true });
+          const on = await snap();
+          out.push([name, zoom, on.st, off.st, await sha16(on.img.data), pixelDiff(on.img, off.img)[0]]);
+        }
+        v.setRenderOptions({ merging: false });
+        v.setAmbientOcclusion(null);
+      }
+      out.push(v.renderOptions.merging);
+    } finally {
+      v.setRenderOptions({ merging: false });
+      v.setScene(src);
+      loaded = null;
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8737,6 +8804,7 @@ const VALUES: ValueSet[] = [
   aoFlyEndValues,
   inputFuzzValues,
   manyCullValues,
+  manyMergeValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────
@@ -8794,8 +8862,8 @@ function reset(v: V, d: Data): void {
   call('setViewCubeTouch', true);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
-  // 0.42.0 instancing·0.43.0 pbr·0.51.0 culling은 기본(켬)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
-  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true, culling: true });
+  // 0.42.0 instancing·0.43.0 pbr·0.51.0 culling은 기본(켬)으로, 0.52.0 merging은 기본('auto' — 화소 장면은 모두 문턱 아래라 묶지 않는다)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
+  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true, culling: true, merging: 'auto' });
   call('setSections', null);
   call('setSection', null);
   call('setTheme', 'dark');

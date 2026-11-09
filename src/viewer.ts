@@ -230,6 +230,7 @@ import {
   INSTANCE_MIN,
   Renderer3d,
 } from './renderer';
+import { MERGE_AUTO_MIN, type MergingMode } from './merge';
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
@@ -1185,6 +1186,9 @@ export interface AnnotationOptions {
  * 선분 위치·선분 색·점·와이어프레임 색인·구간 모음·덧그림)과 합(bytes)·버퍼 수(count). 같은 배열은 처음 올린 성분으로 한 번만 센다(GpuBufferStats).
  * 0.42.0 instanced: 지난 그리기에서 같은 그물 자리를 모아 그린(인스턴싱) 그리기 호출 수(draws — drawCalls에 든다, 외곽선 깊이 그림은 drawCalls처럼 빼고)·
  * 그렇게 그린 자리 수(items — 면·선 차례마다 센다)·번역을 기다리는 인스턴싱 변종 수(pending — 0이 아니면 그동안 그물마다 그리고 다 되면 다시 그린다)
+ * 0.52.0 merged(묶어 그리기 — setRenderOptions({ merging })): 이 장면에서 켜졌는지(active — 'auto'면 묶을 수 있는 그물이 문턱 이상일 때), 지난 그리기에서 묶음 구간으로 그린
+ * 그리기 호출 수(draws — drawCalls에 든다)·그렇게 그린 그물 수(items — 면·선 차례마다), 구운 묶음 수(groups)·묶음에 든 그물 수(meshes — 그 그물은 그물마다 버퍼가 없다)·
+ * 묶음 버퍼 바이트(bytes — buffers에도 든다)·굽기를 기다리는 묶음 수(pending)·지금 장면에서 굽기에 쓴 벽시계 ms 합(bakeMs)
  */
 export type Viewer3dStats = RenderStats & {
   frameMs: number;
@@ -1194,6 +1198,7 @@ export type Viewer3dStats = RenderStats & {
   textures: TextureStats;
   buffers: GpuBufferStats;
   instanced: { draws: number; items: number; pending: number };
+  merged: { active: boolean; draws: number; items: number; groups: number; meshes: number; bytes: number; pending: number; bakeMs: number };
 };
 
 /** Viewer3d.setMesh 선택(0.11.0) */
@@ -2833,6 +2838,13 @@ export class Viewer3d {
    * 0.51.0 culling(기본 켬): 화면 밖 잘라내기 — 그물(삼각형 정점과 윤곽선 끝점의 범위를 모형·겉모습 행렬로 옮긴 상자)이 시야 옆 네 평면 가운데 하나의 확실히 바깥이면
    * 면·윤곽선·삼각형 변·숨은 점선·외곽선·주변 가림 깊이·반투명 면을 그리지 않는다(src/cull.ts — 화면에 화소를 내지 않는 그물이라 그림은 끔과 같다. 굵은 선 반폭·
    * float32 셈 어긋남만큼 여유를 둔다). 그림자 깊이 그림·잘린 면 채우기는 그대로 모두 그린다. 뺀 그물 수는 stats.culled, 그리기 호출 수는 그만큼 준다. false·null이면 끈다
+   * 0.52.0 merging(기본 'auto'): 서로 다른 작은 정적 그물 묶어 그리기 — 같은 꼴(법선 값 꼴·정점 색 유무·한쪽 면)의 그물(정점 65,536개·윤곽선 선분 65,536개 이하, 배열을 다른
+   * 그물과 함께 쓰지 않고 무늬·뒷면·PBR·반투명이 아닌 것)을 장면 차례로 묶음 버퍼에 잇고 그 그물의 그물마다 버퍼·VAO는 놓는다(묶음 버퍼가 저장소 — 그물이 아주 많은 장면의
+   * GL 객체 수·버퍼 바이트를 묶음 수만큼으로). 잇단 묶음 그물의 면·외곽선 깊이·윤곽선·숨은 점선은 그리기 한 번에(자리 행렬·색은 인스턴싱처럼 자리 자료 그림에서),
+   * 그물마다 그리는 길(강조 윤곽선·구간·단면·그림자·반투명·잘린 면 채우기)은 묶음 버퍼의 그 그물 자리로 그린다. 'auto'는 묶을 수 있는 그물이 문턱(MERGE_AUTO_MIN = 2,000) 이상인
+   * 장면만 켜고(장면을 올리는 걸음 안에서 굽는다 — 그보다 작은 장면은 0.51.0과 같다), true·'on'은 늘, false·null·'off'는 끈다(묶음 그물을 그물마다 버퍼로 되돌린다).
+   * { min }이면 'auto' 문턱을 바꾼다. 그물마다 그리던 차례·값 그대로라 SwiftShader 그림은 같고, 기계 GPU는 셰이더가 자료에서 만든 행렬의 곱이 깊이 마지막 자리에서 달라
+   * 모서리 선이 면과 겨루는 몇 화소가 다를 수 있다(인스턴싱과 같다). 바꾸거나 뺀 그물은 묶음에서 빠지고, 묶음 안 빠진 몫이 ¼을 넘으면 남은 그물로 다시 굽는다
    */
   setRenderOptions(o: {
     profiles?: boolean | { width?: number; color?: Rgba | string } | null;
@@ -2841,6 +2853,7 @@ export class Viewer3d {
     instancing?: boolean | { min?: number } | null;
     pbr?: boolean | null;
     culling?: boolean | null;
+    merging?: boolean | MergingMode | { mode?: MergingMode; min?: number } | null;
   }): void {
     if ('profiles' in o) {
       const p = o.profiles;
@@ -2866,6 +2879,13 @@ export class Viewer3d {
     }
     if ('pbr' in o) this.renderer.pbr = o.pbr !== false && o.pbr !== null;
     if ('culling' in o) this.renderer.culling = o.culling !== false && o.culling !== null;
+    if ('merging' in o) {
+      const g = o.merging;
+      const obj = g && typeof g === 'object' ? g : null;
+      const mode: MergingMode = g === true || g === 'on' ? 'on' : g === 'auto' ? 'auto' : obj ? (obj.mode === 'on' || obj.mode === 'off' ? obj.mode : 'auto') : 'off';
+      const min = obj && typeof obj.min === 'number' && Number.isFinite(obj.min) ? Math.max(2, Math.floor(obj.min)) : MERGE_AUTO_MIN;
+      this.renderer.setMerging({ mode, min });
+    }
     this.invalidate();
   }
 
@@ -2929,7 +2949,7 @@ export class Viewer3d {
     return this.aoOpt ? { ...this.aoOpt } : null;
   }
 
-  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr, 0.51.0 culling) */
+  /** 지금 보여 주기 선택(hiddenEdges는 불투명도, 0.8.0의 hiddenEdgesShaded·hiddenEdgeColor·edgeColor도, 0.42.0 instancing = { on, min }, 0.43.0 pbr, 0.51.0 culling, 0.52.0 merging = { mode, min }) */
   get renderOptions(): {
     profiles: { width: number; color: Rgba | string | null } | null;
     hiddenEdges: number;
@@ -2939,6 +2959,7 @@ export class Viewer3d {
     instancing: { on: boolean; min: number };
     pbr: boolean;
     culling: boolean;
+    merging: { mode: MergingMode; min: number };
   } {
     const r = this.renderOpts;
     return {
@@ -2950,6 +2971,7 @@ export class Viewer3d {
       instancing: { ...this.renderer.instancing },
       pbr: this.renderer.pbr,
       culling: this.renderer.culling,
+      merging: { ...this.renderer.merging },
     };
   }
 
@@ -5575,6 +5597,10 @@ export class Viewer3d {
       textures: this.renderer.textureStats,
       buffers: this.renderer.bufferStats,
       instanced: { ...this.renderer.instStats, pending: this.renderer.instPending },
+      merged: (() => {
+        const m = this.renderer.mergeInfo;
+        return { active: m.active, ...this.renderer.mergeStats, groups: m.groups, meshes: m.items, bytes: m.bytes, pending: m.pending, bakeMs: m.bakeMs };
+      })(),
     };
   }
 
@@ -8257,8 +8283,9 @@ export class Viewer3d {
       }
     }
     this.renderer.render(f, w, h, this.renderState(f, dpr));
-    // 0.42.0 인스턴싱 변종을 아직 번역 중이면(그동안 그물마다 그렸다) 다음 프레임에 다시 그린다 — 다 되면 모아 그린다
-    if (this.renderer.instPending) this.invalidate();
+    // 0.42.0 인스턴싱 변종을 아직 번역 중이면(그동안 그물마다 그렸다) 다음 프레임에 다시 그린다 — 다 되면 모아 그린다.
+    // 0.52.0 굽기를 기다리는 묶음이 있어도(프레임마다 몫 안에서 굽는다)
+    if (this.renderer.instPending || this.renderer.mergePending) this.invalidate();
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
     this.frameMs = performance.now() - t0;
