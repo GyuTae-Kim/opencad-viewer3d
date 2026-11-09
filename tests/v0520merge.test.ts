@@ -239,6 +239,16 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     expect(a.mergedDraws).toBe(0);
     const b = same((v) => v.setSections([{ normal: [1, 0, 0], offset: 120 }, { normal: [0, 1, 0], offset: 40 }]), 'sections');
     expect(b.mergedDraws).toBe(0);
+    // 구간 단면(0.44.0 — 묶음 안 삼각형·선분 구간만 자르는 평면)도 그물마다
+    const r = same(
+      (v) =>
+        v.setSections([
+          { normal: [0, 0, 1], offset: 5, caps: 'all', items: [{ id: 'd3', start: 0, count: 6 }, { id: 'c2', start: 0, count: 8, edges: true }, 'd5'] },
+          { normal: [1, 0, 0], offset: 200, caps: 'none' },
+        ]),
+      'secrange',
+    );
+    expect(r.mergedDraws).toBe(0);
     const c = same((v) => v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true }), 'shadows');
     expect(c.mergedDraws).toBeGreaterThan(0);
     // 면은 그물마다: 묶어 그린 그물 수가 윤곽선 차례만큼
