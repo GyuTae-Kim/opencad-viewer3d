@@ -32,7 +32,7 @@ const pbr = q.get('pbr') === '1';
 const pbrOff = q.get('pbroff') === '1';
 /** 0.51.0 ?cull=0이면 화면 밖 잘라내기를 끈다(setRenderOptions({ culling: false }) — 그 선택이 없는 판은 무시한다) */
 const cullOff = q.get('cull') === '0';
-/** 0.52.0 ?merge=1이면 묶어 그리기를 켠다(기본 한도), ?merge=all이면 한도 없이(setRenderOptions({ merging }) — 그 선택이 없는 판은 무시한다) */
+/** 0.52.0 ?merge=1이면 묶어 그리기를 늘 켜고(true), ?merge=off면 끈다(false) — 주지 않으면 판 기본(0.52.0은 'auto'). 그 선택이 없는 판은 무시한다 */
 const mergeQ = q.get('merge');
 
 /** 비용 재기 장면(?pbr=1이면 무늬 정의에 PBR 그림, 0.51.0 flat 꼴이면 자리가 많은 평평한 장면) */
@@ -159,7 +159,7 @@ function newViewer(): V {
   if (inst === '0') v.setRenderOptions({ instancing: false } as never);
   if (pbrOff) v.setRenderOptions({ pbr: false } as never);
   if (cullOff) v.setRenderOptions({ culling: false } as never);
-  if (mergeQ) v.setRenderOptions({ merging: mergeQ === 'all' ? { maxBytes: Infinity } : true } as never);
+  if (mergeQ) v.setRenderOptions({ merging: mergeQ !== 'off' } as never);
   return v;
 }
 
@@ -535,7 +535,7 @@ async function mergeDiff(modes: string[]): Promise<{ mode: string; diff: number;
     setMode(v, mode);
     v.setRenderOptions({ merging: false } as never);
     const a = read();
-    v.setRenderOptions({ merging: { maxBytes: Infinity } } as never);
+    v.setRenderOptions({ merging: true } as never);
     for (let i = 0; i < 6000 && (merged().pending > 0 || v.stats.instanced.pending > 0); i++) {
       v.renderNow();
       await frame();
@@ -565,4 +565,19 @@ function spin(n: number): void {
   }
 }
 
-(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes, mergeDiff };
+/**
+ * 0.52.0 페이지를 떠나기 전에 뷰어를 놓고 WebGL 문맥을 잃게 해 GPU 자원을 곧 돌려준다(52차 GPU 안전 — 판을 바꿀 때 앞 페이지 자원이 늦게 풀려 쌓이지 않게).
+ * 살아 있는 GL 객체 수를 알 수 없어 stats.buffers 수·바이트를 돌려준다
+ */
+function close(): { buffers: number; bytes: number } | null {
+  const v = (window as unknown as { last?: V }).last;
+  if (!v) return null;
+  const s = { buffers: v.stats.buffers.count, bytes: v.stats.buffers.bytes };
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext | null;
+  v.dispose();
+  gl?.getExtension('WEBGL_lose_context')?.loseContext();
+  (window as unknown as { last?: V }).last = undefined;
+  return s;
+}
+
+(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes, mergeDiff, close };

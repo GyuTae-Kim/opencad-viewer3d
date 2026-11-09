@@ -15,7 +15,9 @@
  * --parts면 steady 대신 프레임 비용 나누기(GL 호출 종류별 수와 그 종류를 비운 JS 시간·GL 없는 JS·뷰어 몫·고르기 — many.ts의 parts),
  * --profile이면 모드마다 CPU 프로필, --open-only면 처음 열기만. 판 head-step(나눠 올리기 걸음 몫 함수 — 앞 두 걸음 8 ms, 그다음 그물 1,000개마다 1 ms)·
  * head-step-r250(+ redrawMs 250)·head-step-once(+ redrawMs Infinity — 첫 그림과 다 올린 뒤만 그리기). 열기 표에 첫 그림·다 올린 뒤 그림 끝·장면 그리기 수
- * 0.52.0: 판 head-merge(묶어 그리기 — 기본 한도 ?merge=1)·head-mergeall(한도 없이 ?merge=all). 열기 표에 묶음 굽기 끝·굽기 합·묶은 그물 수·묶음 수·묶음 MB,
+ * 0.52.0: 판 head-merge(묶어 그리기 늘 켬 ?merge=1)·head-off(끔 ?merge=off — head는 기본 'auto'). 기본 백엔드는 SwiftShader만(기계 GPU는 OPENCAD_BENCH_GPU=1일 때만),
+ * 판을 바꿀 때 앞 페이지 뷰어를 놓고 문맥을 잃게 한 뒤 빈 페이지를 거친다, 띄운 Chrome 묶음 RSS가 3 GB(CHROME_RSS_LIMIT_MB)를 넘으면 그 Chrome을 끄고 실패.
+ * 열기 표에 묶음 굽기 끝·굽기 합·묶은 그물 수·묶음 수·묶음 MB,
  * 프레임 표에 묶음 구간 그리기 호출 수
  * 결과: out/summary.json(done: true)·summary.md, 표준 출력에 표.
  */
@@ -187,7 +189,10 @@ async function main() {
   const variants = (values.variants ?? (values.base ? 'base,head,head-noinst' : 'head,head-noinst')).split(',').filter(Boolean);
   if (variants.includes('base') && !values.base) throw new Error('base 판을 재려면 --base <git 판>을 주세요');
   const port = Number(values.port ?? 0) || 0;
-  const backends = values.backend === 'gpu' ? ['gpu'] : values.backend === 'swiftshader' ? ['swiftshader'] : ['swiftshader', 'gpu'];
+  // 0.52.0(52차 GPU 안전): 기본은 SwiftShader만. 기계 GPU(gpu·both)는 그물이 아주 많은 장면에서 기계를 멈춘 일이 있어 OPENCAD_BENCH_GPU=1을 줄 때만
+  const wantGpu = values.backend === 'gpu' || values.backend === 'both';
+  if (wantGpu && process.env.OPENCAD_BENCH_GPU !== '1') throw new Error('기계 GPU 재기는 OPENCAD_BENCH_GPU=1일 때만 합니다(그물이 아주 많은 장면은 기계를 멈출 수 있다 — SwiftShader로 잰다)');
+  const backends = values.backend === 'gpu' ? ['gpu'] : values.backend === 'both' ? ['swiftshader', 'gpu'] : ['swiftshader'];
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
   const out = resolve(values.out ?? join(repo, '.runtime/bench', `many-${stamp}`));
   if (existsSync(join(out, 'summary.json'))) throw new Error(`이미 결과가 있습니다(덮어쓰지 않습니다): ${out}`);
@@ -219,13 +224,17 @@ async function main() {
               ...(values.pbr ? ['pbr=1'] : []),
               ...(name === 'head-nopbr' ? ['pbroff=1'] : []),
               ...(name === 'head-nocull' ? ['cull=0'] : []),
-              // 0.52.0 묶어 그리기(기본 한도·한도 없이)
-              ...(name === 'head-merge' ? ['merge=1'] : name === 'head-mergeall' ? ['merge=all'] : []),
+              // 0.52.0 묶어 그리기 늘 켬·끔(주지 않으면 판 기본 — 0.52.0은 'auto')
+              ...(name === 'head-merge' ? ['merge=1'] : name === 'head-off' ? ['merge=off'] : []),
               // 0.51.0 나눠 올리기 걸음 몫 함수(STEP 59차 꼴)·다시 그리기 간격
               ...(name.startsWith('head-step') ? ['up=step'] : []),
               ...(name === 'head-step-r250' ? ['redraw=250'] : name === 'head-step-once' ? ['redraw=inf'] : []),
             ];
             const qs = params.length ? `?${params.join('&')}` : '';
+            // 0.52.0 앞 판 페이지의 뷰어를 놓고 문맥을 잃게 한 뒤 빈 페이지로(GPU 자원이 판마다 쌓이지 않게)
+            await browser.evaluate('window.bench && window.bench.close ? window.bench.close() : null').catch(() => null);
+            await browser.send('Page.navigate', { url: 'about:blank' });
+            await new Promise((ok) => setTimeout(ok, 500));
             await browser.send('Page.navigate', { url: `http://127.0.0.1:${p}/${dir}/many.html${qs}` });
             let ready = false;
             for (let i = 0; i < 300 && !ready; i++) {
@@ -299,6 +308,9 @@ async function main() {
           }
         }
       } finally {
+        // 0.52.0 띄운 Chrome 묶음 RSS 가장 큰 값(지킴이 — 한도를 넘으면 그 Chrome을 끄고 실패로 끝난다)
+        res.rssPeakMB = browser.rssPeakMB();
+        log(`${backend} Chrome RSS 가장 큰 값 ${res.rssPeakMB} MB`);
         await browser.close();
       }
       results.push(res);

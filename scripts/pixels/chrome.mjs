@@ -59,8 +59,42 @@ export function chromeArgs({ profile, width, height, platform = process.platform
 
 /**
  * @typedef {{ send: (method: string, params?: object, timeoutMs?: number) => Promise<any>; evaluate: (expr: string, timeoutMs?: number) => Promise<any>;
- *   on: (cb: (method: string, params: any) => void) => void; version: string; close: () => Promise<void> }} Browser
+ *   on: (cb: (method: string, params: any) => void) => void; version: string; close: () => Promise<void>; rssPeakMB: () => number }} Browser
  */
+
+/** 0.52.0 띄운 Chrome 프로세스 묶음 RSS 한도 기본(MB — 환경 변수 CHROME_RSS_LIMIT_MB로 바꾼다). 넘으면 그 Chrome만 끄고 실패로 끝낸다 */
+export const CHROME_RSS_LIMIT_MB = 3072;
+
+/**
+ * 0.52.0 프로세스 pid와 그 자손들의 번호·RSS 합(KB — ps 한 번). 띄운 Chrome(GPU·렌더러 도우미는 그 자식)만 본다
+ * @param {number} pid
+ */
+export function processTreeRss(pid) {
+  const out = execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  /** @type {Map<number, number[]>} */
+  const kids = new Map();
+  /** @type {Map<number, number>} */
+  const rss = new Map();
+  for (const line of out.split('\n')) {
+    const [p, pp, r] = line.trim().split(/\s+/).map(Number);
+    if (!p) continue;
+    rss.set(p, r ?? 0);
+    const a = kids.get(pp ?? 0);
+    if (a) a.push(p);
+    else kids.set(pp ?? 0, [p]);
+  }
+  const pids = [];
+  let kb = 0;
+  const stack = [pid];
+  while (stack.length) {
+    const p = /** @type {number} */ (stack.pop());
+    if (!rss.has(p)) continue;
+    pids.push(p);
+    kb += rss.get(p) ?? 0;
+    for (const c of kids.get(p) ?? []) stack.push(c);
+  }
+  return { pids, kb };
+}
 
 /**
  * @param {{ width: number; height: number; chrome?: string; log?: (s: string) => void; gpu?: boolean }} o
@@ -76,7 +110,43 @@ export async function launchChrome({ width, height, chrome, log = () => {}, gpu 
   });
   let exited = false;
   proc.on('exit', () => (exited = true));
+  // 0.52.0 RSS 지킴이(52차 GPU 안전): 2초마다 띄운 Chrome 묶음의 RSS 합을 보고 한도를 넘으면 그 묶음만 끈다(TERM, 3초 뒤 남은 것 KILL) — 그 뒤 CDP 호출은 실패한다
+  const limitKb = (Number(process.env.CHROME_RSS_LIMIT_MB) || CHROME_RSS_LIMIT_MB) * 1024;
+  let peakKb = 0;
+  /** @type {string | null} */
+  let rssKilled = null;
+  const watch = setInterval(() => {
+    if (exited || !proc.pid) return;
+    let t;
+    try {
+      t = processTreeRss(proc.pid);
+    } catch {
+      return;
+    }
+    peakKb = Math.max(peakKb, t.kb);
+    if (t.kb <= limitKb || rssKilled) return;
+    rssKilled = `Chrome 프로세스 RSS ${Math.round(t.kb / 1024)} MB가 한도 ${Math.round(limitKb / 1024)} MB를 넘어 끕니다`;
+    log(rssKilled);
+    for (const p of t.pids) {
+      try {
+        process.kill(p, 'SIGTERM');
+      } catch {
+        /* 이미 끝남 */
+      }
+    }
+    setTimeout(() => {
+      for (const p of t.pids) {
+        try {
+          process.kill(p, 'SIGKILL');
+        } catch {
+          /* 이미 끝남 */
+        }
+      }
+    }, 3000).unref();
+  }, 2000);
+  watch.unref();
   const cleanup = async () => {
+    clearInterval(watch);
     if (!exited) {
       proc.kill('SIGTERM');
       for (let i = 0; i < 50 && !exited; i++) await sleep(100);
@@ -113,7 +183,7 @@ export async function launchChrome({ width, height, chrome, log = () => {}, gpu 
       } else if (m.method) for (const cb of listeners) cb(m.method, m.params);
     });
     ws.addEventListener('close', () => {
-      for (const r of pending.values()) r({ error: { message: 'CDP 연결이 끊겼습니다' } });
+      for (const r of pending.values()) r({ error: { message: rssKilled ?? 'CDP 연결이 끊겼습니다' } });
       pending.clear();
     });
     /** @param {string} method @param {object} [params] @param {number} [timeoutMs] */
@@ -129,6 +199,12 @@ export async function launchChrome({ width, height, chrome, log = () => {}, gpu 
           if (m.error) rej(new Error(`CDP ${method}: ${m.error.message}`));
           else res(m.result);
         });
+        if (rssKilled) {
+          pending.delete(id);
+          clearTimeout(timer);
+          rej(new Error(`CDP ${method}: ${rssKilled}`));
+          return;
+        }
         ws.send(JSON.stringify({ id, method, params }));
       });
     /** @param {string} expression @param {number} [timeoutMs] */
@@ -145,6 +221,7 @@ export async function launchChrome({ width, height, chrome, log = () => {}, gpu 
       evaluate,
       on: (cb) => listeners.push(cb),
       version: String(ver.product),
+      rssPeakMB: () => Math.round(peakKb / 1024),
       close: async () => {
         try {
           await send('Browser.close', {}, 5000);
