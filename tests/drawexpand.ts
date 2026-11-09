@@ -85,10 +85,12 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
   };
   const nInst = d.op.endsWith('Instanced') ? d.args[d.args.length - 1]! : 1;
   if (vs.includes('layout(location=1) in vec3 a_nrm;')) {
-    // 그물: 정점마다 클립·시점 좌표·법선 행렬 곱·색(정점 색이면 a_col)
-    const stride = merge ? 12 : inst ? ((U.get('u_instStride')?.[0] as number) ?? 11) : 0;
+    // 그물: 정점마다 클립·시점 좌표·법선 행렬 곱·색(정점 색이면 a_col), 0.53.0 그림자 좌표(v_spos — SHADOW)·단면 값(v_clip — CLIP)
+    // (인스턴싱·묶음 변종은 그림자 행렬·로컬 평면도 자리 자료에서 — 묶음은 색 텍셀 뒤 12~15·맨 끝, 인스턴싱은 11~14·맨 끝)
+    const shadowOn = /^#define SHADOW$/m.test(vs), clipOn = /^#define CLIP$/m.test(vs);
+    const stride = inst ? ((U.get('u_instStride')?.[0] as number | undefined) ?? (merge ? 12 : 11)) : 0;
     // 정점 색 쓰기(u_vcol)는 묶음 변종에서 자리 자료(법선 행렬 첫 텍셀 w) — 정점마다 셰이더가 고르는 색(v_col = u_vcol > 0.5 ? a_col : u_color)으로 견준다
-    const flags = JSON.stringify([U.get('u_hasNrm'), f32(U.get('u_tint')), U.get('u_alpha'), U.get('u_ortho'), f32(U.get('u_clip')), U.get('u_flipFace')]);
+    const flags = JSON.stringify([U.get('u_hasNrm'), f32(U.get('u_tint')), U.get('u_alpha'), U.get('u_ortho'), U.get('u_flipFace')]);
     const vl = verts();
     for (let n = 0; n < nInst; n++) {
       const tri: string[] = [];
@@ -103,7 +105,11 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const P = attr(d.attribs.get(0), v, 3)!;
         const N = attr(d.attribs.get(1), v, 3);
         const C = attr(d.attribs.get(2), v, 4) ?? [0, 0, 0, 1];
-        tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, vcol > 0.5 ? C : col]));
+        const s0 = merge ? 12 : 11;
+        const sm = !shadowOn ? null : inst ? [...at(s0), ...at(s0 + 1), ...at(s0 + 2), ...at(s0 + 3)] : f32(U.get('u_shadowM'));
+        const cp = !clipOn ? null : inst ? at(stride - 1) : f32(U.get('u_clip'));
+        const extra = [sm ? mul4(sm, P[0]!, P[1]!, P[2]!) : null, cp ? cp[0]! * P[0]! + cp[1]! * P[1]! + cp[2]! * P[2]! + cp[3]! : null];
+        tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, vcol > 0.5 ? C : col, ...extra]));
         if (tri.length === (mode === 'TRIANGLES' ? 3 : 2)) {
           out.push(`mesh|${mode}|${state}|${flags}|${tri.join(';')}`);
           tri.length = 0;

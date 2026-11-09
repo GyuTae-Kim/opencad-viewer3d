@@ -39,7 +39,8 @@
  * 그물마다 그리는 길(강조 윤곽선·구간·단면·그림자·반투명·잘린 면 채우기)도 같은 정점·같은 색인 차례로 그린다. 'auto'는 묶을 수 있는 그물이 문턱(MERGE_AUTO_MIN) 이상인 장면만 켜고
  * 올리는 걸음 안에서 굽는다(그물이 아주 많아도 GL 객체가 쌓이지 않게). 그릴 때는 그물마다 그리던 자리에서 잇단 묶음 그물을 구간 하나로 모아 MERGE 변종(INST 꼴 자리 자료 — 행렬·색)으로 그린다.
  * 그물마다 그리기와 묶음 구간을 장면 차례 한 목록에 모아 자리 자료를 한 번 올린 뒤 차례대로 그린다. 바꾼·뺀 그물은 묶음에서 빠지고(몫이 크면 남은 그물로 다시 굽는다), 끄면 그물마다 버퍼로 되돌린다.
- * 0.53.0 다시 굽기는 장면 차례 토막으로(mergePlanLoose — 바꾼·새 그물을 이웃 묶음과 함께 굽기 단위로 고르게 나눠 묶음이 엇갈리지 않게)
+ * 0.53.0 다시 굽기는 장면 차례 토막으로(mergePlanLoose — 바꾼·새 그물을 이웃 묶음과 함께 굽기 단위로 고르게 나눠 묶음이 엇갈리지 않게).
+ * 면은 단면 하나·그림자에서도 묶음 구간으로 그린다(자리 자료에 로컬 평면·그림자 행렬 — 인스턴싱과 같다). 단면이 있을 때의 선과 여러 단면은 그물마다(묶음 자리로)
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
@@ -2256,13 +2257,23 @@ export class Renderer3d {
 
   /**
    * 0.52.0 묶음 면 자리 자료 하나(instBuf의 i번째 자리 — 12텍셀): setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로(instMeshes와 같은 셈)
-   * + 그물 색(meshDraw의 u_color와 같은 값) + 정점 색 쓰기 깃발(meshDraw의 u_vcol — 법선 행렬 첫 텍셀의 w)
+   * + 그물 색(meshDraw의 u_color와 같은 값) + 정점 색 쓰기 깃발(meshDraw의 u_vcol — 법선 행렬 첫 텍셀의 w).
+   * 0.53.0: stride(mergeStride)·shadow(빛 투영·시점 — 그림자 행렬 4텍셀)·clip(모형 → 로컬 평면 — 맨 끝 1텍셀)
    */
-  private mergeFaceTexels(f: ViewFrame, model: ArrayLike<number> | undefined, c: Rgba, vcol: boolean, i: number): void {
+  private mergeFaceTexels(
+    f: ViewFrame,
+    model: ArrayLike<number> | undefined,
+    c: Rgba,
+    vcol: boolean,
+    i: number,
+    stride = MERGE_MESH_TEXELS,
+    shadow: ArrayLike<number> | null = null,
+    clip: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null = null,
+  ): void {
     const d = this.instBuf, m3 = this.instM3;
     const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
     const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
-    const o = i * MERGE_MESH_TEXELS * 4;
+    const o = i * stride * 4;
     for (let k = 0; k < 16; k++) {
       d[o + k] = mvp[k]!;
       d[o + 16 + k] = mv[k]!;
@@ -2279,6 +2290,25 @@ export class Renderer3d {
     d[o + 45] = c[1];
     d[o + 46] = c[2];
     d[o + 47] = c[3];
+    // 0.53.0 그림자(12~15 — setMeshMatrix의 u_shadowM과 같은 식, instMeshes와 같은 셈)·단면 하나(맨 끝 — setMeshMatrix의 u_clip과 같은 로컬 평면)
+    if (shadow) {
+      const lv = model ? mat4Mul(shadow, model, this.d4c) : shadow;
+      for (let k = 0; k < 16; k++) d[o + 48 + k] = lv[k]!;
+      for (let j = 0; j < 4; j++) for (let r = 0; r < 3; r++) d[o + 48 + j * 4 + r] = lv[j * 4 + r]! * 0.5 + lv[j * 4 + 3]! * 0.5;
+    }
+    if (clip) {
+      const p = clip(model) ?? NO_CLIP;
+      const q = o + (stride - 1) * 4;
+      d[q] = p[0];
+      d[q + 1] = p[1];
+      d[q + 2] = p[2];
+      d[q + 3] = p[3];
+    }
+  }
+
+  /** 0.53.0 묶음 면 자리 하나의 텍셀 수: 12 + 그림자 행렬 4 + 단면 평면 1 — 셰이더 u_instStride */
+  private static mergeStride(shadow: boolean, clip: boolean): number {
+    return MERGE_MESH_TEXELS + (shadow ? 4 : 0) + (clip ? 1 : 0);
   }
 
   /**
@@ -4652,9 +4682,12 @@ export class Renderer3d {
     const pend = new Map<string, MeshRec[]>();
 
     // ───── 0.52.0 묶어 그리기: 묶음 그물은 그물마다 그리던 자리에서 잇단 것끼리 구간으로 모으고, 그물마다 그리기와 한 목록에 장면 차례로 두었다가
-    // 자리 자료(행렬·색)를 한 번 올린 뒤 차례대로 그린다(차례가 같아 그림이 같다). 단면이 있으면 끈다(그물마다 로컬 평면), 그림자 면도 그물마다 ─────
-    // (단면이 있거나 MERGE 변종을 만들 수 없으면 묶음 저장소의 그물도 그물마다 — 그 그물 자리로 그린다)
-    const mOn = !this.mergeBroken && this.mgGroups.size > 0 && !sec && !multi;
+    // 자리 자료(행렬·색)를 한 번 올린 뒤 차례대로 그린다(차례가 같아 그림이 같다). 0.53.0: 면은 단면 하나·그림자에서도 묶는다(자리마다 로컬 평면·그림자 행렬 —
+    // 인스턴싱과 같다), 선(윤곽선·숨은 점선)은 단면이 있으면 그물마다. 여러 단면이면 모두 그물마다 ─────
+    // (MERGE 변종을 만들 수 없으면 묶음 저장소의 그물도 그물마다 — 그 그물 자리로 그린다)
+    const mOn = !this.mergeBroken && this.mgGroups.size > 0 && !multi;
+    /** 0.53.0 선 차례에서 묶는지(단면이 있으면 0.52.0처럼 그물마다 — 선 변종은 자리마다 평면을 읽지 않는다) */
+    const mOnLines = mOn && !sec;
     type MergeOp = MergeRun | (() => void);
     /** 지금 모으는 목록(null이면 예전처럼 바로 그린다)과 늘일 수 있는 마지막 구간 */
     let mops: MergeOp[] | null = null;
@@ -4699,8 +4732,14 @@ export class Renderer3d {
      */
     const mergeFaces = (ops: readonly MergeOp[], plain: (r: MeshRec) => Prog): void => {
       const runs = ops.filter((o): o is MergeRun => typeof o !== 'function');
-      const p = runs.length ? this.mergeVariant('mesh', meshExtra) : null;
-      const ok = !!p && mergeUpload(runs, MERGE_MESH_TEXELS, (u, i, k) => this.mergeFaceTexels(f, mm(u.g.recs[i]!), u.cols[i - u.a]!, u.vc[i - u.a]!, k));
+      // 0.53.0 그림자(SHADOW — 깊이 그림을 그린 뒤)·단면 하나(CLIP)도 묶음 변종으로: 그물마다 그릴 때(progFor)와 같은 정의, 자리마다 그림자 행렬·로컬 평면을 자리 자료에
+      const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
+      const stride = Renderer3d.mergeStride(shadowOn, !!sec);
+      const p = runs.length ? this.mergeVariant('mesh', [...meshExtra, ...(shadowOn ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : [])]) : null;
+      const ok =
+        !!p &&
+        (!shadowOn || !!shadowVp) &&
+        mergeUpload(runs, stride, (u, i, k) => this.mergeFaceTexels(f, mm(u.g.recs[i]!), u.cols[i - u.a]!, u.vc[i - u.a]!, k, stride, shadowVp, sec ? clipOf : null));
       for (const op of ops) {
         if (typeof op === 'function') {
           op();
@@ -4717,6 +4756,7 @@ export class Renderer3d {
         }
         if (cur !== p) meshUse(p!);
         gl.uniform1i(this.loc(p!, 'u_instBase'), op.base);
+        if (p!.shadow || p!.clip1) gl.uniform1i(this.loc(p!, 'u_instStride'), stride);
         // 정점 색 쓰기는 자리 자료 깃발이라 균일 변수 u_vcol이 없다(기억에는 false로)
         if (flagsNew(false, op.g.hasNormals, op.tint, op.alpha)) {
           gl.uniform1f(this.loc(p!, 'u_hasNrm'), op.g.hasNormals ? 1 : 0);
@@ -4737,8 +4777,8 @@ export class Renderer3d {
         this.mergeStats.items += op.b - op.a;
       }
     };
-    /** 그물을 이 면 차례에서 묶어 그릴 수 있는지(구운 묶음에 들었고, 그림자 면·묶음 안 구간이 아닐 때 — 단면은 mOn이 끈다) */
-    const mergeFace = (r: MeshRec): boolean => !!r.mg && !shadowOn && !st.parts?.(r.src.id);
+    /** 그물을 이 면 차례에서 묶어 그릴 수 있는지(구운 묶음에 들었고 묶음 안 구간이 아닐 때 — 0.53.0 그림자·단면 하나도, 여러 단면은 mOn이 끈다) */
+    const mergeFace = (r: MeshRec): boolean => !!r.mg && !st.parts?.(r.src.id);
     /**
      * 선 목록을 그린다(그물 윤곽선 — 1화소 굵기 1, 숨은 점선이면 dash): 묶음 구간은 MERGE 변종(가는 선·굵은 선 — drawLines와 같은 판정·균일 변수, 선 색은 자리 자료)으로
      * 그 선분 구간 그리기 한 번. 변종이 번역 중이거나 자리 자료가 모자라면 구간도 그물마다 drawLines로
@@ -5063,8 +5103,8 @@ export class Renderer3d {
       const lineBatches = new Map<unknown, LineBatch[]>();
       // 0.51.0 같은 프로그램·같은 값의 윤곽선을 그물마다 잇달아 그릴 때 고정 균일 변수를 다시 보내지 않는다(다른 길이 끼면 memo.p = null)
       const memo = this.lineMemoOff ? null : lineMemo();
-      // 0.52.0 묶음 그물 윤곽선(강조 아닌 1화소)은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에)
-      mops = mOn ? [] : null;
+      // 0.52.0 묶음 그물 윤곽선(강조 아닌 1화소)은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에 — 0.53.0 단면이 있으면 그물마다)
+      mops = mOnLines ? [] : null;
       mrun = null;
       for (const r of visibleMeshes) {
         // 0.51.0 화면 밖 그물: 모으는 길(같은 윤곽선 버퍼·삼각형 변 자리)이 아니면 건너뛴다 — 모으는 길은 묶음·차례를 그대로 두고 그릴 때 뺀다
@@ -5200,8 +5240,8 @@ export class Renderer3d {
       const dashBatches = new Map<unknown, LineBatch[]>();
       // 0.51.0 그물마다 잇단 점선은 고정 균일 변수를 다시 보내지 않는다(구간 길이 끼면 memo.p = null)
       const dmemo = this.lineMemoOff ? null : lineMemo();
-      // 0.52.0 묶음 그물 윤곽선의 숨은 점선도 구간으로(장면 차례 그대로)
-      mops = mOn && backEdges.meshes ? [] : null;
+      // 0.52.0 묶음 그물 윤곽선의 숨은 점선도 구간으로(장면 차례 그대로 — 0.53.0 단면이 있으면 그물마다)
+      mops = mOnLines && backEdges.meshes ? [] : null;
       mrun = null;
       const hiddenA = st.hiddenEdges;
       for (const r of visibleMeshes) {

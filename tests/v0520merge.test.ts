@@ -253,9 +253,12 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     }
   });
 
-  it('단면이 있으면 그물마다(묶음 구간 0), 그림자를 쓰면 면은 그물마다·윤곽선은 묶음 — 둘 다 끔과 같다', () => {
+  it('0.53.0: 단면 하나·그림자에서도 면은 묶고(단면이 있으면 선은 그물마다), 여러 단면·구간 단면은 그물마다(묶음 구간 0) — 모두 끔과 같다', () => {
+    const d = same(() => undefined, 'plain');
     const a = same((v) => v.setSection({ normal: [1, 0, 0], offset: 120 }, { caps: 'all' }), 'section');
-    expect(a.mergedDraws).toBe(0);
+    // 0.52.0은 단면이 있으면 모두 그물마다였다 — 0.53.0은 면만 묶는다(자리마다 로컬 평면): 묶어 그린 그물 수가 면 차례만큼(윤곽선 차례는 그물마다)
+    expect(a.mergedDraws).toBeGreaterThan(0);
+    expect(a.on.v.stats.merged.items).toBeLessThan(d.on.v.stats.merged.items);
     const b = same((v) => v.setSections([{ normal: [1, 0, 0], offset: 120 }, { normal: [0, 1, 0], offset: 40 }]), 'sections');
     expect(b.mergedDraws).toBe(0);
     // 구간 단면(0.44.0 — 묶음 안 삼각형·선분 구간만 자르는 평면)도 그물마다
@@ -270,9 +273,11 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     expect(r.mergedDraws).toBe(0);
     const c = same((v) => v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true }), 'shadows');
     expect(c.mergedDraws).toBeGreaterThan(0);
-    // 면은 그물마다: 묶어 그린 그물 수가 윤곽선 차례만큼
-    const d = same(() => undefined, 'plain');
-    expect(c.on.v.stats.merged.items).toBeLessThan(d.on.v.stats.merged.items);
+    // 0.53.0 그림자에서도 면을 묶는다(자리마다 그림자 행렬 — 0.52.0은 면이 그물마다라 윤곽선 차례만큼이었다): 묶어 그린 그물 수가 그림자 없을 때와 같다
+    expect(c.on.v.stats.merged.items).toBe(d.on.v.stats.merged.items);
+    // 단면 하나 + 그림자도 같다
+    const e = same((v) => (v.setSection({ normal: [1, 0, 0], offset: 120 }), v.setLighting({ sun: { direction: [-0.4, -0.6, 0.8] }, shadows: true })), 'section+shadows');
+    expect(e.mergedDraws).toBeGreaterThan(0);
   });
 
   it('같은 배열 자리(인스턴싱)는 묶지 않고 모은다 — 끄면(instancing: false) 그 자리도 묶지 않는다(배열을 함께 쓴다)', () => {
