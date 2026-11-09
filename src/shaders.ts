@@ -868,3 +868,30 @@ void main() {
   o_color = vec4(1.0);
 #endif
 }`;
+
+/** 한 번만 나오는 글을 바꾼다(없거나 둘 이상이면 예외 — 바꿀 자리를 잘못 찾지 않게) */
+function replaceOnce(src: string, from: string, to: string): string {
+  const i = src.indexOf(from);
+  if (i < 0 || src.indexOf(from, i + 1) >= 0) throw new Error(`mergeShader: 바꿀 자리를 하나로 찾지 못했다 — ${from.trim()}`);
+  return src.slice(0, i) + to + src.slice(i + from.length);
+}
+
+/**
+ * 0.52.0 묶어 그리기 변종(MERGE)의 정점 셰이더: INST 변종 글(정의 INST를 넣은 그물·가는 선·굵은 선 정점 셰이더)에서 자리 번호를 gl_InstanceID 대신
+ * 정점 속성 a_item(위치 5 — 묶음 안 그물 번호, Uint16을 실수로 읽어 정확한 정수)으로 읽고, 색 u_color도 자리 자료 텍셀에서 읽게 바꾼다.
+ * 그물 자리 하나 = 12텍셀(u_mvp 4·u_mv 4·u_nmat 3·u_color 1), 선 자리 하나 = 6텍셀(u_mvp 4·u_mvz 1·u_color 1). 예전 균일 변수와 같은 이름의 지역 변수로 두어
+ * 아래 식은 한 글자도 바뀌지 않는다(그림자·단면 하나와는 함께 쓰지 않는다 — 렌더러가 그물마다 그린다). 원본 셰이더 글자도 그대로라 MERGE가 아닌 변종은 0.51.0과 같다.
+ * 바꿀 자리를 하나로 찾지 못하면 예외(렌더러는 그 변종을 쓰지 않고 그물마다 그린다)
+ */
+export function mergeShader(vs: string, kind: 'mesh' | 'line'): string {
+  let s = replaceOnce(vs, 'uniform int u_instBase;\n', 'uniform int u_instBase;\nlayout(location=5) in float a_item;\n');
+  s = replaceOnce(s, 'uniform vec4 u_color;\n', '');
+  if (kind === 'mesh') {
+    s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * 11 + j;\n', '  int k = u_instBase + int(a_item) * 12 + j;\n');
+    s = replaceOnce(s, '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n', '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n  vec4 u_color = instAt(11);\n');
+  } else {
+    s = replaceOnce(s, '  int k = u_instBase + (gl_InstanceID % u_instN) * 5 + j;\n', '  int k = u_instBase + int(a_item) * 6 + j;\n');
+    s = replaceOnce(s, '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n', '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n  vec4 u_color = instAt(5);\n');
+  }
+  return s;
+}

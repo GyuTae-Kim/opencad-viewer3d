@@ -58,6 +58,25 @@ export interface DrawEntry {
   tex?: string;
 }
 
+/**
+ * 0.52.0: 그리기 순간의 살아 있는 상태(onDraw 손잡이 — 시험이 그린 도형을 펼친다). 속성·색인 버퍼·프로그램(셰이더 글·균일 변수)·자리 자료 그림(단위 5)·
+ * 틀 버퍼·켠 상태(enable)·깊이 함수·깊이 쓰기·색 쓰기·면 밀기 값. 다음 그리기 전에 바뀔 수 있으니 손잡이 안에서 읽는다
+ */
+export interface LiveDraw {
+  op: string;
+  args: number[];
+  attribs: ReadonlyMap<number, Attrib>;
+  element: FakeBuffer | null;
+  prog: { key: string; vs: string; uniforms: ReadonlyMap<string, unknown[]> } | null;
+  inst: FakeTexture | null;
+  fb: unknown;
+  caps: string[];
+  depthFunc: string;
+  depthMask: boolean;
+  colorMask: string;
+  polygonOffset: string;
+}
+
 /** 0.25.0: 가짜 무늬(texImage2D로 올린 그림의 꼬리표를 든다) */
 export interface FakeTexture {
   id: number;
@@ -98,6 +117,13 @@ export class FakeGL {
   logDraws = false;
   /** 0.25.0: 그리기 기록에 묶인 무늬의 그림 꼬리표도 남길지 */
   logTextures = false;
+  /** 0.52.0: 그리기마다 부르는 손잡이(LiveDraw)와 그것이 읽는 켠 상태·깊이·색 쓰기·면 밀기 */
+  onDraw: ((d: LiveDraw) => void) | null = null;
+  private caps = new Set<number>();
+  private depthFn = 0;
+  private depthW = true;
+  private colorW = 'tttt';
+  private polyOff = '0,0';
   readonly textures: FakeTexture[] = [];
   private unit: number | null = null;
   private texUnits = new Map<number, FakeTexture | null>();
@@ -338,6 +364,25 @@ export class FakeGL {
     t.floats ??= new Float32Array(t.w * t.h * 4);
     for (let j = 0; j < h; j++) t.floats.set(src.subarray(srcOffset + j * w * 4, srcOffset + (j + 1) * w * 4), ((y + j) * t.w + x) * 4);
   }
+  // 0.52.0 그리기 상태(onDraw가 읽는다 — 다른 시험에는 값만 든다)
+  enable(c: number): void {
+    this.caps.add(c);
+  }
+  disable(c: number): void {
+    this.caps.delete(c);
+  }
+  depthFunc(f: number): void {
+    this.depthFn = f;
+  }
+  depthMask(m: boolean): void {
+    this.depthW = !!m;
+  }
+  colorMask(r: boolean, g: boolean, b: boolean, a: boolean): void {
+    this.colorW = [r, g, b, a].map((x) => (x ? 't' : 'f')).join('');
+  }
+  polygonOffset(f: number, u: number): void {
+    this.polyOff = `${f},${u}`;
+  }
   createFramebuffer(): object {
     return { id: ++this.ids };
   }
@@ -354,6 +399,23 @@ export class FakeGL {
   }
   private log(op: string, args: number[]): void {
     if (this.vao.deleted) throw new Error('그리기: 지운 VAO');
+    if (this.onDraw) {
+      const p = this.prog;
+      this.onDraw({
+        op,
+        args,
+        attribs: this.vao.attribs,
+        element: this.vao.element,
+        prog: p ? { key: p.key, vs: p.shaders[0]?.src ?? '', uniforms: p.uniforms } : null,
+        inst: this.textureAt(5),
+        fb: this.fb,
+        caps: [...this.caps].map((c) => this.nameOf(c) ?? String(c)).sort(),
+        depthFunc: this.nameOf(this.depthFn) ?? String(this.depthFn),
+        depthMask: this.depthW,
+        colorMask: this.colorW,
+        polygonOffset: this.polyOff,
+      });
+    }
     if (!this.logDraws) return;
     const attribs: string[] = [];
     for (const [i, a] of [...this.vao.attribs].sort((x, y) => x[0] - y[0]))
