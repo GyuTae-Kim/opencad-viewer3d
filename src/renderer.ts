@@ -921,6 +921,8 @@ export class Renderer3d {
   mergeStats = { draws: 0, items: 0 };
   /** 0.52.0 지금까지 묶음 굽기에 쓴 벽시계 ms 합(장면을 바꾸면 0부터) */
   mergeBakeMs = 0;
+  /** 0.52.0 지난 render 벽시계 ms(묶음 굽기를 뺀 장면 그리기 — 굽기 몫의 아래 한도) */
+  private renderMs = 0;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -1805,7 +1807,9 @@ export class Renderer3d {
     if (!this.mgQueue.length) return;
     const t0 = performance.now();
     let first = true;
-    while (this.mgQueue.length && (first || performance.now() - t0 < this.mergeBudgetMs)) {
+    // 몫은 지난 장면 그리기 시간보다 짧지 않게(굽기를 기다리는 그물은 그물마다 그리므로 그리기가 비싼 큰 장면일수록 한 번에 더 굽는다 — 프레임 수가 그리기 시간에 묶이지 않게)
+    const budget = Math.max(this.mergeBudgetMs, this.renderMs);
+    while (this.mgQueue.length && (first || performance.now() - t0 < budget)) {
       first = false;
       this.mergeBake(this.mgQueue.shift()!);
     }
@@ -3640,6 +3644,7 @@ export class Renderer3d {
     this.pollPending();
     // 0.52.0 묶어 그리기를 켰으면 다 올린 뒤 몫 안에서 묶음을 굽는다(그동안 구운 묶음은 묶어서, 나머지는 그물마다)
     this.mergeStep();
+    const renderT0 = performance.now();
     const multi = st.sections ?? null;
     const sec = multi ? null : (st.section ?? null);
     const capsOn =
@@ -4748,6 +4753,12 @@ export class Renderer3d {
           col = lineCache.get(key) ?? edgeLineColor(mode, c, st.colors, hi, lineOpt, ic);
           lineCache.set(key, col);
         }
+        // 0.52.0 묶음 그물 윤곽선(강조 아님 — 굵기 1)은 구간에 더하고 다음 그물로(그물마다 그리기 선택 객체를 만들지 않는다)
+        if (mops && !hi && mergeEdge(r)) {
+          if (r.edges!.parts) this.dropParts(r.edges!);
+          mergeAdd(r, col, false, 0, alphaOf(r.src.id));
+          continue;
+        }
         const model = mm(r);
         if (r.edges) {
           const ep = st.parts?.(r.src.id);
@@ -4762,8 +4773,7 @@ export class Renderer3d {
             if (r.edges.parts) this.dropParts(r.edges);
             if (mops) {
               const rec = r.edges;
-              if (!hi && mergeEdge(r)) mergeAdd(r, col, false, 0, eo.alpha);
-              else mergeDo(() => this.drawLines(f, rec, model, { ...eo, first: 0, count: rec.n }, st, stats, memo));
+              mergeDo(() => this.drawLines(f, rec, model, { ...eo, first: 0, count: rec.n }, st, stats, memo));
               continue;
             }
             this.drawLines(f, r.edges, model, { ...eo, first: 0, count: r.edges.n }, st, stats, memo);
@@ -5221,6 +5231,7 @@ export class Renderer3d {
       gl.disable(gl.BLEND);
     }
     gl.bindVertexArray(null);
+    this.renderMs = performance.now() - renderT0;
   }
 
   /**
