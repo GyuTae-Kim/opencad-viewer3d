@@ -10,7 +10,8 @@ import { cylinderDef, defShape, placeAt } from '../pixels/many';
 export interface FlatSpec {
   /** 자리(그물) 수 */
   flat: number;
-  share: 'distinct' | 'mixed' | 'same';
+  /** 0.52.0 'varied' = 서로 다른 배열에 그리기 상태가 섞인 꼴(스무째마다 반투명, 열째마다 정점 색, 열둘째마다 같은 정의 배열 — 나사 꼴) */
+  share: 'distinct' | 'mixed' | 'same' | 'varied';
   /** 자리 하나의 평균 삼각형 수 어림(기본 60) */
   triangles?: number;
 }
@@ -39,9 +40,11 @@ export function flatScene(spec: FlatSpec): Scene3d & { triangles: number } {
   for (let i = 0; i < n; i++) {
     const k = i % ndefs;
     const d = defs[k]!;
-    const shared = spec.share === 'same' || (spec.share === 'mixed' && i % 2 === 0);
+    const varied = spec.share === 'varied';
+    const shared = spec.share === 'same' || (spec.share === 'mixed' && i % 2 === 0) || (varied && i % 12 === 5);
     const x = (i % cols) * 30, y = Math.floor(i / cols) * 30;
     const lying = i % 3 === 1;
+    const c = COLORS[Math.floor(i / 7) % COLORS.length]!;
     const mesh: Mesh3d = {
       id: `자리 ${i}`,
       name: `부품 ${shared ? k : `따로 ${i}`}`,
@@ -50,11 +53,16 @@ export function flatScene(spec: FlatSpec): Scene3d & { triangles: number } {
       normals: shared ? d.normals : d.normals!.slice(),
       indices: shared ? d.indices : d.indices!.slice(),
       edges: shared ? d.edges : d.edges!.slice(),
-      color: COLORS[Math.floor(i / 7) % COLORS.length]!,
+      color: varied && i % 20 === 7 ? [c[0], c[1], c[2], 0.6] : c,
       doubleSided: false,
       closed: true,
       matrix: placeAt(x, y, lying ? 6 : 0, (i * 37) % 360, lying),
     };
+    // 0.52.0 'varied': 열째마다 정점 색(묶음 열쇠가 다르다)
+    if (varied && !shared && i % 10 === 3) {
+      const nv = mesh.positions.length / 3;
+      mesh.colors = Float32Array.from({ length: nv * 4 }, (_, j) => (j % 4 === 3 ? 1 : c[j % 4]! * (0.8 + ((j >> 2) % 5) * 0.05)));
+    }
     meshes.push(mesh);
     triangles += d.indices!.length / 3;
   }
