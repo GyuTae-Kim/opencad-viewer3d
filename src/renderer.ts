@@ -1826,11 +1826,16 @@ export class Renderer3d {
     this.mgActive = n >= this.merging.min;
   }
 
-  /** 0.52.0 장면을 올리는 동안 올린 그물 하나: 이 장면에서 묶어 그리기를 켰고 묶을 수 있으면 굽기 기다림에 넣고, 그물 2,048개·정점 262,144개만큼 모이면 곧 굽는다 */
+  /**
+   * 0.52.0 장면을 올리는 동안 올린 그물 하나: 이 장면에서 묶어 그리기를 켰고 묶을 수 있으면 굽기 기다림에 넣고, 그물 2,048개·정점 262,144개만큼 모이면 곧 굽는다.
+   * 0.53.0: 정점 한도는 넘기 전에(이 그물을 더하면 넘을 때 먼저) 굽는다 — 기다림 하나가 늘 굽기 단위 안이라 열쇠마다 묶음 하나
+   */
   private mergeFeed(r: MeshRec): void {
     if (!this.mgActive || this.merging.mode === 'off' || this.mergeBroken) return;
     const s = this.mergeSrcOf(r);
     if (!s) return;
+    // 0.53.0: 이 그물을 더하면 정점이 굽기 단위를 넘으면 먼저 굽는다(넘은 뒤에 구우면 단위를 조금 넘은 기다림이 고르게 반으로 나뉘어 묶음이 두 배 — 정점이 많은 그물의 장면)
+    if (this.mgWait.length && this.mgWaitVerts + s.src.nv > MERGE_UPLOAD_VERTS) this.mergeFlushWait();
     this.mgWait.push(r);
     this.mgWaitVerts += s.src.nv;
     if (this.mgWait.length >= MERGE_UPLOAD_MESHES || this.mgWaitVerts >= MERGE_UPLOAD_VERTS) this.mergeFlushWait();

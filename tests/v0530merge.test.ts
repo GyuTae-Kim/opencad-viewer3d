@@ -188,6 +188,27 @@ describe('0.53.0 다시 굽기 — 뷰어', () => {
     expect(w.baked.length).toBe(nBake + 2);
   });
 
+  it('정점이 묶는 쪽인 장면: 올리는 걸음은 굽기 단위(정점 262,144개)를 넘기 전에 굽는다 — 묶음마다 하나, 끄고 켠 고르게 나누기와 같은 묶음 수', () => {
+    // 정점 2만 개 그물 30개(60만 — 굽기 단위 2.3개). 52차 꼴(넘은 뒤 굽기)은 14개째에 넘어 열네 개를 반으로 나눠 묶음이 다섯이었다
+    const NV = 20000;
+    const strip = (i: number): Mesh3d => {
+      const P = new Float32Array(NV * 3);
+      for (let k = 0; k < NV; k++) P.set([i * 10 + (k % 100) * 0.05, Math.floor(k / 100) * 0.05, (k % 3) * 0.01], k * 3);
+      return { id: `s${i}`, positions: P, indices: Uint32Array.from({ length: Math.floor(NV / 3) * 3 }, (_, k) => k), color: [0.5, 0.6, 0.7, 1] };
+    };
+    const w = view({ name: 's', units: 'mm', meshes: Array.from({ length: 30 }, (_, i) => strip(i)), lines: [] }, true);
+    bake(w);
+    expect(w.v.stats.merged.meshes).toBe(30);
+    expect(w.v.stats.merged.groups).toBe(3);
+    for (const [, nv] of w.baked) expect(nv).toBeLessThanOrEqual(MERGE_UPLOAD_VERTS);
+    w.v.setRenderOptions({ merging: false });
+    w.v.renderNow();
+    w.v.setRenderOptions({ merging: true });
+    bake(w);
+    expect(w.v.stats.merged.groups).toBe(3);
+    expect([...rend(w).mgGroups].map((g) => g.live)).toEqual([10, 10, 10]);
+  });
+
   it('묶음 합치기: 토막만 나누면 묶음이 하나 더 생길 때 이웃 묶음을 붙여 함께 고르게 다시 굽는다', () => {
     const N = 3000;
     const w = view(boxes(N));
