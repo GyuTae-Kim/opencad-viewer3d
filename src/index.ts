@@ -40,6 +40,7 @@ export type {
   KeyPickCycleOptions,
   MeasureCandidatesOptions,
   PickCandidatesOptions,
+  PickGroupKey,
   PointerClaimHandler,
   PointerClaimQuery,
   PointerHoldEnd,

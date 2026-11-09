@@ -807,8 +807,11 @@ export interface KeyboardSnapOptions {
   messages?: Partial<Record<KeySnapMessageKey, string>> | KeySnapMessageFn;
 }
 
-/** 키보드 고르기 후보 돌리기 선택(0.47.0 KeyboardSnapOptions.pickCycle — pickCandidates·pick 선택과 같은 뜻, 포인터 종류는 'keyboard') */
-export type KeyPickCycleOptions = Omit<PickOptions, 'pointerType'>;
+/**
+ * 키보드 고르기 후보 돌리기 선택(0.47.0 KeyboardSnapOptions.pickCycle — pickCandidates·pick 선택과 같은 뜻, 포인터 종류는 'keyboard').
+ * 0.53.0 group: 앱 묶음 열쇠 — 같은 묶음은 한 후보로 돌리고 후보 한도(16)·알림 count·onPick cycle을 묶음 수로 센다(NC 56·STEP 62차 요청)
+ */
+export type KeyPickCycleOptions = Omit<PickOptions, 'pointerType'> & { group?: PickGroupKey | null };
 
 /** 키보드 붙잡기 알림(0.46.0) */
 export interface KeyboardSnapAnnouncement {
@@ -1098,9 +1101,17 @@ export interface PickOptions {
   throughTranslucent?: boolean;
 }
 
-/** Viewer3d.pickCandidates 선택(0.47.0): pick 선택과 후보 수 한도(기본 16) */
+/**
+ * 0.53.0 고르기 후보 묶음 열쇠(pickCandidates·키보드 pickCycle의 group): 고른 것(사본) → 앱 묶음 열쇠(공구 경로의 코드 줄·판재 가공 단위, STEP의 B-rep 면 등).
+ * 열쇠가 같은 후보는 하나로 센다(가장 앞의 것). 문자열·유한한 수가 아니면(null·undefined 등) 그 후보는 묶지 않는다. 던지면 묶지 않는다
+ */
+export type PickGroupKey = (pick: Pick3d) => string | number | null | undefined;
+
+/** Viewer3d.pickCandidates 선택(0.47.0): pick 선택과 후보 수 한도(기본 16 — 0.53.0 group을 주면 묶음 수) */
 export interface PickCandidatesOptions extends PickOptions {
   max?: number;
+  /** 0.53.0 앱 묶음 열쇠(같은 묶음은 한 후보 — 주지 않으면 0.47.0 그대로 기본 도형마다) */
+  group?: PickGroupKey | null;
 }
 
 /** 고르기 복사본(점·법선 배열도 새로 — 앱이 고쳐도 뷰어 기억이 바뀌지 않게) */
@@ -4154,7 +4165,8 @@ export class Viewer3d {
    * 0.47.0 화면 점에 겹친 고르기 후보(차례대로 — AutoCAD 선택 돌리기·여러 CAD의 "다른 것 고르기" 목록). 첫째는 같은 선택의 pick(x, y, opts)와 같고,
    * 다음은 앞 후보(점·선분·윤곽선·그물 삼각형·잘린 면)를 걷어 내고 같은 규칙(차례 점 → 선분 → 윤곽선 → 그물 면, 허용 거리·가림·단면·숨긴 구간·반투명 지나기)으로
    * 다시 고른 것이다 — 그물은 앞 면 뒤의 것(같은 그물의 뒷면·뒤 묶음·앞 면에 가렸던 선분·점)이 차례로 나온다. 같은 그물의 같은 자리·같은 법선 삼각형은 하나로 센다.
-   * 뷰어 상태를 바꾸지 않는다(앱이 제 목록 UI로 고르게 할 때 — 고른 것은 앱이 onPick 처리기에 넘긴다). 후보 수 한도 max(기본 16). 장면이 없거나 빈 곳이면 빈 배열
+   * 뷰어 상태를 바꾸지 않는다(앱이 제 목록 UI로 고르게 할 때 — 고른 것은 앱이 onPick 처리기에 넘긴다). 후보 수 한도 max(기본 16). 장면이 없거나 빈 곳이면 빈 배열.
+   * 0.53.0 group(앱 묶음 열쇠): 같은 묶음은 가장 앞의 후보 하나로 세고 max는 묶음 수다(주지 않으면 0.47.0 그대로)
    */
   pickCandidates(x: number, y: number, opts?: string | PickCandidatesOptions): Pick3d[] {
     const o: PickCandidatesOptions = typeof opts === 'string' ? { pointerType: opts } : (opts ?? {});
@@ -4414,7 +4426,12 @@ export class Viewer3d {
       keys: normalizeKeySnapKeys(src.keys),
       announce: typeof src.announce === 'function' ? src.announce : null,
       src,
-      pickCycle: pc === false || pc === null ? null : typeof pc === 'object' ? { edges: pc.edges, meshesOnly: !!pc.meshesOnly, throughTranslucent: !!pc.throughTranslucent } : {},
+      pickCycle:
+        pc === false || pc === null
+          ? null
+          : typeof pc === 'object'
+            ? { edges: pc.edges, meshesOnly: !!pc.meshesOnly, throughTranslucent: !!pc.throughTranslucent, ...(typeof pc.group === 'function' ? { group: pc.group } : {}) }
+            : {},
       msgs: typeof src.messages === 'function' ? src.messages : keySnapMessages(src.messages),
     };
     // 고르기 모드에서 켜진 커서는 새 pickCycle로 그 자리를 다시 구한다(알리지 않는다 — 측정 모드는 0.46.0 그대로 두어 차례를 지킨다)
@@ -6045,11 +6062,12 @@ export class Viewer3d {
   /**
    * 0.47.0 화면 점의 겹친 고르기 후보(pickSceneCandidates — 첫째는 pickDetail과 같은 고르기, 다음은 앞 후보를 걷어 낸 같은 고르기). 장면이 없으면 빈 배열
    */
-  private pickList(x: number, y: number, pointerType: string | undefined, o: PickOptions, max: number): PickDetail[] {
+  private pickList(x: number, y: number, pointerType: string | undefined, o: PickOptions & { group?: PickGroupKey | null }, max: number): PickDetail[] {
     if (!this.sceneRef) return [];
     const through = !!o.throughTranslucent;
     const a = o.meshesOnly ? this.pickArgs(true, pointerType, false, false, true, through) : this.pickArgs(true, pointerType, o.edges ?? this.opts.pickEdges, false, false, through);
-    return pickSceneCandidates(this.frame(), x, y, a.items, a.o, max);
+    // 0.53.0 앱 묶음 열쇠(함수일 때만 — 같은 묶음은 한 후보)
+    return pickSceneCandidates(this.frame(), x, y, a.items, a.o, max, typeof o.group === 'function' ? o.group : null);
   }
 
   /** 고르기 묶음 목록과 선택(pickDetail·pickList가 함께 쓴다 — 0.46.0 pickDetail의 인자 그대로) */
@@ -6806,7 +6824,8 @@ export class Viewer3d {
    * 0.37.0: 앱 점이 코어 점에서 화면 붙잡기 거리 밖이면(선이 칸을 얕게 뚫는다) 열린 면 교차와 같은 규칙으로 한 번 더 본다(track.ts acceptFacePatch — 그 선 위·그 칸 위 곡면 조각 자리·
    * 커서에서 붙잡기 거리 안, hit의 꼭짓점과 같은 평면 짝은 그 세 변 가운데 자리에서 모은다 — edgeNeighbors). 그때는 열린 면 교차와 같은 가림(openFaceVisible)을 보고,
    * 앱 점이 같은 평면 짝 위면 face가 그 삼각형이다. hit이 없거나 꼭짓점이 없으면 0.36.0 그대로.
-   * 0.39.0 refineSnapToExact(so.exact): 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면 EXACT_SNAP_SCALE × 붙잡기 거리·칸 크기 안이면 받는다(같은 교차의 정확한 자리)
+   * 0.39.0 refineSnapToExact(so.exact): 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면 EXACT_SNAP_SCALE × 붙잡기 거리·칸 크기 안이면 받는다(같은 교차의 정확한 자리).
+   * 0.53.0(NC 56차): 그래도 받지 못하면 커서 광선이 맞은 삼각형(같은 평면 짝, 또는 그 자리에 겹친 다른 그물 삼각형 — 같은 구멍을 판 두 면에서 뚫은 벽)도 칸 조각 후보로 한 번 더 본다
    */
   private axisFaceRefined(
     so: NonNullable<Viewer3d['snapOpt']>,
@@ -6845,7 +6864,18 @@ export class Viewer3d {
     const t: NearTriangle = { corners: hit.corners, wpp: worldPerPixel(f, viewDepth(f, core)), id: face.id, index: face.index, normal: [face.normal[0], face.normal[1], face.normal[2]] };
     const mates = this.edgeNeighbors(f, t);
     // 0.39.0 refineSnapToExact: 커서에서 붙잡기 거리 밖이어도 코어 점에서 화면 EXACT_SNAP_SCALE × 붙잡기 거리·칸 크기 안이면(같은 교차의 정확한 자리) 받는다
-    const w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx, so.exact ? EXACT_SNAP_SCALE * snapPx : null);
+    const exactPx = so.exact ? EXACT_SNAP_SCALE * snapPx : null;
+    let w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx, exactPx);
+    if (!w) {
+      // 0.53.0(NC 56차): 같은 자리에 다른 그물 삼각형이 겹치면(판 윗면·아랫면에서 뚫은 같은 구멍 벽) 변 가운데 둘레 삼각형 모으기(6개까지)가 그 겹친 것으로 차
+      // 같은 평면 짝을 놓친다 — 커서 광선이 맞은 삼각형도 칸 조각 후보로 본다(X 삼각형과 꼭짓점 둘을 함께 쓰는 같은 평면 삼각형일 때만 — 같은 그물의 짝, 또는 그 짝 자리에
+      // 겹친 다른 그물 삼각형). 처음 받기가 실패한 자리만 다시 보므로 받던 자리는 그대로다
+      const c = this.cursorTriangle(f, x, y, so.through);
+      if (c && !(c.id === t.id && c.index === t.index) && !mates.some((n) => n.id === c.id && n.index === c.index)) {
+        mates.push(c);
+        w = acceptFacePatch(f, core, q, line, t.corners, mates.map((n) => n.corners), x, y, snapPx, exactPx);
+      }
+    }
     if (!w) return null;
     const on = w.cell ? mates[w.cell - 1]! : t;
     if (this.clippedAway(w.p, on.id, on.index) || !this.openFaceVisible(f, w.p, on)) return null;
@@ -7026,6 +7056,14 @@ export class Viewer3d {
   }
 
   /** 삼각형 t의 세 변 가운데 화면 자리에서 1화소 안의 같은 그물 삼각형(0.24.0 면의 열린 교차 둘째 힌트 — 변을 함께 쓰는 이웃 찾기, 자리마다 6개까지) */
+  /** 0.53.0 커서 광선이 처음 맞은 그물 삼각형(그물 면만 — 잘린 면 아님, through면 반투명 그물을 지나) — 칸 조각 후보 꼴(없으면 null) */
+  private cursorTriangle(f: ViewFrame, x: number, y: number, through: boolean): NearTriangle | null {
+    const d = this.pickDetail(x, y, true, undefined, false, false, true, through);
+    const k = d?.pick;
+    if (!k || k.kind !== 'mesh' || k.section || !k.normal || !d!.corners) return null;
+    return { corners: d!.corners, wpp: worldPerPixel(f, viewDepth(f, k.point)), id: k.id, index: k.index, normal: [k.normal[0], k.normal[1], k.normal[2]] };
+  }
+
   private edgeNeighbors(f: ViewFrame, t: NearTriangle): NearTriangle[] {
     const out: NearTriangle[] = [];
     const c = t.corners;
