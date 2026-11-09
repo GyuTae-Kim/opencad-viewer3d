@@ -8696,6 +8696,82 @@ const manyMergeValues: ValueSet = {
   },
 };
 
+/**
+ * 0.53.0 다시 구운 묶음 값(head만 — 새 장면 없이 'many' 자료를 배열 사본으로, 묶어 그리기 늘 켬): 다 구운 뒤 그물 여덟째마다 빼고, 넷째마다 바꾸고(새 배열·색),
+ * 앞 열 개 사본을 장면 끝에 더한 뒤 다시 굽기를 마친 그림(켬 — 다시 구운 묶음 그대로)이 끔 그림·같은 장면을 새로 올려 구운 그림과 같은지(다른 화소 수 — SwiftShader에서는 0)와
+ * 통계(그리기 호출·삼각형·선분·묶음 구간 그리기·묶은 그물 수·묶음 수 — 켬은 새로 올림 이하)
+ */
+const manyRebakeValues: ValueSet = {
+  name: 'many-rebake',
+  data: 'many',
+  needs: v0520merge,
+  run: async ({ v }) => {
+    const out: unknown[] = [];
+    const src = sceneOf('many');
+    const copy = (m: Mesh3d, extra: Partial<Mesh3d> = {}): Mesh3d => ({ ...m, positions: m.positions.slice(), normals: m.normals?.slice(), indices: m.indices?.slice(), edges: m.edges?.slice(), ...extra });
+    const settle = async (): Promise<void> => {
+      await texturesReady(v);
+      v.renderNow();
+      for (let i = 0; i < 500 && ((v.stats?.instanced?.pending ?? 0) > 0 || (v.stats?.merged?.pending ?? 0) > 0); i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        v.renderNow();
+      }
+      v.renderNow();
+    };
+    const modes = ['shadedEdges', 'hiddenLine'] as const;
+    const snaps = async (): Promise<{ st: unknown[]; img: ImageData }[]> => {
+      const r: { st: unknown[]; img: ImageData }[] = [];
+      for (const mode of modes) {
+        v.setRenderMode(mode);
+        v.setRenderOptions({ hiddenEdges: mode === 'hiddenLine' ? true : null });
+        await settle();
+        const s = v.stats;
+        r.push({ st: [s.drawCalls, s.triangles, s.segments, s.merged.draws, s.merged.meshes, s.merged.groups], img: v.renderImage({}) });
+      }
+      return r;
+    };
+    v.setScene({ ...src, meshes: src.meshes.map((m) => copy(m)) });
+    loaded = null;
+    try {
+      reset(v, 'many');
+      v.setRenderOptions({ merging: true });
+      v.orbitBy(0.3, 0.1);
+      await settle();
+      const s0 = v.stats.merged;
+      out.push(['baked', s0.meshes, s0.groups]);
+      const now = v.scene!.meshes.slice();
+      now.forEach((m, i) => {
+        if (i % 8 === 3) v.removeMesh(m.id);
+      });
+      now.forEach((m, i) => {
+        if (i % 4 === 1) v.setMesh(copy(m, { color: [0.85, 0.35 + (i % 3) * 0.1, 0.25, 1] }));
+      });
+      for (let i = 0; i < 10; i++) {
+        const m = now[i]!;
+        const mat = Float64Array.from(m.matrix ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+        mat[13] = mat[13]! - 150;
+        v.setMesh(copy(m, { id: `${m.id} 더함`, matrix: mat }));
+      }
+      const on = await snaps();
+      const s1 = v.stats.merged;
+      out.push(['rebaked', v.scene!.meshes.length, s1.meshes, s1.groups]);
+      v.setRenderOptions({ merging: false });
+      const off = await snaps();
+      // 같은 마지막 장면을 새로 올려 굽는다(처음 굽기)
+      v.setScene({ ...v.scene!, meshes: v.scene!.meshes.map((m) => copy(m)) }, { keepView: true });
+      v.setRenderOptions({ merging: true });
+      const fresh = await snaps();
+      modes.forEach((mode, k) => out.push([mode, on[k]!.st, off[k]!.st, fresh[k]!.st]));
+      for (let k = 0; k < modes.length; k++) out.push([modes[k], await sha16(on[k]!.img.data), pixelDiff(on[k]!.img, off[k]!.img)[0], pixelDiff(on[k]!.img, fresh[k]!.img)[0]]);
+    } finally {
+      v.setRenderOptions({ merging: false });
+      v.setScene(src);
+      loaded = null;
+    }
+    return out;
+  },
+};
+
 const VALUES: ValueSet[] = [
   ...valueSets('base'),
   ...valueSets('off'),
@@ -8805,6 +8881,7 @@ const VALUES: ValueSet[] = [
   inputFuzzValues,
   manyCullValues,
   manyMergeValues,
+  manyRebakeValues,
 ];
 
 // ───────────── 장면마다 뷰어 하나 ─────────────

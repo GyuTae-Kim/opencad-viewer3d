@@ -376,12 +376,34 @@ export function samePickTarget(a: Pick3d, b: Pick3d): boolean {
  * - 같은 그물에서 앞 후보와 같은 깊이·같은 법선으로 맞은 삼각형(삼각형 경계 위 — 한 평면)은 후보로 더하지 않고 숨기기만 한다
  * - 잘린 면은 그 그물(capGroup이면 그 묶음 이름)의 잘린 면을 고른 뒤나 그 그물의 삼각형을 하나라도 걷어 낸 뒤에는 보지 않는다
  *   (잘린 면은 그 그물의 남는 쪽 면보다 앞이므로 먼저 나온다 — 걷어 낸 삼각형이 안팎 세기를 바꿔 없는 잘린 면을 만들지 않게)
- * 숨긴 것 판정은 o.hidden·o.edgeHidden·o.caps를 감싼다(o는 바꾸지 않는다). 후보가 없으면 빈 배열
+ * 숨긴 것 판정은 o.hidden·o.edgeHidden·o.caps를 감싼다(o는 바꾸지 않는다). 후보가 없으면 빈 배열.
+ * 0.53.0 group(앱 묶음 열쇠 — 공구 경로의 코드 줄·판재 가공 단위·같은 B-rep 면): 앞 후보와 열쇠가 같은 후보는 더하지 않고 걷어 내기만 한다(묶음마다 가장 앞의 것 하나 —
+ * max는 묶음 수). 열쇠가 문자열·유한한 수가 아니거나 함수가 던지면 그 후보는 묶지 않는다. 같은 묶음 도형을 여럿 걷어 내므로 다시 고르기 횟수 한도를 늘린다
  */
-export function pickSceneCandidates(f: ViewFrame, x: number, y: number, items: ScenePickItems, o: ScenePickOptions, max = PICK_CANDIDATES_MAX): PickDetail[] {
+export function pickSceneCandidates(
+  f: ViewFrame,
+  x: number,
+  y: number,
+  items: ScenePickItems,
+  o: ScenePickOptions,
+  max = PICK_CANDIDATES_MAX,
+  group?: ((p: Pick3d) => string | number | null | undefined) | null,
+): PickDetail[] {
   const out: PickDetail[] = [];
   const lim = Math.max(0, Math.floor(max));
   if (!lim) return out;
+  /** 0.53.0 나온 묶음 열쇠(수와 글은 다른 열쇠 — 1과 '1'은 다르다) */
+  const groups = new Set<string>();
+  const keyOf = (p: Pick3d): string | null => {
+    if (!group) return null;
+    let k: unknown;
+    try {
+      k = group(copyPickLite(p));
+    } catch {
+      return null;
+    }
+    return typeof k === 'string' ? `s${k}` : typeof k === 'number' && Number.isFinite(k) ? `n${k}` : null;
+  };
   const meshSet = new Set<unknown>(items.meshes), lineSet = new Set<unknown>(items.lines);
   /** 걷어 낸 기본 도형: 'm'(삼각형)·'l'(선분)·'p'(점)·'e'(윤곽선) + 묶음 id → 배열 안 번호 */
   const peeled = new Map<string, Set<number>>();
@@ -410,7 +432,9 @@ export function pickSceneCandidates(f: ViewFrame, x: number, y: number, items: S
     ...(o.caps ? { caps: (m: Mesh3d, k?: number) => !capsOff(m) && o.caps!(m, k) } : {}),
   };
   const meshOf = (id: string): Mesh3d | undefined => items.meshes.find((m) => m.id === id);
-  for (let guard = 0; out.length < lim && guard < lim * 4 + 8; guard++) {
+  // 다시 고르기 횟수 한도(0.47.0 lim × 4 + 8 — 0.53.0 묶음 열쇠가 있으면 같은 묶음 도형을 여럿 걷어 내므로 lim × 32 + 64)
+  const guardMax = group ? lim * 32 + 64 : lim * 4 + 8;
+  for (let guard = 0; out.length < lim && guard < guardMax; guard++) {
     const d = pickScene(f, x, y, items, po);
     if (!d) break;
     const p = d.pick;
@@ -427,9 +451,21 @@ export function pickSceneCandidates(f: ViewFrame, x: number, y: number, items: S
       if (p.kind === 'mesh') turnCapOff(meshOf(p.id), p.id);
     }
     if (p.kind === 'mesh' && !p.section && out.some((e) => sameFaceSpot(f, e.pick, p))) continue;
+    const k = keyOf(p);
+    if (k !== null) {
+      if (groups.has(k)) continue;
+      groups.add(k);
+    }
     out.push(d);
   }
   return out;
+}
+
+/** 0.53.0 앱 묶음 열쇠 함수에 넘기는 고르기 사본(점·법선 배열도 새로 — 앱이 고쳐도 후보가 바뀌지 않게) */
+function copyPickLite(p: Pick3d): Pick3d {
+  const r: Pick3d = { ...p, point: [...p.point] as Pick3d['point'] };
+  if (p.normal) r.normal = [...p.normal] as NonNullable<Pick3d['normal']>;
+  return r;
 }
 
 /** 같은 그물에서 같은 깊이·같은 법선으로 맞은 삼각형인지(삼각형 경계 위를 맞은 한 평면 — 고르기 후보로 겹쳐 세지 않는다) */

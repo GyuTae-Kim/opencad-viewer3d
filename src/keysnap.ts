@@ -149,6 +149,7 @@ export const SNAP_KIND_LABELS: Readonly<Record<SnapKind, string>> = {
 
 /**
  * 0.47.0 키보드 알림 글 틀(코어 기본 — 한국어). 앱은 setKeyboardSnap({ messages })로 열쇠마다 제 언어 틀을 준다({0}·{1}… 자리 — 세 앱 다국어 사전과 같은 꼴, 자리 차례는 틀이 정한다).
+ * 0.53.0: 틀 대신 글 함수(KeySnapMessageFn — 열쇠·값 → 글)도 받는다.
  * 이 기본 틀로 만든 글은 0.46.0 글과 바이트까지 같다
  */
 export const KEY_SNAP_MESSAGES = {
@@ -230,15 +231,40 @@ export function formatKeySnapMessage(t: string, args: readonly (string | number)
   return t.replace(/\{(\d+)\}/g, (s, n: string) => (Number(n) < args.length ? String(args[Number(n)]) : s));
 }
 
-/** 붙잡은 종류 글: 축이면 'X축', 붙잡지 않았으면 '붙잡지 않은 점', 잠근 선 위면 '잠근 선 위 …'(0.47.0 msgs = 글 틀 — 주지 않으면 기본) */
-export function snapKindText(kind: SnapKind | null, axis?: SnapAxis, locked?: boolean, msgs: KeySnapMessages = KEY_SNAP_MESSAGES): string {
+/**
+ * 0.53.0 알림 글 함수(setKeyboardSnap({ messages }) — 열쇠마다 틀 객체 대신): 열쇠와 값(그 열쇠 틀의 {0}·{1}… 자리 차례 그대로 — 종류 이름 같은 조각 글은
+ * 이 함수가 앞서 만든 글이 값으로 들어온다)으로 글 하나를 만든다. 앱이 제 번역 함수(ICU 메시지·복수형)로 잇는다 — 짧은 틀('{0}: {1}' 같은 것)을 앱 번역 사전에 넣지 않아도 된다.
+ * 글(string)이 아닌 값을 돌려주거나 던지면 그 열쇠의 기본 틀(한국어)로 만든다
+ */
+export type KeySnapMessageFn = (key: KeySnapMessageKey, values: readonly (string | number)[]) => string | null | undefined;
+
+/** 0.53.0 알림 글 원천: 기본과 합친 틀(KeySnapMessages — 0.47.0) 또는 글 함수(KeySnapMessageFn) */
+export type KeySnapText = KeySnapMessages | KeySnapMessageFn;
+
+/** 0.53.0 열쇠 하나의 글: 틀이면 formatKeySnapMessage(틀, 값)(0.47.0과 같은 글), 함수면 그 함수의 글(글이 아니거나 던지면 기본 틀) */
+export function keySnapText(msgs: KeySnapText, key: KeySnapMessageKey, values: readonly (string | number)[] = []): string {
+  if (typeof msgs !== 'function') return formatKeySnapMessage(msgs[key], values);
+  try {
+    const s = msgs(key, values);
+    if (typeof s === 'string') return s;
+  } catch {
+    /* 앱 함수의 오류는 기본 글로(키 처리를 끊지 않는다) */
+  }
+  return formatKeySnapMessage(KEY_SNAP_MESSAGES[key], values);
+}
+
+/** 붙잡은 종류 글: 축이면 'X축', 붙잡지 않았으면 '붙잡지 않은 점', 잠근 선 위면 '잠근 선 위 …'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도 — 주지 않으면 기본) */
+export function snapKindText(kind: SnapKind | null, axis?: SnapAxis, locked?: boolean, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
+  const k = `snap.${kind}`;
   const base =
     kind === null
-      ? msgs['snap.none']
+      ? keySnapText(msgs, 'snap.none')
       : kind === 'axis' && axis
-        ? formatKeySnapMessage(msgs.axisKind, [axis.toUpperCase()])
-        : (msgs[`snap.${kind}` as KeySnapMessageKey] ?? String(kind));
-  return locked ? formatKeySnapMessage(msgs.lockedKind, [base]) : base;
+        ? keySnapText(msgs, 'axisKind', [axis.toUpperCase()])
+        : k in KEY_SNAP_MESSAGES
+          ? keySnapText(msgs, k as KeySnapMessageKey)
+          : String(kind);
+  return locked ? keySnapText(msgs, 'lockedKind', [base]) : base;
 }
 
 /** 키 글 하나를 읽기 쉬운 글로('ArrowLeft' → '←', 'Escape' → 'Esc', ' ' → 'Space', 수정 키는 그대로) */
@@ -252,34 +278,34 @@ export function keyLabel(s: string): string {
 
 /**
  * 키 안내 글(가상 커서를 켤 때 알림 끝에 붙인다): '옮기기 ←→↑↓ · 후보 Tab · 찍기 Enter · 끄기 Esc'. 할 일마다 첫 키, 끈 할 일은 뺀다.
- * mode가 'pick'이면 찍기 대신 고르기이고, 후보 돌리기는 pickCycle일 때만 넣는다(0.47.0 — 주지 않으면 0.46.0처럼 뺀다). msgs = 글 틀(0.47.0 — 주지 않으면 기본)
+ * mode가 'pick'이면 찍기 대신 고르기이고, 후보 돌리기는 pickCycle일 때만 넣는다(0.47.0 — 주지 않으면 0.46.0처럼 뺀다). msgs = 글 틀(0.47.0)·글 함수(0.53.0 — 주지 않으면 기본)
  */
-export function keySnapHint(keys: KeySnapKeys, mode: 'measure' | 'pick', pickCycle = false, msgs: KeySnapMessages = KEY_SNAP_MESSAGES): string {
+export function keySnapHint(keys: KeySnapKeys, mode: 'measure' | 'pick', pickCycle = false, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
   const first = (a: KeySnapAction): string | null => (keys[a].length ? keyLabel(keys[a][0]!) : null);
   const move = (['left', 'right', 'up', 'down'] as const).map(first).filter((s): s is string => !!s);
   const parts: string[] = [];
-  if (move.length) parts.push(formatKeySnapMessage(msgs.hintMove, [move.every((s) => s.length === 1) ? move.join('') : move.join(' ')]));
+  if (move.length) parts.push(keySnapText(msgs, 'hintMove', [move.every((s) => s.length === 1) ? move.join('') : move.join(' ')]));
   const nx = mode === 'measure' || pickCycle ? first('next') : null;
-  if (nx) parts.push(formatKeySnapMessage(msgs.hintNext, [nx]));
+  if (nx) parts.push(keySnapText(msgs, 'hintNext', [nx]));
   const cm = first('commit');
-  if (cm) parts.push(formatKeySnapMessage(mode === 'measure' ? msgs.hintCommit : msgs.hintPick, [cm]));
+  if (cm) parts.push(keySnapText(msgs, mode === 'measure' ? 'hintCommit' : 'hintPick', [cm]));
   const ex = first('exit');
-  if (ex) parts.push(formatKeySnapMessage(msgs.hintExit, [ex]));
-  return parts.join(msgs.hintJoin);
+  if (ex) parts.push(keySnapText(msgs, 'hintExit', [ex]));
+  return parts.join(keySnapText(msgs, 'hintJoin'));
 }
 
-/** 세계 점 글: 'X 1, Y 2, Z 3'(num = 수 꼴 — 뷰어는 측정 글과 같은 자릿수, 0.47.0 msgs = 글 틀) */
-export function pointText(p: readonly number[], num: (v: number) => string, msgs: KeySnapMessages = KEY_SNAP_MESSAGES): string {
-  return formatKeySnapMessage(msgs.point, [num(p[0]!), num(p[1]!), num(p[2]!)]);
+/** 세계 점 글: 'X 1, Y 2, Z 3'(num = 수 꼴 — 뷰어는 측정 글과 같은 자릿수, 0.47.0 msgs = 글 틀, 0.53.0 글 함수도) */
+export function pointText(p: readonly number[], num: (v: number) => string, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
+  return keySnapText(msgs, 'point', [num(p[0]!), num(p[1]!), num(p[2]!)]);
 }
 
 /** 후보 글(0.47.0 — 측정·고르기가 함께 쓴다): label에 차례(수가 둘 이상이면 order)를 붙이고 점 글과 거리를 잇는다 */
-export function orderedText(label: string, index: number, count: number, point: string, distance: string | null, msgs: KeySnapMessages = KEY_SNAP_MESSAGES): string {
-  const l = count > 1 ? formatKeySnapMessage(msgs.order, [label, index + 1, count]) : label;
-  return distance === null ? formatKeySnapMessage(msgs.candidate, [l, point]) : formatKeySnapMessage(msgs.candidateDistance, [l, point, distance]);
+export function orderedText(label: string, index: number, count: number, point: string, distance: string | null, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
+  const l = count > 1 ? keySnapText(msgs, 'order', [label, index + 1, count]) : label;
+  return distance === null ? keySnapText(msgs, 'candidate', [l, point]) : keySnapText(msgs, 'candidateDistance', [l, point, distance]);
 }
 
-/** 측정 후보 알림 글: '끝점 1/3: X 1, Y 2, Z 3'(첫 점에서 거리가 있으면 ', 거리 5 mm'). 후보가 없으면 '붙잡을 점이 없습니다'(0.47.0 msgs = 글 틀) */
+/** 측정 후보 알림 글: '끝점 1/3: X 1, Y 2, Z 3'(첫 점에서 거리가 있으면 ', 거리 5 mm'). 후보가 없으면 '붙잡을 점이 없습니다'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도) */
 export function candidateText(
   c: { kind: SnapKind | null; axis?: SnapAxis | undefined; locked?: boolean | undefined; point: readonly number[] } | null,
   index: number,
@@ -287,9 +313,9 @@ export function candidateText(
   num: (v: number) => string,
   distance: number | null,
   unit: string,
-  msgs: KeySnapMessages = KEY_SNAP_MESSAGES,
+  msgs: KeySnapText = KEY_SNAP_MESSAGES,
 ): string {
-  if (!c) return msgs.noSnap;
+  if (!c) return keySnapText(msgs, 'noSnap');
   const u = unit ? ` ${unit}` : '';
   return orderedText(snapKindText(c.kind, c.axis, c.locked, msgs), index, count, pointText(c.point, num, msgs), distance === null ? null : `${num(distance)}${u}`, msgs);
 }

@@ -8,7 +8,7 @@
  * 다를 수 있는 것은 인스턴싱과 같다 — README 0.52.0). 묶은 그물의 그물마다 버퍼·VAO는 놓고 묶음 버퍼가 그 그물의 저장소가 된다(그물마다 그리는 길도 묶음 버퍼의
  * 그 그물 자리 — 색인 시작·정점 시작 — 로 그린다). 그래서 그물이 아주 많은 장면의 GL 객체 수가 그물 수가 아니라 묶음 수만큼이다.
  *
- * 여기에는 묶음 나누기(mergePlan)와 이은 배열 만들기(mergeArrays)만 둔다.
+ * 여기에는 묶음 나누기(mergePlan, 0.53.0 굽기 단위로 고르게 나누기 mergeChunks)와 이은 배열 만들기(mergeArrays)만 둔다.
  */
 import type { VertexArray } from './attribs';
 
@@ -25,7 +25,10 @@ export const MERGE_MESH_SEGMENTS = 65536;
  * 그리기 호출은 면·윤곽선 4,000번(GPU 프로세스가 하나에 2.5 µs 남짓 — 프레임마다 10 ms)이다. 화소 회귀 장면은 모두 이보다 훨씬 작다(그림이 0.51.0과 같다)
  */
 export const MERGE_AUTO_MIN = 2000;
-/** 묶음 밖에 남은 묶을 수 있는 그물(바꾼 그물·새 그물)이 이만큼 모이면 그것들로 새 묶음을 굽는다 */
+/**
+ * 묶음 밖에 남은 묶을 수 있는 그물(바꾼 그물·새 그물)과 묶음에서 빠진 그물이 합해 이만큼 모이면 다시 굽는다
+ * (0.53.0: 그것들끼리 새 묶음이 아니라 그 그물들이 든 장면 차례 토막을 이웃 묶음과 함께 — 렌더러 mergePlanLoose)
+ */
 export const MERGE_LOOSE = 256;
 /**
  * 장면을 올리는 동안 묶음을 굽는 단위: 기다리는 그물이 이만큼(또는 정점 MERGE_UPLOAD_VERTS개) 모이면 올리는 걸음 안에서 굽고 그물 버퍼·VAO를 놓는다 —
@@ -33,7 +36,10 @@ export const MERGE_LOOSE = 256;
  */
 export const MERGE_UPLOAD_MESHES = 2048;
 export const MERGE_UPLOAD_VERTS = 262144;
-/** 묶음 안 바꾼·뺀 그물 몫이 이보다 크면 그 묶음을 풀고(남은 그물은 묶음 밖으로) 다시 굽는다 */
+/**
+ * 묶음 안 바꾼·뺀 그물 몫이 이보다 크면 그 묶음을 다시 굽는다(0.53.0: 그 묶음 그물 사이에 끼었거나 그 묶음이 거느린 묶음 밖 그물도 센다 —
+ * 묶음 밖 그물이 MERGE_LOOSE보다 적어도 그 토막만 다시 굽는다)
+ */
 export const MERGE_DEAD_RATIO = 0.25;
 /** 자리 자료 텍셀 수: 면 그물 하나 12(u_mvp 4·u_mv 4·u_nmat 3·u_color 1), 선 그물 하나 6(u_mvp 4·u_mvz 1·u_color 1) — 셰이더 mergeShader와 같다 */
 export const MERGE_MESH_TEXELS = 12;
@@ -90,6 +96,64 @@ export function mergePlan(cands: readonly MergeCand[], maxBytes: number, lim: { 
   // 장면 차례(묶음 첫 그물)로 — 굽는 차례가 장면 차례를 따르게
   groups.sort((a, b) => a[0]! - b[0]!);
   return { groups, bytes };
+}
+
+/**
+ * 0.53.0 한 열쇠의 장면 차례 토막을 굽기 단위(그물 lim.items개·정점 lim.verts개 — 기본 MERGE_UPLOAD_MESHES·MERGE_UPLOAD_VERTS, 장면을 올리는 걸음이 굽는 단위와 같다)로
+ * 고르게 나눈다: 몇 묶음이 드는지(그물 수·정점 수 가운데 묶는 쪽으로 ⌈합 / 한도⌉) 센 뒤 그 수로 고르게 끊는다(그물마다 몫은 묶는 쪽 — 그물 1 또는 정점 수,
+ * 그물의 가운데가 k번째 끊는 자리를 넘으면 다음 묶음). 묶음 하나는 늘 두 한도 안이다. 52차처럼 앞에서부터 꽉 채우면 끝 묶음이 그물 몇 개로 남아
+ * (하나뿐이면 그물마다) 다시 굽기마다 작은 묶음·묶음 밖 그물이 는다. 정점이 없거나 정점 한도보다 큰 후보는 건너뛰고, 그물 하나뿐인 묶음은 버린다.
+ * 돌려주는 것: 묶음마다 후보 번호(오름차순 — 장면 차례)
+ */
+export function mergeChunks(cands: readonly { nv: number }[], lim: { items: number; verts: number } = { items: MERGE_UPLOAD_MESHES, verts: MERGE_UPLOAD_VERTS }): number[][] {
+  const ok: number[] = [];
+  let items = 0, verts = 0;
+  for (let i = 0; i < cands.length; i++) {
+    const nv = cands[i]!.nv;
+    if (!(nv > 0) || nv > lim.verts) continue;
+    ok.push(i);
+    items++;
+    verts += nv;
+  }
+  if (items < 2) return [];
+  const n = Math.max(1, Math.ceil(items / lim.items), Math.ceil(verts / lim.verts));
+  const byVerts = verts / lim.verts > items / lim.items;
+  const W = byVerts ? verts : items;
+  const out: number[][] = [];
+  let cur: number[] = [];
+  let ci = 0, cv = 0, acc = 0, k = 1;
+  for (const i of ok) {
+    const nv = cands[i]!.nv;
+    const x = byVerts ? nv : 1;
+    const mid = acc + x / 2;
+    if (cur.length && (ci + 1 > lim.items || cv + nv > lim.verts || (k < n && mid > (k * W) / n))) {
+      out.push(cur);
+      cur = [];
+      ci = 0;
+      cv = 0;
+      while (k < n && mid > (k * W) / n) k++;
+    }
+    cur.push(i);
+    ci++;
+    cv += nv;
+    acc += x;
+  }
+  if (cur.length) out.push(cur);
+  return out.filter((g) => g.length >= 2);
+}
+
+/** 0.53.0 여러 열쇠가 섞인 장면 차례 후보를 열쇠마다 mergeChunks로 나눈다(묶음은 첫 후보 차례 — 장면 차례). 장면을 올리는 걸음의 굽기가 쓴다 */
+export function mergeChunksByKey(cands: readonly MergeCand[], lim?: { items: number; verts: number }): number[][] {
+  const byKey = new Map<string, number[]>();
+  cands.forEach((c, i) => {
+    let l = byKey.get(c.key);
+    if (!l) byKey.set(c.key, (l = []));
+    l.push(i);
+  });
+  const groups: number[][] = [];
+  for (const idx of byKey.values()) for (const g of mergeChunks(idx.map((i) => cands[i]!), lim)) groups.push(g.map((j) => idx[j]!));
+  groups.sort((a, b) => a[0]! - b[0]!);
+  return groups;
 }
 
 /** 묶을 그물 하나의 자료(렌더러가 그물마다 올린 것과 같은 배열 — 위치·법선·색은 정점 nv개, 색인은 그리는 count개, 윤곽선은 선분 ns개) */
