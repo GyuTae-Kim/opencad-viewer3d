@@ -38,7 +38,8 @@
  * 장면 차례로 묶음 버퍼에 잇고(정점마다 묶음 안 그물 번호) **그물 버퍼·VAO는 놓는다** — 묶음 버퍼가 그 그물의 저장소가 되어(그물 기록은 묶음 VAO와 그 색인 구간·윤곽선 구간을 가리킨다)
  * 그물마다 그리는 길(강조 윤곽선·구간·단면·그림자·반투명·잘린 면 채우기)도 같은 정점·같은 색인 차례로 그린다. 'auto'는 묶을 수 있는 그물이 문턱(MERGE_AUTO_MIN) 이상인 장면만 켜고
  * 올리는 걸음 안에서 굽는다(그물이 아주 많아도 GL 객체가 쌓이지 않게). 그릴 때는 그물마다 그리던 자리에서 잇단 묶음 그물을 구간 하나로 모아 MERGE 변종(INST 꼴 자리 자료 — 행렬·색)으로 그린다.
- * 그물마다 그리기와 묶음 구간을 장면 차례 한 목록에 모아 자리 자료를 한 번 올린 뒤 차례대로 그린다. 바꾼·뺀 그물은 묶음에서 빠지고(몫이 크면 남은 그물로 다시 굽는다), 끄면 그물마다 버퍼로 되돌린다
+ * 그물마다 그리기와 묶음 구간을 장면 차례 한 목록에 모아 자리 자료를 한 번 올린 뒤 차례대로 그린다. 바꾼·뺀 그물은 묶음에서 빠지고(몫이 크면 남은 그물로 다시 굽는다), 끄면 그물마다 버퍼로 되돌린다.
+ * 0.53.0 다시 굽기는 장면 차례 토막으로(mergePlanLoose — 바꾼·새 그물을 이웃 묶음과 함께 굽기 단위로 고르게 나눠 묶음이 엇갈리지 않게)
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
@@ -84,7 +85,8 @@ import {
   type MergingOptions,
   mergeArrays,
   mergeBytes,
-  mergePlan,
+  mergeChunks,
+  mergeChunksByKey,
   mergeSrcBytes,
 } from './merge';
 import { AO_MAX_PIXELS, type AoParams, aoSize } from './ao';
@@ -653,6 +655,25 @@ interface MergeGroup {
   hasColors: boolean;
   /** 한쪽 면(Mesh3d.doubleSided === false — 뒷면 버리기) */
   cull: boolean;
+  /** 0.53.0 묶음 열쇠(법선 값 꼴·한쪽 면 — 같은 열쇠의 장면 차례 줄에서 다시 굽기 차례를 정한다) */
+  key: string;
+  /** 0.53.0 다시 굽기 차례를 정할 때 쓰는 셈(mergePlanLoose가 그때마다 새로 채운다) */
+  plan?: MergePlanStat;
+}
+
+/**
+ * 0.53.0 다시 굽기 차례 셈(묶음 하나): 같은 열쇠 줄에서 마지막으로 본 이 묶음 그물의 줄 번호·묶음 번호, 이 묶음 그물 사이에 낀 다른 그물 수,
+ * 이 묶음이 거느린 묶음 밖 그물 수(줄에서 이 묶음 그물 뒤 — 줄 맨 앞 것은 첫 묶음이), 묶음 번호가 장면 차례를 거슬렀는지
+ */
+interface MergePlanStat {
+  seq: number;
+  mi: number;
+  gaps: number;
+  own: number;
+  broken: boolean;
+  /** 산 그물 수·그 정점 수(묶음 합치기 — 붙이면 묶음 수가 느는지) */
+  n: number;
+  nv: number;
 }
 
 /**
@@ -1763,8 +1784,9 @@ export class Renderer3d {
   }
 
   /**
-   * 0.52.0 그물 기록이 장면에서 빠진다(그물을 바꾸거나 뺄 때 — 바꾼 그물의 새 기록은 그물마다 버퍼로 올린다). 묶음 안 빠진 그물이 MERGE_DEAD_RATIO를 넘으면
-   * 남은 그물을 새 묶음으로 옮기는 굽기를 줄에 넣는다(다 옮기면 옛 묶음은 쓰는 기록이 없어 지운다)
+   * 0.52.0 그물 기록이 장면에서 빠진다(그물을 바꾸거나 뺄 때 — 바꾼 그물의 새 기록은 그물마다 버퍼로 올린다). 묶음의 빠진 그물 수를 세고 다음 그리기에서 다시 살핀다.
+   * 0.53.0: 52차는 빠진 몫이 ¼을 넘으면 곧 그 묶음 남은 그물만 새 묶음으로 옮겼다(바꾼 그물로 구운 묶음과 장면 차례로 엇갈렸다) — 이제 다시 굽기는 mergePlanLoose가
+   * 장면 차례 토막으로 정한다
    */
   private mergeLeave(r: MeshRec): void {
     const g = r.mg;
@@ -1772,10 +1794,6 @@ export class Renderer3d {
     if (!g) return;
     g.dead++;
     this.mergeRelease(r);
-    if (this.mgGroups.has(g) && !g.rebuild && g.dead > g.recs.length * MERGE_DEAD_RATIO) {
-      g.rebuild = true;
-      this.mgQueue.push(g.recs.filter((x) => x.mg === g));
-    }
   }
 
   /**
@@ -1817,7 +1835,10 @@ export class Renderer3d {
     if (this.mgWait.length >= MERGE_UPLOAD_MESHES || this.mgWaitVerts >= MERGE_UPLOAD_VERTS) this.mergeFlushWait();
   }
 
-  /** 0.52.0 굽기를 기다리는 그물을 묶음으로 나눠 곧 굽는다(묶음에 들지 못한 그물은 그물마다 버퍼 그대로) */
+  /**
+   * 0.52.0 굽기를 기다리는 그물을 묶음으로 나눠 곧 굽는다(묶음에 들지 못한 그물은 그물마다 버퍼 그대로).
+   * 0.53.0: 열쇠마다 굽기 단위로 고르게 나눈다(mergeChunksByKey — 정점이 많아 한 단위를 넘으면 끝 묶음이 그물 하나로 남아 그물마다 남지 않게)
+   */
   private mergeFlushWait(): void {
     const recs = this.mgWait;
     this.mgWait = [];
@@ -1832,7 +1853,7 @@ export class Renderer3d {
       keep.push(r);
       cands.push({ key: s.key, nv: s.src.nv, bytes: mergeSrcBytes(s.src) });
     }
-    for (const g of mergePlan(cands, Infinity).groups) this.mergeBake(g.map((i) => keep[i]!));
+    for (const g of mergeChunksByKey(cands)) this.mergeBake(g.map((i) => keep[i]!));
     this.gl.bindVertexArray(null);
     this.mergeBakeMs += performance.now() - t0;
   }
@@ -1878,24 +1899,147 @@ export class Renderer3d {
   }
 
   /**
-   * 0.52.0 묶음 밖의 묶을 수 있는 그물을 장면 차례로 훑어 묶음으로 나눠 굽기 줄에 넣는다. 'auto'에서 아직 켜지지 않았으면 묶을 수 있는 그물이 문턱 이상일 때 켠다.
-   * 켠 뒤에는 묶음이 하나도 없으면 모두, 있으면 묶음 밖 그물이 MERGE_LOOSE개 이상일 때만(바꾼 그물 몇 개로 굽기를 되풀이하지 않게)
+   * 0.52.0 묶을 그물을 장면 차례로 훑어 굽기 줄을 정한다. 'auto'에서 아직 켜지지 않았으면 묶을 수 있는 그물이 문턱 이상일 때 켠다.
+   * 0.53.0 다시 굽기 차례: 52차는 묶음 밖 그물(바꾼 그물·새 그물)끼리 새 묶음을 구워 옛 묶음과 장면 차례로 엇갈렸다(구간이 짧아져 1만에서 20%를 바꾸면 그리기 4,006).
+   * 이제 열쇠마다 장면 차례 줄(묶을 수 있는 그물 — 묶음 안·밖)을 훑어, 깨끗한 묶음(빠진 그물이 없고, 그 묶음 그물 사이에 다른 그물이 끼지 않았고, 묶음 밖 그물을
+   * 거느리지 않은 것 — 묶음 밖 그물은 줄에서 바로 앞 묶음이, 줄 맨 앞 것은 첫 묶음이 거느린다)은 두고, 나머지(더럽혀진 묶음의 산 그물과 묶음 밖 그물)를 잇단 토막마다
+   * 굽기 단위(그물 2,048개·정점 262,144개 — 장면을 올리는 걸음과 같다)로 고르게 나눠(mergeChunks) 줄에 넣는다. 묶음 합치기: 토막 양옆의 깨끗한 묶음은 함께 다시 구워도
+   * 묶음 수가 늘지 않으면(토막만 나누면 끝 묶음이 하나 더 생길 때) 토막에 붙인다. 그래서 묶음이 장면 차례로 엇갈리지 않아 구간·그리기 호출·GL 객체 수가 처음 굽기 수준으로 돌아온다.
+   * 다시 굽는 때: 묶음이 없으면 모두, 묶음 밖 그물 + 빠진 그물이 MERGE_LOOSE(256)개 이상이면 더럽혀진 토막 모두, 아니면 한 묶음의 빠진·낀·거느린 그물이
+   * ¼을 넘는 토막만(바꾼 그물 몇 개로 굽기를 되풀이하지 않게). 굽기 하나는 단위 안이라 프레임마다 굽기 몫(적어도 묶음 하나)이 처음 굽기와 같다
    */
   private mergePlanLoose(): void {
     const mode = this.merging.mode;
     if (mode === 'off' || (mode === 'auto' && !this.mgActive && this.meshes.length < this.merging.min)) return;
-    const recs: MeshRec[] = [];
-    const cands: MergeCand[] = [];
+    // 1) 열쇠마다 줄 번호를 매기며 묶음마다 셈(낀 그물·거느린 그물·차례 거스름·산 그물 수와 정점 수), 묶음 밖 그물의 열쇠·정점 수
+    type Lane = { seq: number; last: MergeGroup | null; head: number };
+    const lanes = new Map<string, Lane>();
+    const lane = (key: string): Lane => {
+      let l = lanes.get(key);
+      if (!l) lanes.set(key, (l = { seq: 0, last: null, head: 0 }));
+      return l;
+    };
+    const loose = new Map<MeshRec, { key: string; nv: number }>();
+    for (const g of this.mgGroups) g.plan = { seq: -1, mi: -1, gaps: 0, own: 0, broken: false, n: 0, nv: 0 };
     for (const r of this.meshes) {
-      if (r.mg) continue;
+      const g = r.mg;
+      if (g) {
+        const l = lane(g.key), p = g.plan!, i = r.mi!;
+        if (p.seq >= 0) {
+          p.gaps += l.seq - p.seq - 1;
+          if (i <= p.mi) p.broken = true;
+        } else if (!l.last && l.head) {
+          p.own += l.head;
+          l.head = 0;
+        }
+        p.seq = l.seq++;
+        p.mi = i;
+        p.n++;
+        p.nv += g.vStart[i + 1]! - g.vStart[i]!;
+        l.last = g;
+        continue;
+      }
       const s = this.mergeSrcOf(r);
       if (!s) continue;
-      recs.push(r);
-      cands.push({ key: s.key, nv: s.src.nv, bytes: mergeSrcBytes(s.src) });
+      loose.set(r, { key: s.key, nv: s.src.nv });
+      const l = lane(s.key);
+      l.seq++;
+      if (l.last) l.last.plan!.own++;
+      else l.head++;
     }
-    if (!this.mgActive && recs.length >= (mode === 'on' ? 2 : this.merging.min)) this.mgActive = true;
-    if (!this.mgActive || recs.length < 2 || (this.mgGroups.size && recs.length < MERGE_LOOSE)) return;
-    for (const g of mergePlan(cands, Infinity).groups) this.mgQueue.push(g.map((i) => recs[i]!));
+    if (!this.mgActive && loose.size >= (mode === 'on' ? 2 : this.merging.min)) this.mgActive = true;
+    if (!this.mgActive) return;
+    // 2) 더럽혀진 묶음, ¼을 넘는 묶음, 다시 굽는 때
+    let dead = 0;
+    const dirty = new Set<MergeGroup>(), over = new Set<MergeGroup>();
+    for (const g of this.mgGroups) {
+      const p = g.plan!;
+      dead += g.dead;
+      if (g.dead || p.gaps || p.own || p.broken || g.rebuild) dirty.add(g);
+      if (p.broken || g.rebuild || g.dead + p.gaps + p.own > g.recs.length * MERGE_DEAD_RATIO) over.add(g);
+    }
+    const all = !this.mgGroups.size || loose.size + dead >= MERGE_LOOSE;
+    if (!all && !over.size) return;
+    // 3) 열쇠마다 줄을 덩이로: 더럽혀진 그물 하나씩(묶음 밖 그물·더럽혀진 묶음 그물)과 깨끗한 묶음 하나씩
+    type Blk = { g: MergeGroup | null; r: MeshRec | null; nv: number; dirty: boolean };
+    const rows = new Map<string, Blk[]>();
+    const row = (key: string): Blk[] => {
+      let b = rows.get(key);
+      if (!b) rows.set(key, (b = []));
+      return b;
+    };
+    for (const r of this.meshes) {
+      const g = r.mg;
+      if (g) {
+        const b = row(g.key);
+        if (dirty.has(g)) b.push({ g, r, nv: g.vStart[r.mi! + 1]! - g.vStart[r.mi!]!, dirty: true });
+        else if (b.at(-1)?.g !== g) b.push({ g, r: null, nv: 0, dirty: false });
+        continue;
+      }
+      const s = loose.get(r);
+      if (s) row(s.key).push({ g: null, r, nv: s.nv, dirty: true });
+    }
+    // 4) 잇단 더럽혀진 덩이(토막)마다: 다시 굽는 토막이면 양옆 깨끗한 묶음을 묶음 수가 늘지 않는 동안 붙이고, 굽기 단위로 고르게 나눠 줄에 넣는다
+    const need = (n: number, v: number): number => Math.max(Math.ceil(n / MERGE_UPLOAD_MESHES), Math.ceil(v / MERGE_UPLOAD_VERTS));
+    for (const b of rows.values()) {
+      let i = 0;
+      while (i < b.length) {
+        if (!b[i]!.dirty) {
+          i++;
+          continue;
+        }
+        let lo = i, hi = i, n = 0, v = 0, pick = all;
+        const take = (x: Blk): void => {
+          n += x.r ? 1 : x.g!.plan!.n;
+          v += x.r ? x.nv : x.g!.plan!.nv;
+          if (x.g && over.has(x.g)) pick = true;
+        };
+        while (hi < b.length && b[hi]!.dirty) take(b[hi++]!);
+        if (pick)
+          for (let grew = true; grew; ) {
+            grew = false;
+            // 왼쪽 깨끗한 묶음(그 너머는 앞에서 다룬 토막 — 넘지 않는다)
+            const L = b[lo - 1];
+            if (L && !L.dirty && need(n + L.g!.plan!.n, v + L.g!.plan!.nv) <= need(n, v)) {
+              L.dirty = true;
+              take(L);
+              lo--;
+              grew = true;
+            }
+            // 오른쪽 깨끗한 묶음(그 너머가 더럽혀진 토막이면 이어 붙는다)
+            const R = b[hi];
+            if (R && !R.dirty && need(n + R.g!.plan!.n, v + R.g!.plan!.nv) <= need(n, v)) {
+              R.dirty = true;
+              take(b[hi++]!);
+              while (hi < b.length && b[hi]!.dirty) take(b[hi++]!);
+              grew = true;
+            }
+          }
+        i = hi;
+        if (!pick) continue;
+        const recs: MeshRec[] = [], nvs: { nv: number }[] = [], gs = new Set<MergeGroup>();
+        for (let k = lo; k < hi; k++) {
+          const x = b[k]!;
+          if (x.g) gs.add(x.g);
+          if (x.r) {
+            recs.push(x.r);
+            nvs.push({ nv: x.nv });
+            continue;
+          }
+          const g = x.g!;
+          for (let j = 0; j < g.recs.length; j++) {
+            const r = g.recs[j]!;
+            if (r.mg !== g) continue;
+            recs.push(r);
+            nvs.push({ nv: g.vStart[j + 1]! - g.vStart[j]! });
+          }
+        }
+        const chunks = mergeChunks(nvs);
+        if (!chunks.length) continue;
+        for (const g of gs) g.rebuild = true;
+        for (const c of chunks) this.mgQueue.push(c.map((j) => recs[j]!));
+      }
+    }
   }
 
   /**
@@ -2049,6 +2193,7 @@ export class Renderer3d {
       hasNormals: !!a.nrm,
       hasColors: !!a.col,
       cull: r0.src.doubleSided === false,
+      key: key!,
     };
     this.mgGroups.add(g);
     this.mgBytes += g.bytes;
