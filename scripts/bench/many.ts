@@ -13,6 +13,7 @@
  *    모두 바꾼 시간을 JS 몫(GL 없이)으로, 뷰어 그리기(renderNow) − 렌더러 그리기를 뷰어 몫으로, 화면 가운데 고르기 시간(처음·그 뒤)을 고르기 몫으로 잰다.
  *  - 0.51.0 ?flat 꼴(scripts/bench/flat.ts — 자리 1만·8만, 서로 다른 배열·같은 배열 섞음·모두 같은 배열), ?cull=0이면 화면 밖 잘라내기를 끈다
  *  - 0.52.0 ?merge=1이면 묶어 그리기(기본 한도), ?merge=all이면 한도 없이 — 열기는 묶음 굽기를 마칠 때까지 기다린다(mergeMs·bakeMs)
+ *  - 0.53.0 editDiff: 빼기·바꾸기·더하기 뒤 다시 굽기(프레임마다 굽기 ms)와 끔·켬 그림 차이
  */
 import { checkerBmp } from '../../src/synth';
 import type { Mesh3d } from '../../src/types';
@@ -555,6 +556,86 @@ async function mergeDiff(modes: string[]): Promise<{ mode: string; diff: number;
   return out;
 }
 
+/**
+ * 0.53.0 다시 굽기(52차 남은 일 ①): 연 장면(묶음을 다 구운 뒤)에서 30% 빼기(i % 10 < 3)·20% 바꾸기(i % 10 = 5, 6 — 같은 꼴 배열 사본, 색만 다름)·5% 더하기(앞 그물 사본을 장면 끝에)를
+ * 한 번에 하고, 다시 굽기를 마칠 때까지 프레임마다 그리기 JS ms·굽기 ms(stats.merged.bakeMs 차)·그리기 호출을 잰 뒤, 모드마다 묶어 그리기 끔·켬 그림 차이(mergeDiff와 같은 셈)
+ */
+async function editDiff(modes: string[]): Promise<unknown> {
+  const v = (window as unknown as { last: V }).last;
+  const m = (): { draws: number; pending: number; groups: number; meshes: number; bakeMs: number } => (v.stats as unknown as { merged: { draws: number; pending: number; groups: number; meshes: number; bakeMs: number } }).merged;
+  v.renderNow();
+  const before = { drawCalls: v.stats.drawCalls, groups: m().groups, meshes: m().meshes, buffers: v.stats.buffers.count, bytes: v.stats.buffers.bytes };
+  const src = v.scene!.meshes.slice();
+  const t0 = performance.now();
+  src.forEach((x, i) => {
+    if (i % 10 < 3) v.removeMesh(x.id);
+  });
+  src.forEach((x, i) => {
+    if (i % 10 === 5 || i % 10 === 6)
+      v.setMesh({ ...x, positions: x.positions.slice(), normals: x.normals?.slice(), indices: x.indices?.slice(), edges: x.edges?.slice(), color: [0.9, 0.4, 0.3, 1] });
+  });
+  const add = Math.floor(src.length / 20);
+  for (let i = 0; i < add; i++) {
+    const x = src[i]!;
+    const mat = Float64Array.from(x.matrix ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    mat[13] = mat[13]! - 120;
+    v.setMesh({ ...x, id: `더한 ${i}`, positions: x.positions.slice(), normals: x.normals?.slice(), indices: x.indices?.slice(), edges: x.edges?.slice(), matrix: mat });
+  }
+  const editMs = performance.now() - t0;
+  const frames: { js: number; bake: number; draws: number; pending: number }[] = [];
+  for (let i = 0; i < 6000; i++) {
+    const b0 = m().bakeMs, f0 = performance.now();
+    v.renderNow();
+    syncGpu(v);
+    frames.push({ js: performance.now() - f0, bake: m().bakeMs - b0, draws: v.stats.drawCalls, pending: m().pending });
+    if (!m().pending && i > 0) break;
+    await frame();
+  }
+  v.renderNow();
+  const after = { drawCalls: v.stats.drawCalls, groups: m().groups, meshes: m().meshes, buffers: v.stats.buffers.count, bytes: v.stats.buffers.bytes, scene: v.scene!.meshes.length };
+  const bakes = frames.map((f) => f.bake).filter((x) => x > 0);
+  const rebake = {
+    editMs: Math.round(editMs),
+    frames: frames.length,
+    bakeFrames: bakes.length,
+    bakeMaxMs: Math.round(Math.max(0, ...bakes) * 10) / 10,
+    bakeSumMs: Math.round(bakes.reduce((s, x) => s + x, 0)),
+    frameMaxMs: Math.round(Math.max(0, ...frames.map((f) => f.js)) * 10) / 10,
+    firstDraws: frames[0]?.draws ?? 0,
+  };
+  // 다시 구운 묶음 그대로 모드마다 켬 그림을 먼저 읽고, 끈 뒤 같은 모드 그림과 견준다(다시 켜면 처음부터 다시 구우므로 켬을 먼저)
+  const gl = v.canvas.getContext('webgl2') as WebGL2RenderingContext;
+  const read = (): Uint8Array => {
+    v.renderNow();
+    const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+    gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return px;
+  };
+  const on: { px: Uint8Array; merged: number; draws: number }[] = [];
+  for (const mode of modes) {
+    setMode(v, mode);
+    const px = read();
+    on.push({ px, merged: m().draws, draws: v.stats.drawCalls });
+  }
+  v.setRenderOptions({ merging: false } as never);
+  const diff: { mode: string; diff: number; max: number; merged: number; draws: number; offDraws: number; lit: number }[] = [];
+  modes.forEach((mode, k) => {
+    setMode(v, mode);
+    const a = read(), b = on[k]!.px;
+    let n = 0, max = 0, lit = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      let d = 0;
+      for (let c = 0; c < 4; c++) d = Math.max(d, Math.abs(a[i + c]! - b[i + c]!));
+      if (d) n++;
+      if (d > max) max = d;
+      if (a[i] !== a[0] || a[i + 1] !== a[1] || a[i + 2] !== a[2]) lit++;
+    }
+    diff.push({ mode, diff: n, max, merged: on[k]!.merged, draws: on[k]!.draws, offDraws: v.stats.drawCalls, lit });
+  });
+  v.highlight(null);
+  return { before, after, rebake, diff };
+}
+
 /** n번 돌려 그리고 GPU 마침을 기다린다 */
 function spin(n: number): void {
   const v = (window as unknown as { last: V }).last;
@@ -580,4 +661,4 @@ function close(): { buffers: number; bytes: number } | null {
   return s;
 }
 
-(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes, mergeDiff, close };
+(window as unknown as { bench: unknown }).bench = { ready: true, open, steady, parts, prep, spin, hashes, mergeDiff, editDiff, close };

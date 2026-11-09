@@ -19,6 +19,7 @@
  * 판을 바꿀 때 앞 페이지 뷰어를 놓고 문맥을 잃게 한 뒤 빈 페이지를 거친다, 띄운 Chrome 묶음 RSS가 3 GB(CHROME_RSS_LIMIT_MB)를 넘으면 그 Chrome을 끄고 실패.
  * 열기 표에 묶음 굽기 끝·굽기 합·묶은 그물 수·묶음 수·묶음 MB,
  * 프레임 표에 묶음 구간 그리기 호출 수
+ * 0.53.0: --editdiff면 head 판에서 빼기·바꾸기·더하기 뒤 다시 굽기(프레임마다 굽기 ms)와 다시 구운 묶음 그대로의 끔·켬 그림 차이
  * 결과: out/summary.json(done: true)·summary.md, 표준 출력에 표.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -146,6 +147,10 @@ export function manyTable(res) {
   // 0.52.0 묶어 그리기 끔·켬 차이(모드 — 다른 화소 수 / 바탕 아닌 화소, 가장 큰 채널 차, 묶음 구간 그리기 수)
   for (const [name, r] of Object.entries(res.variants))
     if (r.mergeDiff?.length) md += `\n**${name} 묶어 그리기 끔·켬 차이**: ${r.mergeDiff.map((/** @type {any[]} */ ds) => ds.map((d) => `${d.mode} ${d.diff}/${d.lit}(최대 ${d.max}, 구간 ${d.merged})`).join(' · ')).join(' / ')}\n`;
+  // 0.53.0 --editdiff(빼기·바꾸기·더하기 뒤 다시 굽기와 끔·켬 차이)
+  for (const [name, r] of Object.entries(res.variants))
+    for (const e of r.editDiff ?? [])
+      md += `\n**${name} 빼기·바꾸기·더하기 뒤**: 그리기 ${e.before.drawCalls} → 다시 굽기 첫 프레임 ${e.rebake.firstDraws} → ${e.after.drawCalls}, 묶음 ${e.before.groups} → ${e.after.groups}(묶은 그물 ${e.after.meshes}/${e.after.scene}), 버퍼 ${e.before.buffers} → ${e.after.buffers}; 바꾸기 ${e.rebake.editMs} ms, 다시 굽기 ${e.rebake.frames}프레임(굽기 ${e.rebake.bakeFrames}프레임, 프레임마다 굽기 가장 긴 ${e.rebake.bakeMaxMs} ms, 합 ${e.rebake.bakeSumMs} ms, 가장 긴 프레임 JS ${e.rebake.frameMaxMs} ms); 끔·켬 차이 ${e.diff.map((/** @type {any} */ d) => `${d.mode} ${d.diff}/${d.lit}(최대 ${d.max}, 그리기 ${d.draws} — 끔 ${d.offDraws}, 구간 ${d.merged})`).join(' · ')}\n`;
   // 0.51.0 CPU 프로필(마지막 차례의 것 — 함수별 자기 시간 ms, 프레임 수로 나누지 않은 합)
   for (const [name, r] of Object.entries(res.variants))
     for (const [mode, p] of Object.entries(r.profile ?? {})) {
@@ -177,6 +182,7 @@ async function main() {
       'open-only': { type: 'boolean' },
       hash: { type: 'boolean' },
       mergediff: { type: 'boolean' },
+      editdiff: { type: 'boolean' },
     },
   });
   const rounds = Math.max(1, Math.min(20, Number(values.rounds ?? 2) || 2));
@@ -261,6 +267,11 @@ async function main() {
             if (values.mergediff && name !== 'base') {
               const md = await browser.evaluate(`bench.mergeDiff(${JSON.stringify(modes)})`, 1_800_000);
               (v.mergeDiff ??= []).push(md);
+            }
+            // 0.53.0 --editdiff: 빼기·바꾸기·더하기 뒤 다시 굽기(프레임마다 굽기 ms)와 다시 구운 묶음 그대로의 끔·켬 그림 차이(그 함수가 있는 판만)
+            if (values.editdiff && name !== 'base') {
+              const ed = await browser.evaluate(`bench.editDiff ? bench.editDiff(${JSON.stringify(modes)}) : null`, 1_800_000);
+              if (ed) (v.editDiff ??= []).push(ed);
             }
             // 0.51.0 --open-only: 처음 열기만(나눠 올리기 걸음 견주기)
             if (values['open-only']) continue;
