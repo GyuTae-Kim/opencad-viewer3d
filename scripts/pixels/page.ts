@@ -8862,8 +8862,8 @@ function reset(v: V, d: Data): void {
   call('setViewCubeTouch', true);
   call('setPickEdges', false);
   call('setRenderMode', 'shaded');
-  // 0.42.0 instancing·0.43.0 pbr·0.51.0 culling은 기본(켬)으로, 0.52.0 merging은 기본(끔)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
-  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true, culling: true, merging: false });
+  // 0.42.0 instancing·0.43.0 pbr·0.51.0 culling은 기본(켬)으로, 0.52.0 merging은 기본('auto' — 화소 장면은 모두 문턱 아래라 묶지 않는다)으로(그 선택이 없는 판은 모르는 열쇠를 보지 않는다)
+  call('setRenderOptions', { profiles: null, hiddenEdges: null, edgeColor: null, instancing: true, pbr: true, culling: true, merging: 'auto' });
   call('setSections', null);
   call('setSection', null);
   call('setTheme', 'dark');
