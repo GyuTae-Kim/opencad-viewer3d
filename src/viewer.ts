@@ -242,14 +242,15 @@ import {
   KEY_STEP_PX,
   type KeySnapAction,
   type KeySnapKeys,
+  type KeySnapMessageFn,
   type KeySnapMessageKey,
-  type KeySnapMessages,
+  type KeySnapText,
   candidateText,
-  formatKeySnapMessage,
   inPoints,
   keySnapAction,
   keySnapHint,
   keySnapMessages,
+  keySnapText,
   moveKeyCursor,
   normalizeKeySnapKeys,
   orderedText,
@@ -388,6 +389,19 @@ export interface ViewCubeTouchOptions {
   size?: number;
   /** 편 큐브의 면 가장자리 띠 폭(면 한 변 대비 0.1~0.4, 기본 CUBE_TOUCH_BAND 0.3) */
   band?: number;
+}
+
+/**
+ * 0.53.0 손가락 뷰 큐브를 펴거나 접은 까닭(onViewCubeExpandedChange): 'touch' 손가락으로 접힌 큐브를 눌러 폈다 · 'pick' 편 큐브에서 면·모서리·꼭짓점을 골라 접었다 ·
+ * 'cube' 편 큐브의 고를 것이 없는 자리를 눌러 접었다 · 'canvas' 3D 보기를 눌러 접었다 · 'escape' Esc로 접었다 ·
+ * 'option' 앱이 큐브 선택을 바꿔 접었다(setViewCubeVisible(false)·setViewCubeTouch·setViewCubeSize)
+ */
+export type ViewCubeExpandReason = 'touch' | 'pick' | 'cube' | 'canvas' | 'escape' | 'option';
+
+/** 0.53.0 손가락 뷰 큐브 펴기·접기 알림 사건: 까닭과 바뀐 뒤 큐브 자리(viewCubeRect와 같은 값 — 편 동안은 편 자리) */
+export interface ViewCubeExpandEvent {
+  reason: ViewCubeExpandReason;
+  rect: MeasureLabelRect | null;
 }
 
 /** setSections의 평면 하나: normal·p = offset의 법선 쪽을 잘라 낸다 */
@@ -787,9 +801,10 @@ export interface KeyboardSnapOptions {
   pickCycle?: boolean | KeyPickCycleOptions;
   /**
    * 0.47.0 알림 글 틀: 열쇠 → 틀 글({0}·{1} 자리 — KEY_SNAP_MESSAGES의 열쇠와 자리 뜻). 준 열쇠만 바꾸고 나머지는 기본(한국어 — 0.46.0 글과 같다).
-   * 앱 다국어 사전의 같은 열쇠 틀을 그대로 넣는다(알림 값은 그대로 — 값으로 제 글을 만들어도 된다)
+   * 앱 다국어 사전의 같은 열쇠 틀을 그대로 넣는다(알림 값은 그대로 — 값으로 제 글을 만들어도 된다).
+   * 0.53.0: 글 함수 (key, values) => string 도 받는다(values = 그 열쇠 틀의 {0}·{1}… 자리 값 차례 — 앱 번역 함수로 잇는다. 글이 아니면 그 열쇠의 기본 틀)
    */
-  messages?: Partial<Record<KeySnapMessageKey, string>>;
+  messages?: Partial<Record<KeySnapMessageKey, string>> | KeySnapMessageFn;
 }
 
 /** 키보드 고르기 후보 돌리기 선택(0.47.0 KeyboardSnapOptions.pickCycle — pickCandidates·pick 선택과 같은 뜻, 포인터 종류는 'keyboard') */
@@ -1771,8 +1786,8 @@ export class Viewer3d {
     src: KeyboardSnapOptions;
     /** 0.47.0 고르기 모드 후보 돌리기 선택(끄면 null — 0.46.0 고르기 모드) */
     pickCycle: KeyPickCycleOptions | null;
-    /** 0.47.0 알림 글 틀(기본과 합친 것) */
-    msgs: KeySnapMessages;
+    /** 0.47.0 알림 글 틀(기본과 합친 것), 0.53.0 또는 앱 글 함수 */
+    msgs: KeySnapText;
   } | null = null;
   /**
    * 0.46.0 가상 커서(켰을 때만): 자리(CSS 화소)·지금 후보 차례·그 자리 측정 후보 목록, 고르기 모드면 커서 아래 고른 것,
@@ -1937,6 +1952,8 @@ export class Viewer3d {
   private upOnly = false;
   private measureCbs = new Set<(m: MeasureResult | null) => void>();
   private camCbs = new Set<(c: CameraState) => void>();
+  /** 0.53.0 손가락 뷰 큐브 펴기·접기 알림(onViewCubeExpandedChange) */
+  private cubeCbs = new Set<(expanded: boolean, e: ViewCubeExpandEvent) => void>();
   private lastCamKey = '';
   /** 0.50.0 지금 장면의 입력 알림(sceneIssues)과 듣는 함수(onSceneIssues) */
   private issues: SceneIssue[] = [];
@@ -2624,6 +2641,7 @@ export class Viewer3d {
     this.upload = null;
     this.measureCbs.clear();
     this.camCbs.clear();
+    this.cubeCbs.clear();
     this.issueCbs.clear();
     this.issues = [];
     this.restoreCbs.clear();
@@ -3149,7 +3167,7 @@ export class Viewer3d {
   }
 
   setViewCubeVisible(on: boolean): void {
-    if (!on) this.foldCube();
+    if (!on) this.foldCube('option');
     this.opts.viewCube = on;
     this.cube.style.display = on ? '' : 'none';
     this.invalidate();
@@ -3159,7 +3177,7 @@ export class Viewer3d {
    * 0.44.0 손가락 뷰 큐브 선택(Viewer3dOptions.viewCubeTouch와 같다 — false = 0.43.0처럼 손가락도 바로 고르기, true = 기본, { size, band }). 편 큐브는 접는다
    */
   setViewCubeTouch(t: boolean | ViewCubeTouchOptions): void {
-    this.foldCube();
+    this.foldCube('option');
     this.opts.viewCubeTouch = cubeTouchOpts(t);
   }
 
@@ -3172,6 +3190,24 @@ export class Viewer3d {
   /** 0.44.0 손가락으로 뷰 큐브를 편 동안 true(viewCubeRect도 편 자리) */
   get viewCubeExpanded(): boolean {
     return this.cubeZoom > 0;
+  }
+
+  /**
+   * 0.53.0 손가락 뷰 큐브를 펴고 접을 때마다 알림(STEP 61차 요청 — 앱이 pointerup·keyup에서 viewCubeExpanded를 다시 읽지 않아도 된다):
+   * expanded = 바뀐 뒤 viewCubeExpanded, e.reason = 까닭(ViewCubeExpandReason), e.rect = 바뀐 뒤 viewCubeRect(측정 글상자 비키기 자리를 바로 고칠 때).
+   * 펴고 접는 그 순간(사건 처리 안 — 그리기 전)에 부른다. 편 큐브에서 면을 고르면 카메라 움직임을 시작한 뒤 'pick'으로 접힌다. 바뀌지 않으면(이미 접힘·펴지 못함) 부르지 않는다.
+   * dispose 뒤에는 부르지 않는다. 그만 받으려면 돌려준 함수를 부른다
+   */
+  onViewCubeExpandedChange(cb: (expanded: boolean, e: ViewCubeExpandEvent) => void): () => void {
+    this.cubeCbs.add(cb);
+    return () => this.cubeCbs.delete(cb);
+  }
+
+  /** 0.53.0 펴기·접기 알림을 보낸다 */
+  private cubeNotify(reason: ViewCubeExpandReason): void {
+    if (!this.cubeCbs.size) return;
+    const expanded = this.cubeZoom > 0;
+    for (const cb of [...this.cubeCbs]) cb(expanded, { reason, rect: this.viewCubeRect });
   }
 
   /** 0.44.0 지금 큐브 한 변(편 동안은 편 크기)과 누르는 자리 띠(편 동안만 손가락 띠 — 아니면 undefined = 0.43.0 띠) */
@@ -3193,16 +3229,18 @@ export class Viewer3d {
     this.cube.style.width = this.cube.style.height = `${z}px`;
     this.cubeHover = null;
     this.invalidate();
+    this.cubeNotify('touch');
     return true;
   }
 
-  /** 0.44.0 편 손가락 큐브를 접는다 */
-  private foldCube(): void {
+  /** 0.44.0 편 손가락 큐브를 접는다(0.53.0 reason — 접었으면 알림) */
+  private foldCube(reason: ViewCubeExpandReason): void {
     if (!this.cubeZoom) return;
     this.cubeZoom = 0;
     this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
     this.cubeHover = null;
     this.invalidate();
+    this.cubeNotify(reason);
   }
 
   setAxesVisible(on: boolean): void {
@@ -3220,7 +3258,7 @@ export class Viewer3d {
 
   /** 뷰 큐브 한 변(CSS 화소, 64~160으로 자른다) */
   setViewCubeSize(px: number): void {
-    this.foldCube();
+    this.foldCube('option');
     this.opts.viewCubeSize = cubeSize(px);
     this.cube.style.width = this.cube.style.height = `${this.opts.viewCubeSize}px`;
     this.invalidate();
@@ -4377,7 +4415,7 @@ export class Viewer3d {
       announce: typeof src.announce === 'function' ? src.announce : null,
       src,
       pickCycle: pc === false || pc === null ? null : typeof pc === 'object' ? { edges: pc.edges, meshesOnly: !!pc.meshesOnly, throughTranslucent: !!pc.throughTranslucent } : {},
-      msgs: keySnapMessages(src.messages),
+      msgs: typeof src.messages === 'function' ? src.messages : keySnapMessages(src.messages),
     };
     // 고르기 모드에서 켜진 커서는 새 pickCycle로 그 자리를 다시 구한다(알리지 않는다 — 측정 모드는 0.46.0 그대로 두어 차례를 지킨다)
     if (this.keyCur && !this.measuring) {
@@ -7477,7 +7515,7 @@ export class Viewer3d {
       if (this.tracker) this.dwell(null, null);
     }
     this.invalidate();
-    if (say && this.keySnap?.announce) this.keySnap.announce({ reason: 'end', mode, x: c.x, y: c.y, snap: null, index: 0, count: 0, pick: null, text: this.keySnap.msgs.end });
+    if (say && this.keySnap?.announce) this.keySnap.announce({ reason: 'end', mode, x: c.x, y: c.y, snap: null, index: 0, count: 0, pick: null, text: keySnapText(this.keySnap.msgs, 'end') });
   }
 
   /** 측정 모드의 첫 점에서 지금 후보까지 거리(첫 점만 찍었을 때) */
@@ -7486,12 +7524,12 @@ export class Viewer3d {
     return a && p ? Math.hypot(p[0]! - a[0], p[1]! - a[1], p[2]! - a[2]) : null;
   }
 
-  /** 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*) */
-  private pickText(p: Pick3d, msgs: KeySnapMessages): string {
+  /** 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*, 0.53.0 글 함수도) */
+  private pickText(p: Pick3d, msgs: KeySnapText): string {
     const it = this.items.get(p.id);
     const name = (it?.item.name || p.id).trim() || p.id;
     const kind: KeySnapMessageKey = p.section ? 'pick.section' : `pick.${p.kind}`;
-    return formatKeySnapMessage(msgs.pickItem, [name, msgs[kind]]);
+    return keySnapText(msgs, 'pickItem', [name, keySnapText(msgs, kind)]);
   }
 
   /** 알림을 만들어 앱에 넘긴다(extra = 찍은 점·측정 결과, lead = 지금 후보 글 대신 쓸 글) */
@@ -7509,11 +7547,11 @@ export class Viewer3d {
     let body: string;
     if (mode === 'measure') body = candidateText(snap ? { kind: snap.snap, axis: snap.axis, locked: snap.locked, point: snap.point } : null, index, count, num, this.keyDistance(snap?.point ?? null), unit, M);
     // 0.47.0: 고르기 후보가 둘 이상이면 차례('상자 면 2/3: …' — 측정 후보 글과 같은 꼴)
-    else body = c.pick ? orderedText(this.pickText(c.pick, M), index, count, pointText(c.pick.point, num, M), null, M) : M.noPick;
+    else body = c.pick ? orderedText(this.pickText(c.pick, M), index, count, pointText(c.pick.point, num, M), null, M) : keySnapText(M, 'noPick');
     let text = body;
-    if (reason === 'start') text = formatKeySnapMessage(M.start, [body, keySnapHint(ks.keys, mode, !!ks.pickCycle, M)]);
+    if (reason === 'start') text = keySnapText(M, 'start', [body, keySnapHint(ks.keys, mode, !!ks.pickCycle, M)]);
     else if (extra?.lead) text = extra.lead;
-    else if (reason === 'cycle' && count === 1) text = formatKeySnapMessage(M.only, [body]);
+    else if (reason === 'cycle' && count === 1) text = keySnapText(M, 'only', [body]);
     const a: KeyboardSnapAnnouncement = { reason, mode, x: c.x, y: c.y, snap, index, count, pick: c.pick ? { ...c.pick, point: [...c.pick.point] as V3 } : null, text };
     if (extra?.point) a.point = extra.point;
     if (extra?.measurement) a.measurement = extra.measurement;
@@ -7594,13 +7632,13 @@ export class Viewer3d {
       if (this.keySnap?.pickCycle && c.index > 0 && c.picks[c.index]) this.keyPickCandidate(c, e);
       else this.click(c.x, c.y, ev, true);
       if (this.keyCur !== c) return;
-      this.keyAnnounce('commit', { lead: c.pick ? formatKeySnapMessage(M.picked, [this.pickText(c.pick, M)]) : M.pickedNothing });
+      this.keyAnnounce('commit', { lead: c.pick ? keySnapText(M, 'picked', [this.pickText(c.pick, M)]) : keySnapText(M, 'pickedNothing') });
       return;
     }
     this.keyRecompute(true);
     const ent = c.list[c.index];
     if (!ent) {
-      this.keyAnnounce('commit', { lead: M.noPoint });
+      this.keyAnnounce('commit', { lead: keySnapText(M, 'noPoint') });
       return;
     }
     this.refsSet(ent.after);
@@ -7614,8 +7652,8 @@ export class Viewer3d {
     const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
     const u = unit ? ` ${unit}` : '';
     const lead = m
-      ? formatKeySnapMessage(M.secondPoint, [`${num(m.distance)}${u}`, num(m.dx), num(m.dy), num(m.dz)])
-      : formatKeySnapMessage(M.firstPoint, [snapKindText(point.snap, point.axis, point.locked, M), pointText(point.point, num, M)]);
+      ? keySnapText(M, 'secondPoint', [`${num(m.distance)}${u}`, num(m.dx), num(m.dy), num(m.dz)])
+      : keySnapText(M, 'firstPoint', [snapKindText(point.snap, point.axis, point.locked, M), pointText(point.point, num, M)]);
     this.keyAnnounce('commit', { point, measurement: m, lead });
   }
 
@@ -7833,7 +7871,7 @@ export class Viewer3d {
       const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
       if (h) this.setViewDir(h.dir);
       // 편 큐브는 고르거나 큐브 밖을 누르면 접는다
-      this.foldCube();
+      this.foldCube(h ? 'pick' : 'cube');
     };
     this.on<PointerEvent>(cube, 'pointerup', (e) => cubeUp(e, false));
     this.on<PointerEvent>(cube, 'pointercancel', (e) => cubeUp(e, true));
@@ -7845,7 +7883,7 @@ export class Viewer3d {
     // 0.46.0: 포인터로 누르면 가상 커서를 끈다(포인터가 이어받는다)
     if (this.keyCur) this.keyEnd(true);
     // 0.44.0 편 손가락 뷰 큐브는 3D 보기를 누르면 접는다(누르기는 그대로 이어 간다)
-    this.foldCube();
+    this.foldCube('canvas');
     // 누르기로 받은 초점에는 테두리를 보이지 않는다(0.9.1 — 키보드로 이미 초점이 있던 캔버스도 data-v3d-focus="pointer"로 감춘다)
     pointerFocus(this.canvas);
     try {
@@ -8125,7 +8163,7 @@ export class Viewer3d {
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
     // 0.44.0: 손가락으로 편 뷰 큐브를 먼저 접는다
-    else if (e.key === 'Escape' && this.cubeZoom) this.foldCube();
+    else if (e.key === 'Escape' && this.cubeZoom) this.foldCube('escape');
     // 0.16.0: 첫 점 전이라도 끌어온 점이 있으면 Esc가 지운다
     else if (e.key === 'Escape' && (this.measurePts.length || (this.measuring && this.tracker?.size))) this.clearMeasure();
     else return false;
