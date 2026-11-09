@@ -72,6 +72,11 @@ describe('0.52.0 merge.ts 순수 계산', () => {
     expect(Array.from(a.segItem!)).toEqual([0, 0, 0, 0, 2, 2]);
     expect(a.seg![12]).toBe(-3);
     expect(mergeBytes(a)).toBe(list.reduce((n, x) => n + mergeSrcBytes(x), 0));
+    expect(Array.from(a.vStart)).toEqual([0, 4, 11, 14]);
+    // 정점 색이 없는 그물이 섞이면 그 자리는 0(정점 색 쓰기는 자리 자료 깃발이 정한다)
+    const mixed = mergeArrays([list[0]!, { ...list[1]!, colors: null }]);
+    expect(Array.from(mixed.col!.subarray(16, 20))).toEqual([0, 0, 0, 0]);
+    expect(Array.from(mixed.col!.subarray(0, 4))).toEqual(Array.from(list[0]!.colors!.subarray(0, 4)));
     expect(() => mergeArrays(Array.from({ length: MERGE_ITEMS + 1 }, () => s(3, 0, false, 0)))).toThrow();
   });
 });
@@ -82,8 +87,9 @@ describe('0.52.0 mergeShader', () => {
     const m = mergeShader(withDefines(MESH_VS, 'INST', 'MERGE'), 'mesh');
     expect(m).toContain('layout(location=5) in float a_item;');
     expect(m).toContain('int k = u_instBase + int(a_item) * 12 + j;');
-    expect(m).toContain('  vec4 u_color = instAt(11);\n');
+    expect(m).toContain('  vec4 u_color = instAt(11);\n  float u_vcol = instAt(8).w;\n');
     expect(m).not.toContain('uniform vec4 u_color;');
+    expect(m).not.toContain('uniform float u_vcol;');
     expect(m).not.toContain('gl_InstanceID * 11');
     for (const vs of [THIN_VS, WIDE_VS]) {
       const l = mergeShader(withDefines(vs, 'INST', 'MERGE'), 'line');

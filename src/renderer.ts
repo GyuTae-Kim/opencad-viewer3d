@@ -665,7 +665,8 @@ interface MergeRun {
   b: number;
   base: number;
   cols: Rgba[];
-  vcol: boolean;
+  /** 그물마다 정점 색 쓰기(면 — 자리 자료 깃발) */
+  vc: boolean[];
   tint: number;
   alpha: number;
 }
@@ -1869,9 +1870,10 @@ export class Renderer3d {
     if (r.edges && (!edges || Math.floor(edges.length / 6) < ns)) return null;
     // 그리는 색인(깨진 삼각형을 고친 사본이 먼저 — 묶음에 든 기록은 indexed가 늘 true라 그물 배열로 가린다), 없으면 0, 1, 2…
     const indices = r.tri ?? m.indices ?? null;
+    // 정점 색 유무는 열쇠에 넣지 않는다(묶음 색 버퍼에 없는 그물 자리는 0, 그물마다 정점 색 쓰기는 자리 자료 깃발 — 정점 색 그물이 흩어진 장면도 구간이 끊기지 않게)
     return {
       src: { positions: m.positions, nv, normals, per, colors, indices, count: r.count, edges, ns },
-      key: `${nk}|${colors ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`,
+      key: `${nk}|${m.doubleSided === false ? 1 : 0}`,
     };
   }
 
@@ -2109,9 +2111,9 @@ export class Renderer3d {
 
   /**
    * 0.52.0 묶음 면 자리 자료 하나(instBuf의 i번째 자리 — 12텍셀): setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로(instMeshes와 같은 셈)
-   * + 그물 색(meshDraw의 u_color와 같은 값)
+   * + 그물 색(meshDraw의 u_color와 같은 값) + 정점 색 쓰기 깃발(meshDraw의 u_vcol — 법선 행렬 첫 텍셀의 w)
    */
-  private mergeFaceTexels(f: ViewFrame, model: ArrayLike<number> | undefined, c: Rgba, i: number): void {
+  private mergeFaceTexels(f: ViewFrame, model: ArrayLike<number> | undefined, c: Rgba, vcol: boolean, i: number): void {
     const d = this.instBuf, m3 = this.instM3;
     const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
     const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
@@ -2127,6 +2129,7 @@ export class Renderer3d {
       d[o + 34 + k * 4] = m3[k * 3 + 2]!;
       d[o + 35 + k * 4] = 0;
     }
+    d[o + 35] = vcol ? 1 : 0;
     d[o + 44] = c[0];
     d[o + 45] = c[1];
     d[o + 46] = c[2];
@@ -4515,12 +4518,13 @@ export class Renderer3d {
     const mergeAdd = (r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number): void => {
       const g = r.mg!, i = r.mi!;
       const u = mrun;
-      if (u && u.g === g && u.b === i && u.vcol === vcol && u.tint === tint && u.alpha === alpha) {
+      if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha) {
         u.b++;
         u.cols.push(col);
+        u.vc.push(vcol);
         return;
       }
-      mrun = { g, a: i, b: i + 1, base: 0, cols: [col], vcol, tint, alpha };
+      mrun = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], tint, alpha };
       mops!.push(mrun);
     };
     /** 그물마다 그리기 하나(모으는 중이면 목록에 — 앞 구간은 더 늘이지 않는다: 뒤 그물이 이 그리기를 앞지르지 않게) */
@@ -4551,7 +4555,7 @@ export class Renderer3d {
     const mergeFaces = (ops: readonly MergeOp[], plain: (r: MeshRec) => Prog): void => {
       const runs = ops.filter((o): o is MergeRun => typeof o !== 'function');
       const p = runs.length ? this.mergeVariant('mesh', meshExtra) : null;
-      const ok = !!p && mergeUpload(runs, MERGE_MESH_TEXELS, (u, i, k) => this.mergeFaceTexels(f, mm(u.g.recs[i]!), u.cols[i - u.a]!, k));
+      const ok = !!p && mergeUpload(runs, MERGE_MESH_TEXELS, (u, i, k) => this.mergeFaceTexels(f, mm(u.g.recs[i]!), u.cols[i - u.a]!, u.vc[i - u.a]!, k));
       for (const op of ops) {
         if (typeof op === 'function') {
           op();
@@ -4568,8 +4572,8 @@ export class Renderer3d {
         }
         if (cur !== p) meshUse(p!);
         gl.uniform1i(this.loc(p!, 'u_instBase'), op.base);
-        if (flagsNew(op.vcol, op.g.hasNormals, op.tint, op.alpha)) {
-          gl.uniform1f(this.loc(p!, 'u_vcol'), op.vcol ? 1 : 0);
+        // 정점 색 쓰기는 자리 자료 깃발이라 균일 변수 u_vcol이 없다(기억에는 false로)
+        if (flagsNew(false, op.g.hasNormals, op.tint, op.alpha)) {
           gl.uniform1f(this.loc(p!, 'u_hasNrm'), op.g.hasNormals ? 1 : 0);
           gl.uniform4f(this.loc(p!, 'u_tint'), hiTint[0], hiTint[1], hiTint[2], op.tint);
           gl.uniform1f(this.loc(p!, 'u_alpha'), op.alpha);

@@ -145,7 +145,8 @@ export function mergeArrays(list: readonly MergeSrc[]): MergeArrays {
   const n0 = list[0]?.normals ?? null;
   const per = list[0]?.per ?? 3;
   const nrm: VertexArray | null = n0 ? new (n0.constructor as new (k: number) => VertexArray)(nv * per) : null;
-  const col = list[0]?.colors ? new Float32Array(nv * 4) : null;
+  // 정점 색은 한 그물이라도 있으면 묶음 모두에(없는 그물 자리는 0 — 그 그물은 정점 색을 쓰지 않는다: 자리 자료의 정점 색 깃발·그물마다 u_vcol 0)
+  const col = list.some((s) => !!s.colors) ? new Float32Array(nv * 4) : null;
   const item = new Uint16Array(nv);
   const idx = new Uint32Array(ni);
   const tri = new Uint32Array(n + 1);
@@ -161,10 +162,7 @@ export function mergeArrays(list: readonly MergeSrc[]): MergeArrays {
       if (!s.normals || s.per !== per) throw new Error('mergeArrays: 법선 꼴이 다른 그물');
       nrm.set(s.normals.subarray(0, s.nv * per) as never, v * per);
     }
-    if (col) {
-      if (!s.colors) throw new Error('mergeArrays: 정점 색이 없는 그물');
-      col.set(s.colors.subarray(0, s.nv * 4), v * 4);
-    }
+    if (col && s.colors) col.set(s.colors.subarray(0, s.nv * 4), v * 4);
     item.fill(i, v, v + s.nv);
     tri[i] = k;
     vStart[i] = v;

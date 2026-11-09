@@ -87,7 +87,8 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
   if (vs.includes('layout(location=1) in vec3 a_nrm;')) {
     // 그물: 정점마다 클립·시점 좌표·법선 행렬 곱·색(정점 색이면 a_col)
     const stride = merge ? 12 : inst ? ((U.get('u_instStride')?.[0] as number) ?? 11) : 0;
-    const flags = JSON.stringify([U.get('u_vcol'), U.get('u_hasNrm'), f32(U.get('u_tint')), U.get('u_alpha'), U.get('u_ortho'), f32(U.get('u_clip')), U.get('u_flipFace')]);
+    // 정점 색 쓰기(u_vcol)는 묶음 변종에서 자리 자료(법선 행렬 첫 텍셀 w) — 정점마다 셰이더가 고르는 색(v_col = u_vcol > 0.5 ? a_col : u_color)으로 견준다
+    const flags = JSON.stringify([U.get('u_hasNrm'), f32(U.get('u_tint')), U.get('u_alpha'), U.get('u_ortho'), f32(U.get('u_clip')), U.get('u_flipFace')]);
     const vl = verts();
     for (let n = 0; n < nInst; n++) {
       const tri: string[] = [];
@@ -98,10 +99,11 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const mv = inst ? [...at(4), ...at(5), ...at(6), ...at(7)] : f32(U.get('u_mv'))!;
         const nm = inst ? [...at(8).slice(0, 3), ...at(9).slice(0, 3), ...at(10).slice(0, 3)] : f32(U.get('u_nmat'))!;
         const col = merge ? at(11) : f32(U.get('u_color'));
+        const vcol = merge ? at(8)[3]! : ((U.get('u_vcol')?.[0] as number | undefined) ?? 0);
         const P = attr(d.attribs.get(0), v, 3)!;
         const N = attr(d.attribs.get(1), v, 3);
-        const C = attr(d.attribs.get(2), v, 4);
-        tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, col, C]));
+        const C = attr(d.attribs.get(2), v, 4) ?? [0, 0, 0, 1];
+        tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, vcol > 0.5 ? C : col]));
         if (tri.length === (mode === 'TRIANGLES' ? 3 : 2)) {
           out.push(`mesh|${mode}|${state}|${flags}|${tri.join(';')}`);
           tri.length = 0;
