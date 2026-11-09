@@ -150,6 +150,21 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     }
     return;
   }
+  if (vs.includes('layout(location=0) in vec3 a_pos;\nuniform mat4 u_mvp;') && !vs.includes('a_col')) {
+    // 깊이만 그리는 프로그램(그림자 깊이·외곽선 색 PCOL): 정점마다 클립 좌표 — 조각 셰이더 균일 변수(u_pcol·단면)
+    const fixed = JSON.stringify([f32(U.get('u_pcol')), f32(U.get('u_clip')), U.get('u_nclip'), f32(U.get('u_clips'))]);
+    const mvp = f32(U.get('u_mvp'))!;
+    const tri: string[] = [];
+    for (const v of verts()) {
+      const P = attr(d.attribs.get(0), v, 3)!;
+      tri.push(JSON.stringify(mul4(mvp, P[0]!, P[1]!, P[2]!)));
+      if (tri.length === 3) {
+        out.push(`depth|${mode}|${state}|${fixed}|${tri.join(';')}`);
+        tri.length = 0;
+      }
+    }
+    return;
+  }
   const rest = d.op.startsWith('drawElements') ? [d.args[1], gl.nameOf(d.args[2]!), ...d.args.slice(3)] : d.args.slice(1);
   out.push(`other|${d.op}|${mode}|${rest.join(',')}|${state}|${JSON.stringify([...U].filter(([k]) => !k.startsWith('u_inst')).sort())}`);
 }

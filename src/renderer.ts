@@ -34,10 +34,11 @@
  * 숨은 점선·선분·점 — 구간이 24개를 넘으면 0.7.0처럼 모은 색인·복사본). 잘린 면 채우기는 갈래마다 단위(그 갈래 삼각형만 홀짝, 범위는 그 갈래 정점).
  * 갈래가 없는 묶음(cut이 모두 0)은 0.43.0 길 그대로다
  *
- * 0.52.0 묶어 그리기(선택 — merging, 계산은 merge.ts): 같은 꼴(법선 값 꼴·정점 색 유무·한쪽 면)의 작은 정적 그물(배열을 다른 그물과 함께 쓰지 않는 것)을
- * 장면 차례로 묶음 버퍼에 잇고(정점마다 묶음 안 그물 번호) 다 올린 뒤 프레임마다 몫 안에서 굽는다. 그릴 때는 그물마다 그리던 자리에서 잇단 묶음 그물을 구간 하나로 모아
- * MERGE 변종(INST 꼴 자리 자료 — 행렬·색)으로 그린다. 그물마다 그리기와 묶음 구간을 장면 차례 한 목록에 모아 자리 자료를 한 번 올린 뒤 차례대로 그린다.
- * 강조·묶음 안 구간·단면·그림자·반투명·화면 밖·숨긴 그물은 구간을 끊고(그물마다 또는 빠짐), 바꾼·뺀 그물은 묶음에서 빠진다(몫이 크면 묶음을 다시 굽는다)
+ * 0.52.0 묶어 그리기(merging — 기본 'auto', 계산은 merge.ts): 같은 꼴(법선 값 꼴·정점 색 유무·한쪽 면)의 작은 정적 그물(배열을 다른 그물과 함께 쓰지 않는 것)을
+ * 장면 차례로 묶음 버퍼에 잇고(정점마다 묶음 안 그물 번호) **그물 버퍼·VAO는 놓는다** — 묶음 버퍼가 그 그물의 저장소가 되어(그물 기록은 묶음 VAO와 그 색인 구간·윤곽선 구간을 가리킨다)
+ * 그물마다 그리는 길(강조 윤곽선·구간·단면·그림자·반투명·잘린 면 채우기)도 같은 정점·같은 색인 차례로 그린다. 'auto'는 묶을 수 있는 그물이 문턱(MERGE_AUTO_MIN) 이상인 장면만 켜고
+ * 올리는 걸음 안에서 굽는다(그물이 아주 많아도 GL 객체가 쌓이지 않게). 그릴 때는 그물마다 그리던 자리에서 잇단 묶음 그물을 구간 하나로 모아 MERGE 변종(INST 꼴 자리 자료 — 행렬·색)으로 그린다.
+ * 그물마다 그리기와 묶음 구간을 장면 차례 한 목록에 모아 자리 자료를 한 번 올린 뒤 차례대로 그린다. 바꾼·뺀 그물은 묶음에서 빠지고(몫이 크면 남은 그물로 다시 굽는다), 끄면 그물마다 버퍼로 되돌린다
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
@@ -69,13 +70,15 @@ import {
   withDefines,
 } from './shaders';
 import {
-  MERGE_BYTES,
+  MERGE_AUTO_MIN,
   MERGE_DEAD_RATIO,
   MERGE_LINE_TEXELS,
   MERGE_LOOSE,
   MERGE_MESH_SEGMENTS,
   MERGE_MESH_TEXELS,
   MERGE_MESH_VERTS,
+  MERGE_UPLOAD_MESHES,
+  MERGE_UPLOAD_VERTS,
   type MergeCand,
   type MergeSrc,
   type MergingOptions,
@@ -513,6 +516,8 @@ interface LineRec {
   /** 로컬 → 세계(묶음 원점), 없으면 단위 */
   model?: ArrayLike<number>;
   parts?: PartCache;
+  /** 0.52.0 묶음 저장소의 윤곽선이면 묶음 선분 버퍼 안 이 그물 선분의 시작(선분 수 — 그릴 때 first에 더한다) */
+  first?: number;
 }
 
 /** 한 종류(보통·강조)의 그릴 구간: 구간이 적으면 원래 버퍼에서 구간마다, 많으면 모은 자료로 한 번에 */
@@ -609,9 +614,14 @@ interface MeshRec {
   geo: string;
   /** 0.43.0 PBR 필드(법선·거칠기·금속 그림 id와 값 — 없으면 null = 0.42.0 그물). 무늬 좌표는 attrs.uv·uvT를 함께 쓴다 */
   pbr: PbrSource | null;
-  /** 0.52.0 이 그물이 든 묶음(구운 것)과 그 안 번호(없으면 그물마다) */
+  /**
+   * 0.52.0 이 그물이 든 묶음(구운 것 — 그물의 GPU 저장소)과 그 안 번호(없으면 그물마다 버퍼). 묶음에 들면 vao·attrs·edges는 묶음 것을 가리키고 그물 버퍼는 없다(slots 빈 목록)
+   */
   mg?: MergeGroup | null;
   mi?: number;
+  /** 0.52.0 묶음 색인 버퍼 안 이 그물 색인의 시작(색인 수 — 그물마다 그리기의 drawElements 시작)과 묶음 정점 시작(구간 모음·삼각형 변 색인을 묶음 정점으로 옮길 때) */
+  first?: number;
+  vbase?: number;
   /** 0.52.0 장면에서 빠진(바꾸거나 뺀) 기록이면 true(굽기를 기다리던 묶음에서 뺀다) */
   dropped?: boolean;
 }
@@ -624,14 +634,21 @@ interface MergeGroup {
   recs: MeshRec[];
   vao: WebGLVertexArrayObject;
   tri: Uint32Array;
+  vStart: Uint32Array;
   thin: WebGLVertexArrayObject | null;
   wide: WebGLVertexArrayObject | null;
   seg: Uint32Array;
   segBuf: WebGLBuffer | null;
   segItem: WebGLBuffer | null;
+  /** 그물 기록이 가리키는 정점 속성(그물마다 그리기·구간 모음·삼각형 변) */
+  attrs: MeshAttribs;
   bufs: WebGLBuffer[];
   bytes: number;
   dead: number;
+  /** 이 묶음을 저장소로 쓰는 그물 기록 수(0이 되면 버퍼·VAO를 지운다) */
+  live: number;
+  /** 빠진 몫이 커서 남은 그물을 새 묶음으로 옮기는 중 */
+  rebuild: boolean;
   hasNormals: boolean;
   hasColors: boolean;
   /** 한쪽 면(Mesh3d.doubleSided === false — 뒷면 버리기) */
@@ -905,8 +922,15 @@ export class Renderer3d {
   private cullChunks: { recs: (MeshRec | undefined)[]; n: number[]; box: (CullBox | null)[] } = { recs: [], n: [], box: [] };
   /** 0.51.0 시험용: true면 선 상태 기억(LineMemo)을 쓰지 않고 그물마다 모두 보낸다(0.50.0 GL 호출 — 기억과 그리기 기록이 같은지 견줄 때) */
   lineMemoOff = false;
-  /** 0.52.0 묶어 그리기 선택(기본 끔 — 다음 그리기부터. 켜면 다 올린 뒤 몫 안에서 묶음을 굽는다) */
-  merging: MergingOptions = { on: false, maxBytes: MERGE_BYTES };
+  /** 0.52.0 묶어 그리기 선택(기본 'auto' — 묶을 수 있는 그물이 min 이상인 장면만. 바꾸면 setMerging) */
+  merging: MergingOptions = { mode: 'auto', min: MERGE_AUTO_MIN };
+  /** 0.52.0 지금 장면에서 묶어 그리기가 켜졌는지('on'이거나, 'auto'에서 장면을 올릴 때 문턱을 넘었거나 묶음 밖 그물이 문턱만큼 모였을 때) */
+  private mgActive = false;
+  /** 0.52.0 장면에서 두 번 이상 쓰는 배열(같은 정의 자리 — 묶지 않는다. 장면을 올릴 때 훑는다) */
+  private mgShared = new WeakSet<object>();
+  /** 0.52.0 장면을 올리는 동안 굽기를 기다리는 그물 기록(장면 차례)과 그 정점 수 */
+  private mgWait: MeshRec[] = [];
+  private mgWaitVerts = 0;
   /** 0.52.0 한 그리기에서 묶음 굽기에 쓸 몫(ms — 적어도 묶음 하나) */
   mergeBudgetMs = 8;
   /** 0.52.0 구운 묶음들과 굽기를 기다리는 묶음(그물 기록 목록 — 장면 차례), 묶음 버퍼 바이트 합 */
@@ -1125,14 +1149,16 @@ export class Renderer3d {
         return;
       }
       gl.bindVertexArray(r.vao);
+      // 0.52.0 묶음 저장소의 그물은 묶음 색인 버퍼 안 그 그물 자리부터(first — 아니면 0)
+      const o = (r.first ?? 0) * 4;
       for (const run of list.runs) {
-        if (r.indexed) gl.drawElements(gl.TRIANGLES, run.count * 3, gl.UNSIGNED_INT, run.start * 12);
+        if (r.indexed) gl.drawElements(gl.TRIANGLES, run.count * 3, gl.UNSIGNED_INT, o + run.start * 12);
         else gl.drawArrays(gl.TRIANGLES, run.start * 3, run.count * 3);
       }
       return;
     }
     gl.bindVertexArray(r.vao);
-    if (r.indexed) gl.drawElements(gl.TRIANGLES, r.count, gl.UNSIGNED_INT, 0);
+    if (r.indexed) gl.drawElements(gl.TRIANGLES, r.count, gl.UNSIGNED_INT, (r.first ?? 0) * 4);
     else gl.drawArrays(gl.TRIANGLES, 0, r.count);
   }
 
@@ -1702,46 +1728,119 @@ export class Renderer3d {
     return INST_MESH + (shadow ? 4 : 0) + (clip ? 1 : 0);
   }
 
-  // ───── 0.52.0 묶어 그리기(MERGE): 묶음 굽기·풀기와 자리 자료 ─────
+  // ───── 0.52.0 묶어 그리기(MERGE): 묶음 굽기·옮기기·되돌리기와 자리 자료 ─────
 
-  /** 0.52.0 묶음을 모두 푼다(lost면 GPU 객체는 이미 사라졌으므로 지우지 않고 잊는다). 굽기를 기다리던 것도 버리고 다음에 다시 살핀다 */
+  /** 0.52.0 묶음을 모두 잊는다(clear·forget — 그물 기록도 함께 버려진다. lost면 GPU 객체는 이미 없다). 굽기를 기다리던 것도 버린다 */
   private mergeClear(lost: boolean): void {
-    for (const g of [...this.mgGroups]) this.mergeDrop(g, lost);
+    for (const g of [...this.mgGroups]) this.mergeFree(g, lost);
     this.mgQueue = [];
+    this.mgWait = [];
+    this.mgWaitVerts = 0;
     this.mgBytes = 0;
     this.mgDirty = true;
+    this.mgActive = this.merging.mode === 'on';
+    this.mgShared = new WeakSet();
     this.mergeBakeMs = 0;
   }
 
-  /** 0.52.0 묶음 하나를 푼다: 남은 그물은 묶음 밖(그물마다)으로, 버퍼·VAO는 지운다(lost면 잊기만) */
-  private mergeDrop(g: MergeGroup, lost: boolean): void {
+  /** 0.52.0 묶음의 버퍼·VAO를 지운다(쓰는 그물 기록이 없을 때 — lost면 잊기만) */
+  private mergeFree(g: MergeGroup, lost: boolean): void {
     if (!this.mgGroups.delete(g)) return;
-    for (const r of g.recs) if (r.mg === g) r.mg = null;
     this.mgBytes -= g.bytes;
-    this.mgDirty = true;
     if (lost) return;
     const gl = this.gl;
     for (const v of [g.vao, g.thin, g.wide]) if (v) gl.deleteVertexArray(v);
     for (const b of g.bufs) this.dropBuffer(b);
   }
 
+  /** 0.52.0 그물 기록 하나가 묶음 저장소를 그만 쓴다(장면에서 빠지거나 다른 묶음·그물마다 버퍼로 옮김) — 쓰는 기록이 없으면 묶음을 지운다 */
+  private mergeRelease(r: MeshRec): void {
+    const g = r.mg;
+    if (!g) return;
+    r.mg = null;
+    if (--g.live <= 0) this.mergeFree(g, false);
+  }
+
   /**
-   * 0.52.0 그물 기록이 묶음에서 빠진다(그물을 바꾸거나 뺄 때 — 그 그물은 그물마다 그린다). 묶음 안 빠진 그물이 MERGE_DEAD_RATIO를 넘으면 묶음을 풀어
-   * 남은 그물을 묶음 밖으로 돌린다(묶음 밖 그물이 MERGE_LOOSE개 모이면 다시 굽는다)
+   * 0.52.0 그물 기록이 장면에서 빠진다(그물을 바꾸거나 뺄 때 — 바꾼 그물의 새 기록은 그물마다 버퍼로 올린다). 묶음 안 빠진 그물이 MERGE_DEAD_RATIO를 넘으면
+   * 남은 그물을 새 묶음으로 옮기는 굽기를 줄에 넣는다(다 옮기면 옛 묶음은 쓰는 기록이 없어 지운다)
    */
   private mergeLeave(r: MeshRec): void {
     const g = r.mg;
     this.mgDirty = true;
     if (!g) return;
-    r.mg = null;
     g.dead++;
-    if (g.dead > g.recs.length * MERGE_DEAD_RATIO) this.mergeDrop(g, false);
+    this.mergeRelease(r);
+    if (this.mgGroups.has(g) && !g.rebuild && g.dead > g.recs.length * MERGE_DEAD_RATIO) {
+      g.rebuild = true;
+      this.mgQueue.push(g.recs.filter((x) => x.mg === g));
+    }
+  }
+
+  /**
+   * 0.52.0 장면을 올리기 전에: 두 번 이상 쓰는 배열을 적고(같은 정의 자리 — 묶지 않는다), 'auto'면 묶을 수 있어 보이는 그물(무늬·뒷면·PBR·반투명 색이 없고
+   * 정점·윤곽선이 한도 안이며 배열을 함께 쓰지 않는 그물) 수가 문턱 이상인지로 이 장면의 묶어 그리기를 정한다. 그물이 문턱보다 적은 장면은 훑지 않는다(0.51.0과 같은 일)
+   */
+  private mergePrescan(scene: Scene3d): void {
+    const mode = this.merging.mode;
+    this.mgActive = mode === 'on';
+    if (mode === 'off' || this.mergeBroken || (mode === 'auto' && scene.meshes.length < this.merging.min)) return;
+    const seen = new WeakSet<object>();
+    const mark = (a: object | undefined | null): void => {
+      if (!a) return;
+      if (seen.has(a)) this.mgShared.add(a);
+      else seen.add(a);
+    };
+    for (const m of scene.meshes) for (const a of [m.positions, m.normals, m.indices, m.colors, m.edges]) mark(a);
+    for (const l of scene.lines) for (const a of [l.positions, l.colors]) mark(a);
+    for (const p of scene.points ?? []) mark(p.positions);
+    if (mode !== 'auto') return;
+    let n = 0;
+    for (const m of scene.meshes) {
+      const nv = Math.floor(m.positions.length / 3);
+      if (!nv || nv > MERGE_MESH_VERTS || m.texture || m.backTexture || m.backColor || pbrSource(m) || !(m.color[3] >= 0.999)) continue;
+      if ((m.edges ? m.edges.length / 6 : 0) > MERGE_MESH_SEGMENTS) continue;
+      if ([m.positions, m.normals, m.indices, m.colors, m.edges].some((a) => !!a && this.mgShared.has(a))) continue;
+      n++;
+    }
+    this.mgActive = n >= this.merging.min;
+  }
+
+  /** 0.52.0 장면을 올리는 동안 올린 그물 하나: 이 장면에서 묶어 그리기를 켰고 묶을 수 있으면 굽기 기다림에 넣고, 그물 2,048개·정점 262,144개만큼 모이면 곧 굽는다 */
+  private mergeFeed(r: MeshRec): void {
+    if (!this.mgActive || this.merging.mode === 'off' || this.mergeBroken) return;
+    const s = this.mergeSrcOf(r);
+    if (!s) return;
+    this.mgWait.push(r);
+    this.mgWaitVerts += s.src.nv;
+    if (this.mgWait.length >= MERGE_UPLOAD_MESHES || this.mgWaitVerts >= MERGE_UPLOAD_VERTS) this.mergeFlushWait();
+  }
+
+  /** 0.52.0 굽기를 기다리는 그물을 묶음으로 나눠 곧 굽는다(묶음에 들지 못한 그물은 그물마다 버퍼 그대로) */
+  private mergeFlushWait(): void {
+    const recs = this.mgWait;
+    this.mgWait = [];
+    this.mgWaitVerts = 0;
+    if (recs.length < 2) return;
+    const t0 = performance.now();
+    const keep: MeshRec[] = [];
+    const cands: MergeCand[] = [];
+    for (const r of recs) {
+      const s = r.dropped || r.mg ? null : this.mergeSrcOf(r);
+      if (!s) continue;
+      keep.push(r);
+      cands.push({ key: s.key, nv: s.src.nv, bytes: mergeSrcBytes(s.src) });
+    }
+    for (const g of mergePlan(cands, Infinity).groups) this.mergeBake(g.map((i) => keep[i]!));
+    this.gl.bindVertexArray(null);
+    this.mergeBakeMs += performance.now() - t0;
   }
 
   /**
    * 0.52.0 묶을 수 있는 그물이면 이은 배열 자료와 묶음 열쇠(같은 열쇠끼리만 잇는다 — 법선 값 꼴·정점 색 유무·한쪽 면), 아니면 null.
    * 묶지 않는 것: 무늬 좌표·뒷면·PBR·반투명(장면 값)·다시 받을 배열이 있는 그물, 그릴 것이 없는 그물, 정점·윤곽선이 한도보다 큰 그물,
-   * 배열을 다른 기록과 함께 쓰는 그물(같은 정의 자리 — 인스턴싱 몫, 제자리 고치기가 함께 바뀐다), 코어가 법선을 놓은 그물(이을 배열이 없다)
+   * 배열을 다른 기록과 함께 쓰는 그물(같은 정의 자리 — 인스턴싱 몫, 제자리 고치기가 함께 바뀐다), 코어가 법선을 놓은 그물(이을 배열이 없다).
+   * 묶음에 든 그물(다시 굽기 — 다른 묶음으로 옮길 때)도 그물 배열에서 다시 잇는다
    */
   private mergeSrcOf(r: MeshRec): { src: MergeSrc; key: string } | null {
     const m = r.src;
@@ -1751,6 +1850,7 @@ export class Renderer3d {
     const ns = r.edges ? r.edges.n : 0;
     if (ns > MERGE_MESH_SEGMENTS) return null;
     for (const s of r.slots) if (s && (this.refs.get(s.key) ?? 0) > 1) return null;
+    for (const a of [m.positions, m.normals, m.indices, m.colors, m.edges]) if (a && this.mgShared.has(a)) return null;
     let normals: VertexArray | null = null;
     let per = 3;
     let nk = '-';
@@ -1767,8 +1867,8 @@ export class Renderer3d {
     if (r.hasColors && (!colors || colors.length < nv * 4)) return null;
     const edges = r.edges && m.edges ? (segmentFix(m.edges).fix ?? m.edges) : null;
     if (r.edges && (!edges || Math.floor(edges.length / 6) < ns)) return null;
-    const indices = r.indexed ? (r.tri ?? m.indices ?? null) : null;
-    if (r.indexed && !indices) return null;
+    // 그리는 색인(깨진 삼각형을 고친 사본이 먼저 — 묶음에 든 기록은 indexed가 늘 true라 그물 배열로 가린다), 없으면 0, 1, 2…
+    const indices = r.tri ?? m.indices ?? null;
     return {
       src: { positions: m.positions, nv, normals, per, colors, indices, count: r.count, edges, ns },
       key: `${nk}|${colors ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`,
@@ -1776,10 +1876,12 @@ export class Renderer3d {
   }
 
   /**
-   * 0.52.0 묶음 밖의 묶을 수 있는 그물을 장면 차례로 훑어 묶음으로 나눠 굽기 줄에 넣는다. 묶음이 하나도 없으면(장면을 막 올림) 모두,
-   * 있으면 묶음 밖 그물이 MERGE_LOOSE개 이상일 때만(바꾼 그물 몇 개로 굽기를 되풀이하지 않게). 버퍼 합 한도(merging.maxBytes) 안에서만
+   * 0.52.0 묶음 밖의 묶을 수 있는 그물을 장면 차례로 훑어 묶음으로 나눠 굽기 줄에 넣는다. 'auto'에서 아직 켜지지 않았으면 묶을 수 있는 그물이 문턱 이상일 때 켠다.
+   * 켠 뒤에는 묶음이 하나도 없으면 모두, 있으면 묶음 밖 그물이 MERGE_LOOSE개 이상일 때만(바꾼 그물 몇 개로 굽기를 되풀이하지 않게)
    */
   private mergePlanLoose(): void {
+    const mode = this.merging.mode;
+    if (mode === 'off' || (mode === 'auto' && !this.mgActive && this.meshes.length < this.merging.min)) return;
     const recs: MeshRec[] = [];
     const cands: MergeCand[] = [];
     for (const r of this.meshes) {
@@ -1789,17 +1891,17 @@ export class Renderer3d {
       recs.push(r);
       cands.push({ key: s.key, nv: s.src.nv, bytes: mergeSrcBytes(s.src) });
     }
-    if (recs.length < 2 || (this.mgGroups.size && recs.length < MERGE_LOOSE)) return;
-    const room = Math.max(0, this.merging.maxBytes - this.mgBytes);
-    for (const g of mergePlan(cands, room).groups) this.mgQueue.push(g.map((i) => recs[i]!));
+    if (!this.mgActive && recs.length >= (mode === 'on' ? 2 : this.merging.min)) this.mgActive = true;
+    if (!this.mgActive || recs.length < 2 || (this.mgGroups.size && recs.length < MERGE_LOOSE)) return;
+    for (const g of mergePlan(cands, Infinity).groups) this.mgQueue.push(g.map((i) => recs[i]!));
   }
 
   /**
-   * 0.52.0 묶음 굽기를 몫(mergeBudgetMs — 적어도 묶음 하나) 안에서 이어 간다. 켰을 때·다 올린 뒤에만(나눠 올리는 동안은 그물마다 그린다).
-   * 살필 것이 있으면 먼저 묶음을 나눈다
+   * 0.52.0 묶음 굽기를 몫(mergeBudgetMs와 지난 그리기 시간 가운데 큰 것 — 적어도 묶음 하나) 안에서 이어 간다(다 올린 뒤에만 — 올리는 동안은 올리는 걸음이 굽는다).
+   * 살필 것이 있으면 먼저 묶음을 나눈다(그물이 문턱보다 적은 'auto' 장면은 훑지 않는다)
    */
   private mergeStep(): void {
-    if (!this.merging.on || this.mergeBroken || this.uploading) return;
+    if (this.merging.mode === 'off' || this.mergeBroken || this.uploading) return;
     if (this.mgDirty && !this.mgQueue.length) {
       this.mgDirty = false;
       this.mergePlanLoose();
@@ -1817,37 +1919,53 @@ export class Renderer3d {
     this.mergeBakeMs += performance.now() - t0;
   }
 
-  /** 0.52.0 묶어 그리기 선택 바꾸기: 끄거나 한도를 줄이면 묶음을 모두 놓고(줄였으면 다음 그리기부터 새 한도로 다시 굽는다), 켜거나 늘리면 다시 살핀다 */
+  /**
+   * 0.52.0 묶어 그리기 선택 바꾸기: 'off'면 묶음에 든 그물을 모두 그물마다 버퍼로 되돌리고(장면 배열에서 다시 올린다) 묶음을 지운다.
+   * 'on'·'auto'로 바꾸면 다음 그리기에서 다시 살핀다('on'은 곧 켜고, 'auto'는 묶을 수 있는 그물이 문턱 이상일 때)
+   */
   setMerging(o: MergingOptions): void {
-    const prev = this.merging;
-    this.merging = { on: o.on, maxBytes: o.maxBytes };
-    if (!o.on || o.maxBytes < prev.maxBytes) this.mergeClear(false);
-    else this.mgDirty = true;
+    this.merging = { mode: o.mode, min: Math.max(2, Math.floor(o.min) || MERGE_AUTO_MIN) };
+    this.mgDirty = true;
+    if (o.mode === 'off') {
+      this.mergeUnstore();
+      this.mgActive = false;
+    } else if (o.mode === 'on') this.mgActive = true;
+  }
+
+  /** 0.52.0 묶음에 든 그물을 모두 그물마다 버퍼로 되돌린다(그물 배열에서 다시 올린다 — 묶음은 쓰는 기록이 없어져 지운다) */
+  private mergeUnstore(): void {
+    this.mgQueue = [];
+    this.mgWait = [];
+    this.mgWaitVerts = 0;
+    for (let k = 0; k < this.meshes.length; k++) if (this.meshes[k]!.mg) this.installMesh(this.meshes[k]!.src, k);
+    this.gl.bindVertexArray(null);
   }
 
   /** 0.52.0 굽기를 기다리는 묶음 수(0이 아니면 뷰어가 다음 프레임에 다시 그린다 — 그동안 그 그물은 그물마다 그린다) */
   get mergePending(): number {
-    if (!this.merging.on || this.mergeBroken || this.uploading) return 0;
-    return this.mgQueue.length + (this.mgDirty ? 1 : 0);
+    if (this.merging.mode === 'off' || this.mergeBroken || this.uploading) return 0;
+    return this.mgQueue.length;
   }
 
-  /** 0.52.0 묶음 상태: 구운 묶음 수·묶은 그물 수(빠진 것 빼고)·묶음 버퍼 바이트·굽기를 기다리는 묶음 수·굽기에 쓴 ms 합 */
-  get mergeInfo(): { groups: number; items: number; bytes: number; pending: number; bakeMs: number } {
+  /** 0.52.0 묶음 상태: 구운 묶음 수·묶음에 든 그물 수·묶음 버퍼 바이트·굽기를 기다리는 묶음 수·굽기에 쓴 ms 합·이 장면에서 켜졌는지 */
+  get mergeInfo(): { groups: number; items: number; bytes: number; pending: number; bakeMs: number; active: boolean } {
     let items = 0;
-    for (const g of this.mgGroups) items += g.recs.length - g.dead;
-    return { groups: this.mgGroups.size, items, bytes: this.mgBytes, pending: this.mergePending, bakeMs: Math.round(this.mergeBakeMs * 10) / 10 };
+    for (const g of this.mgGroups) items += g.live;
+    return { groups: this.mgGroups.size, items, bytes: this.mgBytes, pending: this.mergePending, bakeMs: Math.round(this.mergeBakeMs * 10) / 10, active: this.mgActive };
   }
 
   /**
    * 0.52.0 묶음 하나 굽기: 그동안 바뀌거나 빠진 그물·첫 그물과 열쇠가 다른 그물은 빼고 잇는다(둘 이상일 때만). 버퍼는 그물 버퍼와 같은 성분으로 센다
-   * (stats.buffers — 그물 번호는 'indices'·'edges'). VAO는 그물 VAO와 같은 속성 꼴에 그물 번호(위치 5)를 더한다
+   * (stats.buffers — 그물 번호는 'indices'·'edges'). VAO는 그물 VAO와 같은 속성 꼴에 그물 번호(위치 5)를 더한다.
+   * 구운 뒤 그물마다 버퍼·VAO(그리고 구간 모음·삼각형 변 — 다시 쓸 때 묶음 것으로 다시 만든다)를 놓고 그물 기록이 묶음 저장소를 가리키게 한다(mergeAttach).
+   * 다시 굽는 묶음(rebuild)의 그물은 옛 묶음에서 옮긴다
    */
   private mergeBake(list: readonly MeshRec[]): void {
     const srcs: MergeSrc[] = [];
     const recs: MeshRec[] = [];
     let key: string | null = null;
     for (const r of list) {
-      if (r.mg || r.dropped) continue;
+      if ((r.mg && !r.mg.rebuild) || r.dropped) continue;
       const s = this.mergeSrcOf(r);
       if (!s || (key !== null && s.key !== key)) continue;
       key = s.key;
@@ -1866,18 +1984,20 @@ export class Renderer3d {
     const r0 = recs[0]!;
     const vao = gl.createVertexArray()!;
     gl.bindVertexArray(vao);
-    buf(gl.ARRAY_BUFFER, a.pos, 'positions');
+    const posBuf = buf(gl.ARRAY_BUFFER, a.pos, 'positions');
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    const nrmF = a.nrm ? r0.attrs.nrmF : null;
+    let nrmBuf: WebGLBuffer | null = null;
     if (a.nrm) {
-      const f = r0.attrs.nrmF;
-      buf(gl.ARRAY_BUFFER, a.nrm, 'normals');
+      nrmBuf = buf(gl.ARRAY_BUFFER, a.nrm, 'normals');
       gl.enableVertexAttribArray(1);
-      if (f) gl.vertexAttribPointer(1, 3, this.glType(f), f.normalized, f.stride, 0);
+      if (nrmF) gl.vertexAttribPointer(1, 3, this.glType(nrmF), nrmF.normalized, nrmF.stride, 0);
       else gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 12, 0);
     }
+    let colBuf: WebGLBuffer | null = null;
     if (a.col) {
-      buf(gl.ARRAY_BUFFER, a.col, 'colors');
+      colBuf = buf(gl.ARRAY_BUFFER, a.col, 'colors');
       gl.enableVertexAttribArray(2);
       gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 16, 0);
     }
@@ -1912,24 +2032,63 @@ export class Renderer3d {
       recs,
       vao,
       tri: a.tri,
+      vStart: a.vStart,
       thin,
       wide,
       seg: a.segStart,
       segBuf,
       segItem,
+      attrs: { pos: posBuf, nrm: nrmBuf, col: colBuf, uv: null, uvN: 0, buv: null, buvN: 0, nrmF, uvF: null, buvF: null },
       bufs,
       bytes: mergeBytes(a),
       dead: 0,
+      live: 0,
+      rebuild: false,
       hasNormals: !!a.nrm,
       hasColors: !!a.col,
       cull: r0.src.doubleSided === false,
     };
-    recs.forEach((r, i) => {
-      r.mg = g;
-      r.mi = i;
-    });
     this.mgGroups.add(g);
     this.mgBytes += g.bytes;
+    recs.forEach((r, i) => this.mergeAttach(r, g, i));
+  }
+
+  /**
+   * 0.52.0 그물 기록을 묶음 저장소로 옮긴다: 그물마다 버퍼·VAO·윤곽선 VAO(또는 옛 묶음)를 놓고, 구간 모음·삼각형 변(그물 버퍼를 가리킨다)을 지운 뒤
+   * vao·attrs·윤곽선을 묶음 것으로, 색인 시작(first)·정점 시작(vbase)·선분 시작을 그 그물 자리로 둔다. 색인은 묶음 정점 번호라 그릴 때 늘 색인으로 그린다(indexed)
+   */
+  private mergeAttach(r: MeshRec, g: MergeGroup, i: number): void {
+    const gl = this.gl;
+    this.dropParts(r);
+    if (r.edges) this.dropParts(r.edges);
+    if (r.wire) {
+      gl.deleteVertexArray(r.wire.vao);
+      this.vaos.delete(r.wire.vao);
+      const k = this.keys.get(r.wire.idx);
+      if (k) this.freeKey(k, 'element');
+      r.wire = null;
+    }
+    if (r.mg) this.mergeRelease(r);
+    else {
+      gl.deleteVertexArray(r.vao);
+      this.vaos.delete(r.vao);
+      if (r.edges)
+        for (const v of [r.edges.wide, r.edges.thin]) {
+          gl.deleteVertexArray(v);
+          this.vaos.delete(v);
+        }
+      this.release(r.slots);
+    }
+    r.slots = [];
+    r.vao = g.vao;
+    r.attrs = g.attrs;
+    r.indexed = true;
+    r.first = g.tri[i]!;
+    r.vbase = g.vStart[i]!;
+    if (r.edges) r.edges = { id: r.edges.id, group: r.edges.group, n: r.edges.n, pos: g.segBuf!, col: null, wide: g.wide!, thin: g.thin!, first: g.seg[i]! };
+    r.mg = g;
+    r.mi = i;
+    g.live++;
   }
 
   /** 0.52.0 묶음 굵은 선 VAO(묶여 있어야 함)의 인스턴스 속성을 first번째 선분부터로 건다(bindWide와 같은 꼴 + 선분마다 그물 번호 — 위치 5) */
@@ -2124,11 +2283,19 @@ export class Renderer3d {
     this.clear(true);
     this.rel = opts.release ?? null;
     this.syncTextures(scene);
+    // 0.52.0 이 장면에서 묶어 그리기를 켤지('auto' 문턱)·함께 쓰는 배열
+    this.mergePrescan(scene);
     if (opts.incremental) {
       this.pending = { scene, mi: 0, li: 0, pi: 0 };
       return;
     }
-    for (const m of scene.meshes) this.meshes.push(this.sceneMeshRec(m));
+    for (const m of scene.meshes) {
+      const r = this.sceneMeshRec(m);
+      this.meshes.push(r);
+      // 0.52.0 묶을 그물이 모이면 곧 굽고 그물 버퍼를 놓는다(그물이 아주 많아도 GL 객체가 쌓이지 않게)
+      this.mergeFeed(r);
+    }
+    this.mergeFlushWait();
     for (const l of scene.lines) this.lines.push(this.sceneLineRec(l));
     for (const p of scene.points ?? []) this.points.push(this.scenePointRec(p));
     this.gl.bindVertexArray(null);
@@ -2193,7 +2360,11 @@ export class Renderer3d {
         // 0.25.0: 차례가 오기 전에 앱이 다시 준 배열(문맥 복구)이 있으면 함께 올린다
         const give = this.restoreQ.get(m.id) ?? null;
         this.restoreQ.delete(m.id);
-        this.meshes.push(this.sceneMeshRec(m, { give }));
+        const r = this.sceneMeshRec(m, { give });
+        this.meshes.push(r);
+        // 0.52.0 묶을 그물이 모이면 이 걸음 안에서 굽고 그물 버퍼를 놓는다(그물을 다 올리면 남은 것도)
+        this.mergeFeed(r);
+        if (p!.mi >= s.meshes.length) this.mergeFlushWait();
       } else if (kind === 'line') this.lines.push(this.sceneLineRec(s.lines[p!.li++]!));
       else this.points.push(this.scenePointRec(pts[p!.pi++]!));
       this.gl.bindVertexArray(null);
@@ -2406,9 +2577,9 @@ export class Renderer3d {
     this.restoreQ.delete(m.id);
     const i = this.meshes.findIndex((r) => r.src.id === m.id);
     const old = i >= 0 ? this.meshes[i]! : null;
-    // 0.52.0 바꾸는 그물은 곧바로 묶음에서 뺀다(제자리 고치기·나눠 올리는 동안 앞 기록을 그물마다 그린다 — 묶음 사본은 옛 값이다)
-    if (old) this.mergeLeave(old);
-    else this.mgDirty = true;
+    // 0.52.0 묶음을 다시 살핀다. 바꾸는 그물이 묶음 저장소에 있으면 새 기록이 들어설 때(installMesh — dropMeshRec) 빠진다 — 그때까지 앞 기록은 묶음 자리를 그린다
+    // (묶음 저장소의 그물은 그물 버퍼가 없어 제자리 고치기가 앞 기록을 바꾸지 않는다)
+    this.mgDirty = true;
     const skipped = old && ranges ? this.skippedRanges(old, m) : [];
     if (old && ranges) this.patchSame(old.slots, old.lay, m, ranges);
     if (old && o.incremental) {
@@ -2494,7 +2665,8 @@ export class Renderer3d {
     const rec = this.sceneMeshRec(m, { from: old, keep: o.keep, give: o.give });
     if (old) {
       const w = old.wire;
-      if (w && old.src.indices === m.indices && old.tri === rec.tri && old.count === rec.count && old.indexed === rec.indexed) {
+      // 0.52.0 묶음 저장소의 앞 기록은 삼각형 변 색인이 묶음 정점 번호라 넘겨 쓰지 않는다
+      if (w && !old.mg && old.src.indices === m.indices && old.tri === rec.tri && old.count === rec.count && old.indexed === rec.indexed) {
         const gl = this.gl;
         gl.bindVertexArray(w.vao);
         gl.bindBuffer(gl.ARRAY_BUFFER, rec.attrs.pos);
@@ -2511,18 +2683,22 @@ export class Renderer3d {
   /** 그물 기록의 VAO·구간 캐시·윤곽선 기록(keepWire가 아니면 삼각형 변 색인도)을 지운다. 배열 버퍼는 release가 지운다 */
   private dropMeshRec(r: MeshRec, keepWire: boolean): void {
     const gl = this.gl;
-    // 0.52.0 묶음에서 빠진다(묶음 버퍼에는 이 그물 사본이 남지만 그리지 않는다)
+    // 0.52.0 묶음 저장소의 그물이면 묶음 VAO는 지우지 않고 묶음에서 빠진다(묶음 버퍼의 이 그물 자리는 그리지 않는다 — 쓰는 기록이 없어지면 묶음을 지운다)
     r.dropped = true;
+    const stored = !!r.mg;
     this.mergeLeave(r);
     this.dropParts(r);
-    gl.deleteVertexArray(r.vao);
-    this.vaos.delete(r.vao);
+    if (!stored) {
+      gl.deleteVertexArray(r.vao);
+      this.vaos.delete(r.vao);
+    }
     if (r.edges) {
       this.dropParts(r.edges);
-      for (const v of [r.edges.wide, r.edges.thin]) {
-        gl.deleteVertexArray(v);
-        this.vaos.delete(v);
-      }
+      if (!stored)
+        for (const v of [r.edges.wide, r.edges.thin]) {
+          gl.deleteVertexArray(v);
+          this.vaos.delete(v);
+        }
     }
     if (r.wire && !keepWire) {
       gl.deleteVertexArray(r.wire.vao);
@@ -3099,11 +3275,13 @@ export class Renderer3d {
     const idx = new Uint32Array(tris * 6);
     // 0.50.0: 깨진 삼각형을 넓이 0으로 바꾼 색인(있으면 — 그 변은 길이 0이라 그리지 않는다)
     const I = r.tri ?? m.indices;
+    // 0.52.0 묶음 저장소의 그물은 묶음 위치 버퍼를 가리키므로 묶음 정점 번호로(vbase를 더한다 — 아니면 0)
+    const vb = r.vbase ?? 0;
     // 삼각형마다 작은 배열을 만들지 않고 바로 채운다(삼각형 수백만 개에서 쓰레기 수집이 길어지지 않게)
     for (let t = 0, o = 0; t < tris; t++, o += 6) {
-      const a = I ? I[t * 3]! : t * 3;
-      const b = I ? I[t * 3 + 1]! : t * 3 + 1;
-      const c = I ? I[t * 3 + 2]! : t * 3 + 2;
+      const a = (I ? I[t * 3]! : t * 3) + vb;
+      const b = (I ? I[t * 3 + 1]! : t * 3 + 1) + vb;
+      const c = (I ? I[t * 3 + 2]! : t * 3 + 2) + vb;
       idx[o] = a;
       idx[o + 1] = b;
       idx[o + 2] = b;
@@ -3513,6 +3691,8 @@ export class Renderer3d {
     if (runs.length > RUN_LIMIT && total > 0) {
       const gl = this.gl;
       const idx = compactTriIndices(r.tri ?? r.src.indices, runs, wire);
+      // 0.52.0 묶음 저장소의 그물은 묶음 정점 번호로(그 VAO가 묶음 버퍼를 가리킨다)
+      if (r.vbase) for (let i = 0; i < idx.length; i++) idx[i] = idx[i]! + r.vbase;
       const vao = gl.createVertexArray()!;
       gl.bindVertexArray(vao);
       if (wire) {
@@ -3923,8 +4103,10 @@ export class Renderer3d {
           stats.drawCalls++;
         } else {
           gl.bindVertexArray(r.vao);
+          // 0.52.0 묶음 저장소의 그물은 묶음 색인 버퍼 안 그 그물 자리부터
+          const o = (r.first ?? 0) * 4;
           for (const run of list.runs) {
-            if (r.indexed) gl.drawElements(gl.TRIANGLES, run.count * 3, gl.UNSIGNED_INT, run.start * 12);
+            if (r.indexed) gl.drawElements(gl.TRIANGLES, run.count * 3, gl.UNSIGNED_INT, o + run.start * 12);
             else gl.drawArrays(gl.TRIANGLES, run.start * 3, run.count * 3);
             stats.drawCalls++;
           }
@@ -3933,7 +4115,7 @@ export class Renderer3d {
         return;
       }
       gl.bindVertexArray(r.vao);
-      if (r.indexed) gl.drawElements(gl.TRIANGLES, r.count, gl.UNSIGNED_INT, 0);
+      if (r.indexed) gl.drawElements(gl.TRIANGLES, r.count, gl.UNSIGNED_INT, (r.first ?? 0) * 4);
       else gl.drawArrays(gl.TRIANGLES, 0, r.count);
       stats.drawCalls++;
       stats.triangles += r.count / 3;
@@ -4311,7 +4493,8 @@ export class Renderer3d {
       if (!sec) edgeN = new Map();
       for (const r of visibleMeshes) {
         geoN.set(r.geo, (geoN.get(r.geo) ?? 0) + 1);
-        if (edgeN && r.edges) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
+        // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼를 함께 가리키지만 같은 그물 자리가 아니다(세지 않는다 — 묶음 구간으로 그린다)
+        if (edgeN && r.edges && !r.mg) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
       }
     }
     /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
@@ -4322,7 +4505,8 @@ export class Renderer3d {
 
     // ───── 0.52.0 묶어 그리기: 묶음 그물은 그물마다 그리던 자리에서 잇단 것끼리 구간으로 모으고, 그물마다 그리기와 한 목록에 장면 차례로 두었다가
     // 자리 자료(행렬·색)를 한 번 올린 뒤 차례대로 그린다(차례가 같아 그림이 같다). 단면이 있으면 끈다(그물마다 로컬 평면), 그림자 면도 그물마다 ─────
-    const mOn = this.merging.on && !this.mergeBroken && this.mgGroups.size > 0 && !sec && !multi;
+    // (단면이 있거나 MERGE 변종을 만들 수 없으면 묶음 저장소의 그물도 그물마다 — 그 그물 자리로 그린다)
+    const mOn = !this.mergeBroken && this.mgGroups.size > 0 && !sec && !multi;
     type MergeOp = MergeRun | (() => void);
     /** 지금 모으는 목록(null이면 예전처럼 바로 그린다)과 늘일 수 있는 마지막 구간 */
     let mops: MergeOp[] | null = null;
@@ -5475,9 +5659,11 @@ export class Renderer3d {
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
       if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
       gl.bindVertexArray(r.wide);
-      if (o.first) this.bindWide(r.pos, r.col, o.first);
+      // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼 안 그 그물 자리부터(r.first — 아니면 0)
+      const f0 = (r.first ?? 0) + o.first;
+      if (f0) this.bindWide(r.pos, r.col, f0);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, o.count);
-      if (o.first) this.bindWide(r.pos, r.col, 0);
+      if (f0) this.bindWide(r.pos, r.col, 0);
     } else {
       const p = fog
         ? this.variant('thin', ['FOG', ...(clips ? ['CLIPN'] : clip ? ['CLIP'] : [])])
@@ -5499,7 +5685,7 @@ export class Renderer3d {
       gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
       if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
       gl.bindVertexArray(r.thin);
-      gl.drawArrays(gl.LINES, o.first * 2, o.count * 2);
+      gl.drawArrays(gl.LINES, ((r.first ?? 0) + o.first) * 2, o.count * 2);
     }
     stats.drawCalls++;
     stats.segments += o.count;

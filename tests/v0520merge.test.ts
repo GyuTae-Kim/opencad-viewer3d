@@ -166,16 +166,29 @@ function same(set: (v: Viewer3d) => void, label: string, o: { mode?: string; zoo
 }
 
 describe('0.52.0 묶어 그리기 — 뷰어', () => {
-  it('기본 끔: 묶음을 굽지 않고 MERGE 변종을 만들지 않는다', () => {
-    const w = view(scene(), false);
-    w.v.renderNow();
-    expect(w.v.renderOptions.merging).toEqual({ on: false, maxBytes: 256 * 1024 * 1024 });
-    expect(w.v.stats.merged).toMatchObject({ draws: 0, items: 0, groups: 0, meshes: 0, bytes: 0, pending: 0 });
+  it("기본 'auto': 묶을 수 있는 그물이 문턱(2,000)보다 적은 장면은 켜지 않는다 — 묶음·MERGE 변종 없음, 끔과 같은 그리기 기록", () => {
+    const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false, renderMode: 'shadedEdges', viewCube: false });
+    views.push(v);
+    const gl = (v.canvas as unknown as FakeElement).gl!;
+    v.setScene(scene());
+    v.fit(false);
+    v.renderNow();
+    expect(v.renderOptions.merging).toEqual({ mode: 'auto', min: 2000 });
+    expect(v.stats.merged).toMatchObject({ active: false, draws: 0, items: 0, groups: 0, meshes: 0, bytes: 0, pending: 0 });
     let merge = 0;
-    w.gl.onDraw = (d) => void (d.prog?.vs.includes('a_item') && merge++);
-    w.v.renderNow();
-    w.gl.onDraw = null;
+    gl.onDraw = (d) => void (d.prog?.vs.includes('a_item') && merge++);
+    const auto = expandFrame(gl, () => v.renderNow());
+    gl.onDraw = null;
     expect(merge).toBe(0);
+    const off = view(scene(), false);
+    off.v.fit(false);
+    expect(auto).toEqual(shot(off));
+    // 문턱을 낮추면(min) 같은 장면도 켜진다 — 'auto'는 다음 그리기에서 살핀다
+    v.setRenderOptions({ merging: { min: 30 } });
+    bake({ v, gl });
+    expect(v.stats.merged.active).toBe(true);
+    expect(v.stats.merged.meshes).toBeGreaterThan(40);
+    expect(expandFrame(gl, () => v.renderNow())).toEqual(shot(off));
   });
 
   it('켜면 다 올린 뒤 굽고 그린 도형이 끔과 같다(모드 일곱) — 그리기 호출은 준다', () => {
@@ -337,33 +350,182 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     expect(on.v.stats.merged.meshes).toBeLessThan(all.v.stats.merged.meshes);
   });
 
-  it('바이트 한도(maxBytes)를 넘는 그물은 묶지 않는다, 끄면 묶음 버퍼를 놓는다, stats.buffers에 든다', () => {
+  it('켜면 묶음 그물의 그물마다 버퍼를 놓아 버퍼 바이트가 늘지 않고(그물 번호만큼), 끄면 그물마다 버퍼로 되돌려 끔과 같은 바이트·같은 그림', () => {
     const w = view(scene(), false);
+    w.v.fit(false);
     w.v.renderNow();
-    const b0 = w.v.stats.buffers.bytes;
+    const b0 = w.v.stats.buffers.bytes, n0 = w.v.stats.buffers.count;
+    const before = shot(w);
     w.v.setRenderOptions({ merging: true });
     bake(w);
-    const full = w.v.stats.merged;
-    expect(full.bytes).toBeGreaterThan(0);
-    expect(w.v.stats.buffers.bytes).toBe(b0 + full.bytes);
-    w.v.setRenderOptions({ merging: { maxBytes: Math.floor(full.bytes / 3) } });
-    bake(w);
-    expect(w.v.stats.merged.bytes).toBeLessThanOrEqual(full.bytes / 3);
-    expect(w.v.renderOptions.merging.maxBytes).toBe(Math.floor(full.bytes / 3));
+    const m = w.v.stats.merged;
+    expect(m.bytes).toBeGreaterThan(0);
+    // 묶음 버퍼 = 그물 버퍼 사본 + 정점마다 그물 번호 2바이트·선분마다 4바이트 — 놓은 그물 버퍼만큼 빠져 합은 그물 번호만큼만 는다
+    const st = w.v.stats.buffers;
+    expect(st.bytes).toBeGreaterThan(b0);
+    expect(st.bytes).toBeLessThan(b0 * 1.25);
+    expect(st.count).toBeLessThan(n0);
+    expect(shot(w)).toEqual(before);
     w.v.setRenderOptions({ merging: false });
     w.v.renderNow();
-    expect(w.v.stats.merged.groups).toBe(0);
+    expect(w.v.stats.merged).toMatchObject({ groups: 0, meshes: 0, bytes: 0, active: false });
     expect(w.v.stats.buffers.bytes).toBe(b0);
+    expect(w.v.stats.buffers.count).toBe(n0);
+    expect(shot(w)).toEqual(before);
+    expect(w.v.renderOptions.merging).toEqual({ mode: 'off', min: 2000 });
   });
 
-  it('고르기·후보는 그대로(CPU) — 켬·끔 같은 결과', () => {
+  it('GPU 객체: 프레임을 거듭해도 늘지 않고, 굽기·다시 굽기(빼기·바꾸기)·끄고 켜기·문맥 복구·dispose에서 만든 묶음 버퍼·VAO를 모두 지운다(그물 2,000)', () => {
+    // 그물 1만으로 같은 셈(0.51.0 판과 견줌)은 시험 시간이 길어 52차 .runtime 하네스로 쟀다(README 0.52.0 "확인")
+    const N = 2000;
+    const big = (): Scene3d => {
+      const meshes: Mesh3d[] = [];
+      for (let i = 0; i < N; i++) {
+        const m = boxMesh(`b${i}`, [0, 0, 0], [6, 6, 4 + (i % 3)], [0.4 + (i % 5) * 0.1, 0.5, 0.6, 1]);
+        m.origin = [(i % 100) * 10, Math.floor(i / 100) * 10, 0];
+        if (i % 3 === 0) m.colors = Float32Array.from({ length: 32 }, (_, k) => (k % 4 === 3 ? 1 : 0.5));
+        meshes.push(m);
+      }
+      return { name: 'big', units: 'mm', meshes, lines: [] };
+    };
+    const on = view(big(), true), off = view(big(), false);
+    type G = { bufs: unknown[]; thin: unknown; wide: unknown };
+    type R = { src: { id: string }; mg?: unknown; slots: ({ key: object } | null)[]; edges: unknown };
+    const rend = (w: W): { mgGroups: Set<G>; meshes: R[] } => (w.v as unknown as { renderer: { mgGroups: Set<G>; meshes: R[] } }).renderer;
+    const groups = (w: W): G[] => [...rend(w).mgGroups];
+    const live = (w: W): { b: number; v: number } => ({ b: w.gl.liveBuffers, v: w.gl.vaos.filter((x) => !x.deleted).length });
+    const made: number[] = [];
+    /** 켠 뷰어에 있어야 할 GL 객체 수 = 끈 뷰어 − 묶음에 든 그물의 그물마다 버퍼·VAO(끈 뷰어의 같은 그물 기록으로 센다) + 묶음 버퍼·VAO */
+    const expected = (): { b: number; v: number } => {
+      const offRec = new Map(rend(off).meshes.map((r) => [r.src.id, r]));
+      const b0 = live(off);
+      let b = b0.b, v = b0.v;
+      for (const r of rend(on).meshes) {
+        if (!r.mg) continue;
+        const o = offRec.get(r.src.id)!;
+        b -= new Set(o.slots.filter(Boolean).map((s) => s!.key)).size;
+        v -= 1 + (o.edges ? 2 : 0);
+      }
+      for (const g of groups(on)) {
+        b += g.bufs.length;
+        v += 1 + (g.thin ? 1 : 0) + (g.wide ? 1 : 0);
+      }
+      return { b, v };
+    };
+    /** 가짜 문맥은 잃어도 객체를 지우지 않는다 — 잃기 직전 두 뷰어의 객체 수 차(그 뒤 견줄 때 더한다) */
+    let lostDiff = { b: 0, v: 0 };
+    const check = (label: string): void => {
+      bake(on);
+      off.v.renderNow();
+      const a = live(on), e = expected();
+      made.push(groups(on).length);
+      expect(a.b, label).toBe(e.b + lostDiff.b);
+      expect(a.v, label).toBe(e.v + lostDiff.v);
+    };
+    const both = (f: (v: Viewer3d) => void): void => {
+      f(on.v);
+      f(off.v);
+    };
+    both((v) => v.fit(false));
+    check('baked');
+    expect(on.v.stats.merged.meshes).toBe(N);
+    // 그물 2,000개: 끈 뷰어는 그물마다 버퍼·VAO(그물 하나에 7개 남짓), 켠 뷰어는 묶음 몇 개 몫뿐
+    expect(live(on).b + live(on).v).toBeLessThan((live(off).b + live(off).v) / 20);
+    // 프레임을 거듭 그려도(돌리기·모드·외곽선·주변 가림·숨은 점선·확대) GL 객체가 늘지 않는다 — 켬·끔 모두(무늬 = 자리 자료 그림·깊이 그림 포함)
+    const objs = (w: W): string => JSON.stringify([live(w), w.gl.textures.filter((t) => !t.deleted).length]);
+    const spin = (w: W): void => {
+      for (const [mode, f] of [
+        ['shadedEdges', () => w.v.setRenderOptions({ profiles: { width: 1 } })],
+        ['hiddenLine', () => w.v.setRenderOptions({ profiles: null, hiddenEdges: 0.4 })],
+        ['shaded', () => w.v.setAmbientOcclusion({})],
+        ['shadedEdges', () => (w.v.setAmbientOcclusion(null), w.v.zoomBy(0.3))],
+      ] as const) {
+        w.v.setRenderMode(mode as never);
+        f();
+        for (let i = 0; i < 5; i++) {
+          w.v.orbitBy(0.05, 0.01);
+          w.v.renderNow();
+        }
+      }
+      w.v.fit(false);
+      w.v.renderNow();
+    };
+    for (const w of [on, off]) {
+      spin(w);
+      const first = objs(w);
+      for (let k = 0; k < 3; k++) spin(w);
+      expect(objs(w), w === on ? 'on frames' : 'off frames').toBe(first);
+    }
+    // 많이 빼기(묶음마다 빠진 몫 ¼ 넘음 — 풀고 남은 그물로 다시 굽기)
+    both((v) => {
+      for (let i = 0; i < N; i++) if (i % 10 < 3) v.removeMesh(`b${i}`);
+    });
+    check('removed');
+    expect(on.v.stats.merged.meshes).toBe(N * 0.7);
+    // 많이 바꾸기(같은 id에 새 배열 — 바꾼 그물은 빠지고 다시 굽기)
+    both((v) => {
+      for (let i = 0; i < N; i++) if (i % 10 === 5 || i % 10 === 6) v.setMesh({ ...boxMesh(`b${i}`, [0, 0, 0], [5, 5, 5], [0.9, 0.3, 0.2, 1]), origin: [(i % 100) * 10, Math.floor(i / 100) * 10, 0] });
+    });
+    check('replaced');
+    expect(on.v.stats.merged.meshes).toBe(N * 0.7);
+    // 끄면 묶음 버퍼·VAO가 모두 없어져 끈 뷰어와 같은 수, 다시 켜면 다시 굽는다(세 번)
+    for (let k = 0; k < 3; k++) {
+      on.v.setRenderOptions({ merging: false });
+      on.v.renderNow();
+      off.v.renderNow();
+      expect(live(on), `off ${k}`).toEqual(live(off));
+      on.v.setRenderOptions({ merging: true });
+      check(`on ${k}`);
+    }
+    // 문맥 잃음·되찾음: 잃은 객체는 잊고 다시 올린 뒤 다시 굽는다(그 뒤로 묶음 수가 잃기 전과 같다)
+    const lostOn = live(on), lostOff = live(off);
+    lostDiff = { b: lostOn.b - lostOff.b, v: lostOn.v - lostOff.v };
+    const before = made.at(-1);
+    both((v) => {
+      (v.canvas as unknown as FakeElement).fire('webglcontextlost', {});
+      (v.canvas as unknown as FakeElement).fire('webglcontextrestored', {});
+    });
+    check('restored');
+    expect(made.at(-1)).toBe(before);
+    expect(made.every((n) => n > 0)).toBe(true);
+    // dispose: 두 뷰어 모두 묶음·그물 버퍼·VAO를 남기지 않는다(같은 수 — 가짜 문맥이 잃은 뒤 쥔 옛 객체만 빼고)
+    expect(live(off).b).toBeGreaterThan(0);
+    on.v.dispose();
+    off.v.dispose();
+    const a = live(on), b = live(off);
+    expect(a).toEqual({ b: b.b + lostDiff.b, v: b.v + lostDiff.v });
+  });
+
+  it('고르기·후보·키보드 후보 돌리기(pickCycle)는 그대로(CPU) — 켬·끔 같은 결과', () => {
     const on = view(scene(), true), off = view(scene(), false);
     for (const w of [on, off]) w.v.fit(false);
     bake(on);
+    expect(on.v.stats.merged.meshes).toBeGreaterThan(40);
     for (let y = 60; y < 600; y += 90)
       for (let x = 60; x < 800; x += 110) {
         expect(JSON.stringify(on.v.pick(x, y))).toBe(JSON.stringify(off.v.pick(x, y)));
+        expect(JSON.stringify(on.v.pick(x, y, { meshesOnly: true, throughTranslucent: true }))).toBe(JSON.stringify(off.v.pick(x, y, { meshesOnly: true, throughTranslucent: true })));
         expect(JSON.stringify(on.v.pickCandidates(x, y))).toBe(JSON.stringify(off.v.pickCandidates(x, y)));
       }
+    // 키보드 고르기 모드(keyboard 켠 뷰어): Enter로 가상 커서(가운데)를 켜고 Tab으로 겹친 후보를 돌린다 — 알림 차례·후보가 같다
+    const said = (merging: boolean): string[] => {
+      const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: true, renderMode: 'shadedEdges', viewCube: false });
+      views.push(v);
+      v.setRenderOptions({ merging });
+      v.setScene(scene());
+      v.fit(false);
+      bake({ v, gl: (v.canvas as unknown as FakeElement).gl! });
+      const out: string[] = [];
+      v.setKeyboardSnap({ announce: (a) => out.push(`${a.reason}|${a.index}/${a.count}|${a.pick ? `${a.pick.kind}:${a.pick.id}` : '-'}`) });
+      const fire = (k: string): void => (v.canvas as unknown as FakeElement).fire('keydown', { key: k, code: '', shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, preventDefault() {} });
+      fire('Enter');
+      for (let i = 0; i < 4; i++) fire('Tab');
+      out.push(`merged ${v.stats.merged.meshes > 0}`);
+      return out;
+    };
+    const a = said(true), b = said(false);
+    expect(a.length).toBeGreaterThan(2);
+    expect(a.slice(0, -1)).toEqual(b.slice(0, -1));
+    expect([a.at(-1), b.at(-1)]).toEqual(['merged true', 'merged false']);
   });
 });
