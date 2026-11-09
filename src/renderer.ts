@@ -2093,10 +2093,14 @@ export class Renderer3d {
     this.gl.bindVertexArray(null);
   }
 
-  /** 0.52.0 굽기를 기다리는 묶음 수(0이 아니면 뷰어가 다음 프레임에 다시 그린다 — 그동안 그 그물은 그물마다 그린다) */
+  /**
+   * 0.52.0 굽기를 기다리는 묶음 수(0이 아니면 뷰어가 다음 프레임에 다시 그린다 — 그동안 그 그물은 그물마다 그린다).
+   * 0.53.0: 켜진 장면에서 다시 굽기 차례를 아직 정하지 않았으면(그물을 바꾸거나 빼거나 선택을 바꾼 뒤 다음 그리기 전) 1을 더한다 — 빼기는 52차처럼 곧 줄에 넣지 않으므로
+   * 그 사이에도 기다리는 것이 있다고 알린다(정한 뒤 할 일이 없으면 0)
+   */
   get mergePending(): number {
     if (this.merging.mode === 'off' || this.mergeBroken || this.uploading) return 0;
-    return this.mgQueue.length;
+    return this.mgQueue.length + (this.mgDirty && this.mgActive ? 1 : 0);
   }
 
   /** 0.52.0 묶음 상태: 구운 묶음 수·묶음에 든 그물 수·묶음 버퍼 바이트·굽기를 기다리는 묶음 수·굽기에 쓴 ms 합·이 장면에서 켜졌는지 */

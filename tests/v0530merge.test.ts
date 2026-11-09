@@ -216,7 +216,10 @@ describe('0.53.0 다시 굽기 — 뷰어', () => {
     expect(w.v.stats.merged.groups).toBe(2);
     // 300개 빼기(MERGE_LOOSE 넘음): 두 묶음 모두 더럽혀져 한 토막 2,700개 → 1,350개씩 두 묶음
     for (let i = 0; i < N; i += 10) w.v.removeMesh(`b${i}`);
+    // 다시 굽기 차례를 정하기 전에도(다음 그리기 전) 기다리는 것이 있다고 알린다 — 뷰어·앱이 굽기를 마칠 때까지 그린다
+    expect(w.v.stats.merged.pending).toBeGreaterThan(0);
     bake(w);
+    expect(w.v.stats.merged.pending).toBe(0);
     const sizes = (): number[] => [...rend(w).mgGroups].map((g) => g.live);
     expect(sizes()).toEqual([1350, 1350]);
     // 끝에 800개 더하기: 끝 토막 2,150개는 두 묶음이 들지만 앞 묶음을 붙이면 3,500개도 두 묶음 — 붙여서 1,750개씩(셋이 아니라 둘)
