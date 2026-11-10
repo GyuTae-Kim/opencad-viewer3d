@@ -3465,7 +3465,8 @@ export class Viewer3d {
    * 0.54.0 고르기 후보 하나를 화면 덧그림에 미리 강조한다(SKP 56·57차 — 겹친 것 목록 줄에 초점·마우스가 갈 때 등, 고르기 알림 pick·pickCandidates 후보를 그대로):
    * 그물 면이면 맞은 삼각형과 같은 평면에서 변을 맞대고 이어진 삼각형(opts.ranges를 주면 그 삼각형 구간 — 앱이 아는 면)을 강조 색으로 옅게 칠하고 테두리를 긋고,
    * 선분·윤곽선은 그 선분, 점은 둘레 고리를 긋는다(키보드 고르기 후보 표식과 같은 꼴). 깊이를 따지지 않고 앞에 그린다(앞 면에 가린 후보도 보인다).
-   * 고른 것·강조(highlight)·알림은 바꾸지 않는다. 숨긴 묶음·장면에 없는 묶음·단면의 잘린 면 후보는 그리지 않는다. null이면 지우고, 장면을 바꾸면 풀린다. 그림 저장에는 그리지 않는다
+   * 고른 것·강조(highlight)·알림은 바꾸지 않는다. 숨긴 묶음·장면에 없는 묶음·단면의 잘린 면 후보는 그리지 않는다. null이면 지우고, 장면을 바꾸면 풀린다. 그림 저장에는 그리지 않는다.
+   * 0.56.0: 면 삼각형이 PICK_PREVIEW_MAX_TRIS(4,096)를 넘으면 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 한도에서 잘린 자리 안쪽 변을 긋지 않는다)
    */
   setPickPreview(p: Pick3d | null, opts: PickPreviewOptions = {}): void {
     if (this.disposed) return;
@@ -8803,7 +8804,8 @@ export class Viewer3d {
 
   /**
    * 0.54.0 그물 면 후보 표식(화면 덧그림만): 면 삼각형(ranges면 그 구간, 아니면 맞은 삼각형과 같은 평면으로 이어진 삼각형 — pickpreview.ts)을 강조 색으로 옅게 한 번에 칠하고
-   * 테두리 변을 바탕 테 위 강조 색 선으로. 단면의 잘린 면·삼각형 번호가 없는 후보는 그리지 않는다. 눈 뒤 꼭짓점이 있는 삼각형·변은 건너뛴다
+   * 테두리 변을 바탕 테 위 강조 색 선으로. 단면의 잘린 면·삼각형 번호가 없는 후보는 그리지 않는다. 눈 뒤 꼭짓점이 있는 삼각형·변은 건너뛴다.
+   * 0.56.0: 삼각형 수 한도(PICK_PREVIEW_MAX_TRIS)에 걸린 면은 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 0.54.0은 한도까지 칠하고 잘린 자리 안쪽 변까지 그었다)
    */
   private drawFaceMark(ctx: CanvasRenderingContext2D, f: ViewFrame, p: Pick3d, m: Mesh3d, ranges: readonly IndexRange[] | null): void {
     if (p.section || !Number.isInteger(p.index) || p.index < 0) return;
@@ -8817,19 +8819,21 @@ export class Viewer3d {
       return scr(pos[v * 3]!, pos[v * 3 + 1]!, pos[v * 3 + 2]!);
     };
     const th = this.theme;
-    ctx.beginPath();
-    for (const t of fo.tris) {
-      const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
-      if (!a || !b || !c) continue;
-      ctx.moveTo(a[0], a[1]);
-      ctx.lineTo(b[0], b[1]);
-      ctx.lineTo(c[0], c[1]);
-      ctx.closePath();
+    if (!fo.capped) {
+      ctx.beginPath();
+      for (const t of fo.tris) {
+        const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
+        if (!a || !b || !c) continue;
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.lineTo(c[0], c[1]);
+        ctx.closePath();
+      }
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = th.highlight;
+      ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = th.highlight;
-    ctx.fill();
-    ctx.globalAlpha = 1;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const e = fo.edges;
