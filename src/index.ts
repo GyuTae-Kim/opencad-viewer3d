@@ -157,8 +157,8 @@ export {
   closestPart,
 } from './closest';
 export { type Annotation3d, type AnnotationKind, HIDDEN_LABEL_DASH, angleAt, annotationGeometry, annotationLabelLook, measureDigits, measureNumber } from './annotate';
-export type { CameraState, Projection, ViewName } from './camera';
-export { VIEW_KEYS, VIEW_LABELS } from './camera';
+export type { CameraState, Projection } from './camera';
+export { VIEW_KEYS, VIEW_LABELS, type ViewName, viewKeyOf } from './viewkeys';
 export {
   type AnimateSetting,
   CAMERA_MOVE_MAX_MS,

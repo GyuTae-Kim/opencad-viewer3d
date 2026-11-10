@@ -11,9 +11,15 @@
 import type { Box3 } from './types';
 import { boxCenter, boxCorners, boxIsEmpty } from './bounds';
 import { type Mat4, type V3, add, clamp, cross, dot, hasOrigin, lerp3, mat4Invert, mat4Mul, normalize, orthographic, perspective, scale, sub, transform4, translation } from './math';
+import type { ViewName } from './viewkeys';
+
+/**
+ * 표준 뷰 이름·키 표: 0.54.0부터 아주 작은 모듈 viewkeys.ts에 두고 여기서도 같은 객체를 내보낸다(0.10.0~0.53.0 앱의 opencad-viewer3d/camera 가져오기 그대로).
+ * 첫 화면에서 표만 쓰는 앱은 opencad-viewer3d/viewkeys에서 가져온다 — 여기서 가져오면 번들러가 이 모듈 전체를 첫 화면에 둔다
+ */
+export { VIEW_KEYS, VIEW_LABELS, type ViewName, viewKeyOf } from './viewkeys';
 
 export type Projection = 'perspective' | 'orthographic';
-export type ViewName = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'swIso' | 'seIso' | 'neIso' | 'nwIso';
 
 export interface CameraState {
   target: V3;
@@ -59,26 +65,6 @@ export const VIEW_DIRS: Record<ViewName, V3> = {
   neIso: [1, 1, 1],
   nwIso: [-1, 1, 1],
 };
-
-export const VIEW_LABELS: Record<ViewName, string> = {
-  top: '위',
-  bottom: '아래',
-  front: '앞',
-  back: '뒤',
-  left: '왼쪽',
-  right: '오른쪽',
-  swIso: '남서 등각',
-  seIso: '남동 등각',
-  neIso: '북동 등각',
-  nwIso: '북서 등각',
-};
-
-/**
- * 표준 뷰 키(1 앞 2 뒤 3 왼쪽 4 오른쪽 5 위 6 아래 7 남동 등각) — Viewer3d.handleKey의 규칙이고, 앱이 단추·메뉴 글에 같은 표를 쓰게 내보낸다.
- * 0.10.0부터 여기(작은 모듈 opencad-viewer3d/camera)에 둔다: 코어 입구(뷰어·그리기)를 나눠 받는 앱도 첫 화면에서 표를 복사하지 않고 쓴다.
- * 입구(opencad-viewer3d)와 opencad-viewer3d/viewer도 같은 객체를 내보낸다
- */
-export const VIEW_KEYS: Readonly<Record<string, ViewName>> = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'bottom', '7': 'seIso' };
 
 export function defaultCamera(): CameraState {
   const a = dirToAngles(VIEW_DIRS.seIso);
