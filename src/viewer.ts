@@ -189,6 +189,7 @@ import {
   closestKey,
   closestPart,
   closestSlice,
+  primsWithin,
   sameClosestKey,
   sliceRange,
 } from './closest';
@@ -533,6 +534,17 @@ export interface ClosestPointsOptions {
    */
   rangeA?: IndexRange | readonly IndexRange[] | null;
   rangeB?: IndexRange | readonly IndexRange[] | null;
+}
+
+/**
+ * 0.55.0 점 둘레 삼각형 묻기 선택(Viewer3d.trianglesNear): local = 점과 반지름이 그물 자기 좌표(Mesh3d.positions — 묶음 원점·행렬을 반영하기 전)다(기본은 세계 —
+ * closestPoints와 같다). hidden = 숨긴 구간(setHiddenRanges)도 넣는다(기본은 뺀다 — closestPoints와 같다). range = 그 구간 안 삼각형만(closestPoints rangeA와 같은 꼴 —
+ * 구간만의 BVH를 만들어 기억한다)
+ */
+export interface TrianglesNearOptions {
+  local?: boolean;
+  hidden?: boolean;
+  range?: IndexRange | readonly IndexRange[] | null;
 }
 
 /**
@@ -5095,6 +5107,23 @@ export class Viewer3d {
         ch.port2.close();
       }
     }
+  }
+
+  /**
+   * 0.55.0 그물 묶음 id에서 점 point로부터 거리 radius 안의 삼각형 번호(Pick3d.raw·setHiddenRanges·closestPoints indexA와 같은 번호, 오름차순 — STEP 64차 요청).
+   * 점·반지름은 세계 좌표(묶음 원점·행렬을 반영 — closestPoints와 같다), local이면 그물 자기 좌표. 고르기·최소 거리와 같은 BVH(없으면 만든다)를 내려가며
+   * 먼 마디는 버리고 남은 삼각형만 정확한 거리(double — closestPoints와 같은 셈)로 고르므로 답은 모든 삼각형을 같은 셈으로 잰 전수와 같다(깨진 정점의 삼각형은 빠진다).
+   * 큰 그물에서 점 하나에 마디 수십 개·삼각형 수십 개만 본다(전수는 삼각형 수만큼). radius 0이면 그 점이 놓인 삼각형만.
+   * 숨긴 구간은 뺀다(hidden이면 넣는다). 없는 id·그물이 아닌 묶음·유한하지 않은 점·0보다 작거나 NaN인 반지름이면 null, 구간이 그물 밖뿐이면 빈 목록
+   */
+  trianglesNear(id: string, point: readonly number[], radius: number, opts: TrianglesNearOptions = {}): number[] | null {
+    const it = this.items.get(id);
+    if (it?.kind !== 'mesh' || !point || !(radius >= 0) || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || !Number.isFinite(point[2])) return null;
+    const s = this.closestShape(id, true, opts.range);
+    if (!s) return [];
+    if (opts.local) s.model = null;
+    if (opts.hidden) s.skip = null;
+    return primsWithin(s, point, radius);
   }
 
   /** 0.41.0 indices: 배열 안 번호(rawA·rawB)에 원본 식별 번호(indexA·indexB — segmentIds·pointIds, 그물이면 삼각형 번호 그대로)를 더한다 */

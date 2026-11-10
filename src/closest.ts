@@ -608,3 +608,90 @@ export function sliceRange(v: unknown): number {
 
 /** 나눠 돌리기 기본 조각 시간(ms, 0.41.0) — 60 Hz 한 프레임(16.7 ms)의 절반 남짓이라 그리기·입력 틈이 남는다 */
 export const CLOSEST_SLICE_MS = 8;
+
+/**
+ * 0.55.0 점 p(세계)에서 거리 r 안의 기본 도형(삼각형·선분·점) 번호 — 묶음 번호(구간 모양이면 offset·map으로 옮긴 번호), 오름차순(STEP 64차 요청 — Viewer3d.trianglesNear).
+ * 모양의 BVH를 내려가며 마디 세계 상자(모형 행렬이면 여덟 꼭짓점을 옮긴 상자 — 최근접점 찾기와 같은 셈·같은 반올림 여유)가 p에서 r보다 먼 마디는 버리고,
+ * 잎의 기본 도형은 세계 정점(double)에서 p까지 정확한 거리(closestPtTri·closestPtSeg — closestPoints와 같은 셈)의 제곱이 r²(r × r) 이하인 것만 담는다.
+ * 마디 버리기는 거리에 반올림 여유(1e-7 × (r + |p| + 1))를 두므로 답은 모든 기본 도형을 같은 셈으로 잰 전수와 같다(BVH에서 뺀 깨진 정점의 도형과 skip은 빠진다).
+ * p가 유한하지 않거나 r이 0보다 작거나 NaN이면 빈 목록. r = 0이면 p가 그 위에 놓인(셈이 거리 0을 낸) 도형만, r = Infinity면 모든 도형.
+ * 마디를 한 번씩만 보고 새로 잡는 것은 마디 더미와 답 배열뿐이다(최근접점 찾기의 세계 상자·정점 기억 배열은 잡지 않는다 — 점 하나 묻기가 그물 크기만큼 잡지 않게)
+ */
+export function primsWithin(s: ClosestShape, p: readonly number[], r: number): number[] {
+  const out: number[] = [];
+  const px = p[0]!, py = p[1]!, pz = p[2]!;
+  const bvh = s.bvh;
+  if (!bvh.count || !(r >= 0) || !Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) return out;
+  const M = s.model ?? null;
+  const r2 = r * r;
+  const lim = r + (r + Math.max(Math.abs(px), Math.abs(py), Math.abs(pz)) + 1) * 1e-7;
+  const lim2 = lim * lim;
+  const L = bvh.box, node = bvh.node, order = bvh.order;
+  const P = s.positions, I = s.indices;
+  const kind = s.kind;
+  const off = s.offset ?? 0, map = s.map ?? null, skip = s.skip ?? null;
+  const q: V3 = [px, py, pz];
+  const vert = (v: number): V3 => {
+    const x = P[v * 3]!, y = P[v * 3 + 1]!, z = P[v * 3 + 2]!;
+    if (!M) return [x, y, z];
+    return [M[0]! * x + M[4]! * y + M[8]! * z + M[12]!, M[1]! * x + M[5]! * y + M[9]! * z + M[13]!, M[2]! * x + M[6]! * y + M[10]! * z + M[14]!];
+  };
+  /** 기본 도형 i와 p 사이 거리 제곱 */
+  const dist2 = (i: number): number => {
+    let c: V3;
+    if (kind === 'triangle') c = I ? closestPtTri(q, vert(I[i * 3]!), vert(I[i * 3 + 1]!), vert(I[i * 3 + 2]!)) : closestPtTri(q, vert(i * 3), vert(i * 3 + 1), vert(i * 3 + 2));
+    else if (kind === 'segment') c = closestPtSeg(q, vert(i * 2), vert(i * 2 + 1));
+    else c = vert(i);
+    const dx = c[0] - px, dy = c[1] - py, dz = c[2] - pz;
+    return dx * dx + dy * dy + dz * dz;
+  };
+  const stack: number[] = [0];
+  while (stack.length) {
+    const ni = stack.pop()!;
+    const o = ni * 6;
+    let x0: number, y0: number, z0: number, x1: number, y1: number, z1: number;
+    if (!M) {
+      x0 = L[o]!;
+      y0 = L[o + 1]!;
+      z0 = L[o + 2]!;
+      x1 = L[o + 3]!;
+      y1 = L[o + 4]!;
+      z1 = L[o + 5]!;
+    } else {
+      // 최근접점 찾기(WorldShape.box)와 같은 셈: 여덟 꼭짓점을 옮긴 상자 + float32 상자를 옮긴 반올림 여유
+      x0 = y0 = z0 = Infinity;
+      x1 = y1 = z1 = -Infinity;
+      for (let i = 0; i < 8; i++) {
+        const x = L[o + (i & 1 ? 3 : 0)]!, y = L[o + (i & 2 ? 4 : 1)]!, z = L[o + (i & 4 ? 5 : 2)]!;
+        const wx = M[0]! * x + M[4]! * y + M[8]! * z + M[12]!;
+        const wy = M[1]! * x + M[5]! * y + M[9]! * z + M[13]!;
+        const wz = M[2]! * x + M[6]! * y + M[10]! * z + M[14]!;
+        if (wx < x0) x0 = wx;
+        if (wx > x1) x1 = wx;
+        if (wy < y0) y0 = wy;
+        if (wy > y1) y1 = wy;
+        if (wz < z0) z0 = wz;
+        if (wz > z1) z1 = wz;
+      }
+      const pad = (Math.abs(x1 - x0) + Math.abs(y1 - y0) + Math.abs(z1 - z0)) * 1e-7;
+      x0 -= pad;
+      y0 -= pad;
+      z0 -= pad;
+      x1 += pad;
+      y1 += pad;
+      z1 += pad;
+    }
+    const gx = Math.max(0, x0 - px, px - x1), gy = Math.max(0, y0 - py, py - y1), gz = Math.max(0, z0 - pz, pz - z1);
+    if (gx * gx + gy * gy + gz * gz > lim2) continue;
+    const a = node[ni * 2]!, n = node[ni * 2 + 1]!;
+    if (n > 0) {
+      for (let j = a; j < a + n; j++) {
+        const pi = order[j]!;
+        const raw = map ? map[pi]! : off + pi;
+        if (skip && skip(raw)) continue;
+        if (dist2(pi) <= r2) out.push(raw);
+      }
+    } else if (a !== 0xffffffff) stack.push(a, a + 1);
+  }
+  return out.sort((x, y) => x - y);
+}

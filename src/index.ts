@@ -64,6 +64,7 @@ export type {
   SegmentHighlightOptions,
   SetMeshOptions,
   SnapshotOptions,
+  TrianglesNearOptions,
   Viewer3dOptions,
   Viewer3dStats,
 } from './viewer';
@@ -158,6 +159,8 @@ export {
   closestBetweenAsync,
   type ClosestPart,
   closestPart,
+  type ClosestShape,
+  primsWithin,
 } from './closest';
 export { type Annotation3d, type AnnotationKind, HIDDEN_LABEL_DASH, angleAt, annotationGeometry, annotationLabelLook, measureDigits, measureNumber } from './annotate';
 export type { CameraState, Projection } from './camera';
