@@ -16,6 +16,7 @@
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
 import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, okCoord, sceneBounds, transformBox, unionBox } from './bounds';
 import { type CutRanges, type IndexRange, type RangePart, cutBits, cutMaskAt, cutParts, cutRuns, mergeRanges, partCuts, partitionRanges, rangeTester } from './ranges';
+import { type FaceOutline, planarFace, rangesFace, triCorner } from './pickpreview';
 import { type Bvh, type PrimKind, buildBvh, primCount as bvhPrimCount } from './bvh';
 import {
   type CameraState,
@@ -808,13 +809,32 @@ export interface KeyboardSnapOptions {
    * 0.53.0: 글 함수 (key, values) => string 도 받는다(values = 그 열쇠 틀의 {0}·{1}… 자리 값 차례 — 앱 번역 함수로 잇는다. 글이 아니면 그 열쇠의 기본 틀)
    */
   messages?: Partial<Record<KeySnapMessageKey, string>> | KeySnapMessageFn;
+  /**
+   * 0.54.0 고른 것 이름 함수(SKP 56차 요청): 알림 글의 고른 것 이름(틀 pickItem의 {0} — 기본은 묶음 이름, 없으면 id)을 앱 이름(그룹·컴포넌트 경로, B-rep 면 이름 등)으로.
+   * 고르기 모드 후보 글·'commit'의 picked 글에 쓴다. 글이 아니거나 빈 글·예외면 기본 이름
+   */
+  pickName?: ((p: Pick3d) => string | null | undefined) | null;
 }
 
 /**
  * 키보드 고르기 후보 돌리기 선택(0.47.0 KeyboardSnapOptions.pickCycle — pickCandidates·pick 선택과 같은 뜻, 포인터 종류는 'keyboard').
- * 0.53.0 group: 앱 묶음 열쇠 — 같은 묶음은 한 후보로 돌리고 후보 한도(16)·알림 count·onPick cycle을 묶음 수로 센다(NC 56·STEP 62차 요청)
+ * 0.53.0 group: 앱 묶음 열쇠 — 같은 묶음은 한 후보로 돌리고 후보 한도(16)·알림 count·onPick cycle을 묶음 수로 센다(NC 56·STEP 62차 요청).
+ * 0.54.0 facePreview: 지금 후보가 그물 면이면 그 면을 화면 덧그림에 강조한다(setPickPreview와 같은 표식 — 기본 끔: 0.53.0처럼 커서만, SKP 56·57차 요청).
+ * faceRanges: 그 면으로 강조할 삼각형 구간(앱이 아는 면 — PickPreviewOptions.ranges와 같은 뜻, undefined·null이면 맞은 삼각형과 같은 평면으로 이어진 삼각형)
  */
-export type KeyPickCycleOptions = Omit<PickOptions, 'pointerType'> & { group?: PickGroupKey | null };
+export type KeyPickCycleOptions = Omit<PickOptions, 'pointerType'> & {
+  group?: PickGroupKey | null;
+  facePreview?: boolean;
+  faceRanges?: ((p: Pick3d) => readonly IndexRange[] | null | undefined) | null;
+};
+
+/**
+ * 0.54.0 고르기 후보 미리 강조 선택(Viewer3d.setPickPreview): ranges = 그물 면 후보를 강조할 삼각형 구간(그 그물 삼각형 번호 { start, count } — setHiddenRanges와 같은 꼴,
+ * 앱이 아는 면). 주지 않으면 맞은 삼각형과 같은 평면에서 변을 맞대고 이어진 삼각형(PICK_PREVIEW_MAX_TRIS개까지)
+ */
+export interface PickPreviewOptions {
+  ranges?: readonly IndexRange[] | null;
+}
 
 /** 키보드 붙잡기 알림(0.46.0) */
 export interface KeyboardSnapAnnouncement {
@@ -1817,7 +1837,15 @@ export class Viewer3d {
     pickCycle: KeyPickCycleOptions | null;
     /** 0.47.0 알림 글 틀(기본과 합친 것), 0.53.0 또는 앱 글 함수 */
     msgs: KeySnapText;
+    /** 0.54.0 고른 것 이름 함수(없으면 null) */
+    pickName: ((p: Pick3d) => string | null | undefined) | null;
   } | null = null;
+  /** 0.54.0 고르기 후보 미리 강조(setPickPreview — 화면 덧그림만): 고른 것 사본과 앱 삼각형 구간 */
+  private pickPrev: { pick: Pick3d; ranges: IndexRange[] | null } | null = null;
+  /**
+   * 0.54.0 그물 면 미리 강조 셈 기억(덧그림은 프레임마다 그린다 — 같은 위치·색인 배열·삼각형·구간이면 다시 세지 않는다. 키보드 후보와 setPickPreview를 함께 두게 넷까지)
+   */
+  private faceMemo: { pos: ArrayLike<number>; idx: ArrayLike<number> | undefined; tri: number; ranges: string | null; out: FaceOutline | null }[] = [];
   /**
    * 0.46.0 가상 커서(켰을 때만): 자리(CSS 화소)·지금 후보 차례·그 자리 측정 후보 목록, 고르기 모드면 커서 아래 고른 것,
    * 켤 때 포인터 자리(모르면 켠 뒤 처음 본 자리 — 거기서 4화소 넘게 움직이면 끈다). 0.47.0 picks: 고르기 모드 겹친 후보(pickCycle일 때만, 아니면 빈 배열)
@@ -2164,6 +2192,9 @@ export class Viewer3d {
     this.lookMoved.clear();
     this.lineModels = new WeakMap();
     this.segHi = null;
+    // 0.54.0 고르기 후보 미리 강조도 장면을 바꾸면 풀린다
+    this.pickPrev = null;
+    this.faceMemo = [];
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
@@ -3383,6 +3414,27 @@ export class Viewer3d {
   }
 
   /**
+   * 0.54.0 고르기 후보 하나를 화면 덧그림에 미리 강조한다(SKP 56·57차 — 겹친 것 목록 줄에 초점·마우스가 갈 때 등, 고르기 알림 pick·pickCandidates 후보를 그대로):
+   * 그물 면이면 맞은 삼각형과 같은 평면에서 변을 맞대고 이어진 삼각형(opts.ranges를 주면 그 삼각형 구간 — 앱이 아는 면)을 강조 색으로 옅게 칠하고 테두리를 긋고,
+   * 선분·윤곽선은 그 선분, 점은 둘레 고리를 긋는다(키보드 고르기 후보 표식과 같은 꼴). 깊이를 따지지 않고 앞에 그린다(앞 면에 가린 후보도 보인다).
+   * 고른 것·강조(highlight)·알림은 바꾸지 않는다. 숨긴 묶음·장면에 없는 묶음·단면의 잘린 면 후보는 그리지 않는다. null이면 지우고, 장면을 바꾸면 풀린다. 그림 저장에는 그리지 않는다
+   */
+  setPickPreview(p: Pick3d | null, opts: PickPreviewOptions = {}): void {
+    if (this.disposed) return;
+    const ok = !!p && typeof p === 'object' && typeof p.id === 'string' && Array.isArray(p.point) && p.point.length >= 3;
+    if (!ok && !this.pickPrev) return;
+    const ranges = Array.isArray(opts?.ranges) ? opts.ranges.map((r) => ({ start: Number(r?.start), count: Number(r?.count) })) : null;
+    this.pickPrev = ok ? { pick: { ...p, point: [p.point[0], p.point[1], p.point[2]] }, ranges } : null;
+    this.invalidate();
+  }
+
+  /** 0.54.0 지금 미리 강조한 고르기 후보(setPickPreview — 사본, 없으면 null) */
+  get pickPreview(): Pick3d | null {
+    const p = this.pickPrev?.pick;
+    return p ? { ...p, point: [...p.point] as V3 } : null;
+  }
+
+  /**
    * 선분 묶음의 앞에서 count개만 그린다(NC 재생). null이면 전부.
    * ghost(0~1)를 주면 나머지를 그 불투명도로 흐리게 그린다.
    */
@@ -4429,6 +4481,7 @@ export class Viewer3d {
    *   커서를 켜기 전·끈 뒤 Tab은 브라우저 초점 이동 그대로다.
    *   0.47.0: 고르기 모드에서도 커서가 켜져 있으면 그 자리에 겹친 고르기 후보(pickCandidates 차례 — AutoCAD 선택 돌리기)를 돌리고 Enter로 그 후보를 고른다
    *   (pickCycle — 기본 켬, false면 0.46.0처럼 고르기 모드의 Tab은 초점 이동). 지금 후보가 선분·윤곽선·점이면 화면 덧그림에 강조 색으로 표시한다
+   *   (0.54.0 pickCycle.facePreview를 켜면 그물 면 후보도 그 면을 — setPickPreview와 같은 표식). 0.54.0 pickName이면 알림 글의 고른 것 이름을 앱 이름으로
    * - Enter: 측정 모드면 지금 후보를 측정 점으로 찍고(onMeasure), 아니면 그 자리를 누른 것처럼 고른다(onPick — pointerType 'keyboard', clicks 1, Shift+Enter면 shiftKey).
    *   커서가 꺼져 있으면 켠다
    * - Esc: 뷰 큐브 접기·측정 지우기(뷰어 Esc)가 먼저, 지울 것이 없으면 커서를 끈다. 포인터가 캔버스에서 움직이거나(4화소 이상) 누르거나 캔버스가 초점을 잃어도 끈다
@@ -4453,9 +4506,18 @@ export class Viewer3d {
         pc === false || pc === null
           ? null
           : typeof pc === 'object'
-            ? { edges: pc.edges, meshesOnly: !!pc.meshesOnly, throughTranslucent: !!pc.throughTranslucent, ...(typeof pc.group === 'function' ? { group: pc.group } : {}) }
+            ? {
+                edges: pc.edges,
+                meshesOnly: !!pc.meshesOnly,
+                throughTranslucent: !!pc.throughTranslucent,
+                ...(typeof pc.group === 'function' ? { group: pc.group } : {}),
+                // 0.54.0 그물 면 후보 표식(켤 때만)·앱 면 구간
+                ...(pc.facePreview === true ? { facePreview: true } : {}),
+                ...(typeof pc.faceRanges === 'function' ? { faceRanges: pc.faceRanges } : {}),
+              }
             : {},
       msgs: typeof src.messages === 'function' ? src.messages : keySnapMessages(src.messages),
+      pickName: typeof src.pickName === 'function' ? src.pickName : null,
     };
     // 고르기 모드에서 켜진 커서는 새 pickCycle로 그 자리를 다시 구한다(알리지 않는다 — 측정 모드는 0.46.0 그대로 두어 차례를 지킨다)
     if (this.keyCur && !this.measuring) {
@@ -7585,10 +7647,19 @@ export class Viewer3d {
     return a && p ? Math.hypot(p[0]! - a[0], p[1]! - a[1], p[2]! - a[2]) : null;
   }
 
-  /** 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*, 0.53.0 글 함수도) */
+  /** 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*, 0.53.0 글 함수도, 0.54.0 이름은 앱 pickName이 정할 수 있다) */
   private pickText(p: Pick3d, msgs: KeySnapText): string {
     const it = this.items.get(p.id);
-    const name = (it?.item.name || p.id).trim() || p.id;
+    let name = (it?.item.name || p.id).trim() || p.id;
+    const fn = this.keySnap?.pickName;
+    if (fn) {
+      try {
+        const s = fn({ ...p, point: [...p.point] as V3 });
+        if (typeof s === 'string' && s.trim()) name = s.trim();
+      } catch {
+        // 앱 함수 오류 — 기본 이름
+      }
+    }
     const kind: KeySnapMessageKey = p.section ? 'pick.section' : `pick.${p.kind}`;
     return keySnapText(msgs, 'pickItem', [name, keySnapText(msgs, kind)]);
   }
@@ -8534,24 +8605,58 @@ export class Viewer3d {
     if (this.annos) this.drawAnnotations(ctx, f, screen);
     else if (screen) this.annoLabels = [];
     this.drawMeasure(ctx, f, screen);
+    // 0.54.0 고르기 후보 미리 강조(setPickPreview — 화면 덧그림만)
+    if (screen && this.pickPrev) {
+      ctx.save();
+      this.drawPickMark(ctx, f, this.pickPrev.pick, null, this.pickPrev.ranges);
+      ctx.restore();
+    }
     // 0.46.0 가상 커서(화면 덧그림만 — 그림 저장에는 그리지 않는다)
     const kc = screen ? this.keyCur : null;
     if (kc) {
       ctx.save();
-      // 0.47.0 고르기 모드 후보 돌리기: 지금 후보가 선분·윤곽선이면 그 선분, 점이면 둘레 고리를 강조 색으로(그물 면은 커서 자리 그대로 — 앱이 알림의 pick으로 강조한다)
+      // 0.47.0 고르기 모드 후보 돌리기: 지금 후보가 선분·윤곽선이면 그 선분, 점이면 둘레 고리를 강조 색으로(그물 면은 0.54.0 facePreview를 켰을 때만 그 면 — 아니면 커서 자리 그대로)
       if (!this.measuring && this.keySnap?.pickCycle) this.drawKeyPick(ctx, f, kc.picks[kc.index] ?? null);
       drawSnapMark(ctx, this.theme, kc.x, kc.y, 'cursor');
       ctx.restore();
     }
   }
 
-  /** 0.47.0 가상 커서 고르기 후보 표식(화면 덧그림만): 선분·윤곽선은 바탕 테 위 강조 색 선, 점은 바탕 테 위 강조 색 고리 */
+  /** 0.47.0 가상 커서 고르기 후보 표식(화면 덧그림만): 선분·윤곽선·점(drawPickMark), 0.54.0 그물 면은 pickCycle.facePreview일 때만(faceRanges면 앱 면) */
   private drawKeyPick(ctx: CanvasRenderingContext2D, f: ViewFrame, d: PickDetail | null): void {
     if (!d) return;
+    if (d.pick.kind !== 'mesh') return this.drawPickMark(ctx, f, d.pick, d.ends ?? null, null);
+    const pc = this.keySnap?.pickCycle;
+    if (!pc?.facePreview) return;
+    let ranges: readonly IndexRange[] | null = null;
+    if (typeof pc.faceRanges === 'function') {
+      try {
+        const r = pc.faceRanges({ ...d.pick, point: [...d.pick.point] as V3 });
+        if (Array.isArray(r)) ranges = r;
+      } catch {
+        // 앱 함수 오류 — 같은 평면 면
+      }
+    }
+    this.drawPickMark(ctx, f, d.pick, null, ranges);
+  }
+
+  /**
+   * 0.47.0·0.54.0 고르기 후보 표식(화면 덧그림만 — 깊이를 따지지 않는다): 선분·윤곽선은 바탕 테 위 강조 색 선(끝점을 모르면 장면 배열에서), 점은 바탕 테 위 강조 색 고리,
+   * 0.54.0 그물 면은 그 면(drawFaceMark). 숨긴 묶음·장면에 없는 묶음은 그리지 않는다
+   */
+  private drawPickMark(ctx: CanvasRenderingContext2D, f: ViewFrame, p: Pick3d, ends: [V3, V3] | null, ranges: readonly IndexRange[] | null): void {
+    const it = this.items.get(p.id);
+    if (!it || !this.visible(it.item.id, it.item.group)) return;
     const th = this.theme;
-    const k = d.pick.kind;
-    if ((k === 'line' || k === 'edge') && d.ends) {
-      const a = projectToScreen(f, d.ends[0]), b = projectToScreen(f, d.ends[1]);
+    const k = p.kind;
+    if (k === 'mesh') {
+      if (it.kind === 'mesh') this.drawFaceMark(ctx, f, p, it.item, ranges);
+      return;
+    }
+    if (k === 'line' || k === 'edge') {
+      const e = ends ?? this.pickEnds(p);
+      if (!e) return;
+      const a = projectToScreen(f, e[0]), b = projectToScreen(f, e[1]);
       if (!a || !b) return;
       ctx.lineCap = 'round';
       for (const [color, w] of [
@@ -8566,7 +8671,7 @@ export class Viewer3d {
         ctx.stroke();
       }
     } else if (k === 'point') {
-      const s = projectToScreen(f, d.pick.point);
+      const s = projectToScreen(f, p.point);
       if (!s) return;
       for (const [color, w] of [
         [th.textBg, 5],
@@ -8579,6 +8684,89 @@ export class Viewer3d {
         ctx.stroke();
       }
     }
+  }
+
+  /** 0.54.0 선분·윤곽선 고른 것의 세계 끝점 둘(장면 배열에서 — 선분은 raw(없으면 index) 번째, 윤곽선은 Mesh3d.edges의 index 번째). 없으면 null */
+  private pickEnds(p: Pick3d): [V3, V3] | null {
+    const it = this.items.get(p.id);
+    if (!it) return null;
+    let arr: Float32Array | undefined, i: number, model: ArrayLike<number> | undefined;
+    if (p.kind === 'edge' && it.kind === 'mesh') {
+      arr = it.item.edges;
+      i = p.index;
+      model = this.modelOf(it.item);
+    } else if (p.kind === 'line' && it.kind === 'line') {
+      arr = it.item.positions;
+      i = p.raw ?? p.index;
+      model = this.lineModel(it.item) ?? (hasOrigin(it.item.origin) ? translation(it.item.origin!) : undefined);
+    } else return null;
+    if (!arr || !Number.isInteger(i) || i < 0 || i * 6 + 6 > arr.length) return null;
+    const a: V3 = [arr[i * 6]!, arr[i * 6 + 1]!, arr[i * 6 + 2]!], b: V3 = [arr[i * 6 + 3]!, arr[i * 6 + 4]!, arr[i * 6 + 5]!];
+    return model ? [transformPoint(model, a), transformPoint(model, b)] : [a, b];
+  }
+
+  /**
+   * 0.54.0 그물 면 후보 표식(화면 덧그림만): 면 삼각형(ranges면 그 구간, 아니면 맞은 삼각형과 같은 평면으로 이어진 삼각형 — pickpreview.ts)을 강조 색으로 옅게 한 번에 칠하고
+   * 테두리 변을 바탕 테 위 강조 색 선으로. 단면의 잘린 면·삼각형 번호가 없는 후보는 그리지 않는다. 눈 뒤 꼭짓점이 있는 삼각형·변은 건너뛴다
+   */
+  private drawFaceMark(ctx: CanvasRenderingContext2D, f: ViewFrame, p: Pick3d, m: Mesh3d, ranges: readonly IndexRange[] | null): void {
+    if (p.section || !Number.isInteger(p.index) || p.index < 0) return;
+    const fo = this.faceOutlineOf(m, p.index, ranges);
+    if (!fo) return;
+    const M = this.modelOf(m);
+    const pos = m.positions, idx = m.indices;
+    const scr = (x: number, y: number, z: number): V3 | null => projectToScreen(f, M ? transformPoint(M, [x, y, z]) : [x, y, z]);
+    const vert = (v: number): V3 | null => scr(pos[v * 3]!, pos[v * 3 + 1]!, pos[v * 3 + 2]!);
+    const th = this.theme;
+    ctx.beginPath();
+    for (const t of fo.tris) {
+      const a = vert(triCorner(idx, t, 0)), b = vert(triCorner(idx, t, 1)), c = vert(triCorner(idx, t, 2));
+      if (!a || !b || !c) continue;
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.lineTo(c[0], c[1]);
+      ctx.closePath();
+    }
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = th.highlight;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const e = fo.edges;
+    for (const [color, w] of [
+      [th.textBg, 5],
+      [th.highlight, 2],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      for (let i = 0; i + 5 < e.length; i += 6) {
+        const a = scr(e[i]!, e[i + 1]!, e[i + 2]!), b = scr(e[i + 3]!, e[i + 4]!, e[i + 5]!);
+        if (!a || !b) continue;
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+      }
+      ctx.stroke();
+    }
+  }
+
+  /** 0.54.0 그물 면 미리 강조 셈(같은 위치·색인 배열·삼각형·구간이면 기억에서 — 넷까지) */
+  private faceOutlineOf(m: Mesh3d, tri: number, ranges: readonly IndexRange[] | null): FaceOutline | null {
+    const pos = m.positions, idx = m.indices;
+    if (!pos?.length) return null;
+    const key = ranges ? ranges.map((r) => `${r?.start}:${r?.count}`).join(',') : null;
+    const memo = this.faceMemo;
+    const hit = memo.findIndex((x) => x.pos === pos && x.idx === idx && x.tri === tri && x.ranges === key);
+    if (hit >= 0) {
+      const e = memo[hit]!;
+      if (hit) memo.unshift(...memo.splice(hit, 1));
+      return e.out;
+    }
+    const out = ranges ? rangesFace(pos, idx, ranges) : planarFace(pos, idx, tri);
+    memo.unshift({ pos, idx, tri, ranges: key, out });
+    if (memo.length > 4) memo.length = 4;
+    return out;
   }
 
   /**

@@ -41,6 +41,7 @@ export type {
   MeasureCandidatesOptions,
   PickCandidatesOptions,
   PickGroupKey,
+  PickPreviewOptions,
   PointerClaimHandler,
   PointerClaimQuery,
   PointerHoldEnd,
@@ -68,6 +69,7 @@ export type {
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
 export { PICK_CANDIDATES_MAX, samePickTarget } from './scenepick';
+export { type FaceOutline, PICK_PREVIEW_MAX_COPLANAR, PICK_PREVIEW_MAX_TRIS, planarFace, rangesFace, triCorner } from './pickpreview';
 export type {
   InferenceLock,
   InferenceLockInput,
