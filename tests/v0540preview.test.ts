@@ -90,7 +90,8 @@ describe('0.54.0 그물 면 미리 강조 셈(pickpreview.ts)', () => {
     expect(f.edges.length / 6).toBe(4);
     expect(rangesFace(g.positions, g.indices, [{ start: 100, count: 1 }])).toBeNull();
     expect(rangesFace(g.positions, g.indices, [{ start: 0, count: 8 }], 3)).toMatchObject({ tris: [0, 1, 2], capped: true });
-    expect(entry.planarFace).toBe(planarFace);
+    // 면 셈은 뷰어가 나눠 받는 조각이라 입구에서 값으로 내보내지 않는다(opencad-viewer3d/pickpreview에서 가져온다)
+    expect('planarFace' in entry).toBe(false);
   });
 });
 
@@ -143,8 +144,13 @@ function marks(v: Viewer3d): { fills: number; strokes: number; moves: number } {
   return out;
 }
 
+/** 면 셈 조각(뷰어의 import())이 와서 면 표식이 그려질 때까지 이벤트 고리를 돌린다(이 파일은 setTimeout을 가짜로 두므로 setImmediate로) */
+async function faceKitReady(v: Viewer3d): Promise<void> {
+  for (let i = 0; i < 400 && marks(v).fills === 0; i++) await new Promise((r) => setImmediate(r));
+}
+
 describe('0.54.0 setPickPreview', () => {
-  it('그물 면: 같은 평면 면(삼각형 둘)을 칠하고 테두리 4변(바탕 테·강조 두 번), ranges면 그 삼각형만, null이면 지운다', () => {
+  it('그물 면: 처음에는 면 셈 조각을 받는 동안 표식 없이, 그 뒤 같은 평면 면(삼각형 둘)을 칠하고 테두리 4변(바탕 테·강조 두 번), ranges면 그 삼각형만, null이면 지운다', async () => {
     const v = make();
     const s = v.project([35, 65, 50])!;
     const p = v.pick(s.x, s.y)!;
@@ -154,6 +160,8 @@ describe('0.54.0 setPickPreview', () => {
     v.setPickPreview(p);
     expect(v.pickPreview).toEqual(p);
     expect(v.pickPreview).not.toBe(p);
+    expect(marks(v).fills).toBe(0);
+    await faceKitReady(v);
     const a = marks(v);
     expect(a.fills).toBe(1);
     expect(a.strokes).toBe(1);

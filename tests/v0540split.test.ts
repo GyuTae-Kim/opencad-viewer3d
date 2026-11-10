@@ -79,8 +79,11 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     expect(all.has('mergegl.ts')).toBe(false);
     // 가져오기 글 찾기가 제대로 도는지: 조각 안에서는 merge.ts를 값으로 가져온다
     expect(reach('mergegl.ts').has('merge.ts')).toBe(true);
-    const dyn = [...src('renderer.ts').matchAll(/(?<!typeof\s)import\('(\.[^']+)'\)/g)].map((m) => m[1]);
-    expect(dyn).toEqual(['./mergegl']);
+    const dyn = (f: string): (string | undefined)[] => [...src(f).matchAll(/(?<!typeof\s)import\('(\.[^']+)'\)/g)].map((m) => m[1]);
+    expect(dyn('renderer.ts')).toEqual(['./mergegl']);
+    // 고르기 후보 미리 강조의 면 셈(pickpreview.ts)도 뷰어가 처음 쓸 때 import()로 받는다
+    expect(all.has('pickpreview.ts')).toBe(false);
+    expect(dyn('viewer.ts')).toEqual(['./pickpreview']);
     // shaders.ts에서 MERGE 셰이더 글 바꾸기가 빠졌다(조각으로)
     expect(src('shaders.ts')).not.toMatch(/export function mergeShader/);
   });

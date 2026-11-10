@@ -69,7 +69,8 @@ export type {
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
 export { PICK_CANDIDATES_MAX, samePickTarget } from './scenepick';
-export { type FaceOutline, PICK_PREVIEW_MAX_COPLANAR, PICK_PREVIEW_MAX_TRIS, planarFace, rangesFace, triCorner } from './pickpreview';
+// 0.54.0 면 미리 강조 셈(planarFace·rangesFace 등)은 opencad-viewer3d/pickpreview에서 — 뷰어가 import()로 받는 조각이라 입구에서는 꼴만 내보낸다
+export type { FaceOutline } from './pickpreview';
 export type {
   InferenceLock,
   InferenceLockInput,

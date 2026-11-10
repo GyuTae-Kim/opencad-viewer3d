@@ -16,7 +16,7 @@
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
 import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, okCoord, sceneBounds, transformBox, unionBox } from './bounds';
 import { type CutRanges, type IndexRange, type RangePart, cutBits, cutMaskAt, cutParts, cutRuns, mergeRanges, partCuts, partitionRanges, rangeTester } from './ranges';
-import { type FaceOutline, planarFace, rangesFace, triCorner } from './pickpreview';
+import type { FaceOutline } from './pickpreview';
 import { type Bvh, type PrimKind, buildBvh, primCount as bvhPrimCount } from './bvh';
 import {
   type CameraState,
@@ -1681,6 +1681,15 @@ function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | R
 export { VIEW_KEYS };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
 
+/**
+ * 0.54.0 고르기 후보 미리 강조의 면 셈 조각(pickpreview.ts — 뷰어가 처음 그물 면을 강조할 때 import()로 받는다: 면 미리 강조를 쓰지 않는 앱은 코어 조각에 그 코드를 받지 않는다).
+ * 받았으면 그 모듈, 받지 못했으면 faceKitFailed(그 뒤 면 표식 없이)
+ */
+type FaceKit = typeof import('./pickpreview');
+let faceKit: FaceKit | null = null;
+let faceKitLoad: Promise<void> | null = null;
+let faceKitFailed = false;
+
 export class Viewer3d {
   /**
    * 0.54.0 묶어 그리기 조각(묶음 굽기 코드 — 앱 번들러가 따로 나눈 조각)을 미리 받는다. 받았으면 true, 받지 못했으면 false(그 뒤 이 페이지는 그물마다 그린다).
@@ -1846,6 +1855,8 @@ export class Viewer3d {
    * 0.54.0 그물 면 미리 강조 셈 기억(덧그림은 프레임마다 그린다 — 같은 위치·색인 배열·삼각형·구간이면 다시 세지 않는다. 키보드 후보와 setPickPreview를 함께 두게 넷까지)
    */
   private faceMemo: { pos: ArrayLike<number>; idx: ArrayLike<number> | undefined; tri: number; ranges: string | null; out: FaceOutline | null }[] = [];
+  /** 0.54.0 면 셈 조각을 기다리는지(오면 다시 그린다 — 한 번만 건다) */
+  private faceKitWait = false;
   /**
    * 0.46.0 가상 커서(켰을 때만): 자리(CSS 화소)·지금 후보 차례·그 자리 측정 후보 목록, 고르기 모드면 커서 아래 고른 것,
    * 켤 때 포인터 자리(모르면 켠 뒤 처음 본 자리 — 거기서 4화소 넘게 움직이면 끈다). 0.47.0 picks: 고르기 모드 겹친 후보(pickCycle일 때만, 아니면 빈 배열)
@@ -8716,11 +8727,14 @@ export class Viewer3d {
     const M = this.modelOf(m);
     const pos = m.positions, idx = m.indices;
     const scr = (x: number, y: number, z: number): V3 | null => projectToScreen(f, M ? transformPoint(M, [x, y, z]) : [x, y, z]);
-    const vert = (v: number): V3 | null => scr(pos[v * 3]!, pos[v * 3 + 1]!, pos[v * 3 + 2]!);
+    const vert = (t: number, k: number): V3 | null => {
+      const v = idx ? idx[t * 3 + k]! : t * 3 + k;
+      return scr(pos[v * 3]!, pos[v * 3 + 1]!, pos[v * 3 + 2]!);
+    };
     const th = this.theme;
     ctx.beginPath();
     for (const t of fo.tris) {
-      const a = vert(triCorner(idx, t, 0)), b = vert(triCorner(idx, t, 1)), c = vert(triCorner(idx, t, 2));
+      const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
       if (!a || !b || !c) continue;
       ctx.moveTo(a[0], a[1]);
       ctx.lineTo(b[0], b[1]);
@@ -8751,10 +8765,26 @@ export class Viewer3d {
     }
   }
 
-  /** 0.54.0 그물 면 미리 강조 셈(같은 위치·색인 배열·삼각형·구간이면 기억에서 — 넷까지) */
+  /**
+   * 0.54.0 그물 면 미리 강조 셈(같은 위치·색인 배열·삼각형·구간이면 기억에서 — 넷까지). 면 셈 조각이 아직 없으면 받기를 걸고 null(그 프레임은 표식 없이 — 오면 다시 그린다)
+   */
   private faceOutlineOf(m: Mesh3d, tri: number, ranges: readonly IndexRange[] | null): FaceOutline | null {
     const pos = m.positions, idx = m.indices;
     if (!pos?.length) return null;
+    const kit = faceKit;
+    if (!kit) {
+      if (faceKitFailed || this.faceKitWait) return null;
+      faceKitLoad ??= import('./pickpreview').then(
+        (k) => void (faceKit = k),
+        () => void (faceKitFailed = true),
+      );
+      this.faceKitWait = true;
+      void faceKitLoad.then(() => {
+        this.faceKitWait = false;
+        if (!this.disposed && faceKit) this.invalidate();
+      });
+      return null;
+    }
     const key = ranges ? ranges.map((r) => `${r?.start}:${r?.count}`).join(',') : null;
     const memo = this.faceMemo;
     const hit = memo.findIndex((x) => x.pos === pos && x.idx === idx && x.tri === tri && x.ranges === key);
@@ -8763,7 +8793,7 @@ export class Viewer3d {
       if (hit) memo.unshift(...memo.splice(hit, 1));
       return e.out;
     }
-    const out = ranges ? rangesFace(pos, idx, ranges) : planarFace(pos, idx, tri);
+    const out = ranges ? kit.rangesFace(pos, idx, ranges) : kit.planarFace(pos, idx, tri);
     memo.unshift({ pos, idx, tri, ranges: key, out });
     if (memo.length > 4) memo.length = 4;
     return out;
