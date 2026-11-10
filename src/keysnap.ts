@@ -294,9 +294,32 @@ export function keySnapHint(keys: KeySnapKeys, mode: 'measure' | 'pick', pickCyc
   return parts.join(keySnapText(msgs, 'hintJoin'));
 }
 
-/** 세계 점 글: 'X 1, Y 2, Z 3'(num = 수 꼴 — 뷰어는 측정 글과 같은 자릿수, 0.47.0 msgs = 글 틀, 0.53.0 글 함수도) */
-export function pointText(p: readonly number[], num: (v: number) => string, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
-  return keySnapText(msgs, 'point', [num(p[0]!), num(p[1]!), num(p[2]!)]);
+/**
+ * 0.56.0 키보드 알림 수의 종류(KeySnapNumberFn 둘째 인자): 'x'·'y'·'z' 점 좌표(세계 좌표 — 장면 단위), 'distance' 거리(측정 첫 점에서 후보까지·둘째 점을 찍은 거리),
+ * 'dx'·'dy'·'dz' 둘째 점을 찍은 X·Y·Z 차
+ */
+export type KeySnapNumberKind = 'x' | 'y' | 'z' | 'distance' | 'dx' | 'dy' | 'dz';
+
+/** 0.56.0 코어 기본 수 글(KeySnapNumberFn 둘째 인자): 종류, 코어 글(측정 글과 같은 소수 자리 — 거리는 단위 글을 붙인 것), 소수 자릿수, 장면 단위 글('mm' 등 — 모르면 빈 글) */
+export interface KeySnapNumberCore {
+  kind: KeySnapNumberKind;
+  text: string;
+  digits: number;
+  unit: string;
+}
+
+/**
+ * 0.56.0 키보드 알림 수 꼴(KeyboardSnapOptions.formatNumber — SKP 59·60차 요청): 값과 코어 기본 글 → 앱 글(앱 단위·소수 자리 — 피트·인치 같은 앱 꼴).
+ * 돌려준 글을 그 자리에 그대로 넣는다(거리도 — 코어가 단위를 붙이지 않는다). 글이 아니거나 빈 글·예외면 코어 기본 글(core.text)
+ */
+export type KeySnapNumberFn = (value: number, core: KeySnapNumberCore) => string | null | undefined;
+
+/**
+ * 세계 점 글: 'X 1, Y 2, Z 3'(num = 수 꼴 — 뷰어는 측정 글과 같은 자릿수, 0.47.0 msgs = 글 틀, 0.53.0 글 함수도).
+ * 0.56.0: num 둘째 인자로 좌표 종류('x'·'y'·'z')를 준다(한 인수 함수는 그대로)
+ */
+export function pointText(p: readonly number[], num: (v: number, kind: KeySnapNumberKind) => string, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
+  return keySnapText(msgs, 'point', [num(p[0]!, 'x'), num(p[1]!, 'y'), num(p[2]!, 'z')]);
 }
 
 /** 후보 글(0.47.0 — 측정·고르기가 함께 쓴다): label에 차례(수가 둘 이상이면 order)를 붙이고 점 글과 거리를 잇는다 */
@@ -305,19 +328,22 @@ export function orderedText(label: string, index: number, count: number, point: 
   return distance === null ? keySnapText(msgs, 'candidate', [l, point]) : keySnapText(msgs, 'candidateDistance', [l, point, distance]);
 }
 
-/** 측정 후보 알림 글: '끝점 1/3: X 1, Y 2, Z 3'(첫 점에서 거리가 있으면 ', 거리 5 mm'). 후보가 없으면 '붙잡을 점이 없습니다'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도) */
+/**
+ * 측정 후보 알림 글: '끝점 1/3: X 1, Y 2, Z 3'(첫 점에서 거리가 있으면 ', 거리 5 mm'). 후보가 없으면 '붙잡을 점이 없습니다'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도).
+ * 0.56.0: num 둘째 인자로 수 종류('x'·'y'·'z'·'distance')를 준다. 거리 글은 num(거리, 'distance') 뒤에 unit을 붙인다(뷰어는 단위까지 num이 만들고 unit을 비운다)
+ */
 export function candidateText(
   c: { kind: SnapKind | null; axis?: SnapAxis | undefined; locked?: boolean | undefined; point: readonly number[] } | null,
   index: number,
   count: number,
-  num: (v: number) => string,
+  num: (v: number, kind: KeySnapNumberKind) => string,
   distance: number | null,
   unit: string,
   msgs: KeySnapText = KEY_SNAP_MESSAGES,
 ): string {
   if (!c) return keySnapText(msgs, 'noSnap');
   const u = unit ? ` ${unit}` : '';
-  return orderedText(snapKindText(c.kind, c.axis, c.locked, msgs), index, count, pointText(c.point, num, msgs), distance === null ? null : `${num(distance)}${u}`, msgs);
+  return orderedText(snapKindText(c.kind, c.axis, c.locked, msgs), index, count, pointText(c.point, num, msgs), distance === null ? null : `${num(distance, 'distance')}${u}`, msgs);
 }
 
 /** 세 수가 꼭 같은 점인지 */
