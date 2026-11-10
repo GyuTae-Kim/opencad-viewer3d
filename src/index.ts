@@ -92,6 +92,7 @@ export type {
   AxisFaceSnap,
   DwellStep,
   EdgePatchAccept,
+  FaceMeetPlane,
   FacePatchAccept,
   LockEdgeSnap,
   LockFaceSnap,

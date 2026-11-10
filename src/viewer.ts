@@ -92,6 +92,7 @@ import {
 } from './snap';
 import {
   EXACT_SNAP_SCALE,
+  type FaceMeetPlane,
   LENS_SEGMENTS,
   MeasureTracker,
   OPEN_EDGE_CHORD,
@@ -6504,7 +6505,7 @@ export class Viewer3d {
         }
         // 0.19.0 다듬기: 앱이 그 축 직선과 정확한 곡면의 교차를 주면 그 점(축 위로 내린 자리). 잠글 방향은 코어 점으로 정했다(0.14.0 규칙).
         // 0.37.0: 칸을 얕게 뚫는 축은 넓힌 받기(그 칸 위 곡면 조각 자리·커서에서 붙잡기 거리 안 — 같은 평면 짝 위면 face가 그 삼각형)
-        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, axisRefineLine(face.from, face.axis), first, h) : null;
+        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, axisRefineLine(face.from, face.axis), first, h, face) : null;
         if (rp) {
           out.p = rp.p;
           out.face = rp.face;
@@ -6791,7 +6792,7 @@ export class Viewer3d {
     const h = k.hit;
     out.face = copyFace(h);
     // 0.37.0: 칸을 얕게 뚫는 안내 선은 넓힌 받기(axisFaceRefined — 같은 평면 짝 위면 face가 그 삼각형)
-    const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, s.p, out.face, line, first, h) : null;
+    const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, s.p, out.face, line, first, h, k) : null;
     if (rp) {
       out.p = rp.p;
       out.face = rp.face;
@@ -6968,6 +6969,7 @@ export class Viewer3d {
     line: SnapRefineLine,
     first: V3 | null,
     hit?: FaceHit | null,
+    meet?: { plane: FaceMeetPlane; tol: number } | null,
   ): { p: V3; face: SnapFace } | null {
     const refine = so.refineFace;
     if (!refine) return null;
@@ -6980,6 +6982,11 @@ export class Viewer3d {
       first: first ? [first[0], first[1], first[2]] : null,
       ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
     };
+    // 0.55.0(NC 57차) 코어 점을 구한 평면·같은 자리 허용치(축·잠근 선·안내 선과 면의 교차 faceMeet — 받은 칸 face와 다를 수 있다)
+    if (meet) {
+      input.plane = { point: [meet.plane.point[0], meet.plane.point[1], meet.plane.point[2]], normal: [meet.plane.normal[0], meet.plane.normal[1], meet.plane.normal[2]] };
+      input.tol = meet.tol;
+    }
     const key = openRefineKey(input);
     let q = so.openMemo.get(key);
     if (q === undefined) {
@@ -7290,7 +7297,7 @@ export class Viewer3d {
       out = lockOut(face.p);
       out.face = { id: h.id, index: h.index, normal: h.normal };
       // 0.37.0: 칸을 얕게 뚫는 잠근 선은 넓힌 받기(axisFaceRefined — 같은 평면 짝 위면 face가 그 삼각형)
-      const r = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first, h) : null;
+      const r = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first, h, face) : null;
       if (r) {
         rp = r.p;
         out.face = r.face;
