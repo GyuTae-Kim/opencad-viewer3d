@@ -1711,6 +1711,8 @@ export class Viewer3d {
    * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다).
    * 0.55.0: 'auto'는 묶을 수 있는 그물(무늬·뒷면·PBR·반투명·함께 쓰는 배열이 없는 작은 그물)을 세어 문턱에 닿은 장면에서만 받기를 건다. 받기가 MERGE_KIT_WAIT_MS(4 s)
    * 안에 끝나지 않으면 이 페이지는 기다리지 않고 그물마다 이어 올린다(mergingState 'late', stats.merged.pending 0). 이 약속은 받기가 끝날 때 풀린다(늦게 와도 true — 그때부터 굽는다)
+   * 0.56.0: 한 번에 올리는 장면도 기다리지 않아도 된다 — 켜질 장면을 조각 없이 주면 뷰어가 조각이 올 때까지(기다림 한도 안) 올리기를 미룬다(setScene). 미리 받으면
+   * 그 미룸 없이 setScene 안에서 올린다(첫 그림이 받기 시간만큼 빠르다)
    */
   static preloadMerging(): Promise<boolean> {
     return loadMergeKit();
@@ -2177,6 +2179,9 @@ export class Viewer3d {
    * incremental을 주면 GPU 올리기를 여러 프레임에 나눈다(한 프레임 budgetMs, 기본 8 ms — 묶음 하나는 통째로).
    * 올라간 묶음부터 그리고, onProgress(올린 묶음 수, 전체)를 프레임마다 부른다(끝나면 done = total).
    * 범위·고르기·측정은 처음부터 장면 전체로 한다. 주지 않으면 예전처럼 한 번에 올린다.
+   * 0.56.0: 한 번에 올리는 장면이 묶어 그리기를 켤 장면('auto'면 묶을 수 있는 그물이 문턱 이상, 'on'이면 그물이 문턱 이상)이고 묶어 그리기 조각을 받는 중이면
+   * 조각이 올 때까지(MERGE_KIT_WAIT_MS 안) 올리기를 미룬다 — 그동안 이 장면은 그리지 않고(범위·고르기·측정은 그대로) stats.merged.pending은 1, 오면 다음 프레임에
+   * 한 번에 올리고 굽는다(조각을 미리 받은 setScene과 같은 GL 객체·그림). 늦거나 받지 못하거나 merging을 끄면 곧 그물마다 올리고, 그림 저장(toBlob·renderImage)은 기다리지 않는다.
    * 그물 하나만 바뀌면 장면 전체 대신 setMesh·removeMesh(0.11.0)를 쓴다.
    *
    * 0.25.0 release(true = 셋 모두, 또는 ReleaseOptions): 켠 배열·원본은 GPU에 올린 뒤(나눠 올리면 그 그물 차례에, 무늬는 풀어 올린 뒤)
