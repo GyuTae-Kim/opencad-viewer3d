@@ -1039,9 +1039,10 @@ export class Renderer3d {
   private renderMs = 0;
   /**
    * 0.54.0 미뤄 둔 장면 훑기(mergePrescan — 나눠 올리는 장면은 첫 그림 뒤 올리는 걸음마다 몫 안에서): 장면, 단계(0 그물 배열 적기·1 선분·점 배열 적기·2 묶을 수 있는 그물 세기),
-   * 다음 그물 번호, 본 배열, 센 수. null이면 훑기를 마쳤거나 훑지 않는 장면
+   * 다음 그물 번호, 본 배열, 센 수. null이면 훑기를 마쳤거나 훑지 않는 장면.
+   * 0.55.0 c: 훑기를 마치기 전에 올린 그물 가운데 묶을 수 있어 보이는 것의 수('auto' 받기를 일찍 걸 위 한계 — mergeOffer)
    */
-  private mgScan: { scene: Scene3d; phase: 0 | 1 | 2; i: number; seen: WeakSet<object>; n: number } | null = null;
+  private mgScan: { scene: Scene3d; phase: 0 | 1 | 2; i: number; seen: WeakSet<object>; n: number; c: number } | null = null;
   /** 0.54.0 올렸지만 아직 굽기 기다림에 넣지 못한 그물(훑기 전·중이거나 조각을 받는 중 — 장면 차례)과 그 정점 수 */
   private mgUnfed: MeshRec[] = [];
   private mgUnfedVerts = 0;
@@ -1947,7 +1948,8 @@ export class Renderer3d {
    * 정점·윤곽선이 한도 안이며 배열을 함께 쓰지 않는 그물) 수가 문턱 이상인지로 이 장면의 묶어 그리기를 정한다. 그물이 문턱보다 적은 장면은 훑지 않는다(0.51.0과 같은 일).
    * 0.54.0: 훑을 장면이면 묶어 그리기 조각 받기를 곧 건다(훑기·첫 올리기 걸음과 겹친다). defer(나눠 올리기)면 훑기를 첫 그림 뒤 올리는 걸음으로 미룬다 —
    * 8만 그물 장면에서 이 훑기(배열 40만 개 적기)가 setScene을 50~90 ms 붙잡아 첫 그림이 0.51.0보다 늦었다(가짜 GL 첫 그림 0.51.0 137~142 → 0.53.0 176~319 ms).
-   * 0.55.0: 'auto'는 여기서 받기를 걸지 않고 훑기가 묶을 수 있는 그물을 문턱만큼 센 때 건다(mergeScan — 무늬·함께 쓰는 배열이 많아 켜지지 않을 장면은 받지 않는다)
+   * 0.55.0: 'auto'는 여기서 받기를 걸지 않는다 — 훑기가 묶을 수 있는 그물을 문턱만큼 센 때(mergeScan), 또는 그 전에 올린 그물 가운데 묶을 수 있어 보이는 것이
+   * 문턱에 닿은 때(mergeOffer — 나눠 올리기 첫 걸음 안이라 받기가 첫 걸음들과 겹친다) 건다. 무늬·반투명·같은 정의 자리가 많아 켜질 수 없는 장면은 받지 않는다
    */
   private mergePrescan(scene: Scene3d, defer: boolean): void {
     const mode = this.merging.mode;
@@ -1955,7 +1957,7 @@ export class Renderer3d {
     this.mgScan = null;
     if (this.mgOff || (mode === 'auto' && scene.meshes.length < this.merging.min)) return;
     if (mode === 'on') this.wantKit();
-    this.mgScan = { scene, phase: 0, i: 0, seen: new WeakSet<object>(), n: 0 };
+    this.mgScan = { scene, phase: 0, i: 0, seen: new WeakSet<object>(), n: 0, c: 0 };
     if (!defer) this.mergeScan(Infinity);
   }
 
@@ -2026,6 +2028,11 @@ export class Renderer3d {
       this.mgDirty = true;
       return;
     }
+    // 0.55.0 'auto' 훑기를 마치기 전: 올린 그물 가운데 묶을 수 있어 보이는 것(mergeSrcOf — 앞서 올린 그물과 함께 쓰는 배열은 refs·적은 배열로 빠지고, 뒤 그물과 함께 쓸 배열의
+    // 첫 그물만 더 센다 — 정확한 셈의 위 한계)이 문턱에 닿으면 곧 받기를 건다(그 장면은 켜질 수 있다). 훑기 셈을 기다리면 받기가 첫 걸음들과 겹치지 않아
+    // 큰 장면의 굽기가 받기 시간만큼 늦었다(가짜 WebGL 데우지 않은 1만 — 55차 측정)
+    const sc = this.mgScan;
+    if (sc && !mergeKit && this.merging.mode === 'auto' && sc.c < this.merging.min && !kitWaiters.has(this.kitNote) && this.mergeSrcOf(r) && ++sc.c >= this.merging.min) this.wantKit();
     if (this.mgScan || (this.mgActive && !mergeKit && !this.mgOff)) {
       this.mgUnfed.push(r);
       this.mgUnfedVerts += Math.floor(r.src.positions.length / 3);

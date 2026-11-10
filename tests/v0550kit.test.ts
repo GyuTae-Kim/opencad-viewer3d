@@ -90,6 +90,8 @@ function toHold(V: ViewerCtor, w: { v: ViewerT; r: Rend }, n: number): void {
   expect(V.mergingState()).toBe('idle');
   expect(w.r.uploadSome(600_000)).toBe(false);
   expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+  // 첫 걸음(첫 그림 앞 — 아직 훑지 않았다)에서 올린 그물 가운데 묶을 수 있어 보이는 것이 문턱에 닿아 받기를 건다(받기가 첫 걸음들과 겹친다)
+  expect(V.mergingState()).toBe('loading');
   w.v.renderNow();
   expect(w.r.uploadSome(600_000)).toBe(false);
   expect(V.mergingState()).toBe('loading');
@@ -236,7 +238,8 @@ describe('0.55.0 조각 받기 걸림 막기', () => {
 describe("0.55.0 'auto' 받기 시점", () => {
   it('그물이 문턱 이상이어도 묶을 수 있는 그물(함께 쓰는 배열이 없는 것)이 문턱 아래면 받지 않는다 — 나눠 올리기·한 번에 올리기', async () => {
     const { Viewer3d } = await fresh('real');
-    // 상자 모양 셋을 그물 3,000개가 나눠 쓴다(같은 정의 자리 — 묶지 않는다) + 서로 다른 상자 1,999개
+    // 상자 모양 셋을 그물 3,000개가 나눠 쓴다(같은 정의 자리 — 묶지 않는다) + 서로 다른 상자 1,999개.
+    // 나눠 올리기 첫 걸음의 올린 그물 셈(위 한계)은 앞서 올린 그물과 함께 쓰는 배열을 빼므로 모양마다 첫 그물 하나씩만 센다(3 — 문턱 아래)
     const shapes = [0, 1, 2].map((k) => box(k));
     const shared = (i: number): Mesh3d => ({ ...shapes[i % 3]!, id: `s${i}`, origin: [(i % 60) * 10, 1000 + Math.floor(i / 60) * 10, 0] });
     const sc: Scene3d = { name: 's', units: 'mm', meshes: [...Array.from({ length: 3000 }, (_, i) => shared(i)), ...Array.from({ length: MERGE_AUTO_MIN - 1 }, (_, i) => box(i + 10))], lines: [] };
