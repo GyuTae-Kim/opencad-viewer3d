@@ -197,6 +197,17 @@ export interface SnapRefineFaceInput {
    * 같은 입력이라도 open이 다르면 따로 묻고 각자 제 답을 쓴다 — open일 때 다른 길로 푸는 앱도 된다
    */
   open?: boolean;
+  /**
+   * 0.55.0(NC 57차 요청) 열린 후보가 아닌 'axisFace'에서 코어 점을 구한 평면(평면 위 점·법선 — 길이는 상관없다): point는 line과 이 평면의 교차다.
+   * 커서 아래 칸이나 앞서 다시 맞춘 칸의 평면이라 face(point의 화면 자리에서 다시 맞춘 칸 — 그 칸 위 점이 point에서 tol 안이라 받았다)의 평면과 다를 수 있다
+   * (선이 곡면 벽을 스치면 이웃 칸 — 그때 point는 face 평면 밖이다). 다른 꼴('onFace'·열린 후보)에는 이 필드가 없다
+   */
+  plane?: { point: V3; normal: V3 };
+  /**
+   * 0.55.0 plane과 함께: 그 받기의 같은 자리 허용치(point 깊이에서 화면 반 화소, 아주 큰 좌표면 좌표 크기의 1e-9배 — 앱이 문턱을 화면 크기로 맞출 때).
+   * tol은 기억 열쇠(openRefineKey)에 든다 — 확대·축소로 tol이 바뀌면 다시 묻는다(plane은 같은 코어 점·축 직선이면 같은 평면이라 넣지 않는다)
+   */
+  tol?: number;
 }
 
 /** 면 위 점 다듬기 종류(0.21.0 — SnapRefineFaceInput.kind): 'axisFace'(0.19.0)·'onFace' */
@@ -389,14 +400,17 @@ const segKey = (s: SnapSegment): string => `${s.kind}|${s.id.length}:${s.id}|${s
  * 0.19.0: 축이 면을 뚫는 점('axisFace')은 선분 자리에 면(그물 id·삼각형 번호·법선)이 들어간다. 0.21.0 'onFace'도 같은 꼴이다(line이 커서 광선이라 커서마다 다른 열쇠 —
  * 뷰어는 이 기억에 넣지 않고 바로 앞 입력 하나만 견준다).
  * 0.36.0: 열린 후보(open = true)면 열쇠 끝에 '#open'이 붙는다(아니면 그대로). 뚫는 칸의 열린 후보(0.34.0)는 코어 'axisFace'·'axisEdge'와 같은 입력일 수 있는데,
- * open일 때 다른 길로 푸는 앱(높이 판정을 달리하는 등)이면 먼저 물은 쪽 답이 다른 쪽에 쓰이지 않게 따로 묻는다
+ * open일 때 다른 길로 푸는 앱(높이 판정을 달리하는 등)이면 먼저 물은 쪽 답이 다른 쪽에 쓰이지 않게 따로 묻는다.
+ * 0.55.0: 면 입력에 같은 자리 허용치(tol)가 있으면 열쇠 끝에 붙는다(없으면 그대로 — 앱이 tol로 문턱을 맞추면 배율이 바뀔 때 다시 묻게).
+ * 점을 구한 평면(plane)은 넣지 않는다 — 같은 코어 점·축 직선이면 같은 평면이다(같은 평면을 이웃 삼각형으로 맞춰 평면 위 점만 다를 때 다시 묻지 않게)
  */
 export function openRefineKey(
-  c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line' | 'open'> | Pick<SnapRefineFaceInput, 'kind' | 'point' | 'face' | 'first' | 'line' | 'open'>,
+  c: Pick<SnapRefineInput, 'kind' | 'point' | 'segment' | 'other' | 'first' | 'line' | 'open'> | Pick<SnapRefineFaceInput, 'kind' | 'point' | 'face' | 'first' | 'line' | 'open' | 'tol'>,
 ): string {
   const l = c.line;
   const where = 'face' in c ? `face|${c.face.id.length}:${c.face.id}|${c.face.index}|${c.face.normal.join(',')}#-` : `${segKey(c.segment)}#${c.other ? segKey(c.other) : '-'}`;
-  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis ?? '-'}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}${c.open ? '#open' : ''}`;
+  const tol = 'face' in c && c.tol !== undefined ? `#tol|${c.tol}` : '';
+  return `${c.kind}#${c.point.join(',')}#${where}#${c.first ? c.first.join(',') : '-'}${l ? `#${l.axis ?? '-'}|${l.origin.join(',')}|${l.dir.join(',')}` : ''}${c.open ? '#open' : ''}${tol}`;
 }
 
 /** 열린 후보 다듬기 기억(0.15.0): 열쇠 → 앱이 돌려준 점(받을 수 있는 수 셋의 복사본, 아니면 null). 가장 오래 쓰지 않은 것부터 지운다 */

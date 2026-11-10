@@ -112,7 +112,7 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     expect(off.v.stats.merged.groups).toBe(0);
   });
 
-  it('문턱을 넘는 장면 나눠 올리기: setScene은 훑지 않고 받기를 걸며, 첫 그림 앞에서는 굽지 않고 굽기 단위에서 걸음을 멈춘다 — 다 올린 뒤는 미리 받은 뷰어와 같다', async () => {
+  it('문턱을 넘는 장면 나눠 올리기: setScene은 훑지 않고(0.55.0 받기도 훑기 뒤에), 첫 그림 앞에서는 굽지 않고 굽기 단위에서 걸음을 멈춘다 — 다 올린 뒤는 미리 받은 뷰어와 같다', async () => {
     const N = MERGE_UPLOAD_MESHES + 600;
     const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false, renderMode: 'shadedEdges', viewCube: false });
     views.push(v);
@@ -127,7 +127,8 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     };
     // 몫이 아주 커도(한 걸음에 다 올릴 몫) 첫 걸음은 굽기 단위 − 1에서 멈춘다
     v.setScene(boxes(N), { incremental: { budgetMs: 600_000 } });
-    expect(Viewer3d.mergingState()).toBe('loading');
+    // 0.55.0 'auto'는 setScene에서 받기를 걸지 않는다(첫 그림 뒤 훑기가 묶을 수 있는 그물을 문턱만큼 센 때 — v0550kit.test.ts). 0.54.0은 여기서 'loading'
+    expect(Viewer3d.mergingState()).toBe('idle');
     expect(r.mgScan).not.toBeNull();
     expect(r.uploadSome(600_000)).toBe(false);
     expect(r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);

@@ -92,6 +92,7 @@ import {
 } from './snap';
 import {
   EXACT_SNAP_SCALE,
+  type FaceMeetPlane,
   LENS_SEGMENTS,
   MeasureTracker,
   OPEN_EDGE_CHORD,
@@ -189,6 +190,7 @@ import {
   closestKey,
   closestPart,
   closestSlice,
+  primsWithin,
   sameClosestKey,
   sliceRange,
 } from './closest';
@@ -533,6 +535,17 @@ export interface ClosestPointsOptions {
    */
   rangeA?: IndexRange | readonly IndexRange[] | null;
   rangeB?: IndexRange | readonly IndexRange[] | null;
+}
+
+/**
+ * 0.55.0 점 둘레 삼각형 묻기 선택(Viewer3d.trianglesNear): local = 점과 반지름이 그물 자기 좌표(Mesh3d.positions — 묶음 원점·행렬을 반영하기 전)다(기본은 세계 —
+ * closestPoints와 같다). hidden = 숨긴 구간(setHiddenRanges)도 넣는다(기본은 뺀다 — closestPoints와 같다). range = 그 구간 안 삼각형만(closestPoints rangeA와 같은 꼴 —
+ * 구간만의 BVH를 만들어 기억한다)
+ */
+export interface TrianglesNearOptions {
+  local?: boolean;
+  hidden?: boolean;
+  range?: IndexRange | readonly IndexRange[] | null;
 }
 
 /**
@@ -1695,13 +1708,18 @@ export class Viewer3d {
    * 0.54.0 묶어 그리기 조각(묶음 굽기 코드 — 앱 번들러가 따로 나눈 조각)을 미리 받는다. 받았으면 true, 받지 못했으면 false(그 뒤 이 페이지는 그물마다 그린다).
    * 뷰어는 묶어 그리기를 켤 수 있는 장면(setRenderOptions merging 'on'이거나 'auto'에서 그물이 문턱 이상)을 받을 때 스스로 받기를 걸고, 받는 동안은 그물마다 그리며
    * 나눠 올리기는 굽지 못한 그물이 굽기 단위(2,048개)에 닿으면 기다린다. 큰 장면을 한 번에(incremental 없이) 올리는 앱이 조각이 오기 전 그물마다 GL 객체를 쌓지 않으려면
-   * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다)
+   * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다).
+   * 0.55.0: 'auto'는 묶을 수 있는 그물(무늬·뒷면·PBR·반투명·함께 쓰는 배열이 없는 작은 그물)을 세어 문턱에 닿은 장면에서만 받기를 건다. 받기가 MERGE_KIT_WAIT_MS(4 s)
+   * 안에 끝나지 않으면 이 페이지는 기다리지 않고 그물마다 이어 올린다(mergingState 'late', stats.merged.pending 0). 이 약속은 받기가 끝날 때 풀린다(늦게 와도 true — 그때부터 굽는다)
    */
   static preloadMerging(): Promise<boolean> {
     return loadMergeKit();
   }
 
-  /** 0.54.0 묶어 그리기 조각 받기 상태('idle' 받기를 걸지 않음 · 'loading' · 'ready' · 'failed' — 문턱을 넘지 않는 장면만 열었으면 'idle'로 남는다) */
+  /**
+   * 0.54.0 묶어 그리기 조각 받기 상태('idle' 받기를 걸지 않음 · 'loading' · 'ready' · 'failed' — 문턱을 넘지 않는 장면만 열었으면 'idle'로 남는다).
+   * 0.55.0 'late': 받는 중이지만 기다림 한도(MERGE_KIT_WAIT_MS)를 넘었다 — 기다리지 않고 그물마다 올린다(오면 'ready', 실패하면 'failed')
+   */
   static mergingState(): MergeKitState {
     return mergeKitState();
   }
@@ -5092,6 +5110,23 @@ export class Viewer3d {
     }
   }
 
+  /**
+   * 0.55.0 그물 묶음 id에서 점 point로부터 거리 radius 안의 삼각형 번호(Pick3d.raw·setHiddenRanges·closestPoints indexA와 같은 번호, 오름차순 — STEP 64차 요청).
+   * 점·반지름은 세계 좌표(묶음 원점·행렬을 반영 — closestPoints와 같다), local이면 그물 자기 좌표. 고르기·최소 거리와 같은 BVH(없으면 만든다)를 내려가며
+   * 먼 마디는 버리고 남은 삼각형만 정확한 거리(double — closestPoints와 같은 셈)로 고르므로 답은 모든 삼각형을 같은 셈으로 잰 전수와 같다(깨진 정점의 삼각형은 빠진다).
+   * 큰 그물에서 점 하나에 마디 수십 개·삼각형 수십 개만 본다(전수는 삼각형 수만큼). radius 0이면 그 점이 놓인 삼각형만.
+   * 숨긴 구간은 뺀다(hidden이면 넣는다). 없는 id·그물이 아닌 묶음·유한하지 않은 점·0보다 작거나 NaN인 반지름이면 null, 구간이 그물 밖뿐이면 빈 목록
+   */
+  trianglesNear(id: string, point: readonly number[], radius: number, opts: TrianglesNearOptions = {}): number[] | null {
+    const it = this.items.get(id);
+    if (it?.kind !== 'mesh' || !point || !(radius >= 0) || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || !Number.isFinite(point[2])) return null;
+    const s = this.closestShape(id, true, opts.range);
+    if (!s) return [];
+    if (opts.local) s.model = null;
+    if (opts.hidden) s.skip = null;
+    return primsWithin(s, point, radius);
+  }
+
   /** 0.41.0 indices: 배열 안 번호(rawA·rawB)에 원본 식별 번호(indexA·indexB — segmentIds·pointIds, 그물이면 삼각형 번호 그대로)를 더한다 */
   private closestIds(idA: string, idB: string, r: ClosestResult | null): ClosestResult | null {
     if (!r || r.rawA === undefined || r.rawB === undefined) return r;
@@ -6470,7 +6505,7 @@ export class Viewer3d {
         }
         // 0.19.0 다듬기: 앱이 그 축 직선과 정확한 곡면의 교차를 주면 그 점(축 위로 내린 자리). 잠글 방향은 코어 점으로 정했다(0.14.0 규칙).
         // 0.37.0: 칸을 얕게 뚫는 축은 넓힌 받기(그 칸 위 곡면 조각 자리·커서에서 붙잡기 거리 안 — 같은 평면 짝 위면 face가 그 삼각형)
-        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, axisRefineLine(face.from, face.axis), first, h) : null;
+        const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face!, axisRefineLine(face.from, face.axis), first, h, face) : null;
         if (rp) {
           out.p = rp.p;
           out.face = rp.face;
@@ -6757,7 +6792,7 @@ export class Viewer3d {
     const h = k.hit;
     out.face = copyFace(h);
     // 0.37.0: 칸을 얕게 뚫는 안내 선은 넓힌 받기(axisFaceRefined — 같은 평면 짝 위면 face가 그 삼각형)
-    const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, s.p, out.face, line, first, h) : null;
+    const rp = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, s.p, out.face, line, first, h, k) : null;
     if (rp) {
       out.p = rp.p;
       out.face = rp.face;
@@ -6934,6 +6969,7 @@ export class Viewer3d {
     line: SnapRefineLine,
     first: V3 | null,
     hit?: FaceHit | null,
+    meet?: { plane: FaceMeetPlane; tol: number } | null,
   ): { p: V3; face: SnapFace } | null {
     const refine = so.refineFace;
     if (!refine) return null;
@@ -6946,6 +6982,11 @@ export class Viewer3d {
       first: first ? [first[0], first[1], first[2]] : null,
       ray: { origin: [...ray.origin] as V3, dir: [...ray.dir] as V3 },
     };
+    // 0.55.0(NC 57차) 코어 점을 구한 평면·같은 자리 허용치(축·잠근 선·안내 선과 면의 교차 faceMeet — 받은 칸 face와 다를 수 있다)
+    if (meet) {
+      input.plane = { point: [meet.plane.point[0], meet.plane.point[1], meet.plane.point[2]], normal: [meet.plane.normal[0], meet.plane.normal[1], meet.plane.normal[2]] };
+      input.tol = meet.tol;
+    }
     const key = openRefineKey(input);
     let q = so.openMemo.get(key);
     if (q === undefined) {
@@ -7256,7 +7297,7 @@ export class Viewer3d {
       out = lockOut(face.p);
       out.face = { id: h.id, index: h.index, normal: h.normal };
       // 0.37.0: 칸을 얕게 뚫는 잠근 선은 넓힌 받기(axisFaceRefined — 같은 평면 짝 위면 face가 그 삼각형)
-      const r = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first, h) : null;
+      const r = so.refineFace ? this.axisFaceRefined(so, f, x, y, snapPx, face.p, out.face, refineLineOf(line), first, h, face) : null;
       if (r) {
         rp = r.p;
         out.face = r.face;

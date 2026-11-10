@@ -381,7 +381,20 @@ export interface TrackLine {
   axis: SnapAxis;
 }
 
-/** 축과 면의 교차 결과(0.18.0): 찍을 점, 축, 지나는 점(복사본), 그 축 단위 방향, 커서와의 화면 거리, 그 점의 면 맞음(hitAt이 돌려준 그 객체), 받은 lines 안 번호 */
+/**
+ * 0.55.0 축·잠근 선·안내 선과 면의 교차가 점을 구한 평면(NC 57차 요청 — 뷰어는 SnapRefineFaceInput.plane으로 넘긴다): 평면 위 점(면 맞음의 origin, 없으면 point)과
+ * 법선(면 맞음 그대로 — 길이는 상관없다)의 복사본. 찍을 점은 그 직선과 이 평면의 교차다. 이 평면은 커서 아래 면이거나 앞서 다시 맞춘 면이라,
+ * 찍을 점의 화면 자리에서 다시 맞춘 면(hit)과 다를 수 있다(곡면을 나눈 이웃 칸 — 다시 맞춘 점이 찍을 점에서 tol 안이라 받았다)
+ */
+export interface FaceMeetPlane {
+  point: V3;
+  normal: V3;
+}
+
+/**
+ * 축과 면의 교차 결과(0.18.0): 찍을 점, 축, 지나는 점(복사본), 그 축 단위 방향, 커서와의 화면 거리, 그 점의 면 맞음(hitAt이 돌려준 그 객체), 받은 lines 안 번호.
+ * 0.55.0 plane = 찍을 점을 구한 평면(FaceMeetPlane), tol = 다시 맞춘 점을 같은 자리로 본 허용치(그 깊이에서 화면 반 화소, 아주 큰 좌표면 좌표 크기의 1e-9배)
+ */
 export interface AxisFaceSnap<H extends TrackFaceHit = TrackFaceHit> {
   p: V3;
   axis: SnapAxis;
@@ -390,6 +403,8 @@ export interface AxisFaceSnap<H extends TrackFaceHit = TrackFaceHit> {
   distPx: number;
   hit: H;
   line: number;
+  plane: FaceMeetPlane;
+  tol: number;
 }
 
 /** 축과 면의 교차에서 면을 바꿔 다시 구하는 최대 횟수(0.18.0 — 곡면을 나눈 삼각형에서 축이 뚫는 삼각형을 찾아 간다) */
@@ -423,14 +438,15 @@ export function axisFaceSnap<H extends TrackFaceHit>(
     const e = dirs.find(([n]) => n === axis)?.[1];
     if (!e || cursorOn(f, O, x, y, snapPx)) continue;
     const r: LockFaceSnap<H> | null = faceMeet<H>(f, O, e, x, y, snapPx, under, hitAt, steps, best ? best.distPx : Infinity);
-    if (r) best = { p: r.p, axis, from: [O[0]!, O[1]!, O[2]!], direction: [e[0], e[1], e[2]], distPx: r.distPx, hit: r.hit, line: li };
+    if (r) best = { p: r.p, axis, from: [O[0]!, O[1]!, O[2]!], direction: [e[0], e[1], e[2]], distPx: r.distPx, hit: r.hit, line: li, plane: r.plane, tol: r.tol };
   }
   return best;
 }
 
 /**
  * 점 O를 지나는 단위 방향 e의 직선이 커서 아래 면(under)에서 시작해 맨 앞에 보이는 면을 뚫는 점(axisFaceSnap·lockFaceSnap이 함께 쓴다 — 규칙은 axisFaceSnap 머리글).
- * 커서에서 snapPx 안이고 bestDist보다 가까울 때만 { p, distPx, hit }, 아니면 null
+ * 커서에서 snapPx 안이고 bestDist보다 가까울 때만 { p, distPx, hit, plane, tol }, 아니면 null.
+ * 0.55.0 plane = p를 구한 평면(복사본 — 받은 면 hit와 다를 수 있다), tol = hit.point를 p와 같은 자리로 본 허용치(meetTol)
  */
 function faceMeet<H extends TrackFaceHit>(
   f: ViewFrame,
@@ -443,7 +459,7 @@ function faceMeet<H extends TrackFaceHit>(
   hitAt: (sx: number, sy: number) => H | null | undefined,
   steps: number,
   bestDist: number,
-): { p: V3; distPx: number; hit: H } | null {
+): { p: V3; distPx: number; hit: H; plane: FaceMeetPlane; tol: number } | null {
   let plane: TrackFaceHit = under;
   for (let k = 0; k < steps; k++) {
     const n = plane.normal, Q = plane.origin ?? plane.point;
@@ -460,7 +476,7 @@ function faceMeet<H extends TrackFaceHit>(
     const s = projectToScreen(f, m)!;
     const h = hitAt(s[0], s[1]);
     if (!h) return null;
-    if (dist3(h.point, m) <= tol) return { p: m, distPx: dist, hit: h };
+    if (dist3(h.point, m) <= tol) return { p: m, distPx: dist, hit: h, plane: { point: [Q[0]!, Q[1]!, Q[2]!], normal: [n[0]!, n[1]!, n[2]!] }, tol };
     plane = h;
   }
   return null;
@@ -473,11 +489,16 @@ export interface LockEdgeSnap<S extends TrackSegment = TrackSegment> {
   seg: S;
 }
 
-/** 잠근 선과 면의 교차 결과(0.19.0 lockFaceSnap): 찍을 점, 커서와의 화면 거리, 그 점의 면 맞음(hitAt이 돌려준 그 객체) */
+/**
+ * 잠근 선과 면의 교차 결과(0.19.0 lockFaceSnap): 찍을 점, 커서와의 화면 거리, 그 점의 면 맞음(hitAt이 돌려준 그 객체).
+ * 0.55.0 plane·tol: AxisFaceSnap과 같다(찍을 점을 구한 평면·같은 자리 허용치)
+ */
 export interface LockFaceSnap<H extends TrackFaceHit = TrackFaceHit> {
   p: V3;
   distPx: number;
   hit: H;
+  plane: FaceMeetPlane;
+  tol: number;
 }
 
 /**
@@ -1932,10 +1953,10 @@ export interface TrackDirOtherLine<T = unknown> {
 
 /**
  * 끌어온 점의 나란함·수직 선이 다른 것과 만나는 점(0.28.0 trackDirMeetSnap): TrackDirSnap(찍을 점 — 그 선 위, 끌어온 점, 안내 종류·방향, 화면 거리)에
- * 만난 것(meet): 'line' = 받은 lines의 번호와 꼬리표, 'edge' = 받은 segs의 그 선분, 'face' = 면 맞음(hitAt이 돌려준 그 객체)
+ * 만난 것(meet): 'line' = 받은 lines의 번호와 꼬리표, 'edge' = 받은 segs의 그 선분, 'face' = 면 맞음(hitAt이 돌려준 그 객체 — 0.55.0 plane·tol은 AxisFaceSnap과 같다)
  */
 export type TrackDirMeetSnap<S extends TrackSegment = TrackSegment, H extends TrackFaceHit = TrackFaceHit, T = unknown> = TrackDirSnap & {
-  meet: { kind: 'line'; line: number; tag?: T } | { kind: 'edge'; seg: S } | { kind: 'face'; hit: H };
+  meet: { kind: 'line'; line: number; tag?: T } | { kind: 'edge'; seg: S } | { kind: 'face'; hit: H; plane: FaceMeetPlane; tol: number };
 };
 
 /** trackDirMeetSnap 선택(0.28.0) */
@@ -2009,7 +2030,7 @@ export function trackDirMeetSnap<S extends TrackSegment = TrackSegment, H extend
       // 면
       if (under && hitAt) {
         const r = faceMeet<H>(f, P, dir, x, y, snapPx, under, hitAt, steps, best ? best.distPx : Infinity);
-        if (r) take(r.p, r.distPx, { kind: 'face', hit: r.hit });
+        if (r) take(r.p, r.distPx, { kind: 'face', hit: r.hit, plane: r.plane, tol: r.tol });
       }
     }
   }

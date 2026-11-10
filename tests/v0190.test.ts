@@ -127,7 +127,8 @@ describe('lockFaceSnap(잠근 선과 면의 교차)', () => {
     expect(r.p).toEqual(M);
     expect(r.hit.name).toBe('바닥');
     expect(r.distPx).toBeCloseTo(Math.hypot(2, 1), 6);
-    expect(Object.keys(r).sort()).toEqual(['distPx', 'hit', 'p']);
+    // 0.55.0 점을 구한 평면·같은 자리 허용치가 더해졌다(NC 57차 — v0550meet.test.ts)
+    expect(Object.keys(r).sort()).toEqual(['distPx', 'hit', 'p', 'plane', 'tol']);
     // 방향 길이·부호는 상관없다
     expect(lockFaceSnap(f, O, [0, 0, -4], x + 2, y + 1, 10, under, (sx, sy) => flat(f, sx, sy))!.p).toEqual(M);
   });

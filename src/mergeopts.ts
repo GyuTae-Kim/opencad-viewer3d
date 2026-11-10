@@ -35,6 +35,14 @@ export const MERGE_DEAD_RATIO = 0.25;
 /** 자리 자료 텍셀 수: 면 그물 하나 12(u_mvp 4·u_mv 4·u_nmat 3·u_color 1), 선 그물 하나 6(u_mvp 4·u_mvz 1·u_color 1) — 셰이더 mergeShader와 같다 */
 export const MERGE_MESH_TEXELS = 12;
 export const MERGE_LINE_TEXELS = 6;
+/**
+ * 0.55.0 묶어 그리기 조각 받기를 기다리는 한도(ms — 받기를 건 때부터). 이 안에 오지도 실패하지도 않으면 그 페이지는 조각을 기다리지 않는다
+ * (Viewer3d.mergingState() 'late' — 나눠 올리기가 굽기 단위에서 멈추지 않고 그물마다 이어 올린다. 받기는 그대로 두어, 나중에 오면 그때부터 굽고
+ * 기다리지 않고 올린 그물은 다 올린 뒤 묶는다). 0.54.0은 한도가 없어 받기가 걸린 채 끝나지 않으면 나눠 올리기가 2,047번째 그물에서 멈춘 채 남았다.
+ * 값: 조각은 gzip 4.1 kB 남짓이라 느린 3G(내려받기 400 kbps 남짓·요청 지연 2 s 안팎)에서도 2.1 s 안팎에 온다 — 그 두 배 가까운 여유. 이 컴퓨터에서
+ * 데우지 않은 첫 받기(시험 변환 포함)는 0.41~0.81 s였다(54차). 더 길게 잡으면 걸린 받기에서 장면이 그만큼 2,047개까지만 보인다
+ */
+export const MERGE_KIT_WAIT_MS = 4000;
 
 /** 0.52.0 묶어 그리기 방식: 'auto' = 묶을 수 있는 그물이 문턱(min) 이상인 장면만, 'on' = 늘, 'off' = 끔(0.51.0 길) */
 export type MergingMode = 'auto' | 'on' | 'off';

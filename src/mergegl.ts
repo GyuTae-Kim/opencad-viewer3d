@@ -8,6 +8,9 @@
  * 렌더러가 조각을 받는 때: 'on'이거나 'auto'에서 장면 그물이 문턱 이상일 때(setScene — 훑기 전, 받기와 첫 올리기 걸음이 겹친다), 'on'으로 바꿀 때,
  * 다 올린 뒤 묶음 밖 그물이 문턱만큼 모일 수 있을 때. 받는 동안은 그물마다 그리고(그림이 같다), 나눠 올리기는 굽지 못한 그물이 굽기 단위에 닿으면 멈춰
  * 기다린다(그물마다 GL 객체가 쌓이는 한도는 0.53.0과 같다). Viewer3d.preloadMerging()으로 미리 받을 수 있다.
+ * 0.55.0: 'auto'는 setScene이 아니라 묶을 수 있는 그물이 문턱에 닿을 수 있다고 센 때(나눠 올리기는 올린 그물의 위 한계 셈 — 첫 걸음 안, 한 번에 올리기는 장면 훑기,
+ * 다 올린 뒤에는 mergeStep이 planLoose와 같은 셈으로) 받기를 건다. 받기가
+ * MERGE_KIT_WAIT_MS 안에 끝나지 않으면 그 페이지는 기다리지 않고 그물마다 이어 올린다(늦게 오면 그때부터 굽고, 기다리지 않고 올린 그물은 다 올린 뒤 planLoose가 묶는다)
  */
 import type { AttribFormat } from './attribs';
 import type { ViewFrame } from './camera';
