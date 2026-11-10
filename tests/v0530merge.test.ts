@@ -16,8 +16,10 @@ import { Viewer3d } from '../src/viewer';
 
 let dom: ReturnType<typeof installDom>;
 const views: Viewer3d[] = [];
-beforeAll(() => {
+beforeAll(async () => {
   dom = installDom();
+  // 0.54.0 묶어 그리기 조각(나눠 받는다)을 먼저 받아 둔다
+  expect(await Viewer3d.preloadMerging()).toBe(true);
 });
 afterAll(() => {
   for (const v of views) v.dispose();

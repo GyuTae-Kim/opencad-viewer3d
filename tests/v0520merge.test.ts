@@ -11,7 +11,8 @@ import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
 import { MERGE_ITEMS, mergeArrays, mergeBytes, mergePlan, mergeSrcBytes, type MergeSrc } from '../src/merge';
-import { MESH_VS, THIN_VS, WIDE_VS, mergeShader, withDefines } from '../src/shaders';
+import { mergeShader } from '../src/mergegl';
+import { MESH_VS, THIN_VS, WIDE_VS, withDefines } from '../src/shaders';
 import { packNormals } from '../src/attribs';
 import { translation } from '../src/math';
 import { boxMesh } from '../src/synth';
@@ -21,8 +22,10 @@ import { cylinderDef, placeAt } from '../scripts/pixels/many';
 
 let dom: ReturnType<typeof installDom>;
 const views: Viewer3d[] = [];
-beforeAll(() => {
+beforeAll(async () => {
   dom = installDom();
+  // 0.54.0 묶어 그리기 조각(나눠 받는다)을 먼저 받아 둔다 — 이 파일은 받은 뒤의 굽기·그리기(0.53.0과 같은 결과)를 본다
+  expect(await Viewer3d.preloadMerging()).toBe(true);
 });
 afterAll(() => {
   for (const v of views) v.dispose();
@@ -138,8 +141,12 @@ function view(sc: Scene3d = scene(), merging = true, opts: { incremental?: boole
   v.setScene(sc, { incremental: opts.incremental ? { budgetMs: 1 } : undefined, release: opts.release } as never);
   return { v, gl };
 }
-/** 묶음 굽기를 마칠 때까지 그린다 */
+/**
+ * 묶음 굽기를 마칠 때까지 그린다. 먼저 한 번 그린다 — 'auto'에서 아직 켜지지 않은 장면은 다음 그리기가 차례를 정하기 전까지 pending이 0이라(0.53.0부터 같은 셈)
+ * 고리가 돌지 않고 마지막 한 번 그리기의 굽기 몫만 구웠다(부하가 아주 크면 묶음 하나 — 54차 전체 시험에서 한 번 보였다)
+ */
 function bake(w: W): void {
+  w.v.renderNow();
   for (let i = 0; i < 100 && (w.v.stats.merged.pending > 0 || w.v.stats.instanced.pending > 0); i++) w.v.renderNow();
   w.v.renderNow();
 }

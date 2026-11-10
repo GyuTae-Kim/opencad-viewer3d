@@ -41,6 +41,7 @@ export type {
   MeasureCandidatesOptions,
   PickCandidatesOptions,
   PickGroupKey,
+  PickPreviewOptions,
   PointerClaimHandler,
   PointerClaimQuery,
   PointerHoldEnd,
@@ -68,6 +69,8 @@ export type {
 } from './viewer';
 export type { Plane4, SectionAxis } from './section';
 export { PICK_CANDIDATES_MAX, samePickTarget } from './scenepick';
+// 0.54.0 면 미리 강조 셈(planarFace·rangesFace 등)은 opencad-viewer3d/pickpreview에서 — 뷰어가 import()로 받는 조각이라 입구에서는 꼴만 내보낸다
+export type { FaceOutline } from './pickpreview';
 export type {
   InferenceLock,
   InferenceLockInput,
@@ -157,8 +160,8 @@ export {
   closestPart,
 } from './closest';
 export { type Annotation3d, type AnnotationKind, HIDDEN_LABEL_DASH, angleAt, annotationGeometry, annotationLabelLook, measureDigits, measureNumber } from './annotate';
-export type { CameraState, Projection, ViewName } from './camera';
-export { VIEW_KEYS, VIEW_LABELS } from './camera';
+export type { CameraState, Projection } from './camera';
+export { VIEW_KEYS, VIEW_LABELS, type ViewName, viewKeyOf } from './viewkeys';
 export {
   type AnimateSetting,
   CAMERA_MOVE_MAX_MS,
@@ -173,9 +176,9 @@ export {
   watchReducedMotion,
 } from './motion';
 export { CUBE_TOUCH_BAND, CUBE_TOUCH_MIN, CUBE_TOUCH_SIZE, type CubeTarget, cubeTargets } from './viewcube';
-export type { GpuBufferPart, GpuBufferStats, InstancingOptions, RenderMode, TextureSource, TextureStats } from './renderer';
+export type { GpuBufferPart, GpuBufferStats, InstancingOptions, MergeKitState, RenderMode, TextureSource, TextureStats } from './renderer';
 export { INSTANCE_MIN } from './renderer';
-export { MERGE_AUTO_MIN, MERGE_MESH_SEGMENTS, MERGE_MESH_VERTS, type MergingMode, type MergingOptions } from './merge';
+export { MERGE_AUTO_MIN, MERGE_MESH_SEGMENTS, MERGE_MESH_VERTS, type MergingMode, type MergingOptions } from './mergeopts';
 export { PBR_DEFAULT_ROUGHNESS, PBR_MAX_EXPONENT, type PbrSource, type PbrState, pbrSource, pbrState, specExponent } from './pbr';
 export { AO_LOW_DIV, AO_MAX_INTENSITY, AO_MAX_PIXELS, AO_RADIUS_RATIO, AO_SAMPLES, type AmbientOcclusionOptions, type AoMoving, type AoParams, aoParams, aoSize } from './ao';
 export {
