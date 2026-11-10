@@ -88,6 +88,16 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     expect(src('shaders.ts')).not.toMatch(/export function mergeShader/);
   });
 
+  it('조각이 받는 렌더러 상태(MergeHost — 캐스트로 넘겨 tsc가 보지 않는다)의 이름이 모두 렌더러에 있다', () => {
+    const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false, viewCube: false });
+    views.push(v);
+    const r = (v as unknown as { renderer: object }).renderer;
+    const host = /export interface MergeHost \{([\s\S]*?)\n\}/.exec(src('mergegl.ts'))![1]!;
+    const names = [...host.matchAll(/^\s+(?:readonly\s+)?(\w+)[(:]/gm)].map((m) => m[1]!);
+    expect(names.length).toBeGreaterThan(20);
+    for (const n of names) expect(n in r, n).toBe(true);
+  });
+
   it('문턱 아래 장면과 끔은 받기를 걸지 않는다(idle)', async () => {
     expect(Viewer3d.mergingState()).toBe('idle');
     const small = view(boxes(MERGE_AUTO_MIN - 1));
