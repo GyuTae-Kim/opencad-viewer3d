@@ -228,9 +228,12 @@ import {
   type TextureSource,
   type TextureStats,
   INSTANCE_MIN,
+  type MergeKitState,
   Renderer3d,
+  loadMergeKit,
+  mergeKitState,
 } from './renderer';
-import { MERGE_AUTO_MIN, type MergingMode } from './merge';
+import { MERGE_AUTO_MIN, type MergingMode } from './mergeopts';
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
 import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
@@ -1654,11 +1657,26 @@ function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | R
   const band = typeof o.band === 'number' && Number.isFinite(o.band) ? Math.max(0.1, Math.min(0.4, o.band)) : CUBE_TOUCH_BAND;
   return { size, band };
 }
-/** 표준 뷰 키 — 0.10.0부터 작은 모듈 camera.ts에 두고 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
+/** 표준 뷰 키 — 0.10.0부터 작은 모듈에 두고(0.54.0 viewkeys.ts — camera.ts가 다시 내보낸다) 여기서도 같은 객체를 내보낸다(opencad-viewer3d/viewer로 가져오던 앱) */
 export { VIEW_KEYS };
 const UNIT_LABEL: Record<Scene3d['units'], string> = { mm: 'mm', inch: 'in', m: 'm', unknown: '' };
 
 export class Viewer3d {
+  /**
+   * 0.54.0 묶어 그리기 조각(묶음 굽기 코드 — 앱 번들러가 따로 나눈 조각)을 미리 받는다. 받았으면 true, 받지 못했으면 false(그 뒤 이 페이지는 그물마다 그린다).
+   * 뷰어는 묶어 그리기를 켤 수 있는 장면(setRenderOptions merging 'on'이거나 'auto'에서 그물이 문턱 이상)을 받을 때 스스로 받기를 걸고, 받는 동안은 그물마다 그리며
+   * 나눠 올리기는 굽지 못한 그물이 굽기 단위(2,048개)에 닿으면 기다린다. 큰 장면을 한 번에(incremental 없이) 올리는 앱이 조각이 오기 전 그물마다 GL 객체를 쌓지 않으려면
+   * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다)
+   */
+  static preloadMerging(): Promise<boolean> {
+    return loadMergeKit();
+  }
+
+  /** 0.54.0 묶어 그리기 조각 받기 상태('idle' 받기를 걸지 않음 · 'loading' · 'ready' · 'failed' — 문턱을 넘지 않는 장면만 열었으면 'idle'로 남는다) */
+  static mergingState(): MergeKitState {
+    return mergeKitState();
+  }
+
   readonly host: HTMLElement;
   readonly canvas: HTMLCanvasElement;
   private wrap: HTMLDivElement;
@@ -2058,6 +2076,8 @@ export class Viewer3d {
       // 0.29.0: 무늬를 다 풀어 올렸으면 되찾은 뒤 끝 알림
       this.checkRestoreDone();
     };
+    // 0.54.0 묶어 그리기 조각이 오면(또는 받지 못하면) 다시 그린다 — 기다리던 올리기·굽기를 잇는다
+    renderer.onMergeReady = () => this.invalidate();
     this.applyTheme();
 
     const r = host.getBoundingClientRect();
@@ -3937,10 +3957,13 @@ export class Viewer3d {
       } else cb?.(p.done, p.total);
     }
     if (!done) {
-      // 0.51.0 다음 걸음 그리기는 올리기만으로 생긴 것(기다리는 그리기가 없었을 때 — 다른 까닭의 invalidate가 끼면 풀린다)
-      const fresh = !this.raf;
-      this.invalidate();
-      if (fresh && this.raf) this.upOnly = true;
+      // 0.54.0 묶어 그리기 조각을 기다려 멈춘 걸음이면 다음 걸음을 걸지 않는다(조각이 오면 onMergeReady가 다시 그린다)
+      if (!this.renderer.uploadHeld) {
+        // 0.51.0 다음 걸음 그리기는 올리기만으로 생긴 것(기다리는 그리기가 없었을 때 — 다른 까닭의 invalidate가 끼면 풀린다)
+        const fresh = !this.raf;
+        this.invalidate();
+        if (fresh && this.raf) this.upOnly = true;
+      }
     }
     // 0.29.0: 나눠 올리기를 마쳤으면 되찾은 뒤 끝 알림(다시 받을 것·풀 무늬가 남았으면 그것을 기다린다)
     else this.checkRestoreDone();
@@ -8360,8 +8383,8 @@ export class Viewer3d {
     }
     this.renderer.render(f, w, h, this.renderState(f, dpr));
     // 0.42.0 인스턴싱 변종을 아직 번역 중이면(그동안 그물마다 그렸다) 다음 프레임에 다시 그린다 — 다 되면 모아 그린다.
-    // 0.52.0 굽기를 기다리는 묶음이 있어도(프레임마다 몫 안에서 굽는다)
-    if (this.renderer.instPending || this.renderer.mergePending) this.invalidate();
+    // 0.52.0 굽기를 기다리는 묶음이 있어도(프레임마다 몫 안에서 굽는다 — 0.54.0 조각을 받는 동안은 걸지 않고 onMergeReady로)
+    if (this.renderer.instPending || this.renderer.mergeSteps) this.invalidate();
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
     this.frameMs = performance.now() - t0;

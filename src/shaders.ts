@@ -28,7 +28,7 @@
  *   선 자리 하나 = 5텍셀(u_mvp 4·u_mvz 1). 굵은 선은 인스턴스 = 선분 × 자리(선분 속성은 나눔 수 = 자리 수, 자리 = gl_InstanceID % u_instN).
  *   여러 단면(CLIPN)·뒷면(BACK)과 함께 쓰지 않는다(그때는 렌더러가 그물마다 그린다). 0.43.0 그물: 그림자(SHADOW)면 자리마다 u_shadowM 4텍셀(11~14),
  *   단면 하나(CLIP)면 자리마다 로컬 평면 u_clip 1텍셀(맨 끝)을 더 읽는다 — 자리 텍셀 수 u_instStride(12·15·16). 예전 균일 변수와 같은 이름의 지역 변수로 두어 식은 그대로다
- * - 묶어 그리기(MERGE, 0.52.0 — 그물·굵은 선·가는 선): 원본 글에는 없고 mergeShader가 INST 변종 글을 바꿔 만든다. 자리 번호를 gl_InstanceID 대신 정점 속성 a_item(위치 5 —
+ * - 묶어 그리기(MERGE, 0.52.0 — 그물·굵은 선·가는 선): 원본 글에는 없고 mergeShader(0.54.0부터 나눠 받는 조각 mergegl.ts)가 INST 변종 글을 바꿔 만든다. 자리 번호를 gl_InstanceID 대신 정점 속성 a_item(위치 5 —
  *   서로 다른 그물을 이은 묶음 버퍼 안 그물 번호)으로 읽고 색 u_color도 자리 자료에서(그물 12텍셀·선 6텍셀). 0.53.0 그물은 그림자 행렬 4텍셀(12~15)·단면 평면 1텍셀(맨 끝)도
  * - PBR 그림(0.43.0 — 그물 변종, PBR 필드를 준 그물만. 주지 않은 그물은 아래 정의가 없어 0.42.0 셰이더와 전처리 뒤 글자까지 같다):
  *   UV = 무늬 그림 없이도 무늬 좌표 a_uv·v_uv를 읽는다(TEX와 같은 줄). NMAP = 법선 그림(u_nmap — 접선 공간 RGB, X·Y 배율 u_nscale): 접선 틀은 시점 위치·무늬 좌표의
@@ -870,40 +870,3 @@ void main() {
   o_color = vec4(1.0);
 #endif
 }`;
-
-/** 한 번만 나오는 글을 바꾼다(없거나 둘 이상이면 예외 — 바꿀 자리를 잘못 찾지 않게) */
-function replaceOnce(src: string, from: string, to: string): string {
-  const i = src.indexOf(from);
-  if (i < 0 || src.indexOf(from, i + 1) >= 0) throw new Error(`mergeShader: 바꿀 자리를 하나로 찾지 못했다 — ${from.trim()}`);
-  return src.slice(0, i) + to + src.slice(i + from.length);
-}
-
-/**
- * 0.52.0 묶어 그리기 변종(MERGE)의 정점 셰이더: INST 변종 글(정의 INST를 넣은 그물·가는 선·굵은 선 정점 셰이더)에서 자리 번호를 gl_InstanceID 대신
- * 정점 속성 a_item(위치 5 — 묶음 안 그물 번호, Uint16을 실수로 읽어 정확한 정수)으로 읽고, 색 u_color(그물은 정점 색 쓰기 u_vcol — 법선 행렬 첫 텍셀의 w도)를 자리 자료 텍셀에서 읽게 바꾼다.
- * 그물 자리 하나 = 12텍셀(u_mvp 4·u_mv 4·u_nmat 3·u_color 1), 선 자리 하나 = 6텍셀(u_mvp 4·u_mvz 1·u_color 1). 예전 균일 변수와 같은 이름의 지역 변수로 두어
- * 아래 식은 한 글자도 바뀌지 않는다. 0.53.0 그물은 그림자(SHADOW)·단면 하나(CLIP)와도 쓴다 — 자리 텍셀 수 u_instStride(12·13·16·17), 그림자 행렬 12~15, 단면 평면 맨 끝
- * (선은 단면이 있으면 그물마다 — 렌더러). 원본 셰이더 글자도 그대로라 MERGE가 아닌 변종은 0.51.0과 같다.
- * 바꿀 자리를 하나로 찾지 못하면 예외(렌더러는 그 변종을 쓰지 않고 그물마다 그린다)
- */
-export function mergeShader(vs: string, kind: 'mesh' | 'line'): string {
-  let s = replaceOnce(vs, 'uniform int u_instBase;\n', 'uniform int u_instBase;\nlayout(location=5) in float a_item;\n');
-  s = replaceOnce(s, 'uniform vec4 u_color;\n', '');
-  if (kind === 'mesh') {
-    // 그물: 정점 색 쓰기(u_vcol)도 자리마다(법선 행렬 첫 텍셀의 w — 정점 색이 있는 그물과 없는 그물을 한 묶음에)
-    s = replaceOnce(s, 'uniform float u_vcol;\n', '');
-    s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * 11 + j;\n', '  int k = u_instBase + int(a_item) * 12 + j;\n');
-    // 0.53.0 그림자(SHADOW)·단면 하나(CLIP): 자리 텍셀 수 u_instStride(12 + 4 + 1)로 읽고, 그림자 행렬은 색 텍셀 뒤 12~15(단면 평면은 인스턴싱과 같이 맨 끝)
-    s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * u_instStride + j;\n', '  int k = u_instBase + int(a_item) * u_instStride + j;\n');
-    s = replaceOnce(s, '  mat4 u_shadowM = mat4(instAt(11), instAt(12), instAt(13), instAt(14));\n', '  mat4 u_shadowM = mat4(instAt(12), instAt(13), instAt(14), instAt(15));\n');
-    s = replaceOnce(
-      s,
-      '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n',
-      '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n  vec4 u_color = instAt(11);\n  float u_vcol = instAt(8).w;\n',
-    );
-  } else {
-    s = replaceOnce(s, '  int k = u_instBase + (gl_InstanceID % u_instN) * 5 + j;\n', '  int k = u_instBase + int(a_item) * 6 + j;\n');
-    s = replaceOnce(s, '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n', '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n  vec4 u_color = instAt(5);\n');
-  }
-  return s;
-}

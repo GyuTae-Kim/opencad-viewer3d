@@ -9,51 +9,27 @@
  * 그 그물 자리 — 색인 시작·정점 시작 — 로 그린다). 그래서 그물이 아주 많은 장면의 GL 객체 수가 그물 수가 아니라 묶음 수만큼이다.
  *
  * 여기에는 묶음 나누기(mergePlan, 0.53.0 굽기 단위로 고르게 나누기 mergeChunks)와 이은 배열 만들기(mergeArrays)만 둔다.
+ * 0.54.0: 상수·선택 꼴은 작은 모듈 mergeopts.ts로 옮기고 여기서 다시 내보낸다 — 이 모듈은 굽기 조각(mergegl.ts)과 함께 렌더러가 import()로 받는다
+ * (렌더러·뷰어·입구는 이 모듈의 값을 가져오지 않는다 — 가져오면 번들러가 이 모듈을 첫 화면 코어 조각에 둔다)
  */
 import type { VertexArray } from './attribs';
+import { MERGE_ITEMS, MERGE_UPLOAD_MESHES, MERGE_UPLOAD_VERTS, MERGE_VERTS } from './mergeopts';
 
-/** 묶음 하나의 그물 수 한도(정점마다 그물 번호를 Uint16으로 둔다) */
-export const MERGE_ITEMS = 65535;
-/** 묶음 하나의 정점 수 한도(묶음 하나 굽기 — 이은 배열 만들기·올리기 — 가 한 프레임을 오래 붙잡지 않게) */
-export const MERGE_VERTS = 262144;
-/** 묶을 작은 그물의 정점 수 한도(이보다 큰 그물은 그물마다 — 그리기 호출 몫이 작다) */
-export const MERGE_MESH_VERTS = 65536;
-/** 묶을 그물의 윤곽선 선분 수 한도 */
-export const MERGE_MESH_SEGMENTS = 65536;
-/**
- * 'auto'(기본)에서 묶어 그리기를 켜는 문턱: 장면에 묶을 수 있는 그물이 이만큼 이상이면 켠다. 그물마다 GL 객체가 7개 남짓(버퍼 넷·VAO 셋)이라 2,000개면 1만 4천 개,
- * 그리기 호출은 면·윤곽선 4,000번(GPU 프로세스가 하나에 2.5 µs 남짓 — 프레임마다 10 ms)이다. 화소 회귀 장면은 모두 이보다 훨씬 작다(그림이 0.51.0과 같다)
- */
-export const MERGE_AUTO_MIN = 2000;
-/**
- * 묶음 밖에 남은 묶을 수 있는 그물(바꾼 그물·새 그물)과 묶음에서 빠진 그물이 합해 이만큼 모이면 다시 굽는다
- * (0.53.0: 그것들끼리 새 묶음이 아니라 그 그물들이 든 장면 차례 토막을 이웃 묶음과 함께 — 렌더러 mergePlanLoose)
- */
-export const MERGE_LOOSE = 256;
-/**
- * 장면을 올리는 동안 묶음을 굽는 단위: 기다리는 그물이 이만큼(또는 정점 MERGE_UPLOAD_VERTS개) 모이면 올리는 걸음 안에서 굽고 그물 버퍼·VAO를 놓는다 —
- * 그물마다 GL 객체(7개 남짓)가 한꺼번에 쌓이는 것은 이 수 × 7(1만 4천 개) 안쪽이다
- */
-export const MERGE_UPLOAD_MESHES = 2048;
-export const MERGE_UPLOAD_VERTS = 262144;
-/**
- * 묶음 안 바꾼·뺀 그물 몫이 이보다 크면 그 묶음을 다시 굽는다(0.53.0: 그 묶음 그물 사이에 끼었거나 그 묶음이 거느린 묶음 밖 그물도 센다 —
- * 묶음 밖 그물이 MERGE_LOOSE보다 적어도 그 토막만 다시 굽는다)
- */
-export const MERGE_DEAD_RATIO = 0.25;
-/** 자리 자료 텍셀 수: 면 그물 하나 12(u_mvp 4·u_mv 4·u_nmat 3·u_color 1), 선 그물 하나 6(u_mvp 4·u_mvz 1·u_color 1) — 셰이더 mergeShader와 같다 */
-export const MERGE_MESH_TEXELS = 12;
-export const MERGE_LINE_TEXELS = 6;
-
-/** 0.52.0 묶어 그리기 방식: 'auto' = 묶을 수 있는 그물이 문턱(min) 이상인 장면만, 'on' = 늘, 'off' = 끔(0.51.0 길) */
-export type MergingMode = 'auto' | 'on' | 'off';
-
-/** 0.52.0 묶어 그리기 선택(Renderer3d.merging — Viewer3d.setRenderOptions({ merging })) */
-export interface MergingOptions {
-  mode: MergingMode;
-  /** 'auto' 문턱(묶을 수 있는 그물 수) */
-  min: number;
-}
+export {
+  MERGE_AUTO_MIN,
+  MERGE_DEAD_RATIO,
+  MERGE_ITEMS,
+  MERGE_LINE_TEXELS,
+  MERGE_LOOSE,
+  MERGE_MESH_SEGMENTS,
+  MERGE_MESH_TEXELS,
+  MERGE_MESH_VERTS,
+  MERGE_UPLOAD_MESHES,
+  MERGE_UPLOAD_VERTS,
+  MERGE_VERTS,
+  type MergingMode,
+  type MergingOptions,
+} from './mergeopts';
 
 /** 묶음 후보 하나(장면 차례): 묶음 열쇠(같은 열쇠끼리만 잇는다)·정점 수·묶음 버퍼 바이트 */
 export interface MergeCand {

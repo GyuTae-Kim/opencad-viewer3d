@@ -11,7 +11,8 @@ import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
 import { MERGE_ITEMS, mergeArrays, mergeBytes, mergePlan, mergeSrcBytes, type MergeSrc } from '../src/merge';
-import { MESH_VS, THIN_VS, WIDE_VS, mergeShader, withDefines } from '../src/shaders';
+import { mergeShader } from '../src/mergegl';
+import { MESH_VS, THIN_VS, WIDE_VS, withDefines } from '../src/shaders';
 import { packNormals } from '../src/attribs';
 import { translation } from '../src/math';
 import { boxMesh } from '../src/synth';
@@ -21,8 +22,10 @@ import { cylinderDef, placeAt } from '../scripts/pixels/many';
 
 let dom: ReturnType<typeof installDom>;
 const views: Viewer3d[] = [];
-beforeAll(() => {
+beforeAll(async () => {
   dom = installDom();
+  // 0.54.0 묶어 그리기 조각(나눠 받는다)을 먼저 받아 둔다 — 이 파일은 받은 뒤의 굽기·그리기(0.53.0과 같은 결과)를 본다
+  expect(await Viewer3d.preloadMerging()).toBe(true);
 });
 afterAll(() => {
   for (const v of views) v.dispose();
