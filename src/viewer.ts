@@ -1695,13 +1695,18 @@ export class Viewer3d {
    * 0.54.0 묶어 그리기 조각(묶음 굽기 코드 — 앱 번들러가 따로 나눈 조각)을 미리 받는다. 받았으면 true, 받지 못했으면 false(그 뒤 이 페이지는 그물마다 그린다).
    * 뷰어는 묶어 그리기를 켤 수 있는 장면(setRenderOptions merging 'on'이거나 'auto'에서 그물이 문턱 이상)을 받을 때 스스로 받기를 걸고, 받는 동안은 그물마다 그리며
    * 나눠 올리기는 굽지 못한 그물이 굽기 단위(2,048개)에 닿으면 기다린다. 큰 장면을 한 번에(incremental 없이) 올리는 앱이 조각이 오기 전 그물마다 GL 객체를 쌓지 않으려면
-   * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다)
+   * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다).
+   * 0.55.0: 'auto'는 묶을 수 있는 그물(무늬·뒷면·PBR·반투명·함께 쓰는 배열이 없는 작은 그물)을 세어 문턱에 닿은 장면에서만 받기를 건다. 받기가 MERGE_KIT_WAIT_MS(4 s)
+   * 안에 끝나지 않으면 이 페이지는 기다리지 않고 그물마다 이어 올린다(mergingState 'late', stats.merged.pending 0). 이 약속은 받기가 끝날 때 풀린다(늦게 와도 true — 그때부터 굽는다)
    */
   static preloadMerging(): Promise<boolean> {
     return loadMergeKit();
   }
 
-  /** 0.54.0 묶어 그리기 조각 받기 상태('idle' 받기를 걸지 않음 · 'loading' · 'ready' · 'failed' — 문턱을 넘지 않는 장면만 열었으면 'idle'로 남는다) */
+  /**
+   * 0.54.0 묶어 그리기 조각 받기 상태('idle' 받기를 걸지 않음 · 'loading' · 'ready' · 'failed' — 문턱을 넘지 않는 장면만 열었으면 'idle'로 남는다).
+   * 0.55.0 'late': 받는 중이지만 기다림 한도(MERGE_KIT_WAIT_MS)를 넘었다 — 기다리지 않고 그물마다 올린다(오면 'ready', 실패하면 'failed')
+   */
   static mergingState(): MergeKitState {
     return mergeKitState();
   }

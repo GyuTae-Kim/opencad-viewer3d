@@ -44,6 +44,8 @@
  * 0.54.0 묶음 굽기·다시 굽기 차례·이은 배열·자리 자료·MERGE 셰이더 글은 나눠 받는 조각(mergegl.ts·merge.ts — loadMergeKit의 import())으로 옮겼다(SKP 57차 — 문턱을 넘지 않는
  * 앱은 받지 않는다). 렌더러는 묶을 수 있는지 판단·굽기 기다림·그리기 구간 모으기만 두고, 조각이 오기 전에는 그물마다 그린다(그림이 같다). 나눠 올리기에서는 장면 훑기
  * (함께 쓰는 배열 적기·묶을 수 있는 그물 세기)와 굽기를 첫 그림 뒤로 미루고, 굽지 못한 그물이 굽기 단위에 닿으면 그 걸음을 멈춘다(GL 객체가 쌓이는 한도는 0.53.0과 같다)
+ * 0.55.0 조각 받기가 MERGE_KIT_WAIT_MS 안에 끝나지 않으면 그 페이지는 기다리지 않고 그물마다 이어 올린다(나중에 오면 그때부터 굽는다). 'auto'는 묶을 수 있는 그물을
+ * 세어 문턱에 닿은 장면에서만 받기를 건다(0.54.0은 장면 그물 수만 보고 걸었다 — 무늬·함께 쓰는 배열 장면도 받았다)
  */
 import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d, UvTransform } from './types';
 import { type AttribFormat, type VertexArray, normalFormat, uvFormat, uvTransformOf } from './attribs';
@@ -75,6 +77,7 @@ import {
 } from './shaders';
 import {
   MERGE_AUTO_MIN,
+  MERGE_KIT_WAIT_MS,
   MERGE_LINE_TEXELS,
   MERGE_MESH_SEGMENTS,
   MERGE_MESH_TEXELS,
@@ -776,34 +779,65 @@ type MergeKit = typeof import('./mergegl');
 let mergeKit: MergeKit | null = null;
 let mergeKitLoad: Promise<boolean> | null = null;
 let mergeKitFailed = false;
+/** 0.55.0 받기를 건 지 MERGE_KIT_WAIT_MS가 지나도록 오지도 실패하지도 않았다(오거나 실패하면 거짓으로 — 그동안 렌더러는 조각을 기다리지 않는다) */
+let mergeKitLate = false;
+let mergeKitTimer: ReturnType<typeof setTimeout> | undefined;
+/** 0.55.0 조각 받기 알림: 받음·받지 못함·기다림 한도를 넘음 */
+type KitNote = (s: 'ready' | 'failed' | 'late') => void;
+/** 0.55.0 조각을 기다리는 렌더러들의 알림(받거나 받지 못하면 부르고 비운다, 기다림 한도를 넘으면 부르고 둔다 — 렌더러를 닫으면 뺀다) */
+const kitWaiters = new Set<KitNote>();
+
+/** 0.55.0 받기가 끝났다(받음·받지 못함): 기다림 시계를 끄고 기다리던 렌더러에 알린다 */
+function kitSettled(s: 'ready' | 'failed'): void {
+  clearTimeout(mergeKitTimer);
+  mergeKitTimer = undefined;
+  mergeKitLate = false;
+  const list = [...kitWaiters];
+  kitWaiters.clear();
+  for (const f of list) f(s);
+}
 
 /**
  * 0.54.0 묶어 그리기 조각을 받는다(한 번만 — 뷰어가 여럿이어도 같은 약속). 받았으면 true, 받지 못했으면(오프라인 등) false — 그 뒤 이 페이지의 렌더러는
- * 묶어 그리기를 끈다(그물마다 — 0.51.0 길). 렌더러가 필요할 때 스스로 부르고, 앱은 Viewer3d.preloadMerging()으로 미리 부를 수 있다
+ * 묶어 그리기를 끈다(그물마다 — 0.51.0 길). 렌더러가 필요할 때 스스로 부르고, 앱은 Viewer3d.preloadMerging()으로 미리 부를 수 있다.
+ * 0.55.0: 받기를 건 지 MERGE_KIT_WAIT_MS 안에 끝나지 않으면 이 페이지는 조각을 기다리지 않는다('late' — 나눠 올리기가 굽기 단위에서 멈추지 않는다).
+ * 약속은 그대로 받기가 끝날 때 풀린다(늦게 오면 true — 그때부터 굽는다)
  */
 export function loadMergeKit(): Promise<boolean> {
   if (mergeKit) return Promise.resolve(true);
   if (mergeKitFailed) return Promise.resolve(false);
-  if (!mergeKitLoad)
+  if (!mergeKitLoad) {
+    mergeKitTimer = setTimeout(() => {
+      mergeKitTimer = undefined;
+      if (mergeKit || mergeKitFailed) return;
+      mergeKitLate = true;
+      for (const f of [...kitWaiters]) f('late');
+    }, MERGE_KIT_WAIT_MS);
     mergeKitLoad = import('./mergegl').then(
       (m) => {
         mergeKit = m;
+        kitSettled('ready');
         return true;
       },
       () => {
         mergeKitFailed = true;
+        kitSettled('failed');
         return false;
       },
     );
+  }
   return mergeKitLoad;
 }
 
-/** 0.54.0 묶어 그리기 조각 받기 상태: 'idle' 아직 받기를 걸지 않음 · 'loading' 받는 중 · 'ready' 받음 · 'failed' 받지 못함(이 페이지는 그물마다) */
-export type MergeKitState = 'idle' | 'loading' | 'ready' | 'failed';
+/**
+ * 0.54.0 묶어 그리기 조각 받기 상태: 'idle' 아직 받기를 걸지 않음 · 'loading' 받는 중 · 'ready' 받음 · 'failed' 받지 못함(이 페이지는 그물마다).
+ * 0.55.0 'late' 받는 중이지만 기다림 한도(MERGE_KIT_WAIT_MS)를 넘었다 — 이 페이지는 조각을 기다리지 않고 그물마다 올린다(오면 'ready')
+ */
+export type MergeKitState = 'idle' | 'loading' | 'late' | 'ready' | 'failed';
 
 /** 0.54.0 묶어 그리기 조각 받기 상태(시험·앱 확인용 — Viewer3d.mergingState) */
 export function mergeKitState(): MergeKitState {
-  return mergeKit ? 'ready' : mergeKitFailed ? 'failed' : mergeKitLoad ? 'loading' : 'idle';
+  return mergeKit ? 'ready' : mergeKitFailed ? 'failed' : mergeKitLate ? 'late' : mergeKitLoad ? 'loading' : 'idle';
 }
 
 /** 0.42.0 모아 그릴 선 묶음 하나(같은 선 버퍼·같은 색·굵기·불투명도 — 자리 행렬만 다르다). recs·models는 장면 차례 */
@@ -1015,8 +1049,22 @@ export class Renderer3d {
   private mgFramed = true;
   /** 0.54.0 지난 올리기 걸음이 조각을 기다려 멈췄는지(뷰어는 이때 프레임을 거듭 걸지 않고 조각이 오면 onMergeReady로 다시 그린다) */
   private mgHeld = false;
-  /** 0.54.0 묶어 그리기 조각이 오거나 받지 못했을 때(뷰어가 다시 그린다) */
+  /** 0.54.0 묶어 그리기 조각이 오거나 받지 못했을 때(뷰어가 다시 그린다). 0.55.0: 받기가 기다림 한도를 넘었을 때도(멈춘 올리기를 잇는다) */
   onMergeReady: (() => void) | null = null;
+  /** 0.55.0 이 렌더러의 조각 받기 알림(wantKit이 페이지의 기다리는 렌더러 모음에 넣는다 — dispose가 뺀다) */
+  private readonly kitNote: KitNote = (s) => {
+    if (s === 'failed') {
+      // 받지 못했다: 묶어 그리기를 끄고(그물마다) 멈춘 올리기를 잇는다
+      this.mgActive = false;
+      this.mgScan = null;
+      this.mgUnfed = [];
+      this.mgUnfedVerts = 0;
+      this.mgWait = [];
+      this.mgWaitVerts = 0;
+      this.mgQueue = [];
+    } else if (s === 'late') this.mergeLate();
+    this.onMergeReady?.();
+  };
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -1811,6 +1859,8 @@ export class Renderer3d {
     this.mgActive = this.merging.mode === 'on';
     this.mgShared = new WeakSet();
     this.mergeBakeMs = 0;
+    // 0.55.0 조각을 기다리던 것도 잊는다(새 장면이 필요하면 다시 건다 — 훑기·'on'·mergeStep)
+    kitWaiters.delete(this.kitNote);
     this.mgScan = null;
     this.mgUnfed = [];
     this.mgUnfedVerts = 0;
@@ -1823,28 +1873,42 @@ export class Renderer3d {
     return this.merging.mode === 'off' || this.mergeBroken || mergeKitFailed;
   }
 
-  /** 0.54.0 묶어 그리기 조각이 필요하면 받기를 건다(받았거나 받는 중이면 그대로). 오거나 받지 못하면 onMergeReady */
+  /**
+   * 0.54.0 묶어 그리기 조각이 필요하면 받기를 건다(받았거나 받는 중이면 그대로). 오거나 받지 못하면 onMergeReady.
+   * 0.55.0: 알림은 페이지의 기다리는 렌더러 모음으로(kitNote — 기다림 한도를 넘어도 알린다). 이미 한도를 넘은 받기면 곧 기다리지 않는 쪽으로(mergeLate)
+   */
   private wantKit(): void {
     if (mergeKit || mergeKitFailed) return;
-    void loadMergeKit().then((ok) => {
-      if (!ok) {
-        // 받지 못했다: 묶어 그리기를 끄고(그물마다) 멈춘 올리기를 잇는다
-        this.mgActive = false;
-        this.mgScan = null;
-        this.mgUnfed = [];
-        this.mgUnfedVerts = 0;
-        this.mgWait = [];
-        this.mgWaitVerts = 0;
-        this.mgQueue = [];
-      }
-      this.onMergeReady?.();
-    });
+    kitWaiters.add(this.kitNote);
+    if (mergeKitLate) this.mergeLate();
+    void loadMergeKit();
+  }
+
+  /**
+   * 0.55.0 조각 받기가 기다림 한도를 넘었다: 모아 둔 그물(훑기 뒤 굽기를 기다리던 것)을 놓고 그물마다 그대로 둔다 — 조각이 오면 다 올린 뒤 mergeStep이
+   * 묶음 밖 그물로 다시 살펴 굽는다(mgDirty). 받기가 끝날 때까지(mergeKitLate) 나눠 올리기는 굽기 단위에서 멈추지 않고 새로 올린 그물도 모으지 않는다
+   */
+  private mergeLate(): void {
+    this.mgUnfed = [];
+    this.mgUnfedVerts = 0;
+    this.mgDirty = true;
   }
 
   /** 0.54.0 다 올린 장면에서 묶어 그리기를 켤 수 있는지(조각을 받을 까닭 — 'on'이거나, 켜졌거나, 'auto'에서 그물이 문턱 이상) */
   private get mgMay(): boolean {
     const mode = this.merging.mode;
     return mode === 'on' || this.mgActive || (mode === 'auto' && this.meshes.length >= this.merging.min);
+  }
+
+  /**
+   * 0.55.0 조각 없이 'auto' 장면을 켤 수 있는지 센다: 묶음 밖의 묶을 수 있는 그물(mergeSrcOf — 조각의 planLoose가 켤지 정할 때와 같은 셈)이 문턱 이상인지.
+   * 문턱에 닿으면 멈춘다. 조각이 없으면 묶음도 없으므로 장면 그물 모두가 묶음 밖이다
+   */
+  private mgCanAuto(): boolean {
+    const min = this.merging.min;
+    let n = 0;
+    for (const r of this.meshes) if (!r.mg && this.mergeSrcOf(r) && ++n >= min) return true;
+    return false;
   }
 
   /** 0.52.0 묶음의 버퍼·VAO를 지운다(쓰는 그물 기록이 없을 때 — lost면 잊기만) */
@@ -1882,14 +1946,15 @@ export class Renderer3d {
    * 0.52.0 장면을 올리기 전에: 두 번 이상 쓰는 배열을 적고(같은 정의 자리 — 묶지 않는다), 'auto'면 묶을 수 있어 보이는 그물(무늬·뒷면·PBR·반투명 색이 없고
    * 정점·윤곽선이 한도 안이며 배열을 함께 쓰지 않는 그물) 수가 문턱 이상인지로 이 장면의 묶어 그리기를 정한다. 그물이 문턱보다 적은 장면은 훑지 않는다(0.51.0과 같은 일).
    * 0.54.0: 훑을 장면이면 묶어 그리기 조각 받기를 곧 건다(훑기·첫 올리기 걸음과 겹친다). defer(나눠 올리기)면 훑기를 첫 그림 뒤 올리는 걸음으로 미룬다 —
-   * 8만 그물 장면에서 이 훑기(배열 40만 개 적기)가 setScene을 50~90 ms 붙잡아 첫 그림이 0.51.0보다 늦었다(가짜 GL 첫 그림 0.51.0 137~142 → 0.53.0 176~319 ms)
+   * 8만 그물 장면에서 이 훑기(배열 40만 개 적기)가 setScene을 50~90 ms 붙잡아 첫 그림이 0.51.0보다 늦었다(가짜 GL 첫 그림 0.51.0 137~142 → 0.53.0 176~319 ms).
+   * 0.55.0: 'auto'는 여기서 받기를 걸지 않고 훑기가 묶을 수 있는 그물을 문턱만큼 센 때 건다(mergeScan — 무늬·함께 쓰는 배열이 많아 켜지지 않을 장면은 받지 않는다)
    */
   private mergePrescan(scene: Scene3d, defer: boolean): void {
     const mode = this.merging.mode;
     this.mgActive = mode === 'on';
     this.mgScan = null;
     if (this.mgOff || (mode === 'auto' && scene.meshes.length < this.merging.min)) return;
-    this.wantKit();
+    if (mode === 'on') this.wantKit();
     this.mgScan = { scene, phase: 0, i: 0, seen: new WeakSet<object>(), n: 0 };
     if (!defer) this.mergeScan(Infinity);
   }
@@ -1941,7 +2006,8 @@ export class Renderer3d {
         if (!nv || nv > MERGE_MESH_VERTS || m.texture || m.backTexture || m.backColor || pbrSource(m) || !(m.color[3] >= 0.999)) continue;
         if ((m.edges ? m.edges.length / 6 : 0) > MERGE_MESH_SEGMENTS) continue;
         if ([m.positions, m.normals, m.indices, m.colors, m.edges].some((a) => !!a && this.mgShared.has(a))) continue;
-        sc.n++;
+        // 0.55.0 문턱에 닿은 때 받기를 건다(이 장면은 켜진다 — 셈은 줄지 않는다)
+        if (++sc.n === this.merging.min) this.wantKit();
       }
     }
     if (sc.phase !== 2 || (auto && sc.i < ms.length)) return false;
@@ -1955,6 +2021,11 @@ export class Renderer3d {
    * 아니면 곧 넣는다(mergeFeed — 0.53.0과 같다)
    */
   private mergeOffer(r: MeshRec): void {
+    // 0.55.0 조각 받기가 기다림 한도를 넘었으면 모으지 않는다(그물마다 — 조각이 오면 다 올린 뒤 mergeStep이 묶음 밖 그물로 살핀다)
+    if (mergeKitLate) {
+      this.mgDirty = true;
+      return;
+    }
     if (this.mgScan || (this.mgActive && !mergeKit && !this.mgOff)) {
       this.mgUnfed.push(r);
       this.mgUnfedVerts += Math.floor(r.src.positions.length / 3);
@@ -1981,10 +2052,11 @@ export class Renderer3d {
   /**
    * 0.54.0 다음 그물(next)을 올리지 않고 이 걸음을 멈출지: 아직 굽지 못하는 동안(훑기 전·중 — 첫 그림 앞이거나 몫이 모자라 — 또는 켜진 장면에서 조각을 받는 중)
    * 굽지 못한 그물(따로 모은 것 + 굽기 기다림)이 굽기 단위(그물 2,048개 − 1 또는 정점 262,144개)에 닿으면. 그래서 그물마다 GL 객체가 한꺼번에 쌓이는 것은 0.53.0과 같은 단위 안이고,
-   * 첫 그림 앞에서는 굽지 않는다. 한 번에 다 올릴 때(Infinity)는 멈추지 않는다
+   * 첫 그림 앞에서는 굽지 않는다. 한 번에 다 올릴 때(Infinity)는 멈추지 않는다.
+   * 0.55.0: 조각 받기가 기다림 한도를 넘었으면 멈추지 않는다(0.54.0은 받기가 걸린 채 끝나지 않으면 이 걸음에서 멈춘 채 남았다)
    */
   private mergeHold(next: Mesh3d, budgetMs: number): boolean {
-    if (budgetMs === Infinity || this.mgOff) return false;
+    if (budgetMs === Infinity || this.mgOff || mergeKitLate) return false;
     if (!this.mgScan && !(this.mgActive && !mergeKit)) return false;
     const nv = Math.floor(next.positions.length / 3);
     return this.mgUnfed.length + this.mgWait.length >= MERGE_UPLOAD_MESHES - 1 || this.mgUnfedVerts + this.mgWaitVerts + nv >= MERGE_UPLOAD_VERTS;
@@ -2091,12 +2163,16 @@ export class Renderer3d {
   /**
    * 0.52.0 묶음 굽기를 몫(mergeBudgetMs와 지난 그리기 시간 가운데 큰 것 — 적어도 묶음 하나) 안에서 이어 간다(다 올린 뒤에만 — 올리는 동안은 올리는 걸음이 굽는다).
    * 살필 것이 있으면 먼저 묶음을 나눈다(그물이 문턱보다 적은 'auto' 장면은 훑지 않는다).
-   * 0.54.0: 조각이 없으면 켤 수 있는 장면일 때 받기를 걸고 기다린다(그동안 그물마다 — 오면 onMergeReady로 다시 그린다)
+   * 0.54.0: 조각이 없으면 켤 수 있는 장면일 때 받기를 걸고 기다린다(그동안 그물마다 — 오면 onMergeReady로 다시 그린다).
+   * 0.55.0: 'auto'에서 아직 켜지지 않은 장면은 묶을 수 있는 그물을 세어(mgCanAuto — planLoose가 켤지 정하는 셈) 문턱에 닿을 때만 받는다. 닿지 않으면 살필 것을 지운다
+   * (조각이 없으면 묶음도 없어 planLoose가 할 일이 없다 — 그물을 바꾸거나 더하면 다시 센다). 이미 받기를 기다리는 렌더러는 다시 세지 않는다
    */
   private mergeStep(): void {
     if (this.mgOff || this.uploading) return;
     if (!mergeKit) {
-      if (this.mgDirty && this.mgMay) this.wantKit();
+      if (!this.mgDirty || !this.mgMay || kitWaiters.has(this.kitNote)) return;
+      if (this.merging.mode === 'on' || this.mgActive || this.mgCanAuto()) this.wantKit();
+      else this.mgDirty = false;
       return;
     }
     if (this.mgDirty && !this.mgQueue.length) {
@@ -2149,11 +2225,12 @@ export class Renderer3d {
    * 0.52.0 굽기를 기다리는 묶음 수(0이 아니면 뷰어가 다음 프레임에 다시 그린다 — 그동안 그 그물은 그물마다 그린다).
    * 0.53.0: 켜진 장면에서 다시 굽기 차례를 아직 정하지 않았으면(그물을 바꾸거나 빼거나 선택을 바꾼 뒤 다음 그리기 전) 1을 더한다 — 빼기는 52차처럼 곧 줄에 넣지 않으므로
    * 그 사이에도 기다리는 것이 있다고 알린다(정한 뒤 할 일이 없으면 0).
-   * 0.54.0: 묶어 그리기 조각을 받는 중이고 이 장면에서 켤 수 있으면 1(stats.merged.pending — 다 구울 때까지 기다리는 쪽이 조각도 기다리게). 뷰어의 다시 그리기는 mergeSteps로
+   * 0.54.0: 묶어 그리기 조각을 받는 중이고 이 장면에서 켤 수 있으면 1(stats.merged.pending — 다 구울 때까지 기다리는 쪽이 조각도 기다리게). 뷰어의 다시 그리기는 mergeSteps로.
+   * 0.55.0: 받기가 기다림 한도를 넘었으면(mergeKitLate) 조각을 기다리지 않는다 — 0(걸린 받기를 기다리는 앱이 멈춘 채 남지 않게. 오면 그때부터 다시 센다)
    */
   get mergePending(): number {
     if (this.mgOff || this.uploading) return 0;
-    return this.mergeSteps + (!mergeKit && this.mgDirty && this.mgMay ? 1 : 0);
+    return this.mergeSteps + (!mergeKit && !mergeKitLate && this.mgDirty && this.mgMay ? 1 : 0);
   }
 
   /** 0.54.0 다음 그리기에서 할 굽기 일(굽기 줄 + 차례를 정할 것 — 조각이 있을 때만). 0이 아니면 뷰어가 다음 프레임을 건다(조각을 받는 동안은 걸지 않고 onMergeReady로) */
@@ -2164,7 +2241,7 @@ export class Renderer3d {
 
   /** 0.54.0 지난 올리기 걸음이 묶어 그리기 조각을 기다려 멈췄는지(뷰어는 프레임을 거듭 걸지 않는다 — 조각이 오면 onMergeReady) */
   get uploadHeld(): boolean {
-    return this.mgHeld && !!this.pending && !mergeKit && !this.mgOff;
+    return this.mgHeld && !!this.pending && !mergeKit && !this.mgOff && !mergeKitLate;
   }
 
   /** 0.52.0 묶음 상태: 구운 묶음 수·묶음에 든 그물 수·묶음 버퍼 바이트·굽기를 기다리는 묶음 수·굽기에 쓴 ms 합·이 장면에서 켜졌는지 */
