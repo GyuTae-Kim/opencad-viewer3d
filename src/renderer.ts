@@ -950,8 +950,12 @@ export class Renderer3d {
   /** 0.43.0 자리 자료의 그림자 행렬(빛 · 모형) 셈 자리 */
   private d4c = new Float64Array(16);
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
-  /** 나눠 올리는 중인 장면(setScene(scene, { incremental: true })) */
-  private pending: { scene: Scene3d; mi: number; li: number; pi: number; chunk?: ChunkedUpload<WebGLBuffer> | null } | null = null;
+  /**
+   * 나눠 올리는 중인 장면(setScene(scene, { incremental: true })).
+   * 0.56.0 whole: 묶어 그리기 조각을 기다려 통째로 미룬 한 번에 올리기(setScene — 그물·선분·점 아무것도 올리지 않았다, mi·li·pi 0). 조각이 오면(또는 늦음·실패·끔·
+   * 그림 저장처럼 다 올리라는 걸음이면) 다음 걸음에서 한 번에 다 올린다(uploadWhole — 미루지 않은 setScene과 같은 길)
+   */
+  private pending: { scene: Scene3d; mi: number; li: number; pi: number; chunk?: ChunkedUpload<WebGLBuffer> | null; whole?: boolean } | null = null;
   /**
    * 나눠 올리는 중인 그물 바꾸기(0.11.0 setMesh(…, { incremental })): id → 새 그물과 조각 올리기.
    * 다 채울 때까지 앞 그물 기록을 그대로 그리고, 다 채우면 기록을 바꾼다
@@ -2233,10 +2237,13 @@ export class Renderer3d {
    * 0.53.0: 켜진 장면에서 다시 굽기 차례를 아직 정하지 않았으면(그물을 바꾸거나 빼거나 선택을 바꾼 뒤 다음 그리기 전) 1을 더한다 — 빼기는 52차처럼 곧 줄에 넣지 않으므로
    * 그 사이에도 기다리는 것이 있다고 알린다(정한 뒤 할 일이 없으면 0).
    * 0.54.0: 묶어 그리기 조각을 받는 중이고 이 장면에서 켤 수 있으면 1(stats.merged.pending — 다 구울 때까지 기다리는 쪽이 조각도 기다리게). 뷰어의 다시 그리기는 mergeSteps로.
-   * 0.55.0: 받기가 기다림 한도를 넘었으면(mergeKitLate) 조각을 기다리지 않는다 — 0(걸린 받기를 기다리는 앱이 멈춘 채 남지 않게. 오면 그때부터 다시 센다)
+   * 0.55.0: 받기가 기다림 한도를 넘었으면(mergeKitLate) 조각을 기다리지 않는다 — 0(걸린 받기를 기다리는 앱이 멈춘 채 남지 않게. 오면 그때부터 다시 센다).
+   * 0.56.0: 통째로 미룬 한 번에 올리기는 올릴 때까지 1(조각을 기다리는 동안과, 오거나 늦은 뒤 다음 걸음이 올리기 전 — 다 구울 때까지 기다리는 쪽이 그 올리기도 기다리게)
    */
   get mergePending(): number {
-    if (this.mgOff || this.uploading) return 0;
+    if (this.mgOff) return 0;
+    if (this.pending?.whole) return 1;
+    if (this.uploading) return 0;
     return this.mergeSteps + (!mergeKit && !mergeKitLate && this.mgDirty && this.mgMay ? 1 : 0);
   }
 
@@ -2412,6 +2419,8 @@ export class Renderer3d {
   /**
    * 장면 올리기(이전 것은 지운다). incremental이면 여기서는 비우기만 하고, uploadSome()을 부를 때마다 묶음을 몇 개씩 올린다
    * (올라간 묶음부터 그린다 — 큰 모형에서 화면이 멈추지 않게).
+   * 0.56.0: 한 번에 올리는 장면이 묶어 그리기를 켤 장면이고 조각을 받는 중이면 아무것도 올리지 않고 미룬다(pending.whole — uploading, uploadHeld).
+   * 조각이 오면(늦음·실패·끔도) 다음 uploadSome이 한 번에 다 올린다
    */
   setScene(scene: Scene3d, opts: { incremental?: boolean; release?: ReleaseFlags | null } = {}): void {
     this.clear(true);
@@ -2424,8 +2433,36 @@ export class Renderer3d {
       this.mgFramed = false;
       return;
     }
+    // 0.56.0 켜질 장면(훑기가 묶을 수 있는 그물을 문턱만큼 셌거나 'on')인데 조각을 받는 중이면 올리기를 통째로 미룬다. 0.55.0은 여기서 그물마다 버퍼·VAO를
+    // 모두 만들고 조각이 오면 구웠다(STEP 66차 가짜 WebGL: 서로 다른 부품 2~3천 개에서 GL 버퍼 1만 개 남짓 — 미리 받으면 19개). 조각이 오면 다음 걸음이
+    // 미리 받은 setScene과 같은 길(uploadWhole — 굽기 단위마다 곧 굽는다)로 올린다
+    if (this.wholeHold(scene)) {
+      this.pending = { scene, mi: 0, li: 0, pi: 0, whole: true };
+      this.mgHeld = true;
+      return;
+    }
+    this.uploadWhole(scene);
+  }
+
+  /**
+   * 0.56.0 한 번에 올리는 장면을 조각이 올 때까지 미룰지: 묶어 그리기를 쓰고(끔·조각 실패·변종 실패가 아님) 이 장면에서 켜졌고(mgActive — 'auto'면 훑기가 묶을 수 있는
+   * 그물을 문턱만큼 셌다) 그물이 문턱 이상이며, 조각이 아직 없고 받기가 기다림 한도 안이며 이 렌더러가 받기 알림을 기다릴 때
+   */
+  private wholeHold(scene: Scene3d): boolean {
+    return !mergeKit && !this.mgOff && !mergeKitLate && this.mgActive && scene.meshes.length >= this.merging.min && kitWaiters.has(this.kitNote);
+  }
+
+  /** 0.56.0 통째로 미룬 한 번에 올리기를 아직 기다리는지(조각을 받는 중이고 기다림 한도 안, 묶어 그리기가 이 장면에서 켜진 채) */
+  private get wholeWait(): boolean {
+    return !!this.pending?.whole && !mergeKit && !this.mgOff && !mergeKitLate && this.mgActive;
+  }
+
+  /** 장면을 한 번에 올린다(setScene — 0.56.0 통째로 미룬 것은 다음 걸음 uploadSome에서). 미룬 동안 앱이 다시 준 배열(문맥 복구 — restoreMeshArrays)이 있으면 함께 올린다 */
+  private uploadWhole(scene: Scene3d): void {
     for (const m of scene.meshes) {
-      const r = this.sceneMeshRec(m);
+      const give = this.restoreQ.get(m.id) ?? null;
+      this.restoreQ.delete(m.id);
+      const r = this.sceneMeshRec(m, { give });
       this.meshes.push(r);
       // 0.52.0 묶을 그물이 모이면 곧 굽고 그물 버퍼를 놓는다(그물이 아주 많아도 GL 객체가 쌓이지 않게 — 0.54.0 조각이 아직 없으면 다 올린 뒤 mergeStep이)
       this.mergeOffer(r);
@@ -2475,7 +2512,16 @@ export class Renderer3d {
     let first = true;
     this.gl.bindVertexArray(null);
     this.mgHeld = false;
-    if (p) {
+    if (p?.whole) {
+      // 0.56.0 통째로 미룬 한 번에 올리기: 조각을 기다리는 동안은 멈춘다(뷰어는 프레임을 거듭 걸지 않는다 — 오면 onMergeReady). 오거나 늦거나 받지 못했거나 묶어 그리기를
+      // 껐거나 다 올리라는 걸음(Infinity — 그림 저장)이면 한 번에 다 올린다(몫을 보지 않는다 — 미루지 않은 setScene과 같다)
+      if (budgetMs !== Infinity && this.wholeWait) {
+        this.mgHeld = true;
+        return false;
+      }
+      this.pending = null;
+      this.uploadWhole(p.scene);
+    } else if (p) {
       // 0.54.0 미뤄 둔 장면 훑기: 첫 그림 뒤(한 번에 다 올릴 때는 곧) 이 걸음 몫 안에서 이어 가고, 마쳤고 조각이 있으면 모아 둔 그물을 굽기 기다림에 넣는다
       if (this.mgScan && (this.mgFramed || budgetMs === Infinity)) this.mergeScan(budgetMs === Infinity ? Infinity : t0 + budgetMs);
       this.mergeFeedUnfed();

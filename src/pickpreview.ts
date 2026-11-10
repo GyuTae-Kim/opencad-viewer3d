@@ -7,13 +7,21 @@
  * 로컬 좌표 — 뷰어가 모형 행렬로 세계로 옮겨 화면에 칠하고 긋는다.
  * 셈: 같은 위치 꼭짓점 번호(위치 비트 무늬 해시 표)와 꼭짓점 → 삼각형 목록(정수 배열)을 그물마다 한 번 만들고(마지막 그물 하나를 기억), 맞은 삼각형에서
  * 변을 맞댄 같은 평면 이웃만 넓혀 간다 — 같은 평면 삼각형이 아주 많은 평평한 그물에서도 면 크기만큼만 본다. 면은 PICK_PREVIEW_MAX_TRIS개까지
+ *
+ * 0.56.0 한도를 넘는 면의 테두리(STEP 66차): 0.54.0은 한도까지 담은 삼각형들의 테두리를 그어 잘린 자리 안쪽 변까지 테두리로 나와 큰 B-rep 면이 그물처럼 덮였다.
+ * 이제 한도를 넘으면 테두리는 면 전체로 센다 — 앱 구간(rangesFace)은 구간의 모든 삼각형, 같은 평면 면(planarFace)은 한도의 PICK_PREVIEW_OUTLINE_SCALE배까지
+ * 더 넓혀 본 삼각형에서, 변을 함께 쓰는 다른 삼각형이 면에 들지 않는 변만(더 넓혀도 끝나지 않으면 아직 보지 않은 같은 평면 이웃과 맞댄 변도 긋지 않는다 —
+ * 테두리 일부만 나오고 잘린 자리 선은 없다). tris(칠할 삼각형)는 그대로 한도까지다(뷰어는 한도에 걸린 면은 칠하지 않고 테두리만 긋는다)
  */
 import type { IndexRange } from './ranges';
 
 /** 미리 강조할 면의 삼각형 수 한도(넘으면 그만큼만 — capped) */
 export const PICK_PREVIEW_MAX_TRIS = 4096;
 
-/** 미리 강조할 면: 삼각형 번호(장면 차례 아님 — 찾은 차례), 테두리 변 끝점(로컬 좌표 6개씩), 한도에 걸렸는지 */
+/** 0.56.0 같은 평면 면이 한도를 넘을 때 테두리를 세려고 더 넓혀 볼 삼각형 수의 배수(한도 × 이 값 — 기본 65,536개) */
+export const PICK_PREVIEW_OUTLINE_SCALE = 16;
+
+/** 미리 강조할 면: 삼각형 번호(장면 차례 아님 — 찾은 차례), 테두리 변 끝점(로컬 좌표 6개씩), 한도에 걸렸는지(0.56.0: 걸렸어도 테두리는 면 전체로 센 것) */
 export interface FaceOutline {
   tris: number[];
   edges: Float64Array;
@@ -132,6 +140,33 @@ function outline(positions: ArrayLike<number>, indices: ArrayLike<number> | unde
 }
 
 /**
+ * 0.56.0 면 삼각형 all의 테두리 변: 그 변(같은 위치 대표 번호 둘)을 함께 쓰는 다른 삼각형 가운데 면에 드는 것(inFace)이 없는 변. 이웃은 그물 꼴(꼭짓점 → 삼각형 목록)로 찾으므로
+ * 면이 아주 커도 변 표를 만들지 않는다(한도를 넘는 면 — 면 전체의 테두리, 한 번만 나오는 변으로 세는 outline과 같은 변)
+ */
+function boundaryOf(positions: ArrayLike<number>, indices: ArrayLike<number> | undefined, all: readonly number[], inFace: (t: number) => boolean, topo: Topo): Float64Array {
+  const { canon, start, list } = topo;
+  const out: number[] = [];
+  for (const t of all)
+    for (let k = 0; k < 3; k++) {
+      const a = corner(indices, t, k), b = corner(indices, t, (k + 1) % 3);
+      const u = canon[a]!, w = canon[b]!;
+      if (u === w) continue;
+      let shared = false;
+      for (let j = start[u]!; j < start[u + 1]! && !shared; j++) {
+        const s = list[j]!;
+        if (s === t || !inFace(s)) continue;
+        for (let q = 0; q < 3; q++)
+          if (canon[corner(indices, s, q)] === w) {
+            shared = true;
+            break;
+          }
+      }
+      if (!shared) for (const v of [a, b]) out.push(positions[v * 3]!, positions[v * 3 + 1]!, positions[v * 3 + 2]!);
+    }
+  return Float64Array.from(out);
+}
+
+/**
  * 맞은 삼각형(tri)과 같은 평면에서 변을 맞대고 이어진 삼각형(같은 그물). 평면 판정: 꼭짓점 셋이 맞은 삼각형 평면에서 (좌표 크기·그물 크기의 4e-6배) 안이고
  * 법선이 나란하다(앞뒤 가리지 않음 — 감김이 섞인 그물도). 넓이가 없는 이웃은 건너뛴다. 삼각형 번호가 그물 밖이거나 꼭짓점이 그물 밖이면 null
  */
@@ -180,13 +215,15 @@ export function planarFace(positions: ArrayLike<number>, indices: ArrayLike<numb
     const ml = Math.hypot(mx, my, mz);
     return ml > 0 && Math.abs(mx * nx + my * ny + mz * nz) >= ml * 0.9999;
   };
-  // 맞은 삼각형에서 변을 맞댄(대표 꼭짓점 둘을 함께 쓰는) 같은 평면 이웃으로 넓힌다. seen: 이미 판정한 삼각형(면 1·아님 2)
+  // 맞은 삼각형에서 변을 맞댄(대표 꼭짓점 둘을 함께 쓰는) 같은 평면 이웃으로 넓힌다. seen: 이미 판정한 삼각형(면 1·아님 2).
+  // 0.56.0: 한도(max)를 넘어도 테두리를 세려고 한도 × PICK_PREVIEW_OUTLINE_SCALE개까지 넓힌다(full — 거기서도 끝나지 않음)
   const seen = new Map<number, 1 | 2>([[tri, 1]]);
-  const tris: number[] = [tri];
-  let capped = false;
-  for (let i = 0; i < tris.length && !capped; i++) {
-    const t = tris[i]!;
-    for (let k = 0; k < 3 && !capped; k++) {
+  const all: number[] = [tri];
+  const lim = max * PICK_PREVIEW_OUTLINE_SCALE;
+  let full = false;
+  for (let i = 0; i < all.length && !full; i++) {
+    const t = all[i]!;
+    for (let k = 0; k < 3 && !full; k++) {
       const u = canon[corner(indices, t, k)]!, w = canon[corner(indices, t, (k + 1) % 3)]!;
       if (u === w) continue;
       for (let j = start[u]!; j < start[u + 1]!; j++) {
@@ -200,48 +237,80 @@ export function planarFace(positions: ArrayLike<number>, indices: ArrayLike<numb
           seen.set(s, 2);
           continue;
         }
-        if (tris.length >= max) {
-          capped = true;
+        if (all.length >= lim) {
+          full = true;
           break;
         }
         seen.set(s, 1);
-        tris.push(s);
+        all.push(s);
       }
     }
   }
-  return outline(positions, indices, tris, capped, canon);
+  // 한도 안의 면은 0.54.0 그대로(같은 삼각형·같은 테두리 차례)
+  if (all.length <= max && !full) return outline(positions, indices, all, false, canon);
+  // 0.56.0 한도를 넘는 면: 칠할 삼각형은 한도까지, 테두리는 넓혀 본 면 전체에서 — 끝까지 넓히지 못했으면 아직 보지 않은 같은 평면 이웃과 맞댄 변도 면 안쪽으로 본다
+  const inFace = (s: number): boolean => {
+    const v = seen.get(s);
+    return v === 1 || (v === undefined && full && coplanar(s));
+  };
+  return { tris: all.slice(0, max), edges: boundaryOf(positions, indices, all, inFace, topo), capped: true };
 }
 
-/** 앱이 준 삼각형 구간(그물 삼각형 번호 { start, count } — setHiddenRanges와 같은 꼴)의 삼각형과 테두리. 그물 밖 번호는 버리고, 없으면 null */
+/**
+ * 앱이 준 삼각형 구간(그물 삼각형 번호 { start, count } — setHiddenRanges와 같은 꼴)의 삼각형과 테두리. 그물 밖 번호는 버리고, 없으면 null.
+ * 0.56.0: 구간이 한도를 넘으면 칠할 삼각형은 한도까지, 테두리는 구간의 모든 삼각형으로 센다(그물 꼴을 만들어 이웃을 본다)
+ */
 export function rangesFace(positions: ArrayLike<number>, indices: ArrayLike<number> | undefined, ranges: readonly IndexRange[], max = PICK_PREVIEW_MAX_TRIS): FaceOutline | null {
   const nt = triCount(positions, indices);
   const nv = Math.floor(positions.length / 3);
   const tris: number[] = [];
   const seen = new Set<number>();
   let capped = false;
-  for (const r of ranges) {
-    const s = Math.max(0, Math.floor(Number(r?.start))), e = Math.min(nt, s + Math.floor(Number(r?.count)));
-    if (!Number.isFinite(s) || !(e > s)) continue;
-    for (let t = s; t < e; t++) {
-      if (seen.has(t)) continue;
-      let ok = true;
-      for (let k = 0; k < 3; k++) {
-        const v = corner(indices, t, k);
-        if (!(v >= 0 && v < nv)) ok = false;
+  /** 구간의 삼각형 t를 차례로(겹침·그물 밖·꼭짓점이 그물 밖인 것은 빼고) — each가 false를 돌려주면 그친다 */
+  const walk = (each: (t: number) => boolean, has: (t: number) => boolean): void => {
+    for (const r of ranges) {
+      const s = Math.max(0, Math.floor(Number(r?.start))), e = Math.min(nt, s + Math.floor(Number(r?.count)));
+      if (!Number.isFinite(s) || !(e > s)) continue;
+      for (let t = s; t < e; t++) {
+        if (has(t)) continue;
+        let ok = true;
+        for (let k = 0; k < 3; k++) {
+          const v = corner(indices, t, k);
+          if (!(v >= 0 && v < nv)) ok = false;
+        }
+        if (ok && !each(t)) return;
       }
-      if (!ok) continue;
+    }
+  };
+  walk(
+    (t) => {
       if (tris.length >= max) {
         capped = true;
-        break;
+        return false;
       }
       seen.add(t);
       tris.push(t);
-    }
-    if (capped) break;
-  }
+      return true;
+    },
+    (t) => seen.has(t),
+  );
   if (!tris.length) return null;
-  // 테두리만 세므로 같은 위치 번호만(기억한 그물 꼴이 이 그물이면 그것을)
-  const m = topoMemo;
-  const canon = m && m.positions === positions && m.indices === indices ? m.canon : canonical(positions, nv);
-  return outline(positions, indices, tris, capped, canon);
+  if (!capped) {
+    // 테두리만 세므로 같은 위치 번호만(기억한 그물 꼴이 이 그물이면 그것을)
+    const m = topoMemo;
+    const canon = m && m.positions === positions && m.indices === indices ? m.canon : canonical(positions, nv);
+    return outline(positions, indices, tris, false, canon);
+  }
+  // 0.56.0 한도를 넘는 면: 테두리는 구간의 모든 삼각형(면 표시 — 삼각형마다 한 바이트)에서
+  const face = new Uint8Array(nt);
+  const all: number[] = [];
+  walk(
+    (t) => {
+      face[t] = 1;
+      all.push(t);
+      return true;
+    },
+    (t) => face[t] === 1,
+  );
+  return { tris, edges: boundaryOf(positions, indices, all, (s) => face[s] === 1, topoOf(positions, indices)), capped: true };
 }

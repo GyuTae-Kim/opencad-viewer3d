@@ -250,6 +250,8 @@ import {
   type KeySnapKeys,
   type KeySnapMessageFn,
   type KeySnapMessageKey,
+  type KeySnapNumberFn,
+  type KeySnapNumberKind,
   type KeySnapText,
   candidateText,
   inPoints,
@@ -824,9 +826,17 @@ export interface KeyboardSnapOptions {
   messages?: Partial<Record<KeySnapMessageKey, string>> | KeySnapMessageFn;
   /**
    * 0.54.0 고른 것 이름 함수(SKP 56차 요청): 알림 글의 고른 것 이름(틀 pickItem의 {0} — 기본은 묶음 이름, 없으면 id)을 앱 이름(그룹·컴포넌트 경로, B-rep 면 이름 등)으로.
-   * 고르기 모드 후보 글·'commit'의 picked 글에 쓴다. 글이 아니거나 빈 글·예외면 기본 이름
+   * 고르기 모드 후보 글·'commit'의 picked 글에 쓴다. 글이 아니거나 빈 글·예외면 기본 이름.
+   * 0.56.0 둘째 인수 index(SKP 59·60차 요청): 그 고른 것의 후보 차례(KeyboardSnapAnnouncement.index와 같다 — 0이 첫 후보, pickCycle이 꺼졌거나 후보가 없으면 0).
+   * 앱이 첫 후보(누르기와 같은 고르기)와 둘째 이후(돌려 고른 것)를 다른 이름으로 부를 때 쓴다. 코어는 늘 준다(꼴에서 고르는 인수인 것은 PickGroupKey와 같은 까닭). 한 인수 함수는 0.55.0 그대로다
    */
-  pickName?: ((p: Pick3d) => string | null | undefined) | null;
+  pickName?: ((p: Pick3d, index?: number) => string | null | undefined) | null;
+  /**
+   * 0.56.0 알림 수 꼴(SKP 59·60차 요청): 알림 글의 좌표·거리·차 값을 앱 글로(앱 단위·소수 자리 — 피트·인치 같은 앱 꼴). 둘째 인자는 수 종류와 코어 기본 글
+   * (측정 글과 같은 자릿수 — 거리는 단위 글을 붙인 것)·자릿수·단위 글(KeySnapNumberCore). 돌려준 글을 그대로 넣는다(거리도 코어가 단위를 붙이지 않는다).
+   * 글이 아니거나 빈 글·예외면 코어 기본 글. 주지 않으면 0.55.0과 같은 글이다. 알림의 snap·point·measurement 값은 그대로(세계 좌표 수)
+   */
+  formatNumber?: KeySnapNumberFn | null;
 }
 
 /**
@@ -1139,9 +1149,11 @@ export interface PickOptions {
 
 /**
  * 0.53.0 고르기 후보 묶음 열쇠(pickCandidates·키보드 pickCycle의 group): 고른 것(사본) → 앱 묶음 열쇠(공구 경로의 코드 줄·판재 가공 단위, STEP의 B-rep 면 등).
- * 열쇠가 같은 후보는 하나로 센다(가장 앞의 것). 문자열·유한한 수가 아니면(null·undefined 등) 그 후보는 묶지 않는다. 던지면 묶지 않는다
+ * 열쇠가 같은 후보는 하나로 센다(가장 앞의 것). 문자열·유한한 수가 아니면(null·undefined 등) 그 후보는 묶지 않는다. 던지면 묶지 않는다.
+ * 0.56.0 둘째 인수 index(SKP 59·60차 요청): 이 후보가 더해지면 들 차례(앞서 더한 후보 수 — 0이면 첫 후보). 첫 후보와 둘째 이후를 다른 열쇠로 묶는다
+ * (예: 첫 후보는 맨 바깥 그룹 — 누르기와 같은 고르기, 그 뒤는 면마다). 코어는 늘 준다(꼴에서 고르는 인수인 것은 앱이 한 인수로 부르던 코드가 그대로 되게). 한 인수 함수는 0.55.0 그대로다
  */
-export type PickGroupKey = (pick: Pick3d) => string | number | null | undefined;
+export type PickGroupKey = (pick: Pick3d, index?: number) => string | number | null | undefined;
 
 /** Viewer3d.pickCandidates 선택(0.47.0): pick 선택과 후보 수 한도(기본 16 — 0.53.0 group을 주면 묶음 수) */
 export interface PickCandidatesOptions extends PickOptions {
@@ -1711,6 +1723,8 @@ export class Viewer3d {
    * 장면을 주기 전에 이것을 기다린다. 문턱을 넘지 않는 장면만 여는 앱은 부르지 않는다(조각을 받지 않는다).
    * 0.55.0: 'auto'는 묶을 수 있는 그물(무늬·뒷면·PBR·반투명·함께 쓰는 배열이 없는 작은 그물)을 세어 문턱에 닿은 장면에서만 받기를 건다. 받기가 MERGE_KIT_WAIT_MS(4 s)
    * 안에 끝나지 않으면 이 페이지는 기다리지 않고 그물마다 이어 올린다(mergingState 'late', stats.merged.pending 0). 이 약속은 받기가 끝날 때 풀린다(늦게 와도 true — 그때부터 굽는다)
+   * 0.56.0: 한 번에 올리는 장면도 기다리지 않아도 된다 — 켜질 장면을 조각 없이 주면 뷰어가 조각이 올 때까지(기다림 한도 안) 올리기를 미룬다(setScene). 미리 받으면
+   * 그 미룸 없이 setScene 안에서 올린다(첫 그림이 받기 시간만큼 빠르다)
    */
   static preloadMerging(): Promise<boolean> {
     return loadMergeKit();
@@ -1864,8 +1878,10 @@ export class Viewer3d {
     pickCycle: KeyPickCycleOptions | null;
     /** 0.47.0 알림 글 틀(기본과 합친 것), 0.53.0 또는 앱 글 함수 */
     msgs: KeySnapText;
-    /** 0.54.0 고른 것 이름 함수(없으면 null) */
-    pickName: ((p: Pick3d) => string | null | undefined) | null;
+    /** 0.54.0 고른 것 이름 함수(없으면 null — 0.56.0 둘째 인수 후보 차례) */
+    pickName: ((p: Pick3d, index?: number) => string | null | undefined) | null;
+    /** 0.56.0 알림 수 꼴(없으면 null — 코어 기본 글) */
+    formatNumber: KeySnapNumberFn | null;
   } | null = null;
   /** 0.54.0 고르기 후보 미리 강조(setPickPreview — 화면 덧그림만): 고른 것 사본과 앱 삼각형 구간 */
   private pickPrev: { pick: Pick3d; ranges: IndexRange[] | null } | null = null;
@@ -2177,6 +2193,9 @@ export class Viewer3d {
    * incremental을 주면 GPU 올리기를 여러 프레임에 나눈다(한 프레임 budgetMs, 기본 8 ms — 묶음 하나는 통째로).
    * 올라간 묶음부터 그리고, onProgress(올린 묶음 수, 전체)를 프레임마다 부른다(끝나면 done = total).
    * 범위·고르기·측정은 처음부터 장면 전체로 한다. 주지 않으면 예전처럼 한 번에 올린다.
+   * 0.56.0: 한 번에 올리는 장면이 묶어 그리기를 켤 장면('auto'면 묶을 수 있는 그물이 문턱 이상, 'on'이면 그물이 문턱 이상)이고 묶어 그리기 조각을 받는 중이면
+   * 조각이 올 때까지(MERGE_KIT_WAIT_MS 안) 올리기를 미룬다 — 그동안 이 장면은 그리지 않고(범위·고르기·측정은 그대로) stats.merged.pending은 1, 오면 다음 프레임에
+   * 한 번에 올리고 굽는다(조각을 미리 받은 setScene과 같은 GL 객체·그림). 늦거나 받지 못하거나 merging을 끄면 곧 그물마다 올리고, 그림 저장(toBlob·renderImage)은 기다리지 않는다.
    * 그물 하나만 바뀌면 장면 전체 대신 setMesh·removeMesh(0.11.0)를 쓴다.
    *
    * 0.25.0 release(true = 셋 모두, 또는 ReleaseOptions): 켠 배열·원본은 GPU에 올린 뒤(나눠 올리면 그 그물 차례에, 무늬는 풀어 올린 뒤)
@@ -3446,7 +3465,8 @@ export class Viewer3d {
    * 0.54.0 고르기 후보 하나를 화면 덧그림에 미리 강조한다(SKP 56·57차 — 겹친 것 목록 줄에 초점·마우스가 갈 때 등, 고르기 알림 pick·pickCandidates 후보를 그대로):
    * 그물 면이면 맞은 삼각형과 같은 평면에서 변을 맞대고 이어진 삼각형(opts.ranges를 주면 그 삼각형 구간 — 앱이 아는 면)을 강조 색으로 옅게 칠하고 테두리를 긋고,
    * 선분·윤곽선은 그 선분, 점은 둘레 고리를 긋는다(키보드 고르기 후보 표식과 같은 꼴). 깊이를 따지지 않고 앞에 그린다(앞 면에 가린 후보도 보인다).
-   * 고른 것·강조(highlight)·알림은 바꾸지 않는다. 숨긴 묶음·장면에 없는 묶음·단면의 잘린 면 후보는 그리지 않는다. null이면 지우고, 장면을 바꾸면 풀린다. 그림 저장에는 그리지 않는다
+   * 고른 것·강조(highlight)·알림은 바꾸지 않는다. 숨긴 묶음·장면에 없는 묶음·단면의 잘린 면 후보는 그리지 않는다. null이면 지우고, 장면을 바꾸면 풀린다. 그림 저장에는 그리지 않는다.
+   * 0.56.0: 면 삼각형이 PICK_PREVIEW_MAX_TRIS(4,096)를 넘으면 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 한도에서 잘린 자리 안쪽 변을 긋지 않는다)
    */
   setPickPreview(p: Pick3d | null, opts: PickPreviewOptions = {}): void {
     if (this.disposed) return;
@@ -4511,6 +4531,7 @@ export class Viewer3d {
    *   0.47.0: 고르기 모드에서도 커서가 켜져 있으면 그 자리에 겹친 고르기 후보(pickCandidates 차례 — AutoCAD 선택 돌리기)를 돌리고 Enter로 그 후보를 고른다
    *   (pickCycle — 기본 켬, false면 0.46.0처럼 고르기 모드의 Tab은 초점 이동). 지금 후보가 선분·윤곽선·점이면 화면 덧그림에 강조 색으로 표시한다
    *   (0.54.0 pickCycle.facePreview를 켜면 그물 면 후보도 그 면을 — setPickPreview와 같은 표식). 0.54.0 pickName이면 알림 글의 고른 것 이름을 앱 이름으로
+   *   (0.56.0 둘째 인수 후보 차례), 0.56.0 formatNumber면 알림 글의 좌표·거리를 앱 수 꼴로
    * - Enter: 측정 모드면 지금 후보를 측정 점으로 찍고(onMeasure), 아니면 그 자리를 누른 것처럼 고른다(onPick — pointerType 'keyboard', clicks 1, Shift+Enter면 shiftKey).
    *   커서가 꺼져 있으면 켠다
    * - Esc: 뷰 큐브 접기·측정 지우기(뷰어 Esc)가 먼저, 지울 것이 없으면 커서를 끈다. 포인터가 캔버스에서 움직이거나(4화소 이상) 누르거나 캔버스가 초점을 잃어도 끈다
@@ -4547,6 +4568,7 @@ export class Viewer3d {
             : {},
       msgs: typeof src.messages === 'function' ? src.messages : keySnapMessages(src.messages),
       pickName: typeof src.pickName === 'function' ? src.pickName : null,
+      formatNumber: typeof src.formatNumber === 'function' ? src.formatNumber : null,
     };
     // 고르기 모드에서 켜진 커서는 새 pickCycle로 그 자리를 다시 구한다(알리지 않는다 — 측정 모드는 0.46.0 그대로 두어 차례를 지킨다)
     if (this.keyCur && !this.measuring) {
@@ -7699,14 +7721,17 @@ export class Viewer3d {
     return a && p ? Math.hypot(p[0]! - a[0], p[1]! - a[1], p[2]! - a[2]) : null;
   }
 
-  /** 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*, 0.53.0 글 함수도, 0.54.0 이름은 앱 pickName이 정할 수 있다) */
-  private pickText(p: Pick3d, msgs: KeySnapText): string {
+  /**
+   * 고른 것의 글: '이름 면'(이름이 없으면 id — 0.47.0 글 틀 pickItem·pick.*, 0.53.0 글 함수도, 0.54.0 이름은 앱 pickName이 정할 수 있다).
+   * 0.56.0 index = 그 고른 것의 후보 차례(pickName 둘째 인수)
+   */
+  private pickText(p: Pick3d, msgs: KeySnapText, index: number): string {
     const it = this.items.get(p.id);
     let name = (it?.item.name || p.id).trim() || p.id;
     const fn = this.keySnap?.pickName;
     if (fn) {
       try {
-        const s = fn({ ...p, point: [...p.point] as V3 });
+        const s = fn({ ...p, point: [...p.point] as V3 }, index);
         if (typeof s === 'string' && s.trim()) name = s.trim();
       } catch {
         // 앱 함수 오류 — 기본 이름
@@ -7716,22 +7741,43 @@ export class Viewer3d {
     return keySnapText(msgs, 'pickItem', [name, keySnapText(msgs, kind)]);
   }
 
+  /**
+   * 0.56.0 키보드 알림의 수 글: 코어 기본(측정 글과 같은 소수 자리 — 거리는 ' 단위'를 붙인다, 0.55.0과 같은 글)을 앱 수 꼴(formatNumber)이 있으면 그 글로.
+   * 글이 아니거나 빈 글·예외면 코어 기본 글
+   */
+  private keyNum(v: number, kind: KeySnapNumberKind): string {
+    const digits = measureDigits(this.allBox);
+    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
+    const base = measureNumber(v, digits);
+    const text = kind === 'distance' && unit ? `${base} ${unit}` : base;
+    const fn = this.keySnap?.formatNumber;
+    if (fn) {
+      try {
+        const s = fn(v, { kind, text, digits, unit });
+        if (typeof s === 'string' && s.trim()) return s;
+      } catch {
+        // 앱 함수 오류 — 코어 기본 글
+      }
+    }
+    return text;
+  }
+
   /** 알림을 만들어 앱에 넘긴다(extra = 찍은 점·측정 결과, lead = 지금 후보 글 대신 쓸 글) */
   private keyAnnounce(reason: KeyboardSnapAnnouncement['reason'], extra?: { point?: MeasurePoint; measurement?: MeasureResult | null; lead?: string }): void {
     const ks = this.keySnap, c = this.keyCur;
     if (!ks?.announce || !c) return;
     const mode = this.keyMode;
-    const num = (v: number): string => this.fmt(v);
-    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
+    // 0.56.0 수 글은 keyNum(앱 수 꼴 — 거리는 단위까지 만들므로 candidateText에 단위 글을 주지 않는다)
+    const num = (v: number, k: KeySnapNumberKind): string => this.keyNum(v, k);
     const snap = mode === 'measure' ? this.measureHoverSnap : null;
     const count = this.keyCount(c);
     const index = count ? c.index : 0;
     // 0.47.0: 글은 글 틀(setKeyboardSnap messages — 주지 않으면 0.46.0과 같은 한국어)
     const M = ks.msgs;
     let body: string;
-    if (mode === 'measure') body = candidateText(snap ? { kind: snap.snap, axis: snap.axis, locked: snap.locked, point: snap.point } : null, index, count, num, this.keyDistance(snap?.point ?? null), unit, M);
+    if (mode === 'measure') body = candidateText(snap ? { kind: snap.snap, axis: snap.axis, locked: snap.locked, point: snap.point } : null, index, count, num, this.keyDistance(snap?.point ?? null), '', M);
     // 0.47.0: 고르기 후보가 둘 이상이면 차례('상자 면 2/3: …' — 측정 후보 글과 같은 꼴)
-    else body = c.pick ? orderedText(this.pickText(c.pick, M), index, count, pointText(c.pick.point, num, M), null, M) : keySnapText(M, 'noPick');
+    else body = c.pick ? orderedText(this.pickText(c.pick, M, index), index, count, pointText(c.pick.point, num, M), null, M) : keySnapText(M, 'noPick');
     let text = body;
     if (reason === 'start') text = keySnapText(M, 'start', [body, keySnapHint(ks.keys, mode, !!ks.pickCycle, M)]);
     else if (extra?.lead) text = extra.lead;
@@ -7816,7 +7862,7 @@ export class Viewer3d {
       if (this.keySnap?.pickCycle && c.index > 0 && c.picks[c.index]) this.keyPickCandidate(c, e);
       else this.click(c.x, c.y, ev, true);
       if (this.keyCur !== c) return;
-      this.keyAnnounce('commit', { lead: c.pick ? keySnapText(M, 'picked', [this.pickText(c.pick, M)]) : keySnapText(M, 'pickedNothing') });
+      this.keyAnnounce('commit', { lead: c.pick ? keySnapText(M, 'picked', [this.pickText(c.pick, M, this.keyCount(c) ? c.index : 0)]) : keySnapText(M, 'pickedNothing') });
       return;
     }
     this.keyRecompute(true);
@@ -7832,11 +7878,10 @@ export class Viewer3d {
     const m = this.measurement();
     // 찍은 뒤 같은 자리에서 다음 미리 보기(마우스는 다음 이동에서 — 키보드는 커서를 옮기지 않아도 들리게)
     this.keyRecompute();
-    const num = (v: number): string => this.fmt(v);
-    const unit = UNIT_LABEL[this.sceneRef?.units ?? 'unknown'];
-    const u = unit ? ` ${unit}` : '';
+    // 0.56.0 수 글은 keyNum(앱 수 꼴 — 거리는 단위까지)
+    const num = (v: number, k: KeySnapNumberKind): string => this.keyNum(v, k);
     const lead = m
-      ? keySnapText(M, 'secondPoint', [`${num(m.distance)}${u}`, num(m.dx), num(m.dy), num(m.dz)])
+      ? keySnapText(M, 'secondPoint', [num(m.distance, 'distance'), num(m.dx, 'dx'), num(m.dy, 'dy'), num(m.dz, 'dz')])
       : keySnapText(M, 'firstPoint', [snapKindText(point.snap, point.axis, point.locked, M), pointText(point.point, num, M)]);
     this.keyAnnounce('commit', { point, measurement: m, lead });
   }
@@ -8759,7 +8804,8 @@ export class Viewer3d {
 
   /**
    * 0.54.0 그물 면 후보 표식(화면 덧그림만): 면 삼각형(ranges면 그 구간, 아니면 맞은 삼각형과 같은 평면으로 이어진 삼각형 — pickpreview.ts)을 강조 색으로 옅게 한 번에 칠하고
-   * 테두리 변을 바탕 테 위 강조 색 선으로. 단면의 잘린 면·삼각형 번호가 없는 후보는 그리지 않는다. 눈 뒤 꼭짓점이 있는 삼각형·변은 건너뛴다
+   * 테두리 변을 바탕 테 위 강조 색 선으로. 단면의 잘린 면·삼각형 번호가 없는 후보는 그리지 않는다. 눈 뒤 꼭짓점이 있는 삼각형·변은 건너뛴다.
+   * 0.56.0: 삼각형 수 한도(PICK_PREVIEW_MAX_TRIS)에 걸린 면은 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 0.54.0은 한도까지 칠하고 잘린 자리 안쪽 변까지 그었다)
    */
   private drawFaceMark(ctx: CanvasRenderingContext2D, f: ViewFrame, p: Pick3d, m: Mesh3d, ranges: readonly IndexRange[] | null): void {
     if (p.section || !Number.isInteger(p.index) || p.index < 0) return;
@@ -8773,19 +8819,21 @@ export class Viewer3d {
       return scr(pos[v * 3]!, pos[v * 3 + 1]!, pos[v * 3 + 2]!);
     };
     const th = this.theme;
-    ctx.beginPath();
-    for (const t of fo.tris) {
-      const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
-      if (!a || !b || !c) continue;
-      ctx.moveTo(a[0], a[1]);
-      ctx.lineTo(b[0], b[1]);
-      ctx.lineTo(c[0], c[1]);
-      ctx.closePath();
+    if (!fo.capped) {
+      ctx.beginPath();
+      for (const t of fo.tris) {
+        const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
+        if (!a || !b || !c) continue;
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.lineTo(c[0], c[1]);
+        ctx.closePath();
+      }
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = th.highlight;
+      ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = th.highlight;
-    ctx.fill();
-    ctx.globalAlpha = 1;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const e = fo.edges;

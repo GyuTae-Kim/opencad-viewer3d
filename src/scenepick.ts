@@ -378,7 +378,9 @@ export function samePickTarget(a: Pick3d, b: Pick3d): boolean {
  *   (잘린 면은 그 그물의 남는 쪽 면보다 앞이므로 먼저 나온다 — 걷어 낸 삼각형이 안팎 세기를 바꿔 없는 잘린 면을 만들지 않게)
  * 숨긴 것 판정은 o.hidden·o.edgeHidden·o.caps를 감싼다(o는 바꾸지 않는다). 후보가 없으면 빈 배열.
  * 0.53.0 group(앱 묶음 열쇠 — 공구 경로의 코드 줄·판재 가공 단위·같은 B-rep 면): 앞 후보와 열쇠가 같은 후보는 더하지 않고 걷어 내기만 한다(묶음마다 가장 앞의 것 하나 —
- * max는 묶음 수). 열쇠가 문자열·유한한 수가 아니거나 함수가 던지면 그 후보는 묶지 않는다. 같은 묶음 도형을 여럿 걷어 내므로 다시 고르기 횟수 한도를 늘린다
+ * max는 묶음 수). 열쇠가 문자열·유한한 수가 아니거나 함수가 던지면 그 후보는 묶지 않는다. 같은 묶음 도형을 여럿 걷어 내므로 다시 고르기 횟수 한도를 늘린다.
+ * 0.56.0 group 둘째 인수 index(SKP 59·60차 요청): 이 후보가 더해지면 들 차례(앞서 더한 후보 수 — 0이면 첫 후보). 앱이 첫 후보와 둘째 이후를 다른 열쇠로 묶을 때 쓴다
+ * (예: 첫 후보는 맨 바깥 그룹, 그 뒤는 면마다). 한 인수 함수는 0.55.0 그대로다
  */
 export function pickSceneCandidates(
   f: ViewFrame,
@@ -387,7 +389,7 @@ export function pickSceneCandidates(
   items: ScenePickItems,
   o: ScenePickOptions,
   max = PICK_CANDIDATES_MAX,
-  group?: ((p: Pick3d) => string | number | null | undefined) | null,
+  group?: ((p: Pick3d, index: number) => string | number | null | undefined) | null,
 ): PickDetail[] {
   const out: PickDetail[] = [];
   const lim = Math.max(0, Math.floor(max));
@@ -398,7 +400,7 @@ export function pickSceneCandidates(
     if (!group) return null;
     let k: unknown;
     try {
-      k = group(copyPickLite(p));
+      k = group(copyPickLite(p), out.length);
     } catch {
       return null;
     }
