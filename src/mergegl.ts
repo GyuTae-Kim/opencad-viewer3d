@@ -576,7 +576,10 @@ function storeSlots(h: MergeHost, runs: readonly MergeRun[], kind: string, strid
   return s;
 }
 
-/** 0.61.0 이번 차례에 쓴 텍셀 구간이 든 줄을 저장소 그림에 올린다(겹치거나 맞닿은 줄은 한 번에) */
+/**
+ * 0.61.0 이번 차례에 쓴 텍셀 구간을 저장소 그림에 올린다: 한 줄이 안 되는 틈으로 이어진 구간은 하나로 모아 그 텍셀만(첫 줄 조각·가운데 온 줄·끝 줄 조각 — 많아야 세 번).
+ * 강조 하나를 바꾼 프레임은 그 그물 윤곽선 자리 6텍셀
+ */
 function storePut(h: MergeHost, s: MergeStore): void {
   const D = s.dirty;
   if (!D.length) return;
@@ -584,19 +587,33 @@ function storePut(h: MergeHost, s: MergeStore): void {
   const ord = Array.from({ length: D.length / 2 }, (_, j) => j).sort((a, b) => D[a * 2]! - D[b * 2]!);
   gl.activeTexture(gl.TEXTURE0 + STORE_UNIT);
   gl.bindTexture(gl.TEXTURE_2D, s.tex);
-  let r0 = -1, r1 = -1;
+  const sub = (t: number, w: number, rows: number): void =>
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, t % STORE_W, Math.floor(t / STORE_W), w, rows, gl.RGBA, gl.FLOAT, s.buf, t * 4);
+  let t0 = -1, t1 = -1;
   const up = (): void => {
-    if (r0 >= 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r0, STORE_W, r1 - r0, gl.RGBA, gl.FLOAT, s.buf, r0 * STORE_W * 4);
+    if (t0 < 0) return;
+    let a = t0;
+    if (a % STORE_W) {
+      const e = Math.min(t1, (Math.floor(a / STORE_W) + 1) * STORE_W);
+      sub(a, e - a, 1);
+      a = e;
+    }
+    const full = Math.floor((t1 - a) / STORE_W);
+    if (full) {
+      sub(a, STORE_W, full);
+      a += full * STORE_W;
+    }
+    if (a < t1) sub(a, t1 - a, 1);
   };
   for (const j of ord) {
-    const a = Math.floor(D[j * 2]! / STORE_W), b = Math.ceil(D[j * 2 + 1]! / STORE_W);
-    if (r0 >= 0 && a <= r1) {
-      if (b > r1) r1 = b;
+    const a = D[j * 2]!, b = D[j * 2 + 1]!;
+    if (t0 >= 0 && a <= t1 + STORE_W) {
+      if (b > t1) t1 = b;
       continue;
     }
     up();
-    r0 = a;
-    r1 = b;
+    t0 = a;
+    t1 = b;
   }
   up();
   gl.activeTexture(gl.TEXTURE0);
@@ -675,62 +692,76 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
 /**
  * 0.52.0 선 목록을 그린다(그물 윤곽선 — 1화소 굵기 1, 숨은 점선이면 dash): 묶음 구간은 MERGE 변종(가는 선·굵은 선 — drawLines와 같은 판정·균일 변수, 선 색은 자리 자료)으로
  * 그 선분 구간 그리기 한 번. 변종이 번역 중이거나 자리 자료가 모자라면 구간도 그물마다 drawLines로. 0.57.0 render() 안에서 이 조각으로 옮김(GL 호출 차례는 같다).
- * 0.60.0 단면 하나(c.sec)도 묶어 그린다: 그물마다 그릴 때(drawLines의 clip — 그 그물 로컬 평면)와 같은 평면을 자리 자료 7번째 텍셀에(MCLIP — 가는 선은 CLIP도, 0.59.0까지는 단면이 있으면 윤곽선·숨은 점선을 모두 그물마다 그렸다)
+ * 0.60.0 단면 하나(c.sec)도 묶어 그린다: 그물마다 그릴 때(drawLines의 clip — 그 그물 로컬 평면)와 같은 평면을 자리 자료 7번째 텍셀에(MCLIP — 가는 선은 CLIP도, 0.59.0까지는 단면이 있으면 윤곽선·숨은 점선을 모두 그물마다 그렸다).
+ * 0.61.0 굵기는 구간마다(op.w — 강조한 그물 2): 굵은 선·가는 선 판정(drawLines와 같다)과 프로그램을 구간마다 고르고, 고정 균일 변수는 이 차례에서 프로그램마다 한 번
+ * (프로그램의 균일 변수 값은 사이에 낀 그물마다 그리기가 바꾸지 않는다 — 다른 프로그램이다). 한쪽 변종이 번역 중이면 그 구간만 그물마다
  */
 export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[], o: { dashed: boolean; bias: number; capz: boolean }, memo: LineMemo | null): void {
   const gl = h.gl, st = c.st, stats = c.stats;
   const runs = ops.filter((x): x is MergeRun => typeof x !== 'function');
-  const wDev = st.dpr;
-  const wide = o.dashed || wDev > 1.01;
   const lineFog = st.fog ?? null;
   const clip = c.sec ? c.clipOf : null;
   const texels = MERGE_LINE_TEXELS + (clip ? 1 : 0);
-  const p = runs.length
-    ? h.mergeVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(lineFog ? ['FOG'] : []), ...(clip ? (wide ? ['MCLIP'] : ['CLIP', 'MCLIP']) : [])])
-    : null;
+  const wideOf = (u: MergeRun): boolean => o.dashed || u.w * st.dpr > 1.01;
+  const variant = (wide: boolean): Prog | null =>
+    h.mergeVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(lineFog ? ['FOG'] : []), ...(clip ? (wide ? ['MCLIP'] : ['CLIP', 'MCLIP']) : [])]);
+  let pw: Prog | null = null, pt: Prog | null = null;
+  if (runs.some(wideOf)) pw = variant(true);
+  if (!runs.every(wideOf)) pt = variant(false);
   // 0.61.0 자리 종류: 윤곽선 e·숨은 점선 d(색이 달라 한 프레임에 둘 다 그리면 자리를 따로 둔다)
   const kind = o.dashed ? 'd' : 'e';
-  const ok = !!p && putRuns(h, runs, kind, texels, frameSig(c, [texels, lineFog ? 1 : 0], [clip ? clip(undefined) : null]), () => lineFill(h, c, runs, !!lineFog, texels, kind));
-  let set = false;
+  const ok = (!!pw || !!pt) && putRuns(h, runs, kind, texels, frameSig(c, [texels, lineFog ? 1 : 0], [clip ? clip(undefined) : null]), () => lineFill(h, c, runs, !!lineFog, texels, kind));
+  /** 지금 쓰는 프로그램(사이에 그물마다 그리기가 끼면 null)·이 차례에서 고정 균일 변수를 보낸 프로그램과 그 굵기 */
+  let P: Prog | null = null;
+  const done = new Map<Prog, number>();
   for (const op of ops) {
     if (typeof op === 'function') {
       op();
-      set = false;
+      P = null;
       continue;
     }
-    if (!ok) {
+    const wide = wideOf(op);
+    const Q = ok ? (wide ? pw : pt) : null;
+    if (!Q) {
       for (let i = op.a; i < op.b; i++) {
         const r = op.g.recs[i]!;
         const model = c.mm(r);
-        const e = { color: op.cols[i - op.o]!, vcol: false, width: 1, dashed: o.dashed, alpha: op.alpha, clip: clip ? clip(model) : null, clips: null, first: 0, count: r.edges!.n };
+        const e = { color: op.cols[i - op.o]!, vcol: false, width: op.w, dashed: o.dashed, alpha: op.alpha, clip: clip ? clip(model) : null, clips: null, first: 0, count: r.edges!.n };
         h.drawLines(c.f, r.edges!, model, o.capz ? { ...e, bias: o.bias, capz: true } : e, st, stats, memo);
       }
+      P = null;
       continue;
     }
-    const P = p!;
-    if (!set) {
-      // drawLines와 같은 고정 균일 변수(선 색은 자리 자료 — 안개 깊이 행도)
-      set = true;
-      gl.useProgram(P.p);
-      gl.uniform1i(h.loc(P, 'u_inst'), STORE_UNIT);
-      gl.uniform1f(h.loc(P, 'u_vcol'), 0);
-      gl.uniform4f(h.loc(P, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(h.loc(P, 'u_bias'), o.bias);
-      if (wide) {
-        const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
-        gl.uniform2f(h.loc(P, 'u_viewport'), vw, vh);
-        gl.uniform1f(h.loc(P, 'u_width'), wDev);
-        gl.uniform2f(h.loc(P, 'u_dash'), o.dashed ? c.dash[0] * st.dpr : 0, c.dash[1] * st.dpr);
-        // 단면이 있으면 평면은 자리 자료(균일 변수가 아니다)
-        if (!clip) gl.uniform4f(h.loc(P, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
-      }
-      if (lineFog) {
-        gl.uniform4f(h.loc(P, 'u_fogCol'), lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
-        gl.uniform2f(h.loc(P, 'u_fog'), lineFog.start, lineFog.end);
+    if (Q !== P) {
+      P = Q;
+      gl.useProgram(Q.p);
+      if (!done.has(Q)) {
+        // drawLines와 같은 고정 균일 변수(선 색은 자리 자료 — 안개 깊이 행도)
+        done.set(Q, -1);
+        gl.uniform1i(h.loc(Q, 'u_inst'), STORE_UNIT);
+        gl.uniform1f(h.loc(Q, 'u_vcol'), 0);
+        gl.uniform4f(h.loc(Q, 'u_override'), 0, 0, 0, 0);
+        gl.uniform1f(h.loc(Q, 'u_bias'), o.bias);
+        if (wide) {
+          const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
+          gl.uniform2f(h.loc(Q, 'u_viewport'), vw, vh);
+          gl.uniform2f(h.loc(Q, 'u_dash'), o.dashed ? c.dash[0] * st.dpr : 0, c.dash[1] * st.dpr);
+          // 단면이 있으면 평면은 자리 자료(균일 변수가 아니다)
+          if (!clip) gl.uniform4f(h.loc(Q, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
+        }
+        if (lineFog) {
+          gl.uniform4f(h.loc(Q, 'u_fogCol'), lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
+          gl.uniform2f(h.loc(Q, 'u_fog'), lineFog.start, lineFog.end);
+        }
       }
     }
-    gl.uniform1i(h.loc(P, 'u_instBase'), op.base);
-    gl.uniform1f(h.loc(P, 'u_alpha'), op.alpha);
+    // 굵은 선 굵기(장치 화소 — drawLines의 wDev)
+    if (wide && done.get(Q) !== op.w * st.dpr) {
+      done.set(Q, op.w * st.dpr);
+      gl.uniform1f(h.loc(Q, 'u_width'), op.w * st.dpr);
+    }
+    gl.uniform1i(h.loc(Q, 'u_instBase'), op.base);
+    gl.uniform1f(h.loc(Q, 'u_alpha'), op.alpha);
     const g = op.g;
     const s0 = g.seg[op.a]!, s1 = g.seg[op.b]!;
     if (wide) {

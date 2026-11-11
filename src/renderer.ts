@@ -720,6 +720,8 @@ export interface MergeRun {
   sh: boolean;
   tint: number;
   alpha: number;
+  /** 0.61.0 윤곽선 굵기(CSS 화소 — 강조한 그물 2, 그 밖 1. 면 구간은 1) */
+  w: number;
 }
 
 /**
@@ -4932,18 +4934,18 @@ export class Renderer3d {
     /** 지금 모으는 목록(null이면 예전처럼 바로 그린다)과 늘일 수 있는 마지막 구간 */
     let mops: MergeOp[] | null = null;
     let mrun: MergeRun | null = null;
-    /** 묶음 그물 하나를 목록에(앞 구간의 다음 번호이고 구간 균일 변수가 같으면 늘인다) */
-    const mergeAdd = (r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number): void => {
+    /** 묶음 그물 하나를 목록에(앞 구간의 다음 번호이고 구간 균일 변수가 같으면 늘인다). 0.61.0 w = 윤곽선 굵기(강조한 그물 2 — 굵기가 같은 구간끼리) */
+    const mergeAdd = (r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number, w = 1): void => {
       const g = r.mg!, i = r.mi!;
       const u = mrun;
-      if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha) {
+      if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha && u.w === w) {
         if (u.sh) ownRun(u);
         u.b++;
         u.cols.push(col);
         u.vc.push(vcol);
         return;
       }
-      mrun = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha };
+      mrun = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha, w };
       mops!.push(mrun);
     };
     /** 0.60.0 묶음과 함께 쓰던 색 목록을 구간 제 목록으로(그물마다 늘이기 전에) */
@@ -4958,7 +4960,7 @@ export class Renderer3d {
      */
     const mergeRange = (g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number): void => {
       const u = mrun;
-      if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha) {
+      if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha && u.w === 1) {
         if (u.sh && u.cols === cols && u.vc === vc) {
           u.b = b;
           return;
@@ -4971,7 +4973,7 @@ export class Renderer3d {
         u.b = b;
         return;
       }
-      mrun = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha };
+      mrun = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha, w: 1 };
       mops!.push(mrun);
     };
     /** 0.60.0 이 그리기에서 덩이를 구간으로 다룰 수 있는지(겉모습·구간이 없고 덩이 그물이 묶음 그리기 길을 탄다) */
@@ -5412,10 +5414,11 @@ export class Renderer3d {
           col = lineCache.get(key) ?? edgeLineColor(mode, c, st.colors, hi, lineOpt, ic);
           lineCache.set(key, col);
         }
-        // 0.52.0 묶음 그물 윤곽선(강조 아님 — 굵기 1)은 구간에 더하고 다음 그물로(그물마다 그리기 선택 객체를 만들지 않는다)
-        if (mops && !hi && mergeEdge(r)) {
+        // 0.52.0 묶음 그물 윤곽선(굵기 1)은 구간에 더하고 다음 그물로(그물마다 그리기 선택 객체를 만들지 않는다).
+        // 0.61.0 강조한 그물의 굵은 윤곽선(굵기 2)도 구간으로(굵기가 같은 구간끼리 — 0.60.0까지는 그물마다 drawLines, 8만 강조 825개에서 GL 호출 7만 남짓)
+        if (mops && mergeEdge(r)) {
           if (r.edges!.parts) this.dropParts(r.edges!);
-          mergeAdd(r, col, false, 0, alphaOf(r.src.id));
+          mergeAdd(r, col, false, 0, alphaOf(r.src.id), hi ? 2 : 1);
           return;
         }
         const model = mm(r);

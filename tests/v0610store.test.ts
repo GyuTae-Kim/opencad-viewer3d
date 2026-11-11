@@ -2,7 +2,8 @@
  * 0.61.0 묶음 자리 자료 저장소(조각 mergegl — 묶음마다·종류마다 그물 번호 자리를 고정해 둔 RGBA32F 그림, 무늬 단위 10, 60차 남은 한계 "자리 자료를 프레임마다 모두 쓰고 올린다").
  *  - 그린 도형(tests/drawexpand.ts — 정점마다 클립 좌표·시점 좌표·법선·색)이 끈 뷰어(그물마다)와 프레임마다 같다:
  *    가만히·돌림·강조·숨김(항목·묶음)·제자리 색 고치기·겉모습(색·행렬)과 해제·단면 하나·그림자·안개·외곽선·주변 가림·숨은 점선·그물 바꾸기·빼기
- *  - 바뀐 것이 없는 프레임은 올리지 않는다: 가만히·강조 바꿈·숨김 바꿈·외곽선과 주변 가림 켜기는 0텍셀, 제자리 색 고치기·겉모습은 그 자리가 든 줄만, 카메라·단면·그림자·안개가 바뀌면 다시 쓴다
+ *  - 바뀐 것이 없는 프레임은 올리지 않는다: 가만히·숨김 바꿈·외곽선과 주변 가림 켜기는 0텍셀, 강조 바꿈(굵은 윤곽선 선 색)·제자리 색 고치기·겉모습은 그 자리가 든 줄만,
+ *    카메라·단면·그림자·안개가 바뀌면 다시 쓴다
  *  - 무늬 한도가 작으면 자리를 처음부터 다시 놓고(같은 그림), 그래도 넘으면 그 차례는 그물마다(같은 그림). 묶음이 모두 없어지면 저장소 그림을 놓고, 문맥을 잃으면 잊는다
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -110,19 +111,21 @@ describe('0.61.0 묶음 자리 자료 저장소', () => {
     step(on, off, 'still', () => undefined, 'zero');
     step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0), 'some');
     step(on, off, 'still-2', () => undefined, 'zero');
-    step(on, off, 'hover', (w) => w.v.highlight(['b3']), 'zero');
-    step(on, off, 'hover-2', (w) => w.v.highlight(['b4', 'b5', 'b77', 'b300']), 'zero');
+    // 강조: 면 자리는 그대로(강조는 구간 균일 변수), 굵은 윤곽선 구간(0.61.0 — 묶어 그린다)의 선 색만 그 그물 윤곽선 자리 줄에(자리 6텍셀 — 한두 줄씩)
+    // 쓴 자리 텍셀만 올린다(윤곽선 자리 6·면 자리 12 — 한 줄이 안 되는 틈으로 이어진 자리는 그 사이도 함께)
+    step(on, off, 'hover', (w) => w.v.highlight(['b3']), [6, 6]);
+    step(on, off, 'hover-2', (w) => w.v.highlight(['b4', 'b5', 'b77', 'b300']), rows(10));
     step(on, off, 'hide', (w) => w.v.setItemVisible('b10', false), 'zero');
     step(on, off, 'group-hide', (w) => w.v.setGroupVisible('g1', false), 'zero');
-    step(on, off, 'group-show', (w) => (w.v.setGroupVisible('g1', true), w.v.highlight(null)), 'zero');
+    step(on, off, 'group-show', (w) => (w.v.setGroupVisible('g1', true), w.v.highlight(null)), rows(8));
     // 제자리 색 고치기(같은 배열 안 값 — 0.60.0부터 보인다): 그 면 자리가 든 줄만(자리 12텍셀 — 한두 줄)
-    step(on, off, 'color-in-place', (w) => void ((w.sc.meshes[14]!.color as unknown as number[])[0] = 0.95), rows(2));
+    step(on, off, 'color-in-place', (w) => void ((w.sc.meshes[14]!.color as unknown as number[])[0] = 0.95), [12, 12]);
     // 겉모습을 처음 켜면 판이 바뀐다(겉모습이 없으면 자리의 모형을 견주지 않는다) — 그 뒤 겉모습 하나 더는 그 자리만
     step(on, off, 'look-on', (w) => w.v.setItemColor('b16', [1, 0, 0, 1]), 'some');
-    step(on, off, 'look-color', (w) => w.v.setItemColor('b18', [0, 1, 0, 1]), rows(2));
+    step(on, off, 'look-color', (w) => w.v.setItemColor('b18', [0, 1, 0, 1]), [12, 12]);
     // 겉모습 행렬: 그 그물의 면·윤곽선 자리(장면 범위 안에서 옮겨 투영이 그대로 — 범위를 넘으면 투영이 바뀌어 모두 다시 쓴다)
-    step(on, off, 'look-matrix', (w) => w.v.setItemMatrix('b47', translation([1, 0, 0])), rows(4));
-    step(on, off, 'look-matrix-off', (w) => w.v.setItemMatrix('b47', null), rows(4));
+    step(on, off, 'look-matrix', (w) => w.v.setItemMatrix('b47', translation([1, 0, 0])), [18, 18]);
+    step(on, off, 'look-matrix-off', (w) => w.v.setItemMatrix('b47', null), [18, 18]);
     step(on, off, 'looks-off', (w) => (w.v.setItemColor('b16', null), w.v.setItemColor('b18', null)), 'some');
     step(on, off, 'look-matrix-far', (w) => w.v.setItemMatrix('b17', translation([0, 0, 20])), 'some');
     step(on, off, 'look-matrix-far-off', (w) => w.v.setItemMatrix('b17', null), 'some');

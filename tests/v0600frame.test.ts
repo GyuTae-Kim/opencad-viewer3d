@@ -330,8 +330,8 @@ describe('0.60.0 자리 자료 공통 열', () => {
           const stride = 12 + (sh ? 4 : 0) + (sec ? 1 : 0);
           // 구간 둘(o·sh 꼴 둘 — 묶음 전체 목록과 구간 제 목록)
           const runs: MergeRun[] = [
-            { g, a: 0, b: 3, base: 0, cols, vc, o: 0, sh: true, tint: 0, alpha: 1 },
-            { g, a: 3, b: ms.length, base: 0, cols: cols.slice(3), vc: vc.slice(3), o: 3, sh: false, tint: 0, alpha: 1 },
+            { g, a: 0, b: 3, base: 0, cols, vc, o: 0, sh: true, tint: 0, alpha: 1, w: 1 },
+            { g, a: 3, b: ms.length, base: 0, cols: cols.slice(3), vc: vc.slice(3), o: 3, sh: false, tint: 0, alpha: 1, w: 1 },
           ];
           const c = { f, mm: (r: MeshRec) => r.model, look, sec: sec ? {} : null, clipOf, shadowVp: sh ? shadow : null } as never;
           const a = host(), b = host();
