@@ -29,7 +29,7 @@ import {
 } from './mergeopts';
 import type { MeshArrays, MeshLayout, ReleaseFlags } from './release';
 import type { GpuBufferPart, LineMemo, LineRec, MergeBlock, MergeGroup, MergeOrder, MergeRun, MeshRec, Prog, RenderState, RenderStats } from './renderer';
-import { NO_CLIP, type Plane4 } from './section';
+import { NO_CLIP, type Plane4, boxStraddles } from './section';
 import type { Box3, Mesh3d, Rgba } from './types';
 
 /** 이 모듈이 쓰는 렌더러 상태·도움 함수(렌더러가 자신을 넘긴다 — 이름은 Renderer3d 멤버와 같다) */
@@ -389,7 +389,7 @@ export function blockCapFree(k: MergeBlock): boolean {
 }
 
 /** 0.60.0 강조 id → 덩이 번호 · 65536 + 묶음 그물 번호(덩이 그물만 — 같은 id가 여럿이면 목록). 강조를 처음 쓸 때 한 번 */
-export function orderIds(o: MergeOrder): Map<string, number | number[]> {
+function orderIds(o: MergeOrder): Map<string, number | number[]> {
   const m = new Map<string, number | number[]>();
   o.blocks.forEach((k, j) => {
     for (let i = k.a; i < k.b; i++) {
@@ -402,6 +402,222 @@ export function orderIds(o: MergeOrder): Map<string, number | number[]> {
     }
   });
   return m;
+}
+
+// ───── 0.61.0 그리기 뼈대 길 도움(0.60.0 렌더러 render() 안에 있던 것 — 묶어 그리기가 꺼진 장면은 쓰지 않아 코어 조각에서 이 조각으로 옮겼다. 셈·차례는 같다) ─────
+
+/**
+ * 0.60.0 뼈대 차례로 보이는 그물마다 fn(보이는 목록과 같은 차례 — 보이는 목록을 만든 번호 vis). 덩이마다 먼저 blk(덩이, fn)를 묻고, 덩이를 다뤘으면(true) 그 그물들은 건너뛴다
+ * (blk는 예외 그물 — 숨김·잘라냄·강조 — 을 fn으로 넘기고 그 사이 구간을 통째로 더한다)
+ */
+export function eachItem(o: MergeOrder, vis: number, fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void {
+  for (const x of o.items) {
+    if ('src' in x) {
+      if (x.visAt === vis) fn(x);
+      continue;
+    }
+    if (blk && blk(x, fn)) continue;
+    const R = x.g.recs;
+    for (let i = x.a; i < x.b; i++) {
+      const r = R[i]!;
+      if (r.visAt === vis) fn(r);
+    }
+  }
+}
+
+/** 0.60.0 숨김 판이 바뀐 그리기에서 덩이마다 숨긴 그물 번호(보이는 목록을 만든 번호 seq가 아닌 그물) */
+export function blockHid(o: MergeOrder, seq: number): void {
+  for (const k of o.blocks) {
+    const hid: number[] = [];
+    for (let i = k.a; i < k.b; i++) if (k.g.recs[i]!.visAt !== seq) hid.push(i);
+    k.hid = hid;
+  }
+}
+
+/** 0.60.0 강조 모음이 든 덩이에 판 stamp와 강조한 묶음 그물 번호(모음·크기·뼈대가 바뀐 그리기에서) */
+export function blockHi(o: MergeOrder, set: ReadonlySet<string>, stamp: number): void {
+  const ids = (o.ids ??= orderIds(o));
+  const mark = (v: number): void => {
+    const k = o.blocks[Math.floor(v / 65536)]!;
+    if (k.hi !== stamp) {
+      k.hi = stamp;
+      k.hiL = [];
+    }
+    k.hiL.push(v % 65536);
+  };
+  for (const id of set) {
+    const x = ids.get(id);
+    if (x === undefined) continue;
+    if (typeof x === 'number') mark(x);
+    else for (const v of x) mark(v);
+  }
+}
+
+/** 0.60.0 오름차순 두 번호 목록을 합친다(겹친 번호는 하나 — 덩이 예외 그물) */
+export function mergeSorted(a: readonly number[], b: readonly number[]): number[] {
+  const out: number[] = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    const x = j >= b.length || (i < a.length && a[i]! <= b[j]!) ? a[i++]! : b[j++]!;
+    if (out[out.length - 1] !== x) out.push(x);
+  }
+  return out;
+}
+
+/** 0.60.0 이 그리기의 번호들: 그리기 번호(잘라냄 표시)·강조 판(0이면 강조 없음)·보이는 목록 번호 */
+export interface FrameMarks {
+  frame: number;
+  hi: number;
+  vis: number;
+}
+
+/**
+ * 0.60.0 덩이를 예외 그물(숨김·잘라냄 — withHi면 강조도) 사이 구간으로: 구간마다 add, 예외 그물은 보이면 fn(그물마다 길 그대로).
+ * 예외 번호(오름차순·겹침 없음)는 그리기마다 한 번 합친다
+ */
+export function blockRuns(k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number) => void, m: FrameMarks): void {
+  if (k.ex !== m.frame) {
+    k.ex = m.frame;
+    const cutL = k.cut === m.frame ? k.cutL : null;
+    k.exA = !cutL ? k.hid : !k.hid.length ? cutL : mergeSorted(k.hid, cutL);
+    k.exB = m.hi !== 0 && k.hi === m.hi ? mergeSorted(k.exA, k.hiL.slice().sort((p, q) => p - q)) : k.exA;
+  }
+  const R = k.g.recs;
+  let s = k.a;
+  for (const x of withHi ? k.exB : k.exA) {
+    if (x > s) add(s, x);
+    const r = R[x]!;
+    if (r.visAt === m.vis) fn(r);
+    s = x + 1;
+  }
+  if (s < k.b) add(s, k.b);
+}
+
+/** 0.60.0 묶음 그물마다 면 색·정점 색 쓰기(렌더러 colOf·vcolOf와 같은 값 — 겉모습이 없을 때). flat = 숨은 선 모드 바탕 채움 색, mono = 단색 모드 색 */
+export function faceCols(g: MergeGroup, flat: Rgba | null, mono: Rgba | null): [Rgba[], boolean[]] {
+  const fc = (g.fc ??= { cols: g.recs.map((r) => r.src.color), vc: g.recs.map((r) => r.hasColors) });
+  if (flat) return [oneCol(g, 'f', flat), noVc(g)];
+  if (mono) {
+    const key = `m${mono.join()}`;
+    const c = (g.cc ??= {}).f;
+    if (c && c.k === key) return [c.cols, noVc(g)];
+    const cols = fc.cols.map((x): Rgba => [mono[0], mono[1], mono[2], x[3]]);
+    g.cc.f = { k: key, cols };
+    return [cols, noVc(g)];
+  }
+  return [fc.cols, fc.vc];
+}
+
+/** 0.60.0 묶음 그물 수만큼 같은 색(쓰는 곳 slot마다 마지막 값을 둔다 — 값이 같으면 다시 쓴다) */
+export function oneCol(g: MergeGroup, slot: string, c: Rgba): Rgba[] {
+  const key = `c${c[0]},${c[1]},${c[2]},${c[3]}`;
+  const cc = (g.cc ??= {});
+  const x = cc[slot];
+  if (x && x.k === key) return x.cols;
+  const cols = new Array<Rgba>(g.recs.length).fill(c);
+  cc[slot] = { k: key, cols };
+  return cols;
+}
+
+/** 0.60.0 묶음 그물 수만큼 정점 색 끔 */
+export function noVc(g: MergeGroup): boolean[] {
+  return (g.nv ??= new Array<boolean>(g.recs.length).fill(false));
+}
+
+/**
+ * 0.60.0 묶음 그물마다 윤곽선 색(강조·그물마다 선 색이 없을 때 렌더러의 그물마다 col과 같은 값): map이 있으면(선 색 선택) 면 색마다 그 값, one이 있으면 모두 그 색,
+ * 아니면 면 색에 불투명도 a(X-ray 0.9)
+ */
+export function edgeCols(g: MergeGroup, face: () => Rgba[], one: Rgba | null, a: number, map: ((c: Rgba) => Rgba) | null): Rgba[] {
+  if (map) return face().map(map);
+  if (one) return oneCol(g, 'e', one);
+  const key = `w${a}`;
+  const cc = (g.cc ??= {});
+  const x = cc.e;
+  if (x && x.k === key) return x.cols;
+  const cols = face().map((c): Rgba => [c[0], c[1], c[2], a]);
+  cc.e = { k: key, cols };
+  return cols;
+}
+
+/** 0.60.0 덩이 그물의 윤곽선 구간 모음이 없는지(구간 모음 판 ver가 바뀐 뒤에만 다시 본다 — 있으면 그물마다 길이 지운다) */
+export function npOf(k: MergeBlock, ver: number): boolean {
+  if (k.npv !== ver) {
+    let np = true;
+    for (let i = k.a; np && i < k.b; i++) if (k.g.recs[i]!.edges?.parts) np = false;
+    k.np = np;
+    k.npv = ver;
+  }
+  return k.np;
+}
+
+/**
+ * 0.60.0 단면 하나 채우기 단위 거르기: 채우기 단위 묶음이 없는 덩이에서 토막 상자가 평면을 걸치는 토막의 보이는 그물만 push(차례 그대로). 다룰 수 없는 덩이면 false
+ */
+export function capBlock(k: MergeBlock, plane: Readonly<Plane4>, vis: number, push: (r: MeshRec) => void): boolean {
+  if (!k.ok || !blockCapFree(k)) return false;
+  const B = blockBoxes(k), R = k.g.recs;
+  for (let j = 0, s = k.a; s < k.b; j++, s += BLOCK_BOX) {
+    if (!boxStraddles(B[j]!, plane)) continue;
+    for (let i = s; i < Math.min(k.b, s + BLOCK_BOX); i++) if (R[i]!.visAt === vis) push(R[i]!);
+  }
+  return true;
+}
+
+/** 0.60.0 함께 쓰던 색 목록을 구간 제 목록으로(그물마다 늘이기 전에) */
+function own(u: MergeRun): void {
+  u.cols = u.cols.slice(u.a - u.o, u.b - u.o);
+  u.vc = u.vc.slice(u.a - u.o, u.b - u.o);
+  u.o = u.a;
+  u.sh = false;
+}
+
+/**
+ * 0.61.0 묶어 그리는 목록 모으기(0.52.0~0.60.0 render() 안 mergeAdd·mergeRange·mergeDo): 묶음 구간(MergeRun)과 그물마다 그리기(함수)를 장면 차례로.
+ * 마지막 구간은 앞 구간의 다음 번호이고 구간 균일 변수(강조·불투명도)·굵기가 같으면 늘인다
+ */
+export class RunList {
+  ops: MergeOp[] = [];
+  private u: MergeRun | null = null;
+
+  /** 묶음 그물 하나(w = 윤곽선 굵기 — 강조한 그물 2) */
+  add(r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number, w = 1): void {
+    const g = r.mg!, i = r.mi!;
+    const u = this.u;
+    if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha && u.w === w) {
+      if (u.sh) own(u);
+      u.b++;
+      u.cols.push(col);
+      u.vc.push(vcol);
+      return;
+    }
+    this.ops.push((this.u = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha, w }));
+  }
+
+  /** 깨끗한 덩이 [a, b)(그물마다 add를 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다) */
+  range(g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number): void {
+    const u = this.u;
+    if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha && u.w === 1) {
+      if (u.sh && u.cols === cols && u.vc === vc) {
+        u.b = b;
+        return;
+      }
+      if (u.sh) own(u);
+      for (let i = a; i < b; i++) {
+        u.cols.push(cols[i]!);
+        u.vc.push(vc[i]!);
+      }
+      u.b = b;
+      return;
+    }
+    this.ops.push((this.u = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha, w: 1 }));
+  }
+
+  /** 그물마다 그리기 하나(앞 구간은 더 늘이지 않는다 — 뒤 그물이 이 그리기를 앞지르지 않게) */
+  draw(fn: () => void): void {
+    this.ops.push(fn);
+    this.u = null;
+  }
 }
 
 /**
