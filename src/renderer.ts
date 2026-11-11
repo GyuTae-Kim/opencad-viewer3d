@@ -1032,8 +1032,13 @@ export class Renderer3d {
   /** 0.52.0 장면을 올리는 동안 굽기를 기다리는 그물 기록(장면 차례)과 그 정점 수 */
   private mgWait: MeshRec[] = [];
   private mgWaitVerts = 0;
-  /** 0.57.0 mgWait 가운데 빛 기록 수(GL 객체 없이 곧 구울 것 — 동기 구간 끝에 늘 0. 조각만 읽고 쓴다) */
+  /** 0.57.0 mgWait 가운데 빛 기록 수(GL 객체 없이 곧 구울 것). 조각만 읽고 쓴다. 0.58.0: 나눠 올리기는 걸음 사이에도 남는다(그 기록은 mgHold에 있다) */
   mgLight = 0;
+  /**
+   * 0.58.0 나눠 올리는 동안 아직 보이지 않는 그물 기록(장면 차례 — 맨 앞은 늘 빛 기록, 그 뒤로 빛 기록과 끼어든 그물의 그물 버퍼 기록이 섞인다). 그리기·고르기·setMesh가 보는 meshes 밖이라
+   * GL 객체 없는 기록을 걸음 사이에 들고 있어도 그 길들이 볼 일이 없다. 앞선 빛 기록을 굽는 대로 조각 drain이 meshes로 옮기고, 앱이 그 그물을 건드리면 조각 unhold가 그물 버퍼로 돌려 옮긴다
+   */
+  mgHold: MeshRec[] = [];
   /** 0.52.0 한 그리기에서 묶음 굽기에 쓸 몫(ms — 적어도 묶음 하나) */
   mergeBudgetMs = 8;
   /** 0.52.0 구운 묶음들과 굽기를 기다리는 묶음(그물 기록 목록 — 장면 차례), 묶음 버퍼 바이트 합 */
@@ -1868,6 +1873,8 @@ export class Renderer3d {
     this.mgQueue = [];
     this.mgWait = [];
     this.mgWaitVerts = 0;
+    this.mgLight = 0;
+    this.mgHold = [];
     this.mgBytes = 0;
     this.mgDirty = true;
     this.mgActive = this.merging.mode === 'on';
@@ -2160,6 +2167,8 @@ export class Renderer3d {
 
   /** 0.52.0 묶음에 든 그물을 모두 그물마다 버퍼로 되돌린다(그물 배열에서 다시 올린다 — 묶음은 쓰는 기록이 없어져 지운다) */
   private mergeUnstore(): void {
+    // 0.58.0 들고 있던 빛 기록을 먼저 그물 버퍼로(묶어 그리기를 끄면 다시 구울 일이 없다)
+    if (mergeKit) mergeKit.unhold(this.host);
     this.mgQueue = [];
     this.mgWait = [];
     this.mgWaitVerts = 0;
@@ -2441,6 +2450,8 @@ export class Renderer3d {
       // 0.54.0 미뤄 둔 장면 훑기: 첫 그림 뒤(한 번에 다 올릴 때는 곧) 이 걸음 몫 안에서 이어 가고, 마쳤고 조각이 있으면 모아 둔 그물을 굽기 기다림에 넣는다
       if (this.mgScan && (this.mgFramed || budgetMs === Infinity)) this.mergeScan(budgetMs === Infinity ? Infinity : t0 + budgetMs);
       this.mergeFeedUnfed();
+      // 0.58.0 걸음 사이에 묶어 그리기가 꺼졌으면(변종 실패) 들고 있던 빛 기록은 구울 일이 없다 — 그물 버퍼로
+      if (this.mgOff && this.mgHold.length && mergeKit) mergeKit.unhold(this.host);
     }
     while (this.pending && (first || performance.now() - t0 < budgetMs)) {
       const s = p!.scene;
@@ -2455,11 +2466,12 @@ export class Renderer3d {
         this.mgHeld = !this.mgScan;
         break;
       }
-      // 0.57.0 곧장 구울 그물이면 묶음 하나가 찰 때까지 GL 객체 없이 잇는다(이 호출 안에서 굽기까지 끝난다)
+      // 0.57.0 곧장 구울 그물이면 GL 객체 없이 잇는다(0.58.0: 몫이 다하면 빛 기록을 mgHold에 들고 돌아간다. 굽기를 다음 걸음으로 미뤘으면 이번 걸음은 여기까지)
       if (kind === 'mesh' && p!.chunk === undefined && mergeKit?.direct(this.host, s.meshes[p!.mi]!)) {
+        const waited = mergeKit.run(this.host, p!, t0, budgetMs, first);
         first = false;
-        mergeKit.run(this.host, p!, t0, budgetMs);
         this.gl.bindVertexArray(null);
+        if (waited) break;
         if (p!.mi >= s.meshes.length && p!.li >= s.lines.length && p!.pi >= pts.length) this.pending = null;
         continue;
       }
@@ -2477,10 +2489,12 @@ export class Renderer3d {
         const give = this.restoreQ.get(m.id) ?? null;
         this.restoreQ.delete(m.id);
         const r = this.sceneMeshRec(m, { give });
-        this.meshes.push(r);
+        // 0.58.0 앞선 빛 기록을 들고 있으면 장면 차례를 지키려고 함께 든다(그 빛 기록이 구워지면 차례대로 보인다)
+        (this.mgHold.length ? this.mgHold : this.meshes).push(r);
         // 0.52.0 묶을 그물이 모이면 이 걸음 안에서 굽고 그물 버퍼를 놓는다(그물을 다 올리면 남은 것도 — 0.54.0 훑기 전·중·조각을 받는 중이면 모아 둔다)
         this.mergeOffer(r);
         if (p!.mi >= s.meshes.length) this.mergeUploadEnd();
+        if (this.mgHold.length) mergeKit?.drain(this.host);
       } else if (kind === 'line') this.lines.push(this.sceneLineRec(s.lines[p!.li++]!));
       else this.points.push(this.scenePointRec(pts[p!.pi++]!));
       this.gl.bindVertexArray(null);
@@ -2677,6 +2691,8 @@ export class Renderer3d {
         if (p.chunk) this.dropChunk(this.uploadArrays('mesh', prev!));
         p.chunk = undefined;
       }
+      // 0.58.0 올린 그물을 바꾸면(또는 함께 쓰는 배열을 고치면) 들고 있던 빛 기록을 그물 버퍼로 돌려 meshes에 옮긴다 — 아래 길은 meshes에서 찾는다
+      if (this.mgHold.length && k >= 0 && (k < p.mi || ranges)) mergeKit?.unhold(this.host);
       p.scene = scene;
       if (k < 0 || k >= p.mi) {
         // 0.25.0: 다른 그물 객체로 바꿨으면 앞 객체에 앱이 다시 준 배열(문맥 복구)은 버린다
@@ -2750,6 +2766,8 @@ export class Renderer3d {
         if (p.chunk) this.dropChunk(this.uploadArrays('mesh', p.scene.meshes[k]!));
         p.chunk = undefined;
       }
+      // 0.58.0 뺄 그물이 올린 그물이면 들고 있던 빛 기록을 먼저 meshes로(아래에서 meshes에서 찾는다)
+      if (this.mgHold.length && k >= 0 && k < p.mi) mergeKit?.unhold(this.host);
       if (k >= 0 && k < p.mi) p.mi--;
       p.scene = scene;
     }
@@ -3669,7 +3687,8 @@ export class Renderer3d {
   restoreNeed(scene: Scene3d | null): RestoreNeed {
     const out: RestoreNeed = { meshes: [], textures: [] };
     if (scene) {
-      const recs = new Map(this.meshes.map((r) => [r.src, r]));
+      // 0.58.0 들고 있는 기록(나눠 올리는 중 — 그물 버퍼 기록은 놓기로 지워진 꼴이 있을 수 있다)도 기록으로 본다
+      const recs = new Map([...this.meshes, ...this.mgHold].map((r) => [r.src, r]));
       for (const m of scene.meshes) {
         const r = recs.get(m);
         const lay = r ? null : this.laid.get(m);
@@ -3687,6 +3706,7 @@ export class Renderer3d {
    */
   restoreMeshArrays(id: string, a: MeshArrays): boolean {
     if (this.gl.isContextLost() || !a) return false;
+    if (this.mgHold.length) mergeKit?.unhold(this.host);
     const i = this.meshes.findIndex((r) => r.src.id === id);
     let m: Mesh3d | null = i >= 0 ? this.meshes[i]!.src : null;
     let miss = i >= 0 ? this.meshes[i]!.miss : null;
