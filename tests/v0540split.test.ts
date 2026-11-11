@@ -131,7 +131,8 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     expect(Viewer3d.mergingState()).toBe('idle');
     expect(r.mgScan).not.toBeNull();
     expect(r.uploadSome(600_000)).toBe(false);
-    expect(r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+    // 0.60.0 조각이 없어 훑기를 미룬 장면의 첫 그림 앞 걸음은 그물 MERGE_FIRST_MESHES개까지(0.59.0은 굽기 단위 − 1 — 그 뒤는 훑기를 마치고 빛 기록으로 들고 기다린다)
+    expect(r.meshes.length).toBe(MERGE_FIRST_MESHES);
     expect(baked.length).toBe(0);
     let maxVaos = 0;
     for (let i = 0; i < 400 && (r.uploading || v.stats.merged.pending > 0); i++) {

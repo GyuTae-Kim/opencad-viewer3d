@@ -22,19 +22,15 @@ import {
   MERGE_DEAD_RATIO,
   MERGE_LINE_TEXELS,
   MERGE_LOOSE,
-  MERGE_MESH_SEGMENTS,
   MERGE_MESH_TEXELS,
-  MERGE_MESH_VERTS,
   MERGE_UPLOAD_MESHES,
   MERGE_UPLOAD_VERTS,
   type MergingOptions,
 } from './mergeopts';
-import { pbrSource } from './pbr';
 import type { MeshArrays, MeshLayout, ReleaseFlags } from './release';
 import type { GpuBufferPart, LineMemo, LineRec, MergeBlock, MergeGroup, MergeOrder, MergeRun, MeshRec, Prog, RenderState, RenderStats } from './renderer';
 import { NO_CLIP, type Plane4 } from './section';
 import type { Box3, Mesh3d, Rgba } from './types';
-import { CHUNK_MIN_BYTES } from './upload';
 
 /** 이 모듈이 쓰는 렌더러 상태·도움 함수(렌더러가 자신을 넘긴다 — 이름은 Renderer3d 멤버와 같다) */
 export interface MergeHost {
@@ -69,6 +65,7 @@ export interface MergeHost {
   laid: WeakMap<Mesh3d, MeshLayout>;
   rel: ReleaseFlags | null;
   mergeSrcOf(r: MeshRec): { src: MergeSrc; key: string } | null;
+  mergeDirect(m: Mesh3d): boolean;
   mergeBake(list: readonly MeshRec[]): void;
   mergeVariant(base: 'mesh' | 'wide' | 'thin', defs: readonly string[]): Prog | null;
   mergeOffer(r: MeshRec): void;
@@ -174,25 +171,11 @@ function settle(h: MergeHost, list: readonly MeshRec[]): void {
   for (const r of list) if (r.light) solid(h, r);
 }
 
-/** 0.57.0 그물 배열 바이트 합이 조각 올리기 문턱 안인지(uploadSome이 chunkFor로 나눠 올리지 않을 크기 — 같은 배열·이미 올린 배열을 빼지 않은 위 한계) */
-function small(m: Mesh3d): boolean {
-  let n = 0;
-  for (const a of [m.positions, m.normals, m.colors, m.uvs, m.backUvs, m.indices, m.edges]) n += a?.byteLength ?? 0;
-  return n <= CHUNK_MIN_BYTES;
-}
-
 /**
- * 0.57.0 이 그물을 그물마다 GL 객체 없이 곧장 구울지(빛 기록 — 렌더러 meshRec light): 이 장면에서 켜졌고 훑기를 마쳤을 때(훑기 전·중은 묶일지 모른다 — 첫 그림을 그물마다 그린다).
- * 앱이 다시 준 배열을 함께 올릴 그물(restoreQ)·코어가 전에 지운 그물(laid — 올린 꼴과 다시 받을 것을 세는 길)·놓기가 법선을 지울 그물(0.56.0도 묶이지 않는다)은 그물마다 길로,
- * 조각 올리기(CHUNK_MIN_BYTES)를 탈 크기가 아니고 훑기가 묶을 수 있어 보인다고 세는 그물일 때만. 어림과 mergeSrcOf(정점 색 반투명 등)가 갈리면 feed가 그 자리에서 그물 버퍼를 만든다.
- * 조각이 있을 때만 부른다(받기 전·늦음·실패는 렌더러가 그물마다 길로)
+ * 0.57.0 이 그물을 그물마다 GL 객체 없이 곧장 구울지(빛 기록 — 렌더러 meshRec light). 0.60.0 판단은 렌더러(mergeDirect — 조각을 받는 동안에도 빛 기록으로 들고 기다린다)
  */
 export function direct(h: MergeHost, m: Mesh3d): boolean {
-  if (!h.mgActive || h.mgScan || h.mgOff || h.restoreQ.has(m.id) || h.laid.has(m) || (h.rel?.normals && m.normals)) return false;
-  const nv = Math.floor(m.positions.length / 3);
-  if (!nv || nv > MERGE_MESH_VERTS || m.texture || m.backTexture || m.backColor || pbrSource(m) || !(m.color[3] >= 0.999)) return false;
-  if ((m.edges ? m.edges.length / 6 : 0) > MERGE_MESH_SEGMENTS) return false;
-  return ![m.positions, m.normals, m.indices, m.colors, m.edges].some((a) => !!a && h.mgShared.has(a)) && small(m);
+  return h.mergeDirect(m);
 }
 
 /**

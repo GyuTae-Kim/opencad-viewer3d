@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
-import { MERGE_AUTO_MIN, MERGE_KIT_WAIT_MS, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
+import { MERGE_AUTO_MIN, MERGE_FIRST_MESHES, MERGE_KIT_WAIT_MS, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
 import { boxMesh } from '../src/synth';
 import type { Mesh3d, Scene3d } from '../src/types';
 import type { Viewer3d as ViewerT } from '../src/viewer';
@@ -290,7 +290,8 @@ describe('0.56.0 한 번에 올리기를 조각이 올 때까지 미루기', () 
     const b = make(Viewer3d);
     b.v.setScene(boxes(N), { incremental: { budgetMs: 600_000 } });
     expect(b.r.uploadSome(600_000)).toBe(false);
-    expect(b.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+    // 0.60.0 조각이 없어 훑기를 미룬 첫 그림 앞 걸음은 그물 MERGE_FIRST_MESHES개까지
+    expect(b.r.meshes.length).toBe(MERGE_FIRST_MESHES);
     open();
     expect(await Viewer3d.preloadMerging()).toBe(true);
     // 받은 뒤의 한 번에 올리기는 setScene 안에서
