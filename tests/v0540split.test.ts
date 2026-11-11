@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
-import { MERGE_AUTO_MIN, MERGE_SCAN_FIRST, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
+import { MERGE_AUTO_MIN, MERGE_FIRST_MESHES, MERGE_SCAN_FIRST, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
 import { boxMesh } from '../src/synth';
 import type { Mesh3d, Scene3d } from '../src/types';
 import { Viewer3d } from '../src/viewer';
@@ -169,7 +169,8 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     v.setScene(boxes(N), { incremental: { budgetMs: 600_000 } });
     expect(r.mgScan).not.toBeNull();
     r.uploadSome(600_000);
-    expect(r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+    // 0.59.0 첫 그림 앞 걸음은 그물 MERGE_FIRST_MESHES개까지(0.58.0은 굽기 단위 − 1)
+    expect(r.meshes.length).toBe(MERGE_FIRST_MESHES);
     expect(baked.length).toBe(0);
     v.renderNow();
     expect(baked.length).toBe(0);

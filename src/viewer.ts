@@ -239,7 +239,7 @@ import {
 import { MERGE_AUTO_MIN, type MergingMode } from './mergeopts';
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
+import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, LINE_CONTRAST_MIN, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, cssRgba, fitContrast, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
 import { CUBE_TOUCH_BAND, CUBE_TOUCH_SIZE, cubeHit, cubeLayout, drawViewCube } from './viewcube';
 import {
   KEY_BIG_STEP_PX,
@@ -269,8 +269,12 @@ import {
 } from './keysnap';
 
 export interface Viewer3dOptions {
-  /** 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다 */
-  theme?: 'dark' | 'light' | (Partial<Viewer3dTheme> & { base?: 'dark' | 'light' });
+  /**
+   * 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다.
+   * 0.59.0 axisContrast: 좌표축 색(격자 축·왼쪽 아래 축 표시·측정 축 안내선)이 바탕(setBackground 한 색, 없으면 테마 바탕 — 기울기 바탕은 보지 않는다)과
+   * 대비가 모자라면 같은 색상으로 가장 적게 고친다(fitContrast). true면 3:1, 수를 주면 그 비(1 이하·수가 아니면 끔). 기본은 고치지 않는다
+   */
+  theme?: 'dark' | 'light' | (Partial<Viewer3dTheme> & { base?: 'dark' | 'light'; axisContrast?: boolean | number });
   /** 바닥 격자(기본 true) */
   grid?: boolean;
   /** 격자 높이(기본 'min' = 범위 바닥) */
@@ -1693,6 +1697,11 @@ export const TEXTURE_REDRAW_SLOW = 4;
 const TEXTURE_REDRAW_POLL_MS = 50;
 /** 0.30.0 그 울타리를 이만큼(ms) 넘게 기다리면 끝난 것으로 본다(끝났다는 알림이 오지 않는 드라이버에서도 첫 무늬가 나타나게) */
 const TEXTURE_REDRAW_FENCE_MAX_MS = 5000;
+/**
+ * 0.59.0 나눠 올리는 동안 지난 그리기가 걸음 몫보다 오래 걸리면(그리기 ms) × 이 배수가 지날 때까지 올리기만으로 생긴 그리기를 건너뛴다(redrawMs를 주지 않았을 때) —
+ * 그리기가 전체 시간의 1/3쯤을 넘지 않게 한다. 묶을 그물만 있는 8만 그물을 가짜 WebGL로 재 보니 다 구울 때까지 시간의 약 75%가 걸음마다의 장면 그리기(프레임마다 커지는 — 끝에는 100 ms 넘게)였다
+ */
+const UPLOAD_DRAW_GAP = 3;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
 function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
@@ -1756,6 +1765,8 @@ export class Viewer3d {
   private reduceMotion = false;
   private motionOff: (() => void) | null = null;
   private themeOpt: Viewer3dOptions['theme'];
+  /** 0.59.0 좌표축 대비를 켰는지(setBackground가 다시 고른다) */
+  private axisFit = false;
   private theme: Viewer3dTheme = DARK_THEME;
   private colors!: RenderColors;
   /** 단면 테두리·채우기 섞음 색(테마에서 한 번 읽는다) */
@@ -2052,6 +2063,8 @@ export class Viewer3d {
     fn: ((step: number, meshes: number) => number) | null;
     step: number;
     redraw: number;
+    /** 0.59.0 redrawMs를 주지 않았는지(그리기가 몫보다 오래 걸리면 몇 걸음에 한 번 그린다 — UPLOAD_DRAW_GAP) */
+    pace: boolean;
     lastDraw: number;
     cb: ((done: number, total: number) => void) | null;
   } | null = null;
@@ -2213,7 +2226,9 @@ export class Viewer3d {
    *   그다음은 그물 1,000개마다 1 ms). 돌려준 값이 유한한 양수가 아니거나 함수가 예외를 내면 그 걸음은 8 ms
    * - incremental.redrawMs: 나눠 올리는 동안 올리기만으로 생긴 다시 그리기를 이 간격(ms)에 한 번만 한다(첫 걸음은 그린다 — 첫 그림). 다 올린 걸음은 그리지 않고 다음 프레임에
    *   장면 전체를 그린다(올리기와 장면 그리기를 두 작업으로 — 가장 긴 작업이 둘의 합이 아니게). 카메라·고르기·무늬 등 다른 까닭의 다시 그리기는 그대로 그린다. Infinity면 첫 그림과 다 올린 뒤만
-   * 주지 않으면 0.50.0과 같다(모든 걸음 budgetMs 숫자, 걸음마다 그리기)
+   * 주지 않으면 0.50.0과 같은 몫(모든 걸음 budgetMs 숫자)이고, 그리기는 0.59.0부터 두 경우만 건너뛴다(카메라·고르기·무늬 등 다른 까닭의 그리기와 다 올린 걸음은 그대로 그린다):
+   * 그릴 것이 늘지 않은 걸음(묶을 그물의 기록만 모았다 — redrawMs를 주어도), 지난 그리기가 이 걸음 몫보다 오래 걸렸고 그 시작에서 UPLOAD_DRAW_GAP배가 지나지 않은 걸음.
+   * redrawMs: 0을 주면 뒤엣것을 끈다(앞엣것은 같은 그림이라 그대로)
    */
   setScene(
     scene: Scene3d,
@@ -2274,7 +2289,7 @@ export class Viewer3d {
     const fn = typeof io?.budgetMs === 'function' ? io.budgetMs : null;
     const num = typeof io?.budgetMs === 'number' ? io.budgetMs : undefined;
     const redraw = typeof io?.redrawMs === 'number' && io.redrawMs > 0 ? io.redrawMs : 0;
-    this.upload = inc ? { budget: Math.max(1, num ?? 8), fn, step: 0, redraw, lastDraw: -Infinity, cb: opts.onProgress ?? null } : null;
+    this.upload = inc ? { budget: Math.max(1, num ?? 8), fn, step: 0, redraw, pace: io?.redrawMs === undefined, lastDraw: -Infinity, cb: opts.onProgress ?? null } : null;
     // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
@@ -3057,6 +3072,8 @@ export class Viewer3d {
    */
   setBackground(o: BackgroundOptions | null): void {
     this.bgOpt = o ? { ...o } : null;
+    // 0.59.0 좌표축 대비를 켰으면 새 한 색 바탕에 맞춰 다시 고른다
+    if (this.axisFit) this.applyTheme();
     this.invalidate();
   }
 
@@ -5944,10 +5961,24 @@ export class Viewer3d {
     const base = t === 'light' || (typeof t === 'object' && t.base === 'light') ? LIGHT_THEME : DARK_THEME;
     const theme: Viewer3dTheme = { ...base, ...(typeof t === 'object' ? t : {}) };
     delete (theme as { base?: unknown }).base;
+    delete (theme as { axisContrast?: unknown }).axisContrast;
     const cs = getComputedStyle(this.host);
     for (const k of Object.keys(THEME_CSS_VARS) as (keyof Viewer3dTheme)[]) {
       const v = cs.getPropertyValue(THEME_CSS_VARS[k]).trim();
       if (v) theme[k] = v;
+    }
+    // 0.59.0 좌표축 대비(선택): 받은 색이 이미 닿으면 글을 그대로 둔다(같은 그림)
+    const ac = typeof t === 'object' ? t.axisContrast : undefined;
+    const min = ac === true ? LINE_CONTRAST_MIN : typeof ac === 'number' && ac > 1 ? ac : 0;
+    this.axisFit = min > 0;
+    if (min > 0) {
+      const col = this.bgOpt?.color;
+      const bg = col === undefined ? this.rgba(theme.background) : typeof col === 'string' ? this.rgba(col) : col;
+      for (const k of ['axisX', 'axisY', 'axisZ'] as const) {
+        const was = this.rgba(theme[k]);
+        const fit = fitContrast(was, bg, min);
+        if (fit !== was) theme[k] = cssRgba(fit);
+      }
     }
     this.theme = theme;
     this.wrap.style.setProperty('--v3d-focus-default', base === LIGHT_THEME ? FOCUS_DEFAULT.light : FOCUS_DEFAULT.dark);
@@ -8566,13 +8597,17 @@ export class Viewer3d {
         if (up) up.step++;
       }
       const done = this.pumpUpload(b);
-      // 0.51.0 redrawMs: 올리기 걸음만으로 생긴 그리기는 간격 안이면 건너뛰고, 다 올린 걸음은 그리지 않고 다음 프레임에 장면 전체를 그린다
-      if (sceneUp && up && up.redraw > 0 && upOnly) {
-        if (done) {
-          this.invalidate();
-          return;
-        }
-        if (t0 - up.lastDraw < up.redraw) return;
+      if (sceneUp && up && upOnly) {
+        // 0.51.0 redrawMs: 올리기 걸음만으로 생긴 그리기는 간격 안이면 건너뛰고, 다 올린 걸음은 그리지 않고 다음 프레임에 장면 전체를 그린다
+        if (up.redraw > 0) {
+          if (done) {
+            this.invalidate();
+            return;
+          }
+          if (t0 - up.lastDraw < up.redraw) return;
+        } else if (!done && up.pace && !this.renderer.uploadHeld && this.renderer.renderMs > b && t0 - up.lastDraw < this.renderer.renderMs * UPLOAD_DRAW_GAP) return;
+        // 0.59.0 이 걸음이 그릴 것을 늘리지 않았으면(빛 기록만 모았다 — 곧 구워질 때 보인다) 다시 그려도 같은 그림이다
+        if (!done && !this.renderer.uploadNews) return;
       }
     }
     if (this.upload) this.upload.lastDraw = t0;

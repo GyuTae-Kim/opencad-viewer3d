@@ -11,7 +11,7 @@ import { packNormals } from '../src/attribs';
 import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
-import { MERGE_SCAN_FIRST, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
+import { MERGE_FIRST_MESHES, MERGE_SCAN_FIRST, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
 import { boxMesh } from '../src/synth';
 import type { Mesh3d, Scene3d } from '../src/types';
 import { Viewer3d } from '../src/viewer';
@@ -135,7 +135,8 @@ describe('0.57.0 곧장 굽기', () => {
     w.peak.reset();
     w.v.setScene(boxes(N), { incremental: { budgetMs: 600_000 } });
     w.r.uploadSome(600_000);
-    expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+    // 0.59.0 첫 그림 앞 걸음은 그물 MERGE_FIRST_MESHES개까지(0.58.0은 굽기 단위 − 1)
+    expect(w.r.meshes.length).toBe(MERGE_FIRST_MESHES);
     expect(w.r.meshes.every((r) => !r.light && !r.mg)).toBe(true);
     w.v.fit(false);
     bake(w);

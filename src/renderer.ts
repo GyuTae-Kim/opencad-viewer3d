@@ -83,6 +83,7 @@ import {
   MERGE_UPLOAD_MESHES,
   MERGE_UPLOAD_VERTS,
   type MergingOptions,
+  MERGE_FIRST_MESHES,
   MERGE_SCAN_FIRST,
 } from './mergeopts';
 // 0.54.0: 묶음 나누기·굽기(merge.ts·mergegl.ts)는 값으로 가져오지 않는다 — 묶어 그리기를 켤 장면에서만 import()로 받는 조각(loadMergeKit)
@@ -1055,6 +1056,8 @@ export class Renderer3d {
   mergeBakeMs = 0;
   /** 0.52.0 지난 render 벽시계 ms(묶음 굽기를 뺀 장면 그리기 — 굽기 몫의 아래 한도, 조각 step이 읽는다) */
   renderMs = 0;
+  /** 0.59.0 지난 render가 본 그리기 목록 기록 수(그물·선분·점 — uploadNews) */
+  private drawnRecs = 0;
   /**
    * 0.54.0 미뤄 둔 장면 훑기(mergePrescan — 나눠 올리는 장면은 첫 그림 뒤 올리는 걸음마다 몫 안에서): 장면, 단계(0 그물 배열 적기·1 선분·점 배열 적기·2 묶을 수 있는 그물 세기),
    * 다음 그물 번호, 본 배열, 센 수. null이면 훑기를 마쳤거나 훑지 않는 장면.
@@ -2066,6 +2069,8 @@ export class Renderer3d {
     if (budgetMs === Infinity || this.mgOff || mergeKitLate) return false;
     if (!this.mgScan && !(this.mgActive && !mergeKit)) return false;
     const nv = Math.floor(next.positions.length / 3);
+    // 0.59.0 훑기를 미룬 큰 장면의 첫 그림 앞: 몇 개만 그물마다 올리고 곧 첫 그림을 낸다(이 그물들은 훑기 뒤 곧 구워진다 — MERGE_FIRST_MESHES)
+    if (this.mgScan && !this.mgFramed && this.pending!.scene.meshes.length > MERGE_SCAN_FIRST && this.mgUnfed.length >= MERGE_FIRST_MESHES) return true;
     return this.mgUnfed.length + this.mgWait.length >= MERGE_UPLOAD_MESHES - 1 || this.mgUnfedVerts + this.mgWaitVerts + nv >= MERGE_UPLOAD_VERTS;
   }
 
@@ -2415,6 +2420,11 @@ export class Renderer3d {
   get texturesBusy(): boolean {
     for (const r of this.textures.values()) if (r.state === 'queued' || r.state === 'decoding' || r.state === 'restoring') return true;
     return false;
+  }
+
+  /** 0.59.0 지난 그리기 뒤 그리기 목록에 새 기록이 들어왔는지(나눠 올리는 걸음이 빛 기록만 모으면 false — 다시 그려도 같은 그림) */
+  get uploadNews(): boolean {
+    return this.meshes.length + this.lines.length + this.points.length !== this.drawnRecs;
   }
 
   /** 나눠 올리기 진행: 올린 묶음 수 / 전체 묶음 수(올리는 중이 아니면 null) */
@@ -3970,6 +3980,7 @@ export class Renderer3d {
     this.mergeStep();
     // 0.54.0 나눠 올리는 장면의 첫 그림 — 다음 올리기 걸음부터 훑고 굽는다
     this.mgFramed = true;
+    this.drawnRecs = this.meshes.length + this.lines.length + this.points.length;
     const renderT0 = performance.now();
     const multi = st.sections ?? null;
     const sec = multi ? null : (st.section ?? null);
