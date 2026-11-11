@@ -1702,6 +1702,22 @@ const TEXTURE_REDRAW_FENCE_MAX_MS = 5000;
  * 그리기가 전체 시간의 1/3쯤을 넘지 않게 한다. 묶을 그물만 있는 8만 그물을 가짜 WebGL로 재 보니 다 구울 때까지 시간의 약 75%가 걸음마다의 장면 그리기(프레임마다 커지는 — 끝에는 100 ms 넘게)였다
  */
 const UPLOAD_DRAW_GAP = 3;
+/**
+ * 0.62.0 보이는 범위 덩어리 하나의 묶음 수. 숨김을 바꾼 그리기의 보이는 범위(카메라 가까운·먼 면)를 숨긴 묶음이 든 덩어리만 묶음마다 다시 합친다 —
+ * 0.61.0은 묶음 모두를 다시 합쳐 8만 그물에서 숨김을 하나씩 더하는 프레임마다 그리기 밖 약 20 ms였다
+ */
+const VIS_CHUNK = 64;
+/** 0.62.0 보이는 범위 덩어리(뷰어 visChunks): 묶음 차례 목록·id → 차례·덩어리마다 모두 보일 때 범위와 든 묶음 이름(groups — 없으면 빈 집합) */
+interface VisChunks {
+  items: Map<string, Item>;
+  boxes: WeakMap<AnyItem, Box3>;
+  ver: number;
+  size: number;
+  list: Item[];
+  at: Map<string, number>;
+  box: Box3[];
+  groups: Set<string>[];
+}
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
 function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
@@ -1811,6 +1827,12 @@ export class Viewer3d {
   private anim: { from: CameraState; to: CameraState; t0: number; dur: number; done: (arrived: boolean) => void } | null = null;
   private allBox: Box3 = emptyBox();
   private visBox: Box3 | null = null;
+  /**
+   * 0.62.0 보이는 범위 덩어리(묶음 차례 VIS_CHUNK개마다 모두 보일 때의 범위 — 숨김이 바뀌어도 그대로 쓴다). 묶음·범위 캐시·판(boundsVer — 장면·그물·겉모습 행렬을
+   * 바꿀 때 오른다)이 같을 때만 쓴다
+   */
+  private visChunks: VisChunks | null = null;
+  private boundsVer = 0;
   private grid: GridSpec | null = null;
   private gridOn: boolean;
   private bvhs = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Bvh>>();
@@ -2299,6 +2321,7 @@ export class Viewer3d {
     // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(0.49.0은 무한 범위에서 격자를 만들다 예외를 냈다)
     this.allBox = boundsOk(scene.bounds) ? scene.bounds! : sceneBounds(scene);
     this.visBox = null;
+    this.boundsVer++;
     this.rebuildGrid();
     if (!opts.keepView) {
       const a = dirToAngles(VIEW_DIRS.seIso);
@@ -2380,6 +2403,8 @@ export class Viewer3d {
     if (this.gpu) this.renderer.clear();
     this.allBox = emptyBox();
     this.visBox = null;
+    this.boundsVer++;
+    this.visChunks = null;
     this.rebuildGrid();
     if (hadSection) this.emitSection();
     this.invalidate();
@@ -2734,6 +2759,7 @@ export class Viewer3d {
     this.usesOrigin = s.meshes.some((m) => hasOrigin(m.origin)) || s.lines.some((l) => hasOrigin(l.origin)) || (s.points ?? []).some((p) => hasOrigin(p.origin));
     this.visLists = null;
     this.visBox = null;
+    this.boundsVer++;
     this.cutDirty = true;
     this.shadowVer++;
     // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(빈 상자·뒤집힌 상자는 0.49.0도 다시 셌다)
@@ -5551,6 +5577,7 @@ export class Viewer3d {
       }
     if (moved === true || (moved && moved.length)) {
       this.visBox = null;
+      this.boundsVer++;
       this.cutDirty = true;
       this.wheelAnchor = null;
     }
@@ -5879,9 +5906,62 @@ export class Viewer3d {
     let ranged = false;
     for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
     if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoved.size && !this.bbList.length) return (this.visBox = this.allBox);
-    let b = emptyBox();
-    for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    // 0.62.0 숨긴 구간·마주 보는 그물이 없으면 덩어리째(같은 값 — chunkedVisibleBox)
+    let b = !ranged && !this.bbList.length ? this.chunkedVisibleBox() : null;
+    if (!b) {
+      b = emptyBox();
+      for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    }
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
+  }
+
+  /**
+   * 0.62.0 보이는 범위를 덩어리째: 묶음 차례 VIS_CHUNK개마다 모두 보일 때의 범위(unionBox로 차례대로 합친 것)를 두고, 숨긴 묶음이 든 덩어리(숨긴 id의 덩어리·숨긴 이름이 든 덩어리)만
+   * 묶음마다 합친다. unionBox를 차례대로 합친 값은 각 축에서 극값에 처음 닿은 꼭짓점의 값(같은 수 ±0이면 앞의 것)이라 덩어리 범위를 차례대로 합쳐도 비트까지 같다.
+   * 덩어리는 묶음·범위 캐시·판(boundsVer)이 같은 동안 그대로 쓴다(숨김만 바뀐 그리기는 다시 세지 않는다)
+   */
+  private chunkedVisibleBox(): Box3 {
+    let C = this.visChunks;
+    if (!C || C.items !== this.items || C.boxes !== this.boxes || C.ver !== this.boundsVer || C.size !== this.items.size) {
+      const list = [...this.items.values()];
+      const at = new Map<string, number>();
+      const box: Box3[] = [];
+      const groups: Set<string>[] = [];
+      for (let s = 0; s < list.length; s += VIS_CHUNK) {
+        let b = emptyBox();
+        const gs = new Set<string>();
+        for (let i = s; i < Math.min(list.length, s + VIS_CHUNK); i++) {
+          const it = list[i]!;
+          at.set(it.item.id, i);
+          if (it.item.group !== undefined) gs.add(it.item.group);
+          b = unionBox(b, this.boundsOf(it.item));
+        }
+        box.push(b);
+        groups.push(gs);
+      }
+      C = this.visChunks = { items: this.items, boxes: this.boxes, ver: this.boundsVer, size: this.items.size, list, at, box, groups };
+    }
+    const dirty = new Uint8Array(C.box.length);
+    for (const id of this.hiddenItems) {
+      const i = C.at.get(id);
+      if (i !== undefined) dirty[Math.floor(i / VIS_CHUNK)] = 1;
+    }
+    if (this.hiddenGroups.size)
+      C.groups.forEach((gs, j) => {
+        if (gs.size) for (const g of this.hiddenGroups) if (gs.has(g)) dirty[j] = 1;
+      });
+    let b = emptyBox();
+    for (let j = 0; j < C.box.length; j++) {
+      if (!dirty[j]) {
+        b = unionBox(b, C.box[j]!);
+        continue;
+      }
+      for (let i = j * VIS_CHUNK; i < Math.min(C.list.length, (j + 1) * VIS_CHUNK); i++) {
+        const it = C.list[i]!;
+        if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.boundsOf(it.item));
+      }
+    }
+    return b;
   }
 
   /** 묶음의 보이는 세계 범위(묶음 안 숨긴 구간을 빼고) */

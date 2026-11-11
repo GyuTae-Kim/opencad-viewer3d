@@ -680,6 +680,9 @@ export interface MergeGroup {
    */
   org?: Float64Array;
   sft?: Uint8Array;
+  /** 0.62.0 그물 모형이 모두 이동뿐인지(sft 1·2이거나 모형이 없다 — nom. 겉모습이 없으면 자리 자료를 MSHIFT 꼴로: 면 3·선 2텍셀) */
+  mov?: boolean;
+  nom?: Uint8Array;
   fc?: { cols: Rgba[]; vc: boolean[] };
   nv?: boolean[];
   cc?: Record<string, { k: string; cols: Rgba[] }>;
@@ -722,6 +725,11 @@ export interface MergeRun {
   alpha: number;
   /** 0.61.0 윤곽선 굵기(CSS 화소 — 강조한 그물 2, 그 밖 1. 면 구간은 1) */
   w: number;
+  /**
+   * 0.62.0 면 구간 안 강조한 그물 번호(묶음 그물 번호 오름차순 — 없으면 null). 강조는 자리 깃발(정점 색 쓰기 깃발 + 2)이라 구간이 강조에서 끊기지 않고,
+   * 강조 섞기 몫은 구간 균일 변수 tint(면 차례 0.5 — 깊이만 그리는 차례 0)에 그물마다 깃발을 곱한다
+   */
+  hl?: number[] | null;
 }
 
 /**
@@ -747,6 +755,8 @@ export interface MergeBlock {
   ex: number;
   exA: number[];
   exB: number[];
+  /** 0.62.0 이 그리기의 강조한 그물 번호(오름차순 — 강조가 없으면 null, ex 번호의 그리기에서) */
+  hs?: number[] | null;
   /** 그물 세계 범위(MeshRec.box)를 토막(조각 BLOCK_BOX개)마다 합친 상자·채우기 단위 묶음(capGroup)이 없는지(처음 쓸 때 — 조각 blockBoxes·blockCapFree) */
   boxes?: Box3[];
   ncg?: boolean;
@@ -842,7 +852,10 @@ function variantSources(base: 'mesh' | 'wide' | 'thin' | 'point' | 'depth' | 'pr
   const v = withDefines(vs, ...defs);
   // 0.54.0 MERGE 변종은 묶음이 있을 때만 부른다(묶음은 조각이 와야 구우므로 조각이 있다 — 없으면 예외, 부르는 쪽은 그물마다 그린다)
   if (defs.includes('MERGE') && !mergeKit) throw new Error('MERGE 변종: 묶어 그리기 조각을 아직 받지 않았다');
-  return [defs.includes('MERGE') ? mergeKit!.mergeShader(v, base === 'mesh' ? 'mesh' : 'line') : v, withDefines(fs, ...defs)];
+  // 0.62.0 그물 MERGE는 조각 셰이더도(강조 섞기 몫에 그물마다 강조 깃발 — 조각 mergeFrag)
+  const fd = withDefines(fs, ...defs);
+  if (!defs.includes('MERGE')) return [v, fd];
+  return base === 'mesh' ? [mergeKit!.mergeShader(v, 'mesh'), mergeKit!.mergeFrag(fd)] : [mergeKit!.mergeShader(v, 'line'), fd];
 }
 
 /** 0.54.0 묶어 그리기 조각(mergegl.ts — 나눠 받는다): 받았으면 그 모듈, 받는 중이면 약속, 받지 못했으면 mergeKitFailed */
@@ -4883,9 +4896,11 @@ export class Renderer3d {
     /** 0.60.0 이 그리기에서 덩이를 구간으로 다룰 수 있는지(겉모습·구간이 없고 덩이 그물이 묶음 그리기 길을 탄다) */
     const fastOk = !!O && !look && !st.parts;
     const marks = { frame: frameNo, hi: hiStamp, vis: visSeq };
-    /** 0.60.0 덩이를 예외 그물 사이 구간으로(조각 blockRuns). 다룰 수 없으면 false(덩이 전체를 그물마다) */
-    const blockRuns = (k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number) => void): boolean =>
+    /** 0.60.0 덩이를 예외 그물 사이 구간으로(조각 blockRuns). 다룰 수 없으면 false(덩이 전체를 그물마다). 0.62.0 withHi가 아니면 구간 안 강조 번호(hl)도 */
+    const blockRuns = (k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number, hl: number[] | null) => void): boolean =>
       fastOk && k.ok && (kit.blockRuns(k, fn, withHi, add, marks), true);
+    /** 0.62.0 강조 섞기 몫(그물마다 그릴 때 강조한 그물의 u_tint.a — 면 구간은 자리 깃발에 곱한다) */
+    const HI_TINT = 0.5;
     /** 0.60.0 묶음 그물마다 면 색·정점 색 쓰기(조각 faceCols — colOf·vcolOf와 같은 값, 겉모습이 없을 때) */
     const faceCols = (g: MergeGroup): [Rgba[], boolean[]] => kit.faceCols(g, flat ? bgFill : null, mono);
     /** 0.57.0 구간 그리기(조각 drawFaces·drawEdges)에 넘기는 이 프레임 값(부를 때마다 — 그림자는 깊이 그림을 그린 뒤 정해진다) */
@@ -4926,8 +4941,8 @@ export class Renderer3d {
       gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.colorMask(false, false, false, false);
       meshUse(sceneMeshProg());
-      // 0.52.0 묶음 그물은 구간으로(깊이만 — 강조 없이)
-      mops = mOn ? new kit.RunList() : null;
+      // 0.52.0 묶음 그물은 구간으로(깊이만 — 강조 없이). 0.62.0 강조 깃발은 면 차례와 같게 적는다(같은 자리를 읽는다 — 섞는 몫은 0)
+      mops = mOn ? new kit.RunList(0) : null;
       each(
         (r) => {
           if (transOf(r)) return;
@@ -4938,7 +4953,7 @@ export class Renderer3d {
           }
           if (gone(r)) return;
           if (mops && mergeFace(r)) {
-            mops.add(r, colOf(r), vcolOf(r), 0, 1);
+            mops.add(r, colOf(r), vcolOf(r), st.highlight.has(r.src.id) ? HI_TINT : 0, 1);
             return;
           }
           // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
@@ -4954,11 +4969,11 @@ export class Renderer3d {
           if (p !== cur) meshUse(p);
           meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
         },
-        // 0.60.0 덩이는 예외 사이 구간으로(깊이만이라 강조와 상관없다)
+        // 0.60.0 덩이는 예외 사이 구간으로(깊이만이라 강조와 상관없다 — 0.62.0 강조 번호는 깃발로)
         mops
           ? (k, fn) => {
               const [cols, vc] = faceCols(k.g);
-              return blockRuns(k, fn, false, (a, b) => mops!.range(k.g, a, b, cols, vc, 0, 1));
+              return blockRuns(k, fn, false, (a, b, hl) => mops!.range(k.g, a, b, cols, vc, 0, 1, hl));
             }
           : null,
       );
@@ -4980,9 +4995,10 @@ export class Renderer3d {
       let backs = false;
       let pbrs = false;
       const hiOf = (r: MeshRec): number => (st.highlight.has(r.src.id) ? 0.5 : 0);
-      // 0.52.0 묶음 그물은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에)
+      // 0.52.0 묶음 그물은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에).
+      // 0.62.0 강조는 자리 깃발(구간이 끊기지 않는다 — 섞는 몫 HI_TINT를 구간 균일 변수로)
       const plainP = cur;
-      mops = mOn ? new kit.RunList() : null;
+      mops = mOn ? new kit.RunList(HI_TINT) : null;
       each(
         (r) => {
           if (transOf(r)) return;
@@ -5004,7 +5020,7 @@ export class Renderer3d {
             textured = true;
             return;
           }
-          const tint = st.highlight.has(r.src.id) ? 0.5 : 0;
+          const tint = st.highlight.has(r.src.id) ? HI_TINT : 0;
           if (mops) {
             if (mergeFace(r)) mops.add(r, colOf(r), vcolOf(r), tint, 1);
             else
@@ -5016,11 +5032,11 @@ export class Renderer3d {
           }
           meshDrawParts(r, colOf(r), 1, tint, r.src.doubleSided === false);
         },
-        // 0.60.0 덩이는 예외(숨김·잘라냄·강조) 사이 구간으로 — 강조한 그물은 그물마다 길이 강조 구간을 따로 연다
+        // 0.60.0 덩이는 예외(숨김·잘라냄) 사이 구간으로 — 0.62.0 강조한 그물은 구간 안 강조 번호로(0.61.0까지는 예외라 그물마다 길이 강조 구간을 따로 열었다)
         mops
           ? (k, fn) => {
               const [cols, vc] = faceCols(k.g);
-              return blockRuns(k, fn, true, (a, b) => mops!.range(k.g, a, b, cols, vc, 0, 1));
+              return blockRuns(k, fn, false, (a, b, hl) => mops!.range(k.g, a, b, cols, vc, 0, 1, hl));
             }
           : null,
       );

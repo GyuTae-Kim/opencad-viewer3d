@@ -23,6 +23,8 @@ import { type MergeCand, type MergeSrc, mergeArrays, mergeBytes, mergeChunks, me
 import {
   MERGE_DEAD_RATIO,
   MERGE_LINE_TEXELS,
+  MERGE_LITE_LINE_TEXELS,
+  MERGE_LITE_MESH_TEXELS,
   MERGE_LOOSE,
   MERGE_MESH_TEXELS,
   MERGE_UPLOAD_MESHES,
@@ -475,24 +477,34 @@ export interface FrameMarks {
 
 /**
  * 0.60.0 덩이를 예외 그물(숨김·잘라냄 — withHi면 강조도) 사이 구간으로: 구간마다 add, 예외 그물은 보이면 fn(그물마다 길 그대로).
- * 예외 번호(오름차순·겹침 없음)는 그리기마다 한 번 합친다
+ * 예외 번호(오름차순·겹침 없음)는 그리기마다 한 번 합친다. 0.62.0 withHi가 아니면 구간 안 강조한 그물 번호(오름차순 — 없으면 null)를 add에 함께 준다(면 구간의 강조 깃발)
  */
-export function blockRuns(k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number) => void, m: FrameMarks): void {
+export function blockRuns(k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number, hl: number[] | null) => void, m: FrameMarks): void {
   if (k.ex !== m.frame) {
     k.ex = m.frame;
     const cutL = k.cut === m.frame ? k.cutL : null;
     k.exA = !cutL ? k.hid : !k.hid.length ? cutL : mergeSorted(k.hid, cutL);
-    k.exB = m.hi !== 0 && k.hi === m.hi ? mergeSorted(k.exA, k.hiL.slice().sort((p, q) => p - q)) : k.exA;
+    k.hs = m.hi !== 0 && k.hi === m.hi ? k.hiL.slice().sort((p, q) => p - q) : null;
+    k.exB = k.hs ? mergeSorted(k.exA, k.hs) : k.exA;
   }
   const R = k.g.recs;
+  const hs = withHi ? null : k.hs;
+  let p = 0;
+  const span = (a: number, b: number): void => {
+    if (!hs) return add(a, b, null);
+    while (p < hs.length && hs[p]! < a) p++;
+    const q = p;
+    while (p < hs.length && hs[p]! < b) p++;
+    add(a, b, p > q ? hs.slice(q, p) : null);
+  };
   let s = k.a;
   for (const x of withHi ? k.exB : k.exA) {
-    if (x > s) add(s, x);
+    if (x > s) span(s, x);
     const r = R[x]!;
     if (r.visAt === m.vis) fn(r);
     s = x + 1;
   }
-  if (s < k.b) add(s, k.b);
+  if (s < k.b) span(s, k.b);
 }
 
 /** 0.60.0 묶음 그물마다 면 색·정점 색 쓰기(렌더러 colOf·vcolOf와 같은 값 — 겉모습이 없을 때). flat = 숨은 선 모드 바탕 채움 색, mono = 단색 모드 색 */
@@ -582,24 +594,40 @@ export class RunList {
   ops: MergeOp[] = [];
   private u: MergeRun | null = null;
 
+  /**
+   * hiAmt(0.62.0 면 차례 — 강조를 자리 깃발로): null이 아니면 tint > 0인 그물은 구간을 끊지 않고 강조 번호(hl)로 적고, 구간 균일 변수 tint는 늘 hiAmt
+   * (면 색 차례 0.5, 깊이만 그리는 차례 0 — 깃발은 같게 써 두 차례가 같은 자리를 읽는다). null이면 0.61.0처럼 tint가 다르면 구간을 끊는다(윤곽선)
+   */
+  constructor(readonly hiAmt: number | null = null) {}
+
   /** 묶음 그물 하나(w = 윤곽선 굵기 — 강조한 그물 2) */
   add(r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number, w = 1): void {
     const g = r.mg!, i = r.mi!;
     const u = this.u;
-    if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha && u.w === w) {
+    const mix = this.hiAmt !== null, t = mix ? this.hiAmt! : tint;
+    if (u && u.g === g && u.b === i && u.tint === t && u.alpha === alpha && u.w === w) {
       if (u.sh) own(u);
       u.b++;
       u.cols.push(col);
       u.vc.push(vcol);
+      if (mix && tint > 0) (u.hl ??= []).push(i);
       return;
     }
-    this.ops.push((this.u = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha, w }));
+    this.ops.push((this.u = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint: t, alpha, w, hl: !mix ? undefined : tint > 0 ? [i] : null }));
   }
 
-  /** 깨끗한 덩이 [a, b)(그물마다 add를 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다) */
-  range(g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number): void {
+  /**
+   * 깨끗한 덩이 [a, b)(그물마다 add를 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다).
+   * hl = 그 안 강조한 그물 번호(오름차순 — hiAmt가 있는 목록에서만)
+   */
+  range(g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number, hl: number[] | null = null): void {
     const u = this.u;
-    if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha && u.w === 1) {
+    const t = this.hiAmt ?? tint;
+    if (u && u.g === g && u.b === a && u.tint === t && u.alpha === alpha && u.w === 1) {
+      if (hl) {
+        if (u.hl) for (const x of hl) u.hl.push(x);
+        else u.hl = hl;
+      }
       if (u.sh && u.cols === cols && u.vc === vc) {
         u.b = b;
         return;
@@ -612,7 +640,7 @@ export class RunList {
       u.b = b;
       return;
     }
-    this.ops.push((this.u = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha, w: 1 }));
+    this.ops.push((this.u = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint: t, alpha, w: 1, hl: this.hiAmt === null ? undefined : hl }));
   }
 
   /** 그물마다 그리기 하나(앞 구간은 더 늘이지 않는다 — 뒤 그물이 이 그리기를 앞지르지 않게) */
@@ -630,9 +658,20 @@ function shiftsOf(g: MergeGroup): void {
   if (g.org) return;
   const n = g.recs.length;
   const org = new Float64Array(n * 4), sft = new Uint8Array(n);
+  let mov = n > 0;
+  let nom: Uint8Array | undefined;
   for (let i = 0; i < n; i++) {
     const m = g.recs[i]!.model;
-    if (!m || !shiftOnly(m)) continue;
+    if (!m) {
+      // 0.62.0 모형이 없는 그물(세계 좌표): 이동뿐 꼴에서 3열은 시점 투영·시점 행렬 3열 그대로(faceTexels·lineTexels와 같은 값 — 0~2열은 이동뿐 그물의 공통 열과 ±0만 다를 수 있다).
+      // 0.60.0 공통 열 길(sft)은 타지 않는다
+      (nom ??= new Uint8Array(n))[i] = 1;
+      continue;
+    }
+    if (!shiftOnly(m)) {
+      mov = false;
+      continue;
+    }
     let pure = true;
     for (let j = 0; j < 12; j++) if (Object.is(m[j], -0)) pure = false;
     sft[i] = pure ? 2 : 1;
@@ -643,6 +682,15 @@ function shiftsOf(g: MergeGroup): void {
   }
   g.org = org;
   g.sft = sft;
+  g.nom = nom;
+  g.mov = mov;
+}
+
+/** 0.62.0 이 그리기에서 묶음 g의 자리를 MSHIFT 꼴(이동뿐 — 면 3·선 2텍셀)로 쓰는지: 겉모습이 없고 그물 모형이 모두 이동뿐(모형이 없는 그물 포함) */
+function lite(g: MergeGroup, look: boolean): boolean {
+  if (look) return false;
+  shiftsOf(g);
+  return g.mov!;
 }
 
 /**
@@ -699,9 +747,9 @@ function wideAt(h: MergeHost, seg: WebGLBuffer, item: WebGLBuffer, first: number
  * fill이 낡은 자리만 쓴 뒤 쓴 줄만 올린다. 저장소가 GPU 무늬 한도에 들지 않으면 false(그물마다 그린다 — 0.60.0까지 자리 자료 그림이 모자랄 때와 같다).
  * 0.60.0까지는 구간 차례로 자리 k = 0, 1, …에 이어 쓰고 그 차례 자리를 모두 올렸다
  */
-function putRuns(h: MergeHost, runs: readonly MergeRun[], kind: string, stride: number, sig: number[], fill: () => void): boolean {
+function putRuns(h: MergeHost, runs: readonly MergeRun[], kind: string, strideOf: (g: MergeGroup) => number, sig: number[], fill: (fresh: boolean) => void): boolean {
   if (!runs.length) return false;
-  const s = storeSlots(h, runs, kind, stride);
+  const s = storeSlots(h, runs, kind, strideOf);
   if (!s) return false;
   const o = s.sig[kind];
   let same = !!o && o.length === sig.length;
@@ -711,16 +759,18 @@ function putRuns(h: MergeHost, runs: readonly MergeRun[], kind: string, stride: 
     s.gen[kind] = (s.gen[kind] ?? 0) + 1;
   }
   for (const u of runs) u.base = u.g.ps![kind]!.base;
-  fill();
+  // 0.62.0 판이 이 차례에 올랐으면(카메라를 돌린 프레임 등) 그 종류 자리는 모두 낡았다 — 자리마다 견주지 않고 구간째 쓴다
+  fill(!same);
   storePut(h, s);
   return true;
 }
 
 /**
  * 0.61.0 이 차례 구간의 묶음마다 kind 자리(그물 수 × stride 텍셀)를 마련한다 — 없거나 텍셀 수가 다르면 저장소 끝에 새로. 늘려야 하는데 버린 자리(빠진 묶음·텍셀 수가 바뀐 자리)가
- * ¼ 이상이거나 GPU 무늬 한도를 넘으면 자리를 모두 버리고 처음부터 다시 놓는다(그 앞 차례가 이미 건 그리기는 GL 차례대로 그때 그림을 읽는다). 그래도 넘으면 null
+ * ¼ 이상이거나 GPU 무늬 한도를 넘으면 자리를 모두 버리고 처음부터 다시 놓는다(그 앞 차례가 이미 건 그리기는 GL 차례대로 그때 그림을 읽는다). 그래도 넘으면 null.
+ * 0.62.0 텍셀 수는 묶음마다(strideOf — 이동뿐인 묶음은 MSHIFT 꼴)
  */
-function storeSlots(h: MergeHost, runs: readonly MergeRun[], kind: string, stride: number): MergeStore | null {
+function storeSlots(h: MergeHost, runs: readonly MergeRun[], kind: string, strideOf: (g: MergeGroup) => number): MergeStore | null {
   const gl = h.gl;
   const s = (h.mgStore ??= {
     tex: null,
@@ -741,9 +791,9 @@ function storeSlots(h: MergeHost, runs: readonly MergeRun[], kind: string, strid
     need = 0;
     for (const u of runs) {
       const g = u.g, R = g.ps?.[kind];
-      if (add.has(g) || (!all && R && R.ep === s.ep && R.stride === stride)) continue;
+      if (add.has(g) || (!all && R && R.ep === s.ep && R.stride === strideOf(g))) continue;
       add.add(g);
-      need += (g.recs.length + 1) * stride;
+      need += (g.recs.length + 1) * strideOf(g);
     }
   };
   want(false);
@@ -766,6 +816,7 @@ function storeSlots(h: MergeHost, runs: readonly MergeRun[], kind: string, strid
   for (const g of add) {
     const old = g.ps?.[kind];
     if (old && old.ep === s.ep) s.live -= old.at.length * old.stride;
+    const stride = strideOf(g);
     const n = g.recs.length, base = Math.ceil(s.top / stride) * stride;
     (g.ps ??= {})[kind] = { ep: s.ep, base, stride, at: new Uint32Array(n), mdl: new Array(n) };
     s.top = base + n * stride;
@@ -863,38 +914,75 @@ function frameSig(c: MergeDrawCtx, head: number[], more: (ArrayLike<number> | nu
 export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[], plain: (r: MeshRec) => Prog): void {
   const gl = h.gl, stats = c.stats;
   const runs = ops.filter((o): o is MergeRun => typeof o !== 'function');
-  const stride = MERGE_MESH_TEXELS + (c.shadowOn ? 4 : 0) + (c.sec ? 1 : 0);
-  const p = runs.length ? h.mergeVariant('mesh', [...c.meshExtra, ...(c.shadowOn ? ['SHADOW'] : []), ...(c.sec ? ['CLIP'] : [])]) : null;
+  const extra = (c.shadowOn ? 4 : 0) + (c.sec ? 1 : 0);
+  const stride = MERGE_MESH_TEXELS + extra;
+  // 0.62.0 이동뿐인 묶음은 MSHIFT 꼴(면 3텍셀 + 그림자 3열 1 + 단면 1 — 0~2열·법선 행렬은 균일 변수)
+  const strideL = MERGE_LITE_MESH_TEXELS + (c.shadowOn ? 1 : 0) + (c.sec ? 1 : 0);
+  const look = c.look;
+  const full: MergeRun[] = [], thin: MergeRun[] = [];
+  for (const u of runs) (lite(u.g, look) ? thin : full).push(u);
+  const defs = [...c.meshExtra, ...(c.shadowOn ? ['SHADOW'] : []), ...(c.sec ? ['CLIP'] : [])];
+  const pF = full.length ? h.mergeVariant('mesh', defs) : null;
+  const pL = thin.length ? h.mergeVariant('mesh', [...defs, 'MSHIFT']) : null;
   const ok =
-    !!p &&
+    (!!pF || !!pL) &&
     (!c.shadowOn || !!c.shadowVp) &&
-    putRuns(h, runs, 'f', stride, frameSig(c, [stride], [c.shadowOn ? c.shadowVp : null, c.sec ? c.clipOf(undefined) : null]), () => faceFill(h, c, runs, stride));
-  let unit = false;
+    putRuns(
+      h,
+      runs,
+      'f',
+      (g) => (lite(g, look) ? strideL : stride),
+      frameSig(c, [stride], [c.shadowOn ? c.shadowVp : null, c.sec ? c.clipOf(undefined) : null]),
+      (fresh) => {
+        if (full.length) faceFill(h, c, full, stride, 'f', fresh);
+        if (thin.length) liteFaceFill(h, c, thin, strideL, fresh);
+      },
+    );
+  /** 이 차례에서 자리 자료 그림 단위·공통 열을 건 프로그램(meshUse가 프로그램을 바꾸면 단위를 인스턴싱 단위로 되돌려 다시 건다) */
+  const set = new Set<Prog>();
+  let common: LiteMesh | null = null;
   for (const op of ops) {
     if (typeof op === 'function') {
       op();
       continue;
     }
-    if (!ok) {
+    const L = lite(op.g, look);
+    const p = L ? pL : pF;
+    if (!ok || !p) {
+      // 그물마다(강조 깃발이 있는 구간은 강조한 그물만 tint — 그물마다 그릴 때의 강조 섞기와 같다)
+      const hl = op.hl;
+      let q = 0;
       for (let i = op.a; i < op.b; i++) {
         const r = op.g.recs[i]!;
+        let t = op.tint;
+        if (hl !== undefined) {
+          while (hl && q < hl.length && hl[q]! < i) q++;
+          if (!hl || hl[q] !== i) t = 0;
+        }
         c.use(plain(r));
-        c.drawParts(r, op.cols[i - op.o]!, op.alpha, op.tint, op.g.cull);
+        c.drawParts(r, op.cols[i - op.o]!, op.alpha, t, op.g.cull);
       }
       continue;
     }
     // 자리 자료는 저장소 그림 단위에서(meshUse가 인스턴싱 단위로 건 것을 바꾼다)
-    if (c.use(p!) || !unit) {
-      gl.uniform1i(h.loc(p!, 'u_inst'), STORE_UNIT);
-      unit = true;
+    if (c.use(p) || !set.has(p)) {
+      gl.uniform1i(h.loc(p, 'u_inst'), STORE_UNIT);
+      if (L && !set.has(p)) {
+        const m = (common ??= liteMesh(c));
+        gl.uniformMatrix4fv(h.loc(p, 'u_mvp0'), false, m.mvp);
+        gl.uniformMatrix4fv(h.loc(p, 'u_mv0'), false, m.mv);
+        gl.uniformMatrix3fv(h.loc(p, 'u_nmat0'), false, m.nmat);
+        if (m.shadow) gl.uniformMatrix4fv(h.loc(p, 'u_shadow0'), false, m.shadow);
+      }
+      set.add(p);
     }
-    gl.uniform1i(h.loc(p!, 'u_instBase'), op.base);
-    if (p!.shadow || p!.clip1) gl.uniform1i(h.loc(p!, 'u_instStride'), stride);
+    gl.uniform1i(h.loc(p, 'u_instBase'), op.base);
+    if (p.shadow || p.clip1) gl.uniform1i(h.loc(p, 'u_instStride'), L ? strideL : stride);
     // 정점 색 쓰기는 자리 자료 깃발이라 균일 변수 u_vcol이 없다(기억에는 false로)
     if (c.flagsNew(false, op.g.hasNormals, op.tint, op.alpha)) {
-      gl.uniform1f(h.loc(p!, 'u_hasNrm'), op.g.hasNormals ? 1 : 0);
-      gl.uniform4f(h.loc(p!, 'u_tint'), c.hiTint[0], c.hiTint[1], c.hiTint[2], op.tint);
-      gl.uniform1f(h.loc(p!, 'u_alpha'), op.alpha);
+      gl.uniform1f(h.loc(p, 'u_hasNrm'), op.g.hasNormals ? 1 : 0);
+      gl.uniform4f(h.loc(p, 'u_tint'), c.hiTint[0], c.hiTint[1], c.hiTint[2], op.tint);
+      gl.uniform1f(h.loc(p, 'u_alpha'), op.alpha);
     }
     c.cullTo(op.g.cull);
     const t0 = op.g.tri[op.a]!, t1 = op.g.tri[op.b]!;
@@ -920,18 +1008,49 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
   const lineFog = st.fog ?? null;
   const clip = c.sec ? c.clipOf : null;
   const texels = MERGE_LINE_TEXELS + (clip ? 1 : 0);
+  // 0.62.0 이동뿐인 묶음은 MSHIFT 꼴(선 2텍셀 + 안개 z 1 + 단면 1 — 0~2열·안개 z 행 앞 세 칸은 균일 변수)
+  const texelsL = MERGE_LITE_LINE_TEXELS + (lineFog ? 1 : 0) + (clip ? 1 : 0);
+  const look = c.look;
   const wideOf = (u: MergeRun): boolean => o.dashed || u.w * st.dpr > 1.01;
-  const variant = (wide: boolean): Prog | null =>
-    h.mergeVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(lineFog ? ['FOG'] : []), ...(clip ? (wide ? ['MCLIP'] : ['CLIP', 'MCLIP']) : [])]);
-  let pw: Prog | null = null, pt: Prog | null = null;
-  if (runs.some(wideOf)) pw = variant(true);
-  if (!runs.every(wideOf)) pt = variant(false);
+  const variant = (wide: boolean, L: boolean): Prog | null =>
+    h.mergeVariant(wide ? 'wide' : 'thin', [
+      ...(wide && o.capz ? ['CAPZ'] : []),
+      ...(lineFog ? ['FOG'] : []),
+      ...(clip ? (wide ? ['MCLIP'] : ['CLIP', 'MCLIP']) : []),
+      ...(L ? ['MSHIFT'] : []),
+    ]);
+  /** 굵은 선·가는 선 × 온 꼴·이동뿐 꼴 변종(그 구간이 있을 때만 — 번호 wide·2 + lite) */
+  const progs: (Prog | null)[] = [null, null, null, null];
+  const asked = [false, false, false, false];
+  const full: MergeRun[] = [], thin: MergeRun[] = [];
+  for (const u of runs) {
+    const L = lite(u.g, look);
+    (L ? thin : full).push(u);
+    const k = (wideOf(u) ? 2 : 0) + (L ? 1 : 0);
+    if (!asked[k]) {
+      asked[k] = true;
+      progs[k] = variant(k >= 2, L);
+    }
+  }
   // 0.61.0 자리 종류: 윤곽선 e·숨은 점선 d(색이 달라 한 프레임에 둘 다 그리면 자리를 따로 둔다)
   const kind = o.dashed ? 'd' : 'e';
-  const ok = (!!pw || !!pt) && putRuns(h, runs, kind, texels, frameSig(c, [texels, lineFog ? 1 : 0], [clip ? clip(undefined) : null]), () => lineFill(h, c, runs, !!lineFog, texels, kind));
+  const ok =
+    progs.some((p) => !!p) &&
+    putRuns(
+      h,
+      runs,
+      kind,
+      (g) => (lite(g, look) ? texelsL : texels),
+      frameSig(c, [texels, lineFog ? 1 : 0], [clip ? clip(undefined) : null]),
+      (fresh) => {
+        if (full.length) lineFill(h, c, full, !!lineFog, texels, kind, fresh);
+        if (thin.length) liteLineFill(h, c, thin, !!lineFog, texelsL, kind, fresh);
+      },
+    );
   /** 지금 쓰는 프로그램(사이에 그물마다 그리기가 끼면 null)·이 차례에서 고정 균일 변수를 보낸 프로그램과 그 굵기 */
   let P: Prog | null = null;
   const done = new Map<Prog, number>();
+  let common: LiteLine | null = null;
   for (const op of ops) {
     if (typeof op === 'function') {
       op();
@@ -939,7 +1058,8 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       continue;
     }
     const wide = wideOf(op);
-    const Q = ok ? (wide ? pw : pt) : null;
+    const L = lite(op.g, look);
+    const Q = ok ? progs[(wide ? 2 : 0) + (L ? 1 : 0)]! : null;
     if (!Q) {
       for (let i = op.a; i < op.b; i++) {
         const r = op.g.recs[i]!;
@@ -970,6 +1090,12 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
         if (lineFog) {
           gl.uniform4f(h.loc(Q, 'u_fogCol'), lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
           gl.uniform2f(h.loc(Q, 'u_fog'), lineFog.start, lineFog.end);
+        }
+        if (L) {
+          // 0.62.0 이동뿐 꼴: 시점 투영 · 모형 0~2열(그물마다 같다)·안개 z 행 앞 세 칸
+          const m = (common ??= liteLine(c));
+          gl.uniformMatrix4fv(h.loc(Q, 'u_mvp0'), false, m.mvp);
+          if (lineFog) gl.uniform3f(h.loc(Q, 'u_mvz0'), m.mvz[0]!, m.mvz[1]!, m.mvz[2]!);
         }
       }
     }
@@ -1397,9 +1523,10 @@ function col3(a: ArrayLike<number>, b0: number, b1: number, b2: number, b3: numb
  * 0.60.0 묶음 면 자리 자료를 구간 차례로. 이동뿐인 모형(shiftOnly)은 이 그리기의 공통 텍셀(시점 · 모형·투영 · 그것의 0~2열, 법선 행렬, 그림자 행렬 0~2열)을 복사하고
  * 3열만 센다 — faceTexels와 같은 셈이라 float32 값이 비트까지 같다. 그 밖의 모형(회전·늘이기·겉모습 행렬)과 모형이 없는 그물은 faceTexels 그대로.
  * 0.61.0 자리 자료 저장소의 그 묶음 kind 자리에(그물 번호 i → base + i·stride) 낡은 자리만 쓴다: 판(프레임 값 — 겉모습 유무도)·정점 색 깃발·색(float32)이 지난번 쓴 것과 같으면
- * 건너뛴다. 모형은 겉모습이 있을 때만 견준다(없으면 그물 기록의 모형은 묶음이 사는 동안 그대로 — 그물 기록을 보지 않는다. 8만에서 기록을 그물마다 읽는 것이 프레임 대부분이었다)
+ * 건너뛴다. 모형은 겉모습이 있을 때만 견준다(없으면 그물 기록의 모형은 묶음이 사는 동안 그대로 — 그물 기록을 보지 않는다. 8만에서 기록을 그물마다 읽는 것이 프레임 대부분이었다).
+ * 0.62.0 fresh(이 차례에 판이 올랐다 — 그 종류 자리가 모두 낡았다)면 자리마다 견주지 않고 구간째 쓴 것으로 적는다
  */
-export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], stride: number, kind = 'f'): void {
+export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], stride: number, kind = 'f', fresh = false): void {
   const f = c.f, shadow = c.shadowVp, clip = c.sec ? c.clipOf : null, look = c.look;
   const S = stride * 4;
   const V = f.view, P = f.proj;
@@ -1413,15 +1540,26 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
     // 겉모습이 없으면 모형은 그물 기록 것 그대로라 묶음에 모아 둔 3열을 쓴다(그물 기록을 그물마다 보지 않는다)
     if (!look) shiftsOf(g);
     const org = look ? null : g.org!, sft = look ? null : g.sft!;
+    if (fresh && u.b > u.a) dirty(D, base + u.a * stride, (u.b - u.a) * stride);
+    const hl = u.hl;
+    let p = 0;
     for (let i = u.a; i < u.b; i++) {
       const col = cols[i - o0]!, vcol = vcs[i - o0]!;
+      // 0.62.0 깃발 = 정점 색 쓰기 + 강조 2(강조 섞기는 셰이더가 구간 균일 변수 몫에 곱한다)
+      let fl = vcol ? 1 : 0;
+      if (hl) {
+        while (p < hl.length && hl[p]! < i) p++;
+        if (hl[p] === i) fl += 2;
+      }
       const o = (base + i * stride) * 4;
       const lm = look ? c.mm(recs[i]!) : undefined;
-      if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 35] === (vcol ? 1 : 0) && d[o + 44] === F(col[0]) && d[o + 45] === F(col[1]) && d[o + 46] === F(col[2]) && d[o + 47] === F(col[3]))
-        continue;
+      if (!fresh) {
+        if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 35] === fl && d[o + 44] === F(col[0]) && d[o + 45] === F(col[1]) && d[o + 46] === F(col[2]) && d[o + 47] === F(col[3]))
+          continue;
+        dirty(D, base + i * stride, stride);
+      }
       at[i] = gen;
       if (look) mdl[i] = lm;
-      dirty(D, base + i * stride, stride);
       let b0: number, b1: number, b2: number, b3: number;
       let model: ArrayLike<number> | undefined;
       if (sft && sft[i]) {
@@ -1434,6 +1572,7 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
         model = look ? lm : recs[i]!.model;
         if (!model || !shiftOnly(model)) {
           faceTexels(h, f, model, col, vcol, d, o, stride, shadow, clip);
+          d[o + 35] = fl;
           continue;
         }
         b0 = model[12]!;
@@ -1472,7 +1611,7 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
       d[o + 29] = t[1]!;
       d[o + 30] = t[2]!;
       d[o + 31] = t[3]!;
-      d[o + 35] = vcol ? 1 : 0;
+      d[o + 35] = fl;
       d[o + 44] = col[0];
       d[o + 45] = col[1];
       d[o + 46] = col[2];
@@ -1509,9 +1648,9 @@ function shiftPlane(d: Float32Array, at: number, cw: [Readonly<Plane4>, Readonly
 
 /**
  * 0.60.0 묶음 선 자리 자료를 구간 차례로(faceFill과 같은 길 — 이동뿐인 모형은 시점·투영 · 모형의 0~2열·안개 z 행 앞 세 칸을 복사하고 3열만 센다).
- * 0.61.0 저장소의 그 묶음 kind 자리에 낡은 자리만(판·모형·색이 같으면 건너뛴다)
+ * 0.61.0 저장소의 그 묶음 kind 자리에 낡은 자리만(판·모형·색이 같으면 건너뛴다). 0.62.0 fresh면 견주지 않고 구간째(faceFill과 같다)
  */
-export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], fog: boolean, texels: number, kind = 'e'): void {
+export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], fog: boolean, texels: number, kind = 'e', fresh = false): void {
   const f = c.f, clip = c.sec ? c.clipOf : null, look = c.look;
   const S = texels * 4;
   const Q = f.viewProj, V = f.view;
@@ -1524,14 +1663,17 @@ export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
     const R = g.ps![kind]!, at = R.at, mdl = R.mdl, base = R.base;
     if (!look) shiftsOf(g);
     const org = look ? null : g.org!, sft = look ? null : g.sft!;
+    if (fresh && u.b > u.a) dirty(D, base + u.a * texels, (u.b - u.a) * texels);
     for (let i = u.a; i < u.b; i++) {
       const col = cols[i - o0]!;
       const o = (base + i * texels) * 4;
       const lm = look ? c.mm(recs[i]!) : undefined;
-      if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 20] === F(col[0]) && d[o + 21] === F(col[1]) && d[o + 22] === F(col[2]) && d[o + 23] === F(col[3])) continue;
+      if (!fresh) {
+        if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 20] === F(col[0]) && d[o + 21] === F(col[1]) && d[o + 22] === F(col[2]) && d[o + 23] === F(col[3])) continue;
+        dirty(D, base + i * texels, texels);
+      }
       at[i] = gen;
       if (look) mdl[i] = lm;
-      dirty(D, base + i * texels, texels);
       let b0: number, b1: number, b2: number, b3: number;
       let model: ArrayLike<number> | undefined;
       if (sft && sft[i]) {
@@ -1581,6 +1723,216 @@ export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
   }
 }
 
+/**
+ * 0.62.0 이동뿐 꼴(MSHIFT) 면의 공통 균일 변수(그리기 차례마다 한 번): 시점 투영 · 모형·시점 · 모형의 0~2열(3열 칸은 0 — 셰이더가 읽지 않는다)·법선 행렬·
+ * 그림자 행렬 0~2열. faceFill이 이동뿐인 모형에 복사하던 공통 텍셀(tpl)과 같은 float32 값이다
+ */
+export interface LiteMesh {
+  mvp: Float32Array;
+  mv: Float32Array;
+  nmat: Float32Array;
+  shadow: Float32Array | null;
+}
+
+export function liteMesh(c: Pick<MergeDrawCtx, 'f' | 'shadowVp'>): LiteMesh {
+  const mv = mat4Mul(c.f.view, ID4), mvp = mat4Mul(c.f.proj, mv);
+  const out: LiteMesh = { mvp: new Float32Array(16), mv: new Float32Array(16), nmat: normalMatrix(mv, new Float32Array(9)), shadow: null };
+  for (let j = 0; j < 12; j++) {
+    out.mvp[j] = mvp[j]!;
+    out.mv[j] = mv[j]!;
+  }
+  if (c.shadowVp) {
+    const lv = mat4Mul(c.shadowVp, ID4), s = new Float32Array(16);
+    for (let j = 0; j < 3; j++) {
+      for (let r = 0; r < 3; r++) s[j * 4 + r] = lv[j * 4 + r]! * 0.5 + lv[j * 4 + 3]! * 0.5;
+      s[j * 4 + 3] = lv[j * 4 + 3]!;
+    }
+    out.shadow = s;
+  }
+  return out;
+}
+
+/** 0.62.0 이동뿐 꼴(MSHIFT) 선의 공통 균일 변수: 시점 투영 · 모형 0~2열·안개 z 행 앞 세 칸(lineFill의 공통 텍셀과 같은 float32 값) */
+export interface LiteLine {
+  mvp: Float32Array;
+  mvz: Float32Array;
+}
+
+export function liteLine(c: Pick<MergeDrawCtx, 'f'>): LiteLine {
+  const mvp = mat4Mul(c.f.viewProj, ID4), mv = mat4Mul(c.f.view, ID4);
+  const out: LiteLine = { mvp: new Float32Array(16), mvz: new Float32Array([mv[2]!, mv[6]!, mv[10]!]) };
+  for (let j = 0; j < 12; j++) out.mvp[j] = mvp[j]!;
+  return out;
+}
+
+/**
+ * 0.62.0 이동뿐 꼴(MSHIFT — 묶음 그물 모형이 모두 이동뿐이고 겉모습이 없을 때) 면 자리: 텍셀 0 = 시점 투영 · 모형 3열, 1 = 시점 · 모형 3열 xyz와 깃발(w — 정점 색 쓰기),
+ * 2 = 색, 그다음 그림자 3열(그림자 — faceFill의 15번째 텍셀과 같은 값)·로컬 평면(단면). faceFill의 이동뿐 길과 같은 셈·같은 차례라 그 칸의 float32 값이 비트까지 같다
+ * (0~2열·법선 행렬은 liteMesh 균일 변수). 판·깃발·색이 같으면 그 자리는 건너뛴다(fresh면 견주지 않는다). 시점·투영·그림자 행렬 칸은 고리 밖에서 한 번 읽는다
+ */
+export function liteFaceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], stride: number, fresh: boolean, kind = 'f'): void {
+  const V = c.f.view, P = c.f.proj, L = c.shadowVp, clip = c.sec ? c.clipOf : null;
+  const s = h.mgStore!, d = s.buf, D = s.dirty, gen = s.gen[kind]!, F = Math.fround;
+  const v0 = V[0]!, v1 = V[1]!, v2 = V[2]!, v3 = V[3]!, v4 = V[4]!, v5 = V[5]!, v6 = V[6]!, v7 = V[7]!;
+  const v8 = V[8]!, v9 = V[9]!, v10 = V[10]!, v11 = V[11]!, v12 = V[12]!, v13 = V[13]!, v14 = V[14]!, v15 = V[15]!;
+  const p0 = P[0]!, p1 = P[1]!, p2 = P[2]!, p3 = P[3]!, p4 = P[4]!, p5 = P[5]!, p6 = P[6]!, p7 = P[7]!;
+  const p8 = P[8]!, p9 = P[9]!, p10 = P[10]!, p11 = P[11]!, p12 = P[12]!, p13 = P[13]!, p14 = P[14]!, p15 = P[15]!;
+  const sh = !!L, Z = L ?? ID4;
+  const l0 = Z[0]!, l1 = Z[1]!, l2 = Z[2]!, l3 = Z[3]!, l4 = Z[4]!, l5 = Z[5]!, l6 = Z[6]!, l7 = Z[7]!;
+  const l8 = Z[8]!, l9 = Z[9]!, l10 = Z[10]!, l11 = Z[11]!, l12 = Z[12]!, l13 = Z[13]!, l14 = Z[14]!, l15 = Z[15]!;
+  const Q = c.f.viewProj;
+  let cw: [Readonly<Plane4>, Readonly<Plane4>] | undefined;
+  for (const u of runs) {
+    const g = u.g, cols = u.cols, vcs = u.vc, o0 = u.o;
+    const R = g.ps![kind]!, at = R.at, base = R.base;
+    shiftsOf(g);
+    const org = g.org!, sft = g.sft!, nom = g.nom;
+    if (fresh && u.b > u.a) dirty(D, base + u.a * stride, (u.b - u.a) * stride);
+    const hl = u.hl;
+    let p = 0;
+    for (let i = u.a; i < u.b; i++) {
+      const col = cols[i - o0]!;
+      // 깃발 = 정점 색 쓰기 + 강조 2(faceFill과 같다)
+      let fl = vcs[i - o0] ? 1 : 0;
+      if (hl) {
+        while (p < hl.length && hl[p]! < i) p++;
+        if (hl[p] === i) fl += 2;
+      }
+      const o = (base + i * stride) * 4;
+      if (!fresh) {
+        if (at[i] === gen && d[o + 7] === fl && d[o + 8] === F(col[0]) && d[o + 9] === F(col[1]) && d[o + 10] === F(col[2]) && d[o + 11] === F(col[3])) continue;
+        dirty(D, base + i * stride, stride);
+      }
+      at[i] = gen;
+      if (nom && nom[i]) {
+        // 모형이 없는 그물: faceTexels와 같이 시점 투영·시점 행렬 3열 그대로, 그림자 행렬 3열(같은 맞춤), 세계 평면
+        d[o] = Q[12]!;
+        d[o + 1] = Q[13]!;
+        d[o + 2] = Q[14]!;
+        d[o + 3] = Q[15]!;
+        d[o + 4] = v12;
+        d[o + 5] = v13;
+        d[o + 6] = v14;
+        d[o + 7] = fl;
+        d[o + 8] = col[0];
+        d[o + 9] = col[1];
+        d[o + 10] = col[2];
+        d[o + 11] = col[3];
+        let e = o + 12;
+        if (sh) {
+          d[e] = l12 * 0.5 + l15 * 0.5;
+          d[e + 1] = l13 * 0.5 + l15 * 0.5;
+          d[e + 2] = l14 * 0.5 + l15 * 0.5;
+          d[e + 3] = l15;
+          e += 4;
+        }
+        if (clip) putPlane(d, e, clip(undefined));
+        continue;
+      }
+      const q = i * 4, b0 = org[q]!, b1 = org[q + 1]!, b2 = org[q + 2]!, b3 = org[q + 3]!;
+      // 시점 · 모형 3열(col3(V, b)), 투영 · 그것 3열(col3(P, t)) — mat4Mul과 같은 차례로 0에서 더해 간다
+      const t0 = 0 + v0 * b0 + v4 * b1 + v8 * b2 + v12 * b3;
+      const t1 = 0 + v1 * b0 + v5 * b1 + v9 * b2 + v13 * b3;
+      const t2 = 0 + v2 * b0 + v6 * b1 + v10 * b2 + v14 * b3;
+      const t3 = 0 + v3 * b0 + v7 * b1 + v11 * b2 + v15 * b3;
+      d[o] = 0 + p0 * t0 + p4 * t1 + p8 * t2 + p12 * t3;
+      d[o + 1] = 0 + p1 * t0 + p5 * t1 + p9 * t2 + p13 * t3;
+      d[o + 2] = 0 + p2 * t0 + p6 * t1 + p10 * t2 + p14 * t3;
+      d[o + 3] = 0 + p3 * t0 + p7 * t1 + p11 * t2 + p15 * t3;
+      d[o + 4] = t0;
+      d[o + 5] = t1;
+      d[o + 6] = t2;
+      d[o + 7] = fl;
+      d[o + 8] = col[0];
+      d[o + 9] = col[1];
+      d[o + 10] = col[2];
+      d[o + 11] = col[3];
+      let e = o + 12;
+      if (sh) {
+        const s0 = 0 + l0 * b0 + l4 * b1 + l8 * b2 + l12 * b3;
+        const s1 = 0 + l1 * b0 + l5 * b1 + l9 * b2 + l13 * b3;
+        const s2 = 0 + l2 * b0 + l6 * b1 + l10 * b2 + l14 * b3;
+        const s3 = 0 + l3 * b0 + l7 * b1 + l11 * b2 + l15 * b3;
+        d[e] = s0 * 0.5 + s3 * 0.5;
+        d[e + 1] = s1 * 0.5 + s3 * 0.5;
+        d[e + 2] = s2 * 0.5 + s3 * 0.5;
+        d[e + 3] = s3;
+        e += 4;
+      }
+      if (clip) {
+        if (sft[i] === 2) shiftPlane(d, e, (cw ??= planes(clip)), org, q);
+        else putPlane(d, e, clip(g.recs[i]!.model));
+      }
+    }
+  }
+}
+
+/**
+ * 0.62.0 이동뿐 꼴(MSHIFT) 선 자리: 텍셀 0 = 시점 투영 · 모형 3열, 1 = 색, 그다음 안개 z 행 끝 칸(x — 안개)·로컬 평면(단면). lineFill의 이동뿐 길과 같은 셈이라
+ * 그 칸의 float32 값이 비트까지 같다(0~2열·z 행 앞 세 칸은 liteLine 균일 변수). 판·색이 같으면 건너뛴다(fresh면 견주지 않는다)
+ */
+export function liteLineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], fog: boolean, texels: number, kind: string, fresh: boolean): void {
+  const Q = c.f.viewProj, V = c.f.view, clip = c.sec ? c.clipOf : null;
+  const s = h.mgStore!, d = s.buf, D = s.dirty, gen = s.gen[kind]!, F = Math.fround;
+  const q0 = Q[0]!, q1 = Q[1]!, q2 = Q[2]!, q3 = Q[3]!, q4 = Q[4]!, q5 = Q[5]!, q6 = Q[6]!, q7 = Q[7]!;
+  const q8 = Q[8]!, q9 = Q[9]!, q10 = Q[10]!, q11 = Q[11]!, q12 = Q[12]!, q13 = Q[13]!, q14 = Q[14]!, q15 = Q[15]!;
+  const v2 = V[2]!, v6 = V[6]!, v10 = V[10]!, v14 = V[14]!;
+  let cw: [Readonly<Plane4>, Readonly<Plane4>] | undefined;
+  for (const u of runs) {
+    const g = u.g, cols = u.cols, o0 = u.o;
+    const R = g.ps![kind]!, at = R.at, base = R.base;
+    shiftsOf(g);
+    const org = g.org!, sft = g.sft!, nom = g.nom;
+    if (fresh && u.b > u.a) dirty(D, base + u.a * texels, (u.b - u.a) * texels);
+    for (let i = u.a; i < u.b; i++) {
+      const col = cols[i - o0]!;
+      const o = (base + i * texels) * 4;
+      if (!fresh) {
+        if (at[i] === gen && d[o + 4] === F(col[0]) && d[o + 5] === F(col[1]) && d[o + 6] === F(col[2]) && d[o + 7] === F(col[3])) continue;
+        dirty(D, base + i * texels, texels);
+      }
+      at[i] = gen;
+      // 모형이 없는 그물: lineTexels와 같이 시점 투영 3열·시점 z 행 끝 칸 그대로
+      const no = !!nom && nom[i] === 1;
+      const q = i * 4, b0 = org[q]!, b1 = org[q + 1]!, b2 = org[q + 2]!, b3 = org[q + 3]!;
+      d[o] = no ? q12 : 0 + q0 * b0 + q4 * b1 + q8 * b2 + q12 * b3;
+      d[o + 1] = no ? q13 : 0 + q1 * b0 + q5 * b1 + q9 * b2 + q13 * b3;
+      d[o + 2] = no ? q14 : 0 + q2 * b0 + q6 * b1 + q10 * b2 + q14 * b3;
+      d[o + 3] = no ? q15 : 0 + q3 * b0 + q7 * b1 + q11 * b2 + q15 * b3;
+      d[o + 4] = col[0];
+      d[o + 5] = col[1];
+      d[o + 6] = col[2];
+      d[o + 7] = col[3];
+      let e = o + 8;
+      if (fog) {
+        d[e] = no ? v14 : 0 + v2 * b0 + v6 * b1 + v10 * b2 + v14 * b3;
+        d[e + 1] = 0;
+        d[e + 2] = 0;
+        d[e + 3] = 0;
+        e += 4;
+      }
+      if (clip) {
+        if (sft[i] === 2) shiftPlane(d, e, (cw ??= planes(clip)), org, q);
+        else putPlane(d, e, clip(g.recs[i]!.model));
+      }
+    }
+  }
+}
+
+/** 0.62.0 묶음 그물 자리 깃발 풀기(정점 색 쓰기 0·1 + 강조 2 — 작은 정수라 셈이 정확하다) */
+const FLAGS = '  float u_vcol = fl > 1.5 ? fl - 2.0 : fl;\n  v_hi = fl > 1.5 ? 1.0 : 0.0;\n';
+
+/**
+ * 0.62.0 묶어 그리기 그물 변종(MERGE)의 조각 셰이더: 강조 섞기 몫(구간 균일 변수 u_tint.a — 면 차례 0.5)에 그물마다 강조 깃발 v_hi(0·1)를 곱한다.
+ * 그물마다 그릴 때 강조한 그물은 u_tint.a = 0.5, 아닌 그물은 0이라 섞는 몫이 같은 값이다(0.5·1 = 0.5, 0.5·0 = 0). 0.61.0까지는 강조 섞기가 구간 균일 변수라
+ * 강조한 그물마다 면 구간이 둘로 끊겼다(8만 강조 825개 — 면 그리기 1,650번 남짓)
+ */
+export function mergeFrag(fs: string): string {
+  let s = replaceOnce(fs, 'uniform vec4 u_tint;\n', 'uniform vec4 u_tint;\nflat in float v_hi;\n');
+  s = replaceOnce(s, '  c = mix(c, u_tint.rgb, u_tint.a);\n', '  c = mix(c, u_tint.rgb, u_tint.a * v_hi);\n');
+  return s;
+}
+
 /** 한 번만 나오는 글을 바꾼다(없거나 둘 이상이면 예외 — 바꿀 자리를 잘못 찾지 않게) */
 function replaceOnce(src: string, from: string, to: string): string {
   const i = src.indexOf(from);
@@ -1594,32 +1946,58 @@ function replaceOnce(src: string, from: string, to: string): string {
  * 그물 자리 하나 = 12텍셀(u_mvp 4·u_mv 4·u_nmat 3·u_color 1), 선 자리 하나 = 6텍셀(u_mvp 4·u_mvz 1·u_color 1). 예전 균일 변수와 같은 이름의 지역 변수로 두어
  * 아래 식은 한 글자도 바뀌지 않는다. 0.53.0 그물은 그림자(SHADOW)·단면 하나(CLIP)와도 쓴다 — 자리 텍셀 수 u_instStride(12·13·16·17), 그림자 행렬 12~15, 단면 평면 맨 끝
  * (선은 단면이 있으면 그물마다 — 렌더러). 원본 셰이더 글자도 그대로라 MERGE가 아닌 변종은 0.51.0과 같다.
- * 바꿀 자리를 하나로 찾지 못하면 예외(렌더러는 그 변종을 쓰지 않고 그물마다 그린다)
+ * 바꿀 자리를 하나로 찾지 못하면 예외(렌더러는 그 변종을 쓰지 않고 그물마다 그린다).
+ * 0.62.0 이동뿐 꼴(MSHIFT): 0~2열(그물마다 같다)은 균일 변수 u_mvp0·u_mv0(그림자 u_shadow0 — 각 0~2열)·법선 행렬 u_nmat0, 자리에는 3열만 — 그물 자리 3텍셀
+ * (시점 투영 · 모형 3열·시점 · 모형 3열 xyz와 정점 색 쓰기 w·색 — 그림자 3열·단면 평면은 그 뒤), 선 자리 2텍셀(시점 투영 · 모형 3열·색 — 안개 z 행 끝 칸 u_mvz0의 w·단면 평면은 그 뒤).
+ * 행렬은 같은 float32 칸으로 이루어지고 아래 식은 그대로다(시점 · 모형 3열의 w는 시점 좌표 xyz에 들지 않는다)
  */
 export function mergeShader(vs: string, kind: 'mesh' | 'line'): string {
-  let s = replaceOnce(vs, 'uniform int u_instBase;\n', 'uniform int u_instBase;\nlayout(location=5) in float a_item;\n');
+  const lite = /^#define MSHIFT$/m.test(vs);
+  const decl = !lite
+    ? ''
+    : kind === 'mesh'
+      ? 'uniform mat4 u_mvp0;\nuniform mat4 u_mv0;\nuniform mat3 u_nmat0;\nuniform mat4 u_shadow0;\n'
+      : 'uniform mat4 u_mvp0;\nuniform vec3 u_mvz0;\n';
+  let s = replaceOnce(vs, 'uniform int u_instBase;\n', `uniform int u_instBase;\nlayout(location=5) in float a_item;\n${decl}`);
   s = replaceOnce(s, 'uniform vec4 u_color;\n', '');
   if (kind === 'mesh') {
-    // 그물: 정점 색 쓰기(u_vcol)도 자리마다(법선 행렬 첫 텍셀의 w — 정점 색이 있는 그물과 없는 그물을 한 묶음에)
+    // 그물: 정점 색 쓰기(u_vcol)도 자리마다(법선 행렬 첫 텍셀의 w — 정점 색이 있는 그물과 없는 그물을 한 묶음에).
+    // 0.62.0 그 깃발에 강조 2를 더한다(깃발 0~3 — v_hi로 조각 셰이더에, mergeFrag가 강조 섞기 몫에 곱한다)
     s = replaceOnce(s, 'uniform float u_vcol;\n', '');
-    s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * 11 + j;\n', '  int k = u_instBase + int(a_item) * 12 + j;\n');
+    s = replaceOnce(s, 'out vec4 v_col;\n', 'out vec4 v_col;\nflat out float v_hi;\n');
+    s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * 11 + j;\n', `  int k = u_instBase + int(a_item) * ${lite ? 3 : 12} + j;\n`);
     // 0.53.0 그림자(SHADOW)·단면 하나(CLIP): 자리 텍셀 수 u_instStride(12 + 4 + 1)로 읽고, 그림자 행렬은 색 텍셀 뒤 12~15(단면 평면은 인스턴싱과 같이 맨 끝)
     s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * u_instStride + j;\n', '  int k = u_instBase + int(a_item) * u_instStride + j;\n');
-    s = replaceOnce(s, '  mat4 u_shadowM = mat4(instAt(11), instAt(12), instAt(13), instAt(14));\n', '  mat4 u_shadowM = mat4(instAt(12), instAt(13), instAt(14), instAt(15));\n');
     s = replaceOnce(
       s,
-      '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n',
-      '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n  vec4 u_color = instAt(11);\n  float u_vcol = instAt(8).w;\n',
+      '  mat4 u_shadowM = mat4(instAt(11), instAt(12), instAt(13), instAt(14));\n',
+      lite ? '  mat4 u_shadowM = mat4(u_shadow0[0], u_shadow0[1], u_shadow0[2], instAt(3));\n' : '  mat4 u_shadowM = mat4(instAt(12), instAt(13), instAt(14), instAt(15));\n',
     );
+    s = lite
+      ? replaceOnce(
+          s,
+          '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n  mat4 u_mv = mat4(instAt(4), instAt(5), instAt(6), instAt(7));\n  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n',
+          `  mat4 u_mvp = mat4(u_mvp0[0], u_mvp0[1], u_mvp0[2], instAt(0));\n  vec4 m3 = instAt(1);\n  mat4 u_mv = mat4(u_mv0[0], u_mv0[1], u_mv0[2], vec4(m3.xyz, 1.0));\n  mat3 u_nmat = u_nmat0;\n  vec4 u_color = instAt(2);\n  float fl = m3.w;\n${FLAGS}`,
+        )
+      : replaceOnce(
+          s,
+          '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n',
+          `  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n  vec4 u_color = instAt(11);\n  float fl = instAt(8).w;\n${FLAGS}`,
+        );
   } else {
     // 0.60.0 단면 하나(MCLIP): 자리마다 로컬 평면을 7번째 텍셀에서(같은 이름의 전역 변수 — 아래 식은 그대로, 굵은 선은 늘 있던 u_clip, 가는 선은 CLIP의 u_clip)
     const clip = /^#define MCLIP$/m.test(s);
-    s = replaceOnce(s, '  int k = u_instBase + (gl_InstanceID % u_instN) * 5 + j;\n', `  int k = u_instBase + int(a_item) * ${clip ? 7 : 6} + j;\n`);
+    const fog = /^#define FOG$/m.test(s);
+    const n = lite ? 2 + (fog ? 1 : 0) + (clip ? 1 : 0) : clip ? 7 : 6;
+    s = replaceOnce(s, '  int k = u_instBase + (gl_InstanceID % u_instN) * 5 + j;\n', `  int k = u_instBase + int(a_item) * ${n} + j;\n`);
     s = replaceOnce(
       s,
       '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n',
-      `  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n  vec4 u_color = instAt(5);\n${clip ? '  u_clip = instAt(6);\n' : ''}`,
+      lite
+        ? `  mat4 u_mvp = mat4(u_mvp0[0], u_mvp0[1], u_mvp0[2], instAt(0));\n  vec4 u_color = instAt(1);\n${clip ? `  u_clip = instAt(${fog ? 3 : 2});\n` : ''}`
+        : `  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n  vec4 u_color = instAt(5);\n${clip ? '  u_clip = instAt(6);\n' : ''}`,
     );
+    if (lite) s = replaceOnce(s, '  vec4 u_mvz = instAt(4);\n', '  vec4 u_mvz = vec4(u_mvz0, instAt(2).x);\n');
     if (clip) s = replaceOnce(s, 'uniform vec4 u_clip;\n', 'vec4 u_clip;\n');
   }
   return s;
