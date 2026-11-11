@@ -295,6 +295,11 @@ export interface RenderState {
   dpr: number;
   /** 보이는 항목인지 */
   visible: (id: string, group: string | undefined) => boolean;
+  /**
+   * 0.60.0 visible의 판: 숨김(항목·묶음)이 바뀔 때마다 달라지는 수. 주면 장면 차례가 그대로인 동안 같은 판의 보이는 목록을 프레임을 넘어 다시 쓴다
+   * (주지 않으면 0.59.0처럼 그리기마다 그물마다 묻는다)
+   */
+  visKey?: number;
   highlight: ReadonlySet<string>;
   ranges: ReadonlyMap<string, DrawRange>;
   grid: boolean;
@@ -595,8 +600,10 @@ export interface MeshRec {
   cull?: CullBox | null;
   /** 0.51.0 이 그리기 번호(Renderer3d.frameNo)에서 화면 밖으로 잘라냈으면 그 번호 */
   culledAt?: number;
-  /** 0.51.0 이 그리기 번호에서 보이는 그물이면 그 번호(덩어리 잘라내기가 보이는 그물만 센다) */
+  /** 0.51.0 이 그리기 번호에서 보이는 그물이면 그 번호(덩어리 잘라내기가 보이는 그물만 센다). 0.60.0 보이는 목록을 만든 번호(Renderer3d.visSeq — 숨김이 그대로면 프레임을 넘어 같다) */
   visAt?: number;
+  /** 0.60.0 그리기 뼈대(MergeOrder)에서 든 덩이 번호(묶음 밖 −1 — 뼈대를 만들 때 meshes의 모든 기록에 적는다) */
+  bk?: number;
   edges: LineRec | null;
   /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
   wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
@@ -667,6 +674,15 @@ export interface MergeGroup {
   key: string;
   /** 0.53.0 다시 굽기 차례를 정할 때 쓰는 셈(조각 planLoose가 그때마다 새로 채운다) */
   plan?: MergePlanStat;
+  /**
+   * 0.60.0 프레임마다 다시 쓰는 그물 값(처음 쓸 때 만든다 — 묶음의 그물 기록·모형 행렬·색 배열은 묶음이 사는 동안 그대로):
+   * 그물마다 모형 3열(이동뿐인 모형만 — sft 1), 면 색(Mesh3d.color 배열 그대로)·정점 색 쓰기, 정점 색 끔, 한 색 목록(쓰는 곳마다 마지막 값)
+   */
+  org?: Float64Array;
+  sft?: Uint8Array;
+  fc?: { cols: Rgba[]; vc: boolean[] };
+  nv?: boolean[];
+  cc?: Record<string, { k: string; cols: Rgba[] }>;
 }
 
 /**
@@ -693,11 +709,54 @@ export interface MergeRun {
   a: number;
   b: number;
   base: number;
+  /** 그물 i의 색은 cols[i − o](0.60.0 — 덩이째 더한 구간은 묶음 전체 목록을 함께 써 o = 0, sh) */
   cols: Rgba[];
-  /** 그물마다 정점 색 쓰기(면 — 자리 자료 깃발) */
+  /** 그물마다 정점 색 쓰기(면 — 자리 자료 깃발), vc[i − o] */
   vc: boolean[];
+  o: number;
+  /** 0.60.0 cols·vc가 묶음과 함께 쓰는 목록(늘이려면 먼저 제 목록으로 옮긴다) */
+  sh: boolean;
   tint: number;
   alpha: number;
+}
+
+/**
+ * 0.60.0 그리기 뼈대의 덩이: 장면 차례(meshes)에서 같은 묶음의 잇단 번호 [a, b)(at = meshes 안 첫 자리). ok(반투명·뒷면·PBR·무늬 없음)·edges(그물마다 윤곽선)는
+ * 만들 때 정한다(굽기가 받는 그물이라 늘 참 — 틀어지면 그 덩이는 그물마다). cut·hi·np는 그리기마다 쓰는 표시(이 그리기에 잘라낸 그물이 있음·강조 판·윤곽선 구간 모음이 없음)
+ */
+export interface MergeBlock {
+  g: MergeGroup;
+  a: number;
+  b: number;
+  at: number;
+  ok: boolean;
+  edges: boolean;
+  cut: number;
+  hi: number;
+  np: boolean;
+  npv: number;
+  /** 숨긴 그물 번호(보이는 목록을 만들 때), 이 그리기에 잘라낸 그물 번호(cut 번호일 때), 강조한 그물 번호(hi 판일 때) — 모두 묶음 그물 번호 */
+  hid: number[];
+  cutL: number[];
+  hiL: number[];
+  /** 그리기마다 합친 예외 번호(ex 번호의 그리기에서 — exA 숨김·잘라냄, exB 거기에 강조) */
+  ex: number;
+  exA: number[];
+  exB: number[];
+  /** 그물 세계 범위(MeshRec.box)를 토막(조각 BLOCK_BOX개)마다 합친 상자·채우기 단위 묶음(capGroup)이 없는지(처음 쓸 때 — 조각 blockBoxes·blockCapFree) */
+  boxes?: Box3[];
+  ncg?: boolean;
+}
+
+/** 0.60.0 그리기 뼈대: 장면 차례의 덩이·묶음 밖 그물(items), 묶음 밖 그물만(loose), 그물 수(n) — 장면·묶음이 바뀌면 다시 만든다(mergegl orderValid) */
+export interface MergeOrder {
+  n: number;
+  items: (MergeBlock | MeshRec)[];
+  at: Int32Array;
+  blocks: MergeBlock[];
+  loose: MeshRec[];
+  /** 강조 id → 덩이 번호 · 65536 + 묶음 그물 번호(처음 쓸 때 — 같은 id가 여럿이면 목록) */
+  ids?: Map<string, number | number[]>;
 }
 
 interface PointRec {
@@ -855,6 +914,17 @@ interface LineBatch {
   alpha: number;
   recs: MeshRec[];
   models: (ArrayLike<number> | undefined)[];
+}
+
+/** 0.60.0 오름차순 두 번호 목록을 합친다(겹친 번호는 하나 — 덩이 예외 그물) */
+export function mergeSorted(a: readonly number[], b: readonly number[]): number[] {
+  const out: number[] = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    const x = j >= b.length || (i < a.length && a[i]! <= b[j]!) ? a[i++]! : b[j++]!;
+    if (out[out.length - 1] !== x) out.push(x);
+  }
+  return out;
 }
 
 /** 같은 열쇠의 묶음 가운데 색(같은 객체 또는 같은 값)·굵기·불투명도가 같은 것에 자리를 더한다(없으면 새 묶음) */
@@ -1021,9 +1091,20 @@ export class Renderer3d {
    * 0.51.0 잘라내기 덩어리(this.meshes 차례로 CULL_CHUNK개씩): 그때의 그물 기록(같은 자리의 기록이 바뀌면 그 덩어리를 다시 셈한다)·덩어리 그물 수·감싸는 자료
    * (null이면 덩어리째 판단하지 않는다). 그물마다 판단하는 것과 같은 결과를 덩어리 하나의 셈으로(맞춘 화면이면 거의 모든 덩어리가 확실히 안)
    */
-  private cullChunks: { recs: (MeshRec | undefined)[]; n: number[]; box: (CullBox | null)[] } = { recs: [], n: [], box: [] };
+  private cullChunks: { recs: (MeshRec | undefined)[]; n: number[]; box: (CullBox | null)[]; ord?: MergeOrder | null } = { recs: [], n: [], box: [] };
   /** 0.51.0 시험용: true면 선 상태 기억(LineMemo)을 쓰지 않고 그물마다 모두 보낸다(0.50.0 GL 호출 — 기억과 그리기 기록이 같은지 견줄 때) */
   lineMemoOff = false;
+  /** 0.60.0 그리기 뼈대(다 올린 뒤 묶음이 있는 장면 — 장면 차례가 그대로인 동안 다시 쓴다)와 시험용 끄기(true면 0.59.0처럼 그물마다 훑는다 — 같은 그림인지 견줄 때) */
+  private mgOrder: MergeOrder | null = null;
+  orderOff = false;
+  /** 0.60.0 보이는 목록: 만든 번호(MeshRec.visAt)와, 숨김 판(RenderState.visKey)·뼈대가 같으면 프레임을 넘어 다시 쓰는 목록 */
+  private visSeq = 0;
+  private visMemo: { ord: MergeOrder; key: number; seq: number; list: MeshRec[] } | null = null;
+  /** 0.60.0 강조 모음이 든 덩이 표시(같은 모음·크기·뼈대면 다시 쓴다) */
+  private hiSeq = 0;
+  private hiMemo: { set: ReadonlySet<string>; size: number; ord: MergeOrder; stamp: number } | null = null;
+  /** 0.60.0 구간 모음을 만들거나 지울 때마다 1씩(덩이의 윤곽선 구간 모음 없음 표시를 다시 볼 때) */
+  private partsVer = 0;
   /** 0.52.0 묶어 그리기 선택(기본 'auto' — 묶을 수 있는 그물이 min 이상인 장면만. 바꾸면 setMerging) */
   merging: MergingOptions = { mode: 'auto', min: MERGE_AUTO_MIN };
   /** 0.52.0 지금 장면에서 묶어 그리기가 켜졌는지('on'이거나, 'auto'에서 장면을 올릴 때 문턱을 넘었거나 묶음 밖 그물이 문턱만큼 모였을 때) */
@@ -1075,6 +1156,8 @@ export class Renderer3d {
   onMergeReady: (() => void) | null = null;
   /** 0.55.0 이 렌더러의 조각 받기 알림(wantKit이 페이지의 기다리는 렌더러 모음에 넣는다 — dispose가 뺀다) */
   private readonly kitNote: KitNote = (s) => {
+    // 0.60.0 받는 동안 들고 있던 빛 기록은 받지 못하거나 늦으면 그물 버퍼로(장면 차례 그대로 그리기 목록에)
+    if (s !== 'ready') this.holdOut();
     if (s === 'failed') {
       // 받지 못했다: 묶어 그리기를 끄고(그물마다) 멈춘 올리기를 잇는다
       this.mgActive = false;
@@ -1143,6 +1226,7 @@ export class Renderer3d {
     this.mergeClear(true);
     this.meshes = [];
     this.cullChunks = { recs: [], n: [], box: [] };
+    this.forgetOrder();
     this.lines = [];
     this.points = [];
     this.grid = null;
@@ -2069,8 +2153,12 @@ export class Renderer3d {
     if (budgetMs === Infinity || this.mgOff || mergeKitLate) return false;
     if (!this.mgScan && !(this.mgActive && !mergeKit)) return false;
     const nv = Math.floor(next.positions.length / 3);
-    // 0.59.0 훑기를 미룬 큰 장면의 첫 그림 앞: 몇 개만 그물마다 올리고 곧 첫 그림을 낸다(이 그물들은 훑기 뒤 곧 구워진다 — MERGE_FIRST_MESHES)
-    if (this.mgScan && !this.mgFramed && this.pending!.scene.meshes.length > MERGE_SCAN_FIRST && this.mgUnfed.length >= MERGE_FIRST_MESHES) return true;
+    const p = this.pending!;
+    // 0.59.0 훑기를 미룬 큰 장면의 첫 그림 앞: 몇 개만 그물마다 올리고 곧 첫 그림을 낸다(이 그물들은 훑기 뒤 곧 구워진다 — MERGE_FIRST_MESHES).
+    // 0.60.0 조각이 아직 없어 훑기를 미룬 장면도(그물 수와 상관없이 — 훑기 뒤에는 빛 기록으로 들고 기다린다)
+    if (this.mgScan && !this.mgFramed && (p.scene.meshes.length > MERGE_SCAN_FIRST || !mergeKit) && this.mgUnfed.length >= MERGE_FIRST_MESHES) return true;
+    // 0.60.0 빛 기록을 들고 조각을 기다리는 동안 마지막 그물은 조각이 올 때까지 올리지 않는다(다 올림 — 남은 기다림 굽기 — 은 조각이 한다)
+    if (!mergeKit && p.mi + 1 >= p.scene.meshes.length && (this.mgHold.length > 0 || this.lightWait(next))) return true;
     return this.mgUnfed.length + this.mgWait.length >= MERGE_UPLOAD_MESHES - 1 || this.mgUnfedVerts + this.mgWaitVerts + nv >= MERGE_UPLOAD_VERTS;
   }
 
@@ -2151,6 +2239,70 @@ export class Renderer3d {
   }
 
   /**
+   * 0.57.0 이 그물을 그물마다 GL 객체 없이 곧장 구울지(빛 기록 — meshRec light): 이 장면에서 켜졌고 훑기를 마쳤을 때(훑기 전·중은 묶일지 모른다 — 첫 그림을 그물마다 그린다).
+   * 앱이 다시 준 배열을 함께 올릴 그물(restoreQ)·코어가 전에 지운 그물(laid — 올린 꼴과 다시 받을 것을 세는 길)·놓기가 법선을 지울 그물(0.56.0도 묶이지 않는다)은 그물마다 길로,
+   * 조각 올리기(CHUNK_MIN_BYTES)를 탈 크기가 아니고 훑기가 묶을 수 있어 보인다고 세는 그물일 때만. 어림과 mergeSrcOf(정점 색 반투명 등)가 갈리면 조각 feed가 그 자리에서 그물 버퍼를 만든다.
+   * 0.60.0 조각에서 렌더러로 옮겼다(조각을 받는 동안에도 같은 판단으로 빛 기록을 들고 기다린다 — lightWait)
+   */
+  mergeDirect(m: Mesh3d): boolean {
+    if (!this.mgActive || this.mgScan || this.mgOff || this.restoreQ.has(m.id) || this.laid.has(m) || (this.rel?.normals && m.normals)) return false;
+    const nv = Math.floor(m.positions.length / 3);
+    if (!nv || nv > MERGE_MESH_VERTS || m.texture || m.backTexture || m.backColor || pbrSource(m) || !(m.color[3] >= 0.999)) return false;
+    if ((m.edges ? m.edges.length / 6 : 0) > MERGE_MESH_SEGMENTS) return false;
+    if ([m.positions, m.normals, m.indices, m.colors, m.edges].some((a) => !!a && this.mgShared.has(a))) return false;
+    // 그물 배열 바이트 합이 조각 올리기 문턱 안(chunkFor로 나눠 올리지 않을 크기 — 같은 배열·이미 올린 배열을 빼지 않은 위 한계)
+    let n = 0;
+    for (const a of [m.positions, m.normals, m.colors, m.uvs, m.backUvs, m.indices, m.edges]) n += a?.byteLength ?? 0;
+    return n <= CHUNK_MIN_BYTES;
+  }
+
+  /**
+   * 0.60.0 조각을 받는 동안(켜진 장면·훑기를 마침·기다림 한도 안) 곧장 구울 그물이면 GL 객체 없이 빛 기록으로 들고 기다린다(조각이 오면 곧장 굽는다).
+   * 0.59.0은 그물마다 버퍼·VAO를 만들어 그리고 조각이 오면 구웠다(1만 — 걸음 사이 버퍼 2,607개). 받지 못하거나 늦으면 holdOut이 그물 버퍼로 돌린다
+   */
+  private lightWait(m: Mesh3d): boolean {
+    return !mergeKit && !mergeKitLate && !mergeKitFailed && kitWaiters.has(this.kitNote) && this.mergeDirect(m);
+  }
+
+  /**
+   * 0.60.0 들고 있던 기록을 모두 보이는 목록으로(빛 기록은 그물 버퍼로 — 장면 차례 그대로). 조각이 있으면 조각 unhold, 없으면(받는 중·늦음·실패) 여기서.
+   * 걸음 사이에 앱이 그물을 바꾸거나 빼거나 묶어 그리기를 끌 때, 받기가 늦거나 실패할 때, 다 올리라는 걸음(그림 저장)
+   */
+  private holdOut(): void {
+    if (!this.mgHold.length) return;
+    if (mergeKit) {
+      mergeKit.unhold(this.host);
+      return;
+    }
+    for (const r of this.mgHold) if (r.light) Object.assign(r, this.meshRec(r.src), { light: false });
+    this.gl.bindVertexArray(null);
+    for (const r of this.mgHold) this.meshes.push(r);
+    this.mgHold = [];
+  }
+
+  /** 0.60.0 그리기 뼈대와 그것으로 다시 쓰던 목록을 잊는다(장면을 비울 때 — 옛 기록을 붙들지 않게) */
+  private forgetOrder(): void {
+    this.mgOrder = null;
+    this.visMemo = null;
+    this.hiMemo = null;
+  }
+
+  /**
+   * 0.60.0 이 그리기에서 쓸 그리기 뼈대(조각 orderBuild): 다 올렸고(올리는 동안은 장면 차례가 걸음마다 바뀐다) 구운 묶음이 있을 때만, 맞지 않으면 다시 만든다
+   */
+  private orderNow(): MergeOrder | null {
+    if (!mergeKit || this.orderOff || !this.mgGroups.size || this.uploading || this.mgHold.length) {
+      if (this.mgOrder) this.forgetOrder();
+      return null;
+    }
+    const o = this.mgOrder;
+    if (o && mergeKit.orderValid(this.host, o)) return o;
+    this.visMemo = null;
+    this.hiMemo = null;
+    return (this.mgOrder = mergeKit.orderBuild(this.host));
+  }
+
+  /**
    * 0.52.0 묶어 그리기 선택 바꾸기: 'off'면 묶음에 든 그물을 모두 그물마다 버퍼로 되돌리고(장면 배열에서 다시 올린다) 묶음을 지운다.
    * 'on'·'auto'로 바꾸면 다음 그리기에서 다시 살핀다('on'은 곧 켜고, 'auto'는 묶을 수 있는 그물이 문턱 이상일 때)
    */
@@ -2172,8 +2324,8 @@ export class Renderer3d {
 
   /** 0.52.0 묶음에 든 그물을 모두 그물마다 버퍼로 되돌린다(그물 배열에서 다시 올린다 — 묶음은 쓰는 기록이 없어져 지운다) */
   private mergeUnstore(): void {
-    // 0.58.0 들고 있던 빛 기록을 먼저 그물 버퍼로(묶어 그리기를 끄면 다시 구울 일이 없다)
-    if (mergeKit) mergeKit.unhold(this.host);
+    // 0.58.0 들고 있던 빛 기록을 먼저 그물 버퍼로(묶어 그리기를 끄면 다시 구울 일이 없다 — 0.60.0 조각을 받는 중이어도)
+    this.holdOut();
     this.mgQueue = [];
     this.mgWait = [];
     this.mgWaitVerts = 0;
@@ -2460,8 +2612,9 @@ export class Renderer3d {
       // 0.54.0 미뤄 둔 장면 훑기: 첫 그림 뒤(한 번에 다 올릴 때는 곧) 이 걸음 몫 안에서 이어 가고, 마쳤고 조각이 있으면 모아 둔 그물을 굽기 기다림에 넣는다
       if (this.mgScan && (this.mgFramed || budgetMs === Infinity)) this.mergeScan(budgetMs === Infinity ? Infinity : t0 + budgetMs);
       this.mergeFeedUnfed();
-      // 0.58.0 걸음 사이에 묶어 그리기가 꺼졌으면(변종 실패) 들고 있던 빛 기록은 구울 일이 없다 — 그물 버퍼로
-      if (this.mgOff && this.mgHold.length && mergeKit) mergeKit.unhold(this.host);
+      // 0.58.0 걸음 사이에 묶어 그리기가 꺼졌으면(변종 실패) 들고 있던 빛 기록은 구울 일이 없다 — 그물 버퍼로.
+      // 0.60.0 조각을 받는 동안 들고 있던 빛 기록도: 받기가 끝나지 않았는데 다 올리라는 걸음(그림 저장)이면 기다리지 않고 그물 버퍼로
+      if (this.mgOff || (!mergeKit && budgetMs === Infinity)) this.holdOut();
     }
     while (this.pending && (first || performance.now() - t0 < budgetMs)) {
       const s = p!.scene;
@@ -2475,6 +2628,14 @@ export class Renderer3d {
       if (kind === 'mesh' && p!.chunk === undefined && this.mergeHold(s.meshes[p!.mi]!, budgetMs)) {
         this.mgHeld = !this.mgScan;
         break;
+      }
+      // 0.60.0 조각을 받는 동안 곧장 구울 그물은 GL 객체 없이 빛 기록으로 들고(그리지 않는다) 굽기 기다림에 모은다 — 조각이 오면 위 mergeFeedUnfed가 넣고 단위가 차면 굽는다
+      if (kind === 'mesh' && p!.chunk === undefined && budgetMs !== Infinity && this.lightWait(s.meshes[p!.mi]!)) {
+        first = false;
+        const r = this.sceneMeshRec(s.meshes[p!.mi++]!, { light: true });
+        this.mgHold.push(r);
+        this.mergeOffer(r);
+        continue;
       }
       // 0.57.0 곧장 구울 그물이면 GL 객체 없이 잇는다(0.58.0: 몫이 다하면 빛 기록을 mgHold에 들고 돌아간다. 굽기를 다음 걸음으로 미뤘으면 이번 걸음은 여기까지)
       if (kind === 'mesh' && p!.chunk === undefined && mergeKit?.direct(this.host, s.meshes[p!.mi]!)) {
@@ -2702,7 +2863,7 @@ export class Renderer3d {
         p.chunk = undefined;
       }
       // 0.58.0 올린 그물을 바꾸면(또는 함께 쓰는 배열을 고치면) 들고 있던 빛 기록을 그물 버퍼로 돌려 meshes에 옮긴다 — 아래 길은 meshes에서 찾는다
-      if (this.mgHold.length && k >= 0 && (k < p.mi || ranges)) mergeKit?.unhold(this.host);
+      if (this.mgHold.length && k >= 0 && (k < p.mi || ranges)) this.holdOut();
       p.scene = scene;
       if (k < 0 || k >= p.mi) {
         // 0.25.0: 다른 그물 객체로 바꿨으면 앞 객체에 앱이 다시 준 배열(문맥 복구)은 버린다
@@ -2777,7 +2938,7 @@ export class Renderer3d {
         p.chunk = undefined;
       }
       // 0.58.0 뺄 그물이 올린 그물이면 들고 있던 빛 기록을 먼저 meshes로(아래에서 meshes에서 찾는다)
-      if (this.mgHold.length && k >= 0 && k < p.mi) mergeKit?.unhold(this.host);
+      if (this.mgHold.length && k >= 0 && k < p.mi) this.holdOut();
       if (k >= 0 && k < p.mi) p.mi--;
       p.scene = scene;
     }
@@ -3371,6 +3532,7 @@ export class Renderer3d {
     this.jobs.clear();
     this.meshes = [];
     this.cullChunks = { recs: [], n: [], box: [] };
+    this.forgetOrder();
     this.lines = [];
     this.points = [];
     this.setHighlightSegments(null);
@@ -3716,7 +3878,7 @@ export class Renderer3d {
    */
   restoreMeshArrays(id: string, a: MeshArrays): boolean {
     if (this.gl.isContextLost() || !a) return false;
-    if (this.mgHold.length) mergeKit?.unhold(this.host);
+    this.holdOut();
     const i = this.meshes.findIndex((r) => r.src.id === id);
     let m: Mesh3d | null = i >= 0 ? this.meshes[i]!.src : null;
     let miss = i >= 0 ? this.meshes[i]!.miss : null;
@@ -3823,6 +3985,7 @@ export class Renderer3d {
     for (const v of c.vaos) gl.deleteVertexArray(v);
     for (const b of c.bufs) this.dropBuffer(b);
     rec.parts = undefined;
+    this.partsVer++;
   }
 
   /** 이 판의 구간 캐시(판이 바뀌었으면 옛 자료를 지우고 새로) */
@@ -3830,6 +3993,7 @@ export class Renderer3d {
     const c = rec.parts;
     if (c && c.ver === ver) return c;
     if (c) this.dropParts(rec);
+    this.partsVer++;
     return (rec.parts = { ver, vaos: [], bufs: [], lists: new Map() });
   }
 
@@ -4495,12 +4659,87 @@ export class Renderer3d {
     };
 
     const frameNo = ++this.frameNo;
-    const visibleMeshes: MeshRec[] = [];
-    for (const r of this.meshes)
-      if (vis(r.src.id, r.src.group)) {
-        r.visAt = frameNo;
-        visibleMeshes.push(r);
+    // 0.60.0 그리기 뼈대(다 올린 뒤 묶음이 있는 장면): 보이는 목록은 숨김 판(visKey)이 같으면 지난 목록 그대로, 깨끗한 덩이는 아래 차례마다 구간 하나로
+    const O = this.orderNow();
+    let visibleMeshes: MeshRec[];
+    let visSeq: number;
+    const VM = this.visMemo;
+    if (O && st.visKey !== undefined && VM && VM.ord === O && VM.key === st.visKey) {
+      visibleMeshes = VM.list;
+      visSeq = VM.seq;
+    } else {
+      visSeq = ++this.visSeq;
+      visibleMeshes = [];
+      for (const r of this.meshes)
+        if (vis(r.src.id, r.src.group)) {
+          r.visAt = visSeq;
+          visibleMeshes.push(r);
+        }
+      if (O)
+        for (const k of O.blocks) {
+          const hid: number[] = [];
+          for (let i = k.a; i < k.b; i++) if (k.g.recs[i]!.visAt !== visSeq) hid.push(i);
+          k.hid = hid;
+        }
+      this.visMemo = O && st.visKey !== undefined ? { ord: O, key: st.visKey, seq: visSeq, list: visibleMeshes } : null;
+    }
+    // 강조한 그물이 든 덩이(강조 모음·크기·뼈대가 같으면 지난 표시 그대로 — 모음이 비면 0)
+    let hiStamp = 0;
+    if (O && st.highlight.size) {
+      const H = this.hiMemo;
+      if (H && H.set === st.highlight && H.size === st.highlight.size && H.ord === O) hiStamp = H.stamp;
+      else {
+        hiStamp = ++this.hiSeq;
+        const ids = (O.ids ??= mergeKit!.orderIds(O));
+        const mark = (v: number): void => {
+          const k = O.blocks[Math.floor(v / 65536)]!;
+          if (k.hi !== hiStamp) {
+            k.hi = hiStamp;
+            k.hiL = [];
+          }
+          k.hiL.push(v % 65536);
+        };
+        for (const id of st.highlight) {
+          const x = ids.get(id);
+          if (x === undefined) continue;
+          if (typeof x === 'number') mark(x);
+          else for (const v of x) mark(v);
+        }
+        this.hiMemo = { set: st.highlight, size: st.highlight.size, ord: O, stamp: hiStamp };
       }
+    }
+    /**
+     * 0.60.0 보이는 그물마다 fn(장면 차례 — visibleMeshes와 같은 차례). 뼈대가 있으면 덩이마다 먼저 blk(덩이, fn)를 묻고, 덩이를 다뤘으면(true) 그 그물들은 건너뛴다
+     * (blk는 예외 그물 — 숨김·잘라냄·강조 — 을 fn으로 넘기고 그 사이 구간을 통째로 더한다)
+     */
+    const each = (fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void => {
+      if (!O) {
+        for (const r of visibleMeshes) fn(r);
+        return;
+      }
+      for (const x of O.items) {
+        if ('src' in x) {
+          if (x.visAt === visSeq) fn(x);
+          continue;
+        }
+        if (blk && blk(x, fn)) continue;
+        const R = x.g.recs;
+        for (let i = x.a; i < x.b; i++) {
+          const r = R[i]!;
+          if (r.visAt === visSeq) fn(r);
+        }
+      }
+    };
+    /** 0.60.0 덩이의 이 그리기 예외 그물 번호(오름차순·겹침 없음 — withHi면 강조도). 그리기마다 한 번 합친다 */
+    const exOf = (k: MergeBlock, withHi: boolean): number[] => {
+      if (k.ex !== frameNo) {
+        k.ex = frameNo;
+        const cutL = k.cut === frameNo ? k.cutL : null;
+        k.exA = !cutL ? k.hid : !k.hid.length ? cutL : mergeSorted(k.hid, cutL);
+        k.exB = hiStamp !== 0 && k.hi === hiStamp ? mergeSorted(k.exA, k.hiL.slice().sort((p, q) => p - q)) : k.exA;
+      }
+      return withHi ? k.exB : k.exA;
+    };
     // 0.51.0 화면 밖 잘라내기(src/cull.ts): 시야 사각뿔 옆 네 평면 가운데 하나의 확실히 바깥인 그물에 이 그리기 번호를 적고 면·윤곽선·삼각형 변·숨은 점선·
     // 외곽선·주변 가림 깊이·반투명 면에서 뺀다 — 화면에 화소를 내지 않는 그물이라 그림은 같다. 여백은 굵은 선 반폭·끝 마개(장치 화소 4 × 화소 비율 + 4).
     // 그림자 깊이 그림(해 쪽 시야)·잘린 면 채우기 단위·인스턴싱 자리 수·모은 묶음 나누기와 차례는 잘라내기 전 그대로 둔다(0.50.0과 같은 길)
@@ -4511,24 +4750,36 @@ export class Renderer3d {
       const px = 4 * st.dpr + 4;
       const P = cullPlanes(f.viewProj, (2 * px) / Math.max(1, vw), (2 * px) / Math.max(1, vh));
       const cullOf = (r: MeshRec): CullBox | null => (r.cull === undefined ? (r.cull = cullBox(r.local, r.model)) : r.cull);
+      // 0.60.0 잘라낸 그물을 그 덩이의 이 그리기 예외로 적는다(장면 차례로 훑으므로 번호가 오름차순)
+      const cut = (r: MeshRec): void => {
+        r.culledAt = frameNo;
+        culledN++;
+        if (O && r.bk! >= 0) {
+          const k = O.blocks[r.bk!]!;
+          if (k.cut !== frameNo) {
+            k.cut = frameNo;
+            k.cutL = [];
+          }
+          k.cutL.push(r.mi!);
+        }
+      };
       if (look) {
         // 겉모습 행렬이 있으면 그물마다(옮긴 묶음은 옮긴 자리로)
         for (const r of visibleMeshes) {
           const lk = lookOf(r.src.id)?.matrix;
           const d = lk ? cullBox(r.local, this.lookModel(r, lk, r.model).model) : cullOf(r);
-          if (d && cullOut(P, d)) {
-            r.culledAt = frameNo;
-            culledN++;
-          }
+          if (d && cullOut(P, d)) cut(r);
         }
       } else {
-        // 장면 차례 CULL_CHUNK개 덩어리: 감싸는 상자가 확실히 안이면 건너뛰고, 확실히 바깥이면 통째로, 걸치면 그물마다(같은 판단 — cullUnion)
+        // 장면 차례 CULL_CHUNK개 덩어리: 감싸는 상자가 확실히 안이면 건너뛰고, 확실히 바깥이면 통째로, 걸치면 그물마다(같은 판단 — cullUnion).
+        // 0.60.0 뼈대가 맞고 덩어리를 그 뼈대로 셌으면 장면 차례가 그대로라 덩어리 기록을 다시 견주지 않는다
         const M = this.meshes, C = this.cullChunks;
         if (C.recs.length > M.length) C.recs.length = M.length;
+        const same = !!O && C.ord === O;
         for (let s = 0, k = 0; s < M.length; s += CULL_CHUNK, k++) {
           const e = Math.min(M.length, s + CULL_CHUNK);
-          let ok = C.n[k] === e - s;
-          for (let i = s; ok && i < e; i++) if (C.recs[i] !== M[i]) ok = false;
+          let ok = same || C.n[k] === e - s;
+          if (!same) for (let i = s; ok && i < e; i++) if (C.recs[i] !== M[i]) ok = false;
           if (!ok) {
             const list: (CullBox | null)[] = [];
             for (let i = s; i < e; i++) {
@@ -4543,18 +4794,16 @@ export class Renderer3d {
           if (side === 1) continue;
           for (let i = s; i < e; i++) {
             const r = M[i]!;
-            if (r.visAt !== frameNo) continue;
+            if (r.visAt !== visSeq) continue;
             let out = side === -1;
             if (!out) {
               const d = cullOf(r);
               out = !!d && cullOut(P, d);
             }
-            if (out) {
-              r.culledAt = frameNo;
-              culledN++;
-            }
+            if (out) cut(r);
           }
         }
+        C.ord = O;
       }
       stats.culled = culledN;
     }
@@ -4648,11 +4897,18 @@ export class Renderer3d {
     if (this.instancing.on && !multi) {
       geoN = new Map();
       if (!sec) edgeN = new Map();
-      for (const r of visibleMeshes) {
-        geoN.set(r.geo, (geoN.get(r.geo) ?? 0) + 1);
-        // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼를 함께 가리키지만 같은 그물 자리가 아니다(세지 않는다 — 묶음 구간으로 그린다)
-        if (edgeN && r.edges && !r.mg) edgeN.set(r.edges.pos, (edgeN.get(r.edges.pos) ?? 0) + 1);
-      }
+      const G = geoN, E = edgeN;
+      // 0.60.0 묶음에 든 그물은 세지 않는다: 굽기는 배열을 다른 기록과 함께 쓰는 그물을 받지 않아(mergeSrcOf) 그 그물 열쇠는 늘 하나뿐이다 — 모아 그릴 자리가 되지 않는다.
+      // 다 묶은 큰 장면에서 프레임마다 그물 수만큼 글자열 열쇠 Map을 셌다(가짜 WebGL 1만 — 그리기 자기 시간의 약 30%). 뼈대가 있으면 덩이는 통째로 건너뛴다.
+      // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼를 함께 가리키지만 같은 그물 자리가 아니다(세지 않는다 — 묶음 구간으로 그린다)
+      each(
+        (r) => {
+          if (r.mg) return;
+          G.set(r.geo, (G.get(r.geo) ?? 0) + 1);
+          if (E && r.edges) E.set(r.edges.pos, (E.get(r.edges.pos) ?? 0) + 1);
+        },
+        () => true,
+      );
     }
     /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
     const wireGeoN = sec ? null : geoN;
@@ -4662,13 +4918,13 @@ export class Renderer3d {
 
     // ───── 0.52.0 묶어 그리기: 묶음 그물은 그물마다 그리던 자리에서 잇단 것끼리 구간으로 모으고, 그물마다 그리기와 한 목록에 장면 차례로 두었다가
     // 자리 자료(행렬·색)를 한 번 올린 뒤 차례대로 그린다(차례가 같아 그림이 같다). 0.53.0: 면은 단면 하나·그림자에서도 묶는다(자리마다 로컬 평면·그림자 행렬 —
-    // 인스턴싱과 같다), 선(윤곽선·숨은 점선)은 단면이 있으면 그물마다. 여러 단면이면 모두 그물마다 ─────
+    // 인스턴싱과 같다), 선(윤곽선·숨은 점선)은 단면이 있으면 그물마다(0.60.0 선도 단면 하나에서 묶는다 — 자리마다 로컬 평면). 여러 단면이면 모두 그물마다 ─────
     // (MERGE 변종을 만들 수 없으면 묶음 저장소의 그물도 그물마다 — 그 그물 자리로 그린다)
     // 0.54.0 묶음은 조각이 와야 구우므로 묶음이 있으면 조각도 있다(0.57.0 구간 그리기도 조각 — kit.drawFaces·drawEdges)
     const kit = mergeKit!;
     const mOn = !this.mergeBroken && this.mgGroups.size > 0 && !multi && !!mergeKit;
-    /** 0.53.0 선 차례에서 묶는지(단면이 있으면 0.52.0처럼 그물마다 — 선 변종은 자리마다 평면을 읽지 않는다) */
-    const mOnLines = mOn && !sec;
+    /** 0.53.0 선 차례에서 묶는지. 0.60.0 단면 하나도(선 변종이 자리마다 로컬 평면을 읽는다 — 0.59.0까지는 그물마다라 단면을 켠 큰 장면의 프레임이 그물 수만큼 GL 호출이었다) */
+    const mOnLines = mOn;
     /** 지금 모으는 목록(null이면 예전처럼 바로 그린다)과 늘일 수 있는 마지막 구간 */
     let mops: MergeOp[] | null = null;
     let mrun: MergeRun | null = null;
@@ -4677,14 +4933,86 @@ export class Renderer3d {
       const g = r.mg!, i = r.mi!;
       const u = mrun;
       if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha) {
+        if (u.sh) ownRun(u);
         u.b++;
         u.cols.push(col);
         u.vc.push(vcol);
         return;
       }
-      mrun = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], tint, alpha };
+      mrun = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha };
       mops!.push(mrun);
     };
+    /** 0.60.0 묶음과 함께 쓰던 색 목록을 구간 제 목록으로(그물마다 늘이기 전에) */
+    const ownRun = (u: MergeRun): void => {
+      u.cols = u.cols.slice(u.a - u.o, u.b - u.o);
+      u.vc = u.vc.slice(u.a - u.o, u.b - u.o);
+      u.o = u.a;
+      u.sh = false;
+    };
+    /**
+     * 0.60.0 깨끗한 덩이를 통째로 목록에(그물마다 mergeAdd를 [a, b)에 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다)
+     */
+    const mergeRange = (g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number): void => {
+      const u = mrun;
+      if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha) {
+        if (u.sh && u.cols === cols && u.vc === vc) {
+          u.b = b;
+          return;
+        }
+        if (u.sh) ownRun(u);
+        for (let i = a; i < b; i++) {
+          u.cols.push(cols[i]!);
+          u.vc.push(vc[i]!);
+        }
+        u.b = b;
+        return;
+      }
+      mrun = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha };
+      mops!.push(mrun);
+    };
+    /** 0.60.0 이 그리기에서 덩이를 구간으로 다룰 수 있는지(겉모습·구간이 없고 덩이 그물이 묶음 그리기 길을 탄다) */
+    const fastOk = !!O && !look && !st.parts;
+    /**
+     * 0.60.0 덩이를 예외 그물(숨김·잘라냄 — withHi면 강조도) 사이 구간으로: 구간마다 add, 예외 그물은 보이면 fn(그물마다 길 그대로). 다룰 수 없으면 false(덩이 전체를 그물마다)
+     */
+    const blockRuns = (k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number) => void): boolean => {
+      if (!fastOk || !k.ok) return false;
+      const R = k.g.recs;
+      let s = k.a;
+      for (const x of exOf(k, withHi)) {
+        if (x > s) add(s, x);
+        const r = R[x]!;
+        if (r.visAt === visSeq) fn(r);
+        s = x + 1;
+      }
+      if (s < k.b) add(s, k.b);
+      return true;
+    };
+    /** 0.60.0 묶음 그물마다 면 색·정점 색 쓰기(colOf·vcolOf와 같은 값 — 겉모습이 없을 때) */
+    const faceCols = (g: MergeGroup): [Rgba[], boolean[]] => {
+      const fc = (g.fc ??= { cols: g.recs.map((r) => r.src.color), vc: g.recs.map((r) => r.hasColors) });
+      if (flat) return [oneCol(g, 'f', bgFill), noVc(g)];
+      if (mono) {
+        const key = `m${mono.join()}`;
+        const c = (g.cc ??= {}).f;
+        if (c && c.k === key) return [c.cols, noVc(g)];
+        const cols = fc.cols.map((x): Rgba => [mono[0], mono[1], mono[2], x[3]]);
+        g.cc.f = { k: key, cols };
+        return [cols, noVc(g)];
+      }
+      return [fc.cols, fc.vc];
+    };
+    /** 0.60.0 묶음 그물 수만큼 같은 색(쓰는 곳 slot마다 마지막 값을 둔다 — 값이 같으면 다시 쓴다) */
+    const oneCol = (g: MergeGroup, slot: string, c: Rgba): Rgba[] => {
+      const key = `c${c[0]},${c[1]},${c[2]},${c[3]}`;
+      const cc = (g.cc ??= {});
+      const x = cc[slot];
+      if (x && x.k === key) return x.cols;
+      const cols = new Array<Rgba>(g.recs.length).fill(c);
+      cc[slot] = { k: key, cols };
+      return cols;
+    };
+    const noVc = (g: MergeGroup): boolean[] => (g.nv ??= new Array<boolean>(g.recs.length).fill(false));
     /** 그물마다 그리기 하나(모으는 중이면 목록에 — 앞 구간은 더 늘이지 않는다: 뒤 그물이 이 그리기를 앞지르지 않게) */
     const mergeDo = (draw: () => void): void => {
       if (!mops) return draw();
@@ -4697,6 +5025,7 @@ export class Renderer3d {
       st,
       stats,
       mm,
+      look: !!look,
       sec,
       clipOf,
       shadowOn,
@@ -4734,31 +5063,40 @@ export class Renderer3d {
       // 0.52.0 묶음 그물은 구간으로(깊이만 — 강조 없이)
       mops = mOn ? [] : null;
       mrun = null;
-      for (const r of visibleMeshes) {
-        if (transOf(r)) continue;
-        // 0.42.0 같은 그물 자리는 모아서(뒷면 변종 그물은 그물마다)
-        if (!(r.back && backOf(r)) && meshInst(r)) {
-          addPend(pend, r.geo, r);
-          continue;
-        }
-        if (gone(r)) continue;
-        if (mops && mergeFace(r)) {
-          mergeAdd(r, colOf(r), vcolOf(r), 0, 1);
-          continue;
-        }
-        // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
-        if (mops) {
-          mergeDo(() => {
-            const p = progFor(r, false);
-            if (p !== cur) meshUse(p);
-            meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
-          });
-          continue;
-        }
-        const p = progFor(r, false);
-        if (p !== cur) meshUse(p);
-        meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
-      }
+      each(
+        (r) => {
+          if (transOf(r)) return;
+          // 0.42.0 같은 그물 자리는 모아서(뒷면 변종 그물은 그물마다)
+          if (!(r.back && backOf(r)) && meshInst(r)) {
+            addPend(pend, r.geo, r);
+            return;
+          }
+          if (gone(r)) return;
+          if (mops && mergeFace(r)) {
+            mergeAdd(r, colOf(r), vcolOf(r), 0, 1);
+            return;
+          }
+          // 0.43.0 깊이만 그리므로 PBR 변종은 쓰지 않는다(위치 식이 같아 깊이도 같다)
+          if (mops) {
+            mergeDo(() => {
+              const p = progFor(r, false);
+              if (p !== cur) meshUse(p);
+              meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
+            });
+            return;
+          }
+          const p = progFor(r, false);
+          if (p !== cur) meshUse(p);
+          meshDrawParts(r, colOf(r), 1, 0, r.src.doubleSided === false);
+        },
+        // 0.60.0 덩이는 예외 사이 구간으로(깊이만이라 강조와 상관없다)
+        mops
+          ? (k, fn) => {
+              const [cols, vc] = faceCols(k.g);
+              return blockRuns(k, fn, false, (a, b) => mergeRange(k.g, a, b, cols, vc, 0, 1));
+            }
+          : null,
+      );
       if (mops) {
         const ops = mops;
         mops = null;
@@ -4781,65 +5119,77 @@ export class Renderer3d {
       const plainP = cur;
       mops = mOn ? [] : null;
       mrun = null;
-      for (const r of visibleMeshes) {
-        if (transOf(r)) continue;
-        if (r.back && backOf(r)) {
-          if (!gone(r)) backs = true;
-          continue;
-        }
-        if (meshInst(r)) {
-          addPend(pend, r.geo, r);
-          continue;
-        }
-        if (gone(r)) continue;
-        // 0.43.0 PBR 그림을 쓰는 그물은 아래에서 그물마다 맞는 변종으로(PBR 필드가 없는 그물은 늘 빈 목록)
-        if (r.pbr && pbrDefsOf(r).length) {
-          pbrs = true;
-          continue;
-        }
-        if (texOfR(r)) {
-          textured = true;
-          continue;
-        }
-        const tint = st.highlight.has(r.src.id) ? 0.5 : 0;
-        if (mops) {
-          if (mergeFace(r)) mergeAdd(r, colOf(r), vcolOf(r), tint, 1);
-          else
-            mergeDo(() => {
-              if (cur !== plainP) meshUse(plainP);
-              meshDrawParts(r, colOf(r), 1, tint, r.src.doubleSided === false);
-            });
-          continue;
-        }
-        meshDrawParts(r, colOf(r), 1, tint, r.src.doubleSided === false);
-      }
+      each(
+        (r) => {
+          if (transOf(r)) return;
+          if (r.back && backOf(r)) {
+            if (!gone(r)) backs = true;
+            return;
+          }
+          if (meshInst(r)) {
+            addPend(pend, r.geo, r);
+            return;
+          }
+          if (gone(r)) return;
+          // 0.43.0 PBR 그림을 쓰는 그물은 아래에서 그물마다 맞는 변종으로(PBR 필드가 없는 그물은 늘 빈 목록)
+          if (r.pbr && pbrDefsOf(r).length) {
+            pbrs = true;
+            return;
+          }
+          if (texOfR(r)) {
+            textured = true;
+            return;
+          }
+          const tint = st.highlight.has(r.src.id) ? 0.5 : 0;
+          if (mops) {
+            if (mergeFace(r)) mergeAdd(r, colOf(r), vcolOf(r), tint, 1);
+            else
+              mergeDo(() => {
+                if (cur !== plainP) meshUse(plainP);
+                meshDrawParts(r, colOf(r), 1, tint, r.src.doubleSided === false);
+              });
+            return;
+          }
+          meshDrawParts(r, colOf(r), 1, tint, r.src.doubleSided === false);
+        },
+        // 0.60.0 덩이는 예외(숨김·잘라냄·강조) 사이 구간으로 — 강조한 그물은 그물마다 길이 강조 구간을 따로 연다
+        mops
+          ? (k, fn) => {
+              const [cols, vc] = faceCols(k.g);
+              return blockRuns(k, fn, true, (a, b) => mergeRange(k.g, a, b, cols, vc, 0, 1));
+            }
+          : null,
+      );
       if (mops) {
         const ops = mops;
         mops = null;
         mergeFaces(ops, () => plainP);
       }
+      // 0.60.0 무늬·PBR·뒷면 차례: 덩이 그물은 무늬·PBR·뒷면이 없어(ok) 모두 건너뛴다
+      const noBlock = (k: MergeBlock): boolean => k.ok;
       if (textured) {
         meshUse(texProg());
-        for (const r of visibleMeshes)
+        each((r) => {
           if (!transOf(r) && !gone(r) && texOfR(r) && !(r.back && backOf(r)) && !meshInst(r) && !(r.pbr && pbrDefsOf(r).length))
             meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
+        }, noBlock);
       }
       if (pend.size) flushMeshes(pend, hiOf);
       if (pbrs)
-        for (const r of visibleMeshes) {
-          if (transOf(r) || gone(r) || (r.back && backOf(r)) || meshInst(r) || !pbrDefsOf(r).length) continue;
+        each((r) => {
+          if (transOf(r) || gone(r) || (r.back && backOf(r)) || meshInst(r) || !pbrDefsOf(r).length) return;
           const p = progFor(r);
           if (p !== cur) meshUse(p);
           meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
-        }
+        }, noBlock);
       // 뒷면 색·무늬가 있는 그물(그물마다 맞는 변종)
       if (backs)
-        for (const r of visibleMeshes) {
-          if (transOf(r) || gone(r) || !r.back || !backOf(r)) continue;
+        each((r) => {
+          if (transOf(r) || gone(r) || !r.back || !backOf(r)) return;
           const p = progFor(r);
           if (p !== cur) meshUse(p);
           meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
-        }
+        }, noBlock);
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
       // 1b) 잘린 면 채우기
@@ -4860,7 +5210,27 @@ export class Renderer3d {
           const lm = lookOf(r.src.id)?.matrix;
           return lm ? transformBox(b, lm) : b;
         };
-        const units = this.capUnits(visibleMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox });
+        // 0.60.0 단면 하나: 채우기 단위 묶음(capGroup)이 없는 덩이에서 그물 범위를 합친 토막 상자가 평면을 걸치지 않으면 그 토막 그물은 단위를 내지 않는다
+        // (그물 상자 ⊂ 토막 상자 — 걸침 판단이 같다) — 넘기지 않는다(차례는 그대로)
+        let capMeshes = visibleMeshes;
+        if (fastOk && sec && !multi) {
+          const list: MeshRec[] = [];
+          const kit = mergeKit!;
+          each(
+            (r) => list.push(r),
+            (k) => {
+              if (!k.ok || !kit.blockCapFree(k)) return false;
+              const B = kit.blockBoxes(k), R = k.g.recs;
+              for (let j = 0, s = k.a; s < k.b; j++, s += kit.BLOCK_BOX) {
+                if (!boxStraddles(B[j]!, sec.plane)) continue;
+                for (let i = s; i < Math.min(k.b, s + kit.BLOCK_BOX); i++) if (R[i]!.visAt === visSeq) list.push(R[i]!);
+              }
+              return true;
+            },
+          );
+          capMeshes = list;
+        }
+        const units = this.capUnits(capMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox });
         const plain = meshExtra.length ? this.variant('mesh', [...meshExtra, ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('mesh', ['CLIPN']) : this.mesh;
         const capLists = (r: MeshRec, cut: number | undefined): DrawList[] | null => {
           if (cut === undefined) return meshLists(r);
@@ -4981,17 +5351,54 @@ export class Renderer3d {
       const lineBatches = new Map<unknown, LineBatch[]>();
       // 0.51.0 같은 프로그램·같은 값의 윤곽선을 그물마다 잇달아 그릴 때 고정 균일 변수를 다시 보내지 않는다(다른 길이 끼면 memo.p = null)
       const memo = this.lineMemoOff ? null : lineMemo();
-      // 0.52.0 묶음 그물 윤곽선(강조 아닌 1화소)은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에 — 0.53.0 단면이 있으면 그물마다)
+      // 0.52.0 묶음 그물 윤곽선(강조 아닌 1화소)은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에 — 0.60.0 단면 하나에서도)
       mops = mOnLines ? [] : null;
       mrun = null;
-      for (const r of visibleMeshes) {
+      /** 0.60.0 묶음 그물마다 윤곽선 색(강조·그물마다 선 색이 없을 때 아래 col과 같은 값) */
+      const lineMemoC = new Map<Rgba, Rgba>();
+      const edgeCols = (g: MergeGroup): Rgba[] => {
+        if (!lineOpt) {
+          if (flat) return oneCol(g, 'e', st.colors.line);
+          if (mode === 'shadedEdges' || mode === 'monochrome' || mode === 'noTexture') return oneCol(g, 'e', edgeCol);
+          const a = mode === 'xray' ? 0.9 : 1;
+          const key = `w${a}`;
+          const cc = (g.cc ??= {});
+          const x = cc.e;
+          if (x && x.k === key) return x.cols;
+          const cols = faceCols(g)[0].map((c): Rgba => [c[0], c[1], c[2], a]);
+          cc.e = { k: key, cols };
+          return cols;
+        }
+        return faceCols(g)[0].map((c) => {
+          let v = lineMemoC.get(c);
+          if (!v) {
+            const key = `0${c.join()}|`;
+            v = lineCache.get(key) ?? edgeLineColor(mode, c, st.colors, false, lineOpt, undefined);
+            lineCache.set(key, v);
+            lineMemoC.set(c, v);
+          }
+          return v;
+        });
+      };
+      /** 0.60.0 덩이 그물의 윤곽선 구간 모음이 없는지(구간 모음을 만들거나 지운 뒤에만 다시 본다 — 있으면 그물마다 길이 지운다) */
+      const npOf = (k: MergeBlock): boolean => {
+        if (k.npv !== this.partsVer) {
+          let np = true;
+          for (let i = k.a; np && i < k.b; i++) if (k.g.recs[i]!.edges?.parts) np = false;
+          k.np = np;
+          k.npv = this.partsVer;
+        }
+        return k.np;
+      };
+      each(
+        (r) => {
         // 0.51.0 화면 밖 그물: 모으는 길(같은 윤곽선 버퍼·삼각형 변 자리)이 아니면 건너뛴다 — 모으는 길은 묶음·차례를 그대로 두고 그릴 때 뺀다
         if (gone(r)) {
           const solo = st.parts?.(r.src.id);
           const batch = r.edges
             ? !solo && !!edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin
             : meshLineKind(r.src, mode) === 'triangles' && !!wireGeoN && (wireGeoN.get(r.geo) ?? 0) >= instMin && !solo;
-          if (!batch) continue;
+          if (!batch) return;
         }
         const hi = st.highlight.has(r.src.id);
         const c = colOf(r);
@@ -5008,7 +5415,7 @@ export class Renderer3d {
         if (mops && !hi && mergeEdge(r)) {
           if (r.edges!.parts) this.dropParts(r.edges!);
           mergeAdd(r, col, false, 0, alphaOf(r.src.id));
-          continue;
+          return;
         }
         const model = mm(r);
         if (r.edges) {
@@ -5016,7 +5423,7 @@ export class Renderer3d {
           if (!ep && edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin) {
             if (r.edges.parts) this.dropParts(r.edges);
             addLineBatch(lineBatches, r.edges.pos, r, col, hi ? 2 : 1, alphaOf(r.src.id), model);
-            continue;
+            return;
           }
           const eparts = ep?.edges;
           const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaOf(r.src.id), clip: clipOf(model), clips: clipsOf(r.src.id, model) };
@@ -5025,7 +5432,7 @@ export class Renderer3d {
             if (mops) {
               const rec = r.edges;
               mergeDo(() => this.drawLines(f, rec, model, { ...eo, first: 0, count: rec.n }, st, stats, memo));
-              continue;
+              return;
             }
             this.drawLines(f, r.edges, model, { ...eo, first: 0, count: r.edges.n }, st, stats, memo);
           } else {
@@ -5053,19 +5460,28 @@ export class Renderer3d {
           if (wireGeoN && (wireGeoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id)) {
             if (r.parts) this.dropParts(r);
             addLineBatch(lineBatches, `w${r.geo}`, r, col, 1, alphaOf(r.src.id), model);
-            continue;
+            return;
           }
           if (mops) {
             mergeDo(() => {
               if (memo) memo.p = null;
               wireDraw(r, model, col);
             });
-            continue;
+            return;
           }
           if (memo) memo.p = null;
           wireDraw(r, model, col);
         }
-      }
+        },
+        // 0.60.0 덩이는 예외(숨김·잘라냄·강조) 사이 구간으로(그물마다 윤곽선이 있고 윤곽선 구간 모음이 없을 때 — 강조한 그물은 굵게 따로 그린다)
+        mops
+          ? (k, fn) => {
+              if (!k.edges || !fastOk || !npOf(k)) return false;
+              const cols = edgeCols(k.g), vc = noVc(k.g);
+              return blockRuns(k, fn, true, (a, b) => mergeRange(k.g, a, b, cols, vc, 0, 1));
+            }
+          : null,
+      );
       if (mops) {
         const ops = mops;
         mops = null;
@@ -5118,37 +5534,48 @@ export class Renderer3d {
       const dashBatches = new Map<unknown, LineBatch[]>();
       // 0.51.0 그물마다 잇단 점선은 고정 균일 변수를 다시 보내지 않는다(구간 길이 끼면 memo.p = null)
       const dmemo = this.lineMemoOff ? null : lineMemo();
-      // 0.52.0 묶음 그물 윤곽선의 숨은 점선도 구간으로(장면 차례 그대로 — 0.53.0 단면이 있으면 그물마다)
+      // 0.52.0 묶음 그물 윤곽선의 숨은 점선도 구간으로(장면 차례 그대로 — 0.60.0 단면 하나에서도)
       mops = mOnLines && backEdges.meshes ? [] : null;
       mrun = null;
       const hiddenA = st.hiddenEdges;
-      for (const r of visibleMeshes) {
-        if (!r.edges || !backEdges.meshes) continue;
-        const ep = st.parts?.(r.src.id);
-        if (!ep && edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin) {
-          addLineBatch(dashBatches, r.edges.pos, r, dashCol, 1, hiddenA * alphaOf(r.src.id), mm(r));
-          continue;
-        }
-        // 0.51.0 화면 밖 그물은 건너뛴다(모으는 길은 그릴 때 뺀다)
-        if (gone(r)) continue;
-        const rec = r.edges;
-        if (!ep?.edges) {
-          const model = mm(r);
-          if (mops) {
-            if (mergeEdge(r)) mergeAdd(r, dashCol, false, 0, hiddenA * alphaOf(r.src.id));
-            else mergeDo(() => this.drawLines(f, rec, model, { ...backEdgeDash(dashCol, hiddenA * alphaOf(r.src.id)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n }, st, stats, dmemo));
-            continue;
-          }
-          this.drawLines(f, rec, model, { ...backEdgeDash(dashCol, hiddenA * alphaOf(r.src.id)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n }, st, stats, dmemo);
-          continue;
-        }
-        const partsDash = (): void => {
-          if (dmemo) dmemo.p = null;
-          dashHidden(rec, r.src.id, mm(r), rec.n, ep.edges, ep.ver, r.src.edges!, undefined);
-        };
-        if (mops) mergeDo(partsDash);
-        else partsDash();
-      }
+      if (backEdges.meshes)
+        each(
+          (r) => {
+            if (!r.edges) return;
+            const ep = st.parts?.(r.src.id);
+            if (!ep && edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin) {
+              addLineBatch(dashBatches, r.edges.pos, r, dashCol, 1, hiddenA * alphaOf(r.src.id), mm(r));
+              return;
+            }
+            // 0.51.0 화면 밖 그물은 건너뛴다(모으는 길은 그릴 때 뺀다)
+            if (gone(r)) return;
+            const rec = r.edges;
+            if (!ep?.edges) {
+              const model = mm(r);
+              if (mops) {
+                if (mergeEdge(r)) mergeAdd(r, dashCol, false, 0, hiddenA * alphaOf(r.src.id));
+                else mergeDo(() => this.drawLines(f, rec, model, { ...backEdgeDash(dashCol, hiddenA * alphaOf(r.src.id)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n }, st, stats, dmemo));
+                return;
+              }
+              this.drawLines(f, rec, model, { ...backEdgeDash(dashCol, hiddenA * alphaOf(r.src.id)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n }, st, stats, dmemo);
+              return;
+            }
+            const partsDash = (): void => {
+              if (dmemo) dmemo.p = null;
+              dashHidden(rec, r.src.id, mm(r), rec.n, ep.edges, ep.ver, r.src.edges!, undefined);
+            };
+            if (mops) mergeDo(partsDash);
+            else partsDash();
+          },
+          // 0.60.0 덩이는 예외(숨김·잘라냄) 사이 구간으로(점선은 강조와 상관없다 — 겉모습이 없으면 불투명도는 hiddenA · 1)
+          mops
+            ? (k, fn) => {
+                if (!k.edges) return false;
+                const cols = oneCol(k.g, 'd', dashCol), vc = noVc(k.g);
+                return blockRuns(k, fn, false, (a, b) => mergeRange(k.g, a, b, cols, vc, 0, hiddenA * 1));
+              }
+            : null,
+        );
       if (mops) {
         const ops = mops;
         mops = null;
@@ -5180,7 +5607,8 @@ export class Renderer3d {
     if (st.profiles && drawsProfiles(mode) && visibleMeshes.length) {
       const target = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
       // 0.9.0 그물마다 외곽선 색(setItemProfileColor)이 있는 불투명 그물이 보일 때만 색 그림을 함께 그린다(없으면 0.8.0 길 그대로)
-      const perItem = visibleMeshes.some((r) => !!lookOf(r.src.id)?.profileColor && !transOf(r));
+      // 0.60.0 겉모습이 없으면 그물마다 외곽선 색도 없다(그물마다 묻지 않는다)
+      const perItem = !!look && visibleMeshes.some((r) => !!lookOf(r.src.id)?.profileColor && !transOf(r));
       if (!perItem && this.profCol) this.dropProfileColor();
       const fb = perItem ? this.profileColorTarget(devW, devH) : this.profileTarget(devW, devH);
       if (fb) {
@@ -5443,7 +5871,18 @@ export class Renderer3d {
     // 7) 반투명 면(X-ray 포함): 뒤에서 앞으로
     const xray = mode === 'xray';
     // 0.51.0 화면 밖 그물은 빼고(남은 그물의 정렬 차례는 그대로 — 안정 정렬)
-    const trans = mode === 'wireframe' || flat ? [] : visibleMeshes.filter((r) => (xray || transOf(r)) && !gone(r));
+    // 0.60.0 X-ray가 아니고 겉모습이 없으면 덩이 그물은 반투명이 아니다(굽기가 반투명 그물을 받지 않는다 — ok) — 덩이를 건너뛴다(차례는 visibleMeshes와 같다)
+    let trans: MeshRec[] = [];
+    if (mode !== 'wireframe' && !flat) {
+      if (O && !xray && !look)
+        each(
+          (r) => {
+            if (transOf(r) && !gone(r)) trans.push(r);
+          },
+          (k) => k.ok,
+        );
+      else trans = visibleMeshes.filter((r) => (xray || transOf(r)) && !gone(r));
+    }
     if (trans.length) {
       const eye = f.eye;
       const fwd: V3 = [-f.basis.back[0], -f.basis.back[1], -f.basis.back[2]];

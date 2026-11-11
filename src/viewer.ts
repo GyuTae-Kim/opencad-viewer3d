@@ -1776,6 +1776,8 @@ export class Viewer3d {
   private items = new Map<string, Item>();
   private hiddenGroups = new Set<string>();
   private hiddenItems = new Set<string>();
+  /** 0.60.0 숨김 판(숨김을 바꿀 때마다 1씩 — 렌더러가 같은 판의 보이는 목록을 다시 쓴다) */
+  private visVer = 0;
   private hi = new Set<string>();
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
@@ -2253,6 +2255,7 @@ export class Viewer3d {
     this.bbCamKey = '';
     this.hiddenGroups.clear();
     this.hiddenItems.clear();
+    this.visVer++;
     this.hi.clear();
     this.ranges.clear();
     this.rangeSel.clear();
@@ -3468,6 +3471,7 @@ export class Viewer3d {
   }
 
   private visibilityChanged(): void {
+    this.visVer++;
     this.shadowVer++;
     this.visBox = null;
     this.visLists = null;
@@ -8669,6 +8673,7 @@ export class Viewer3d {
       sky,
       dpr,
       visible: (id, g) => this.visible(id, g),
+      visKey: this.visVer,
       highlight: this.hi,
       ranges: this.ranges,
       grid: this.gridOn,

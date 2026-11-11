@@ -260,12 +260,12 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     }
   });
 
-  it('0.53.0: 단면 하나·그림자에서도 면은 묶고(단면이 있으면 선은 그물마다), 여러 단면·구간 단면은 그물마다(묶음 구간 0) — 모두 끔과 같다', () => {
+  it('0.53.0: 단면 하나·그림자에서도 묶고(0.60.0 선도), 여러 단면·구간 단면은 그물마다(묶음 구간 0) — 모두 끔과 같다', () => {
     const d = same(() => undefined, 'plain');
     const a = same((v) => v.setSection({ normal: [1, 0, 0], offset: 120 }, { caps: 'all' }), 'section');
-    // 0.52.0은 단면이 있으면 모두 그물마다였다 — 0.53.0은 면만 묶는다(자리마다 로컬 평면): 묶어 그린 그물 수가 면 차례만큼(윤곽선 차례는 그물마다)
+    // 0.52.0은 단면이 있으면 모두 그물마다였다 — 0.53.0은 면만 묶었고(윤곽선 차례는 그물마다), 0.60.0은 윤곽선도 묶는다(자리마다 로컬 평면): 묶어 그린 그물 수가 단면 없을 때와 같다
     expect(a.mergedDraws).toBeGreaterThan(0);
-    expect(a.on.v.stats.merged.items).toBeLessThan(d.on.v.stats.merged.items);
+    expect(a.on.v.stats.merged.items).toBe(d.on.v.stats.merged.items);
     const b = same((v) => v.setSections([{ normal: [1, 0, 0], offset: 120 }, { normal: [0, 1, 0], offset: 40 }]), 'sections');
     expect(b.mergedDraws).toBe(0);
     // 구간 단면(0.44.0 — 묶음 안 삼각형·선분 구간만 자르는 평면)도 그물마다

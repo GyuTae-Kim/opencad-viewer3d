@@ -13,13 +13,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
-import { MERGE_AUTO_MIN, MERGE_KIT_WAIT_MS, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
+import { MERGE_AUTO_MIN, MERGE_FIRST_MESHES, MERGE_KIT_WAIT_MS, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
 import { boxMesh } from '../src/synth';
 import type { Mesh3d, Scene3d } from '../src/types';
 import type { Viewer3d as ViewerT } from '../src/viewer';
 
 type ViewerCtor = typeof import('../src/viewer').Viewer3d;
-type Rend = { uploadSome: (b: number) => boolean; uploading: boolean; uploadHeld: boolean; meshes: unknown[] };
+type Rend = { uploadSome: (b: number) => boolean; uploading: boolean; uploadHeld: boolean; meshes: unknown[]; mgHold: unknown[] };
 
 let dom: ReturnType<typeof installDom>;
 const views: ViewerT[] = [];
@@ -83,19 +83,22 @@ function bake(v: ViewerT): void {
   v.renderNow();
 }
 
-/** 나눠 올리기를 굽기 단위에서 멈춘 데까지: 첫 걸음(첫 그림 앞 — 훑지 않는다) → 첫 그림 → 다음 걸음(훑기를 마치고 문턱에서 받기를 건다 — 조각이 없으면 멈춘다) */
+/**
+ * 나눠 올리기를 굽기 단위에서 멈춘 데까지: 첫 걸음(첫 그림 앞 — 훑지 않는다) → 첫 그림 → 다음 걸음(훑기를 마치고 문턱에서 받기를 건다 — 조각이 없으면 멈춘다).
+ * 0.60.0 첫 걸음은 그물 MERGE_FIRST_MESHES개(그물마다 — 그 수로는 문턱에 닿지 않아 받기는 훑기가 건다), 훑기 뒤 그물은 빛 기록으로 들고(GL 객체 없음) 굽기 단위 − 1에서 멈춘다
+ */
 function toHold(V: ViewerCtor, w: { v: ViewerT; r: Rend }, n: number): void {
   w.v.setScene(boxes(n), { incremental: { budgetMs: 600_000 } });
   // 0.55.0 'auto'는 setScene에서 받기를 걸지 않는다(훑기 전 — 묶을 수 있는 그물을 아직 세지 않았다)
   expect(V.mergingState()).toBe('idle');
   expect(w.r.uploadSome(600_000)).toBe(false);
-  expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
-  // 첫 걸음(첫 그림 앞 — 아직 훑지 않았다)에서 올린 그물 가운데 묶을 수 있어 보이는 것이 문턱에 닿아 받기를 건다(받기가 첫 걸음들과 겹친다)
-  expect(V.mergingState()).toBe('loading');
+  expect(w.r.meshes.length).toBe(MERGE_FIRST_MESHES);
+  expect(V.mergingState()).toBe('idle');
   w.v.renderNow();
   expect(w.r.uploadSome(600_000)).toBe(false);
   expect(V.mergingState()).toBe('loading');
-  expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+  expect(w.r.meshes.length).toBe(MERGE_FIRST_MESHES);
+  expect(w.r.mgHold.length).toBe(MERGE_UPLOAD_MESHES - 1 - MERGE_FIRST_MESHES);
   expect(w.r.uploadHeld).toBe(true);
 }
 
@@ -134,11 +137,14 @@ describe('0.55.0 조각 받기 걸림 막기', () => {
     await settle();
     expect(Viewer3d.mergingState()).toBe('loading');
     expect(w.r.uploadSome(600_000)).toBe(false);
-    expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
+    expect(w.r.meshes.length).toBe(MERGE_FIRST_MESHES);
     expect(ready).toBe(0);
     vi.advanceTimersByTime(1);
     expect(Viewer3d.mergingState()).toBe('late');
     expect(ready).toBe(1);
+    // 0.60.0 들고 있던 빛 기록은 늦으면 그물 버퍼로(장면 차례 그대로 그리기 목록에)
+    expect(w.r.mgHold.length).toBe(0);
+    expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES - 1);
     expect(w.r.uploadHeld).toBe(false);
     expect(w.r.uploadSome(600_000)).toBe(true);
     expect(w.r.meshes.length).toBe(N);
