@@ -88,7 +88,7 @@ import {
 } from './mergeopts';
 // 0.54.0: 묶음 나누기·굽기(merge.ts·mergegl.ts)는 값으로 가져오지 않는다 — 묶어 그리기를 켤 장면에서만 import()로 받는 조각(loadMergeKit)
 import type { MergeSrc } from './merge';
-import type { MergeDrawCtx, MergeHost, MergeOp } from './mergegl';
+import type { MergeDrawCtx, MergeHost, MergeOp, MergeSlots, MergeStore } from './mergegl';
 import { AO_MAX_PIXELS, type AoParams, aoSize } from './ao';
 import { segmentFix, triangleFix } from './sceneissues';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
@@ -683,6 +683,8 @@ export interface MergeGroup {
   fc?: { cols: Rgba[]; vc: boolean[] };
   nv?: boolean[];
   cc?: Record<string, { k: string; cols: Rgba[] }>;
+  /** 0.61.0 자리 자료 저장소의 이 묶음 자리(종류 f·e·d마다 — 조각 mergegl) */
+  ps?: Record<string, MergeSlots>;
 }
 
 /**
@@ -1105,6 +1107,8 @@ export class Renderer3d {
   private hiMemo: { set: ReadonlySet<string>; size: number; ord: MergeOrder; stamp: number } | null = null;
   /** 0.60.0 구간 모음을 만들거나 지울 때마다 1씩(덩이의 윤곽선 구간 모음 없음 표시를 다시 볼 때) */
   private partsVer = 0;
+  /** 0.61.0 묶음 자리 자료 저장소(조각이 만들고 놓는다 — 묶음이 모두 없어지면 null) */
+  mgStore: MergeStore | null = null;
   /** 0.52.0 묶어 그리기 선택(기본 'auto' — 묶을 수 있는 그물이 min 이상인 장면만. 바꾸면 setMerging) */
   merging: MergingOptions = { mode: 'auto', min: MERGE_AUTO_MIN };
   /** 0.52.0 지금 장면에서 묶어 그리기가 켜졌는지('on'이거나, 'auto'에서 장면을 올릴 때 문턱을 넘었거나 묶음 밖 그물이 문턱만큼 모였을 때) */
@@ -5032,9 +5036,7 @@ export class Renderer3d {
       shadowVp: shadowOn && this.shadowMap ? this.shadowMap.vp : null,
       meshExtra,
       hiTint,
-      use: (p) => {
-        if (p !== cur) meshUse(p);
-      },
+      use: (p) => p !== cur && (meshUse(p), true),
       flagsNew,
       cullTo: (c) => {
         if (c === lastCull) return;
@@ -5043,7 +5045,6 @@ export class Renderer3d {
         else gl.disable(gl.CULL_FACE);
       },
       drawParts: meshDrawParts,
-      instUnit: INST_UNIT,
       dash: DASH,
     });
     /** 면 목록을 그린다(조각 drawFaces — plain은 그 그물을 그물마다 그릴 때의 프로그램) */

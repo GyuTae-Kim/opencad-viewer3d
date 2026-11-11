@@ -407,7 +407,8 @@ export class FakeGL {
         attribs: this.vao.attribs,
         element: this.vao.element,
         prog: p ? { key: p.key, vs: p.shaders[0]?.src ?? '', uniforms: p.uniforms } : null,
-        inst: this.textureAt(5),
+        // 자리 자료 그림: 프로그램 u_inst가 가리키는 단위(인스턴싱 5, 0.61.0 묶음 자리 자료 저장소 10)
+        inst: this.textureAt((p?.uniforms.get('u_inst')?.[0] as number | undefined) ?? 5),
         fb: this.fb,
         caps: [...this.caps].map((c) => this.nameOf(c) ?? String(c)).sort(),
         depthFunc: this.nameOf(this.depthFn) ?? String(this.depthFn),
