@@ -145,6 +145,7 @@ export {
   keySnapHint,
   keySnapMessages,
   keySnapText,
+  measureFormatOf,
   normalizeKeySnapKeys,
   orderedText,
   parseKeyDesc,
