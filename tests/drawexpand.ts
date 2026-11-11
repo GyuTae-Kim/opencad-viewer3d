@@ -41,12 +41,14 @@ const mul4 = (m: readonly number[], x: number, y: number, z: number, w = 1): num
 const mul3 = (m: readonly number[], x: number, y: number, z: number): number[] => [m[0]! * x + m[3]! * y + m[6]! * z, m[1]! * x + m[4]! * y + m[7]! * z, m[2]! * x + m[5]! * y + m[8]! * z];
 
 const FOG = /^#define FOG$/m;
+/** 0.60.0 묶음 선의 단면 하나(자리마다 로컬 평면 — 7번째 텍셀) */
+const MCLIP = /^#define MCLIP$/m;
 
-/** 셰이더 정의(INST·MERGE — 행렬을 어디서 읽는지만 다르다 — 는 뺀다) */
+/** 셰이더 정의(INST·MERGE·MCLIP — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
 const defsOf = (vs: string): string =>
   [...vs.matchAll(/^#define (\w+)$/gm)]
     .map((m) => m[1]!)
-    .filter((d) => d !== 'INST' && d !== 'MERGE')
+    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP')
     .sort()
     .join(',');
 
@@ -119,14 +121,18 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     return;
   }
   if (vs.includes('layout(location=0) in vec2 a_corner;') && vs.includes('a_p0')) {
-    // 굵은 선: 인스턴스(선분)마다 두 끝 클립 좌표·색·굵기·점선·치우침
-    const fixed = JSON.stringify([U.get('u_vcol'), U.get('u_alpha'), f32(U.get('u_override')), U.get('u_bias'), U.get('u_width'), U.get('u_viewport'), U.get('u_dash'), f32(U.get('u_clip')), f32(U.get('u_fogCol')), U.get('u_fog')]);
+    // 굵은 선: 인스턴스(선분)마다 두 끝 클립 좌표·색·굵기·점선·치우침(0.60.0 묶음 단면 평면은 자리 자료 7번째 텍셀 — 그물마다 그릴 때의 u_clip 자리에)
+    const fixedOf = (clip: number[] | null): string =>
+      JSON.stringify([U.get('u_vcol'), U.get('u_alpha'), f32(U.get('u_override')), U.get('u_bias'), U.get('u_width'), U.get('u_viewport'), U.get('u_dash'), clip, f32(U.get('u_fogCol')), U.get('u_fog')]);
+    const mclip = merge && MCLIP.test(vs);
+    const fixed0 = fixedOf(f32(U.get('u_clip')));
     const instN = (U.get('u_instN')?.[0] as number) ?? 1;
     const div = (a: Attrib | undefined): number => Math.max(1, a?.divisor ?? 1);
     for (let n = 0; n < nInst; n++) {
       const a1 = d.attribs.get(1), a2 = d.attribs.get(2);
       const item = merge ? attr(d.attribs.get(5), Math.floor(n / div(d.attribs.get(5))), 1)![0]! : inst ? n % instN : 0;
-      const at = (j: number): number[] => texel(d, base + item * (merge ? 6 : 5) + j);
+      const at = (j: number): number[] => texel(d, base + item * (merge ? (mclip ? 7 : 6) : 5) + j);
+      const fixed = mclip ? fixedOf(at(6)) : fixed0;
       const mvp = inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
       const col = merge ? at(5) : f32(U.get('u_color'));
       const mvz = inst ? at(4) : f32(U.get('u_mvz'));
@@ -136,15 +142,18 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     return;
   }
   if (vs.includes('layout(location=1) in vec4 a_col;') && vs.includes('layout(location=0) in vec3 a_pos;')) {
-    // 가는 선: 정점마다 클립 좌표·색
-    const fixed = JSON.stringify([U.get('u_vcol'), U.get('u_alpha'), f32(U.get('u_override')), U.get('u_bias'), f32(U.get('u_clip')), f32(U.get('u_fogCol')), U.get('u_fog')]);
+    // 가는 선: 정점마다 클립 좌표·색(0.60.0 묶음 단면 평면은 자리 자료 7번째 텍셀 — 선분의 두 끝은 같은 그물)
+    const fixedOf = (clip: number[] | null): string => JSON.stringify([U.get('u_vcol'), U.get('u_alpha'), f32(U.get('u_override')), U.get('u_bias'), clip, f32(U.get('u_fogCol')), U.get('u_fog')]);
+    const mclip = merge && MCLIP.test(vs);
+    let fixed = fixedOf(f32(U.get('u_clip')));
     const instN = (U.get('u_instN')?.[0] as number) ?? 1;
     const vl = verts();
     for (let n = 0; n < nInst; n++) {
       const seg: string[] = [];
       for (const v of vl) {
         const item = merge ? attr(d.attribs.get(5), v, 1)![0]! : inst ? n % instN : 0;
-        const at = (j: number): number[] => texel(d, base + item * (merge ? 6 : 5) + j);
+        const at = (j: number): number[] => texel(d, base + item * (merge ? (mclip ? 7 : 6) : 5) + j);
+        if (mclip) fixed = fixedOf(at(6));
         const mvp = inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
         const col = merge ? at(5) : f32(U.get('u_color'));
         const mvz = inst ? at(4) : f32(U.get('u_mvz'));
