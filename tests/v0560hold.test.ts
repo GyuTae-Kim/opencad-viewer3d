@@ -156,8 +156,9 @@ describe('0.56.0 한 번에 올리기를 조각이 올 때까지 미루기', () 
     expect(liveVaos(w.gl)).toBe(liveVaos(on.gl));
     expect(w.gl.liveBuffers).toBe(on.gl.liveBuffers);
     expect(w.v.stats.buffers).toEqual(on.v.stats.buffers);
-    // 올리는 걸음 안의 가장 큰 값(올리기 앞보다 늘어난 수)도 미리 받은 setScene과 같다(굽기 단위만큼 그물마다 버퍼를 만들고 곧 굽는다 — 0.53.0 굽기 단위)
-    expect(w.peak.max - up0).toBe(on.peak.max - on.before);
+    // 올리는 걸음 안의 가장 큰 값: 0.57.0 곧장 구워 그물마다 버퍼를 만들지 않는다(미리 받은 setScene과 같은 길 — 격자 버퍼 넷이 setScene 안이면 그만큼만 다르다)
+    expect(w.peak.max - up0).toBeLessThanOrEqual(on.peak.max - on.before);
+    expect(on.peak.max - on.before).toBeLessThan(32);
     expect(frame).toEqual(expandFrame(on.gl, () => on.v.renderNow()));
   });
 

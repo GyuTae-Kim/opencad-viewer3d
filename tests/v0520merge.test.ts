@@ -6,7 +6,7 @@
  *    (모드 일곱·외곽선·안개·해·강조·겉모습 색·불투명도·행렬·숨김·묶음 안 구간·화면 밖·화소 비율 2·숨은 점선·단면·그림자·인스턴싱과 섞임·놓은 법선·정수 법선·정점 색·한쪽 면),
  *    그물 바꾸기·빼기·더하기(묶음에서 빠지고 몫이 크면 다시 굽기), 문맥 잃음·되찾음, 나눠 올리기, 바이트 한도, 끄기(버퍼 놓기), 고르기는 그대로
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
@@ -343,10 +343,13 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     expect(shot(on)).toEqual(shot(off));
   });
 
-  it('나눠 올리는 동안은 그물마다, 다 올린 뒤 굽는다', () => {
+  it('나눠 올리면(조각을 받았고 훑기가 짧은 장면 — 0.57.0) 첫 걸음부터 곧장 굽고, 다 올리면 끝 그림이 끈 뷰어와 같다', () => {
+    // 시계를 멈춘다: 앞 52개(곧장 굽기) 뒤에 묶지 않을 그물이 오는 장면이라, 그때 몫(1 ms)을 넘었으면 기록을 그물 버퍼로 돌리고 다음 걸음에 잇는다(느린 러너에서 첫 그림 뒤 묶음 0 — 끝값은 같다)
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
     const w = view(scene(), true, { incremental: true });
     w.v.renderNow();
-    expect(w.v.stats.merged.groups).toBe(0);
+    clock.mockRestore();
+    expect(w.v.stats.merged.groups).toBeGreaterThan(0);
     for (let i = 0; i < 500 && (w.v as unknown as { renderer: { uploading: boolean } }).renderer.uploading; i++) w.v.renderNow();
     bake(w);
     expect(w.v.stats.merged.groups).toBeGreaterThan(0);
