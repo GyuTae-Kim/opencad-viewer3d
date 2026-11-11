@@ -1697,6 +1697,11 @@ export const TEXTURE_REDRAW_SLOW = 4;
 const TEXTURE_REDRAW_POLL_MS = 50;
 /** 0.30.0 그 울타리를 이만큼(ms) 넘게 기다리면 끝난 것으로 본다(끝났다는 알림이 오지 않는 드라이버에서도 첫 무늬가 나타나게) */
 const TEXTURE_REDRAW_FENCE_MAX_MS = 5000;
+/**
+ * 0.59.0 나눠 올리는 동안 지난 그리기가 걸음 몫보다 오래 걸리면(그리기 ms) × 이 배수가 지날 때까지 올리기만으로 생긴 그리기를 건너뛴다(redrawMs를 주지 않았을 때) —
+ * 그리기가 전체 시간의 1/3쯤을 넘지 않게 한다. 묶을 그물만 있는 8만 그물을 가짜 WebGL로 재 보니 다 구울 때까지 시간의 약 75%가 걸음마다의 장면 그리기(프레임마다 커지는 — 끝에는 100 ms 넘게)였다
+ */
+const UPLOAD_DRAW_GAP = 3;
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
 function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
@@ -2058,6 +2063,8 @@ export class Viewer3d {
     fn: ((step: number, meshes: number) => number) | null;
     step: number;
     redraw: number;
+    /** 0.59.0 redrawMs를 주지 않았는지(그리기가 몫보다 오래 걸리면 몇 걸음에 한 번 그린다 — UPLOAD_DRAW_GAP) */
+    pace: boolean;
     lastDraw: number;
     cb: ((done: number, total: number) => void) | null;
   } | null = null;
@@ -2219,7 +2226,9 @@ export class Viewer3d {
    *   그다음은 그물 1,000개마다 1 ms). 돌려준 값이 유한한 양수가 아니거나 함수가 예외를 내면 그 걸음은 8 ms
    * - incremental.redrawMs: 나눠 올리는 동안 올리기만으로 생긴 다시 그리기를 이 간격(ms)에 한 번만 한다(첫 걸음은 그린다 — 첫 그림). 다 올린 걸음은 그리지 않고 다음 프레임에
    *   장면 전체를 그린다(올리기와 장면 그리기를 두 작업으로 — 가장 긴 작업이 둘의 합이 아니게). 카메라·고르기·무늬 등 다른 까닭의 다시 그리기는 그대로 그린다. Infinity면 첫 그림과 다 올린 뒤만
-   * 주지 않으면 0.50.0과 같다(모든 걸음 budgetMs 숫자, 걸음마다 그리기)
+   * 주지 않으면 0.50.0과 같은 몫(모든 걸음 budgetMs 숫자)이고, 그리기는 0.59.0부터 두 경우만 건너뛴다(카메라·고르기·무늬 등 다른 까닭의 그리기와 다 올린 걸음은 그대로 그린다):
+   * 그릴 것이 늘지 않은 걸음(묶을 그물의 기록만 모았다 — redrawMs를 주어도), 지난 그리기가 이 걸음 몫보다 오래 걸렸고 그 시작에서 UPLOAD_DRAW_GAP배가 지나지 않은 걸음.
+   * redrawMs: 0을 주면 뒤엣것을 끈다(앞엣것은 같은 그림이라 그대로)
    */
   setScene(
     scene: Scene3d,
@@ -2280,7 +2289,7 @@ export class Viewer3d {
     const fn = typeof io?.budgetMs === 'function' ? io.budgetMs : null;
     const num = typeof io?.budgetMs === 'number' ? io.budgetMs : undefined;
     const redraw = typeof io?.redrawMs === 'number' && io.redrawMs > 0 ? io.redrawMs : 0;
-    this.upload = inc ? { budget: Math.max(1, num ?? 8), fn, step: 0, redraw, lastDraw: -Infinity, cb: opts.onProgress ?? null } : null;
+    this.upload = inc ? { budget: Math.max(1, num ?? 8), fn, step: 0, redraw, pace: io?.redrawMs === undefined, lastDraw: -Infinity, cb: opts.onProgress ?? null } : null;
     // 0.30.0: 새 장면의 첫 무늬는 곧 그린다
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
@@ -8588,13 +8597,17 @@ export class Viewer3d {
         if (up) up.step++;
       }
       const done = this.pumpUpload(b);
-      // 0.51.0 redrawMs: 올리기 걸음만으로 생긴 그리기는 간격 안이면 건너뛰고, 다 올린 걸음은 그리지 않고 다음 프레임에 장면 전체를 그린다
-      if (sceneUp && up && up.redraw > 0 && upOnly) {
-        if (done) {
-          this.invalidate();
-          return;
-        }
-        if (t0 - up.lastDraw < up.redraw) return;
+      if (sceneUp && up && upOnly) {
+        // 0.51.0 redrawMs: 올리기 걸음만으로 생긴 그리기는 간격 안이면 건너뛰고, 다 올린 걸음은 그리지 않고 다음 프레임에 장면 전체를 그린다
+        if (up.redraw > 0) {
+          if (done) {
+            this.invalidate();
+            return;
+          }
+          if (t0 - up.lastDraw < up.redraw) return;
+        } else if (!done && up.pace && !this.renderer.uploadHeld && this.renderer.renderMs > b && t0 - up.lastDraw < this.renderer.renderMs * UPLOAD_DRAW_GAP) return;
+        // 0.59.0 이 걸음이 그릴 것을 늘리지 않았으면(빛 기록만 모았다 — 곧 구워질 때 보인다) 다시 그려도 같은 그림이다
+        if (!done && !this.renderer.uploadNews) return;
       }
     }
     if (this.upload) this.upload.lastDraw = t0;
