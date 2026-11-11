@@ -238,3 +238,45 @@ export function contrastLineColor(color: Rgba, bg: Rgba, fallback: Rgba, min = L
   const black: Rgba = [0, 0, 0, 1], white: Rgba = [1, 1, 1, 1];
   return contrastRatio(black, bg) >= contrastRatio(white, bg) ? black : white;
 }
+
+/** fitContrast가 재는 여유: 8비트로 얹을 때 반올림으로 기준 아래로 내려가지 않게(가운데 밝기 한 눈금이 대비 약 0.02) */
+const FIT_MARGIN = 0.03;
+
+/**
+ * 0.59.0 바탕 위에서 대비 min:1이 안 되는 선 색을 같은 색상으로 가장 적게 고친다(좌표축 — 파일 배경 위 축 색): 이미 닿으면 받은 값 그대로, 먼저 불투명도만 올리고
+ * (색은 그대로), 그래도 모자라면 불투명하게 색이 놓인 쪽으로(바탕보다 어두우면 검정, 밝으면 흰색 — 그쪽으로 닿지 못할 때만 반대쪽) 섞는다.
+ * 어느 쪽으로도 닿지 못하면(min이 약 4.58을 넘고 바탕이 가운데 밝기일 때) 검정·흰색 가운데 바탕과 더 대비하는 것.
+ * 고친 값은 0~255 눈금 위의 값이다(CSS 글로 옮겨도 대비가 같다)
+ */
+export function fitContrast(color: Rgba, bg: Rgba, min = LINE_CONTRAST_MIN): Rgba {
+  if (contrastRatio(color, bg) >= min) return color;
+  const goal = min + FIT_MARGIN;
+  /** 조건이 처음 맞는 눈금(lo 앞은 안 맞고 hi는 맞는다고 본다) */
+  const first = (lo: number, hi: number, ok: (i: number) => boolean): number => {
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ok(mid)) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  };
+  const [r, g, b] = color;
+  const solid: Rgba = [r, g, b, 1];
+  if (contrastRatio(solid, bg) >= goal) {
+    const a = (i: number): Rgba => [r, g, b, i / 255];
+    return a(first(Math.ceil(Math.min(1, Math.max(0, color[3])) * 255), 255, (i) => contrastRatio(a(i), bg) >= goal));
+  }
+  const black: Rgba = [0, 0, 0, 1], white: Rgba = [1, 1, 1, 1];
+  const near = relativeLuminance(solid) >= relativeLuminance(bg) ? white : black;
+  const to = contrastRatio(near, bg) >= goal ? near : near === white ? black : white;
+  if (contrastRatio(to, bg) < goal) return contrastRatio(black, bg) >= contrastRatio(white, bg) ? black : white;
+  const step = (v: number, t: number, i: number): number => Math.round((v + ((t - v) * i) / 255) * 255) / 255;
+  const mix = (i: number): Rgba => [step(r, to[0], i), step(g, to[1], i), step(b, to[2], i), 1];
+  return mix(first(0, 255, (i) => contrastRatio(mix(i), bg) >= goal));
+}
+
+/** RGBA(0~1) → CSS 글 rgba(r,g,b,a) — 색은 0~255 정수, 알파는 소수 넷째 자리(fitContrast의 눈금을 잃지 않는다) */
+export function cssRgba(c: Rgba): string {
+  const ch = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 255);
+  return `rgba(${ch(c[0])},${ch(c[1])},${ch(c[2])},${+Math.min(1, Math.max(0, c[3])).toFixed(4)})`;
+}

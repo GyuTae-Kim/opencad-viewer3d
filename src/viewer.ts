@@ -239,7 +239,7 @@ import {
 import { MERGE_AUTO_MIN, type MergingMode } from './mergeopts';
 import { type MeshArrays, type ReleaseFlags, type RestoreNeed, releaseFlags } from './release';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT } from './texture';
-import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
+import { CANVAS_CSS, CANVAS_FOCUS_CSS, DARK_THEME, FOCUS_DEFAULT, LIGHT_THEME, LINE_CONTRAST_MIN, THEME_CSS_VARS, type Viewer3dTheme, contrastLineColor, cssRgba, fitContrast, focusKey, focusLeft, parseColor, pointerFocus } from './theme';
 import { CUBE_TOUCH_BAND, CUBE_TOUCH_SIZE, cubeHit, cubeLayout, drawViewCube } from './viewcube';
 import {
   KEY_BIG_STEP_PX,
@@ -269,8 +269,12 @@ import {
 } from './keysnap';
 
 export interface Viewer3dOptions {
-  /** 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다 */
-  theme?: 'dark' | 'light' | (Partial<Viewer3dTheme> & { base?: 'dark' | 'light' });
+  /**
+   * 'dark'(기본) | 'light' | 일부 색. 호스트의 CSS 변수(--v3d-*)가 있으면 그것이 이긴다.
+   * 0.59.0 axisContrast: 좌표축 색(격자 축·왼쪽 아래 축 표시·측정 축 안내선)이 바탕(setBackground 한 색, 없으면 테마 바탕 — 기울기 바탕은 보지 않는다)과
+   * 대비가 모자라면 같은 색상으로 가장 적게 고친다(fitContrast). true면 3:1, 수를 주면 그 비(1 이하·수가 아니면 끔). 기본은 고치지 않는다
+   */
+  theme?: 'dark' | 'light' | (Partial<Viewer3dTheme> & { base?: 'dark' | 'light'; axisContrast?: boolean | number });
   /** 바닥 격자(기본 true) */
   grid?: boolean;
   /** 격자 높이(기본 'min' = 범위 바닥) */
@@ -1756,6 +1760,8 @@ export class Viewer3d {
   private reduceMotion = false;
   private motionOff: (() => void) | null = null;
   private themeOpt: Viewer3dOptions['theme'];
+  /** 0.59.0 좌표축 대비를 켰는지(setBackground가 다시 고른다) */
+  private axisFit = false;
   private theme: Viewer3dTheme = DARK_THEME;
   private colors!: RenderColors;
   /** 단면 테두리·채우기 섞음 색(테마에서 한 번 읽는다) */
@@ -3057,6 +3063,8 @@ export class Viewer3d {
    */
   setBackground(o: BackgroundOptions | null): void {
     this.bgOpt = o ? { ...o } : null;
+    // 0.59.0 좌표축 대비를 켰으면 새 한 색 바탕에 맞춰 다시 고른다
+    if (this.axisFit) this.applyTheme();
     this.invalidate();
   }
 
@@ -5944,10 +5952,24 @@ export class Viewer3d {
     const base = t === 'light' || (typeof t === 'object' && t.base === 'light') ? LIGHT_THEME : DARK_THEME;
     const theme: Viewer3dTheme = { ...base, ...(typeof t === 'object' ? t : {}) };
     delete (theme as { base?: unknown }).base;
+    delete (theme as { axisContrast?: unknown }).axisContrast;
     const cs = getComputedStyle(this.host);
     for (const k of Object.keys(THEME_CSS_VARS) as (keyof Viewer3dTheme)[]) {
       const v = cs.getPropertyValue(THEME_CSS_VARS[k]).trim();
       if (v) theme[k] = v;
+    }
+    // 0.59.0 좌표축 대비(선택): 받은 색이 이미 닿으면 글을 그대로 둔다(같은 그림)
+    const ac = typeof t === 'object' ? t.axisContrast : undefined;
+    const min = ac === true ? LINE_CONTRAST_MIN : typeof ac === 'number' && ac > 1 ? ac : 0;
+    this.axisFit = min > 0;
+    if (min > 0) {
+      const col = this.bgOpt?.color;
+      const bg = col === undefined ? this.rgba(theme.background) : typeof col === 'string' ? this.rgba(col) : col;
+      for (const k of ['axisX', 'axisY', 'axisZ'] as const) {
+        const was = this.rgba(theme[k]);
+        const fit = fitContrast(was, bg, min);
+        if (fit !== was) theme[k] = cssRgba(fit);
+      }
     }
     this.theme = theme;
     this.wrap.style.setProperty('--v3d-focus-default', base === LIGHT_THEME ? FOCUS_DEFAULT.light : FOCUS_DEFAULT.dark);
