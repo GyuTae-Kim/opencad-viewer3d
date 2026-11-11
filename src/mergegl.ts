@@ -13,6 +13,8 @@
  * MERGE_KIT_WAIT_MS 안에 끝나지 않으면 그 페이지는 기다리지 않고 그물마다 이어 올린다(늦게 오면 그때부터 굽고, 기다리지 않고 올린 그물은 다 올린 뒤 planLoose가 묶는다).
  * 0.57.0: 곧장 굽기(direct·run·feed)·그리기 구간 그리기(drawFaces·drawEdges)·묶음 상태 지우기(free·leave·step)도 이 조각으로 옮겼다 — 렌더러에는 켤지 정하는 훑기·셈(mergeScan·mergeSrcOf)과 조각을 부르는 얇은 길만 둔다
  * 0.58.0: 곧장 구울 빛 기록을 걸음 사이에 들고 있다(mgHold — run·drain·unhold). 묶지 않을 그물이 끼어도, 걸음 몫을 넘어도 그물 버퍼로 돌아가지 않고, 굽기는 걸음 앞쪽에서 시작한다
+ * 0.61.0: 묶음 자리 자료 저장소(MergeStore — 묶음마다·종류마다 자리를 고정해 바뀐 자리만 쓰고 그 텍셀만 올린다)와 그리기 뼈대 길 도움(eachItem·blockRuns·RunList 등 —
+ * 0.60.0 렌더러 render() 안에 있던 것)도 이 조각에 둔다
  */
 import type { AttribFormat } from './attribs';
 import type { ViewFrame } from './camera';
