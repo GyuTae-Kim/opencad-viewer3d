@@ -11,8 +11,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import { type FakeGL, fnv } from './fakegl';
 import { expandFrame } from './drawexpand';
-import { faceFill, faceTexels, lineFill, lineTexels, mergeShader, orderBuild, orderValid, shiftOnly } from '../src/mergegl';
-import { mergeSorted, type MergeGroup, type MergeRun, type MeshRec } from '../src/renderer';
+import { faceFill, faceTexels, lineFill, lineTexels, mergeShader, mergeSorted, orderBuild, orderValid, shiftOnly } from '../src/mergegl';
+import type { MergeGroup, MergeRun, MeshRec } from '../src/renderer';
 import { THIN_VS, WIDE_VS, withDefines } from '../src/shaders';
 import { mat4Mul, perspective, translation } from '../src/math';
 import { planeToLocal } from '../src/section';
@@ -275,8 +275,19 @@ describe('0.60.0 단면 하나에서 묶음 선', () => {
 });
 
 describe('0.60.0 자리 자료 공통 열', () => {
-  /** faceTexels·lineTexels만 쓰는 최소 렌더러 상태 */
-  const host = (): Record<string, unknown> => ({ instBuf: new Float32Array(4096 * 4), instM3: new Float32Array(9), d4a: new Float64Array(16), d4b: new Float64Array(16), d4c: new Float64Array(16) });
+  /** faceTexels·lineTexels만 쓰는 최소 렌더러 상태(0.61.0 자리 자료 저장소 사본 — 판 1) */
+  const host = (): Record<string, unknown> => ({
+    instM3: new Float32Array(9),
+    d4a: new Float64Array(16),
+    d4b: new Float64Array(16),
+    d4c: new Float64Array(16),
+    mgStore: { buf: new Float32Array(4096 * 4), dirty: [], gen: { f: 1, e: 1 } },
+  });
+  /** 0.61.0 묶음 g의 kind 자리를 저장소 텍셀 at부터(그물 번호 i → at + i·stride) */
+  const slots = (g: MergeGroup, kind: string, at: number, stride: number): void => {
+    const n = g.recs.length;
+    (g as { ps?: unknown }).ps = { [kind]: { ep: 1, base: at, stride, at: new Uint32Array(n), mdl: new Array(n) } };
+  };
   const frame = () => {
     const view = mat4Mul(translation([-1e5 - 0.3, 7.7, -4e4]), mat4Mul(placeAt(0, 0, 0, 33, true), translation([3.1, -2.2, 0.7])));
     const proj = perspective(0.8, 1.3, 0.1, 5e5);
@@ -319,22 +330,32 @@ describe('0.60.0 자리 자료 공통 열', () => {
           const stride = 12 + (sh ? 4 : 0) + (sec ? 1 : 0);
           // 구간 둘(o·sh 꼴 둘 — 묶음 전체 목록과 구간 제 목록)
           const runs: MergeRun[] = [
-            { g, a: 0, b: 3, base: 0, cols, vc, o: 0, sh: true, tint: 0, alpha: 1 },
-            { g, a: 3, b: ms.length, base: 0, cols: cols.slice(3), vc: vc.slice(3), o: 3, sh: false, tint: 0, alpha: 1 },
+            { g, a: 0, b: 3, base: 0, cols, vc, o: 0, sh: true, tint: 0, alpha: 1, w: 1 },
+            { g, a: 3, b: ms.length, base: 0, cols: cols.slice(3), vc: vc.slice(3), o: 3, sh: false, tint: 0, alpha: 1, w: 1 },
           ];
           const c = { f, mm: (r: MeshRec) => r.model, look, sec: sec ? {} : null, clipOf, shadowVp: sh ? shadow : null } as never;
           const a = host(), b = host();
+          // 0.61.0 저장소 자리(묶음 자리가 텍셀 3·stride부터 — 그물 번호 i의 자리는 3·stride + i·stride)
+          slots(g, 'f', 3 * stride, stride);
           faceFill(a as never, c, runs, stride);
           delete (g as { org?: unknown }).org;
-          ms.forEach((m, i) => faceTexels(b as never, f, m, cols[i]!, vc[i]!, i, stride, sh ? shadow : null, sec ? clipOf : null));
-          const A = a.instBuf as Float32Array, B = b.instBuf as Float32Array;
+          const B = new Float32Array(4096 * 4);
+          ms.forEach((m, i) => faceTexels(b as never, f, m, cols[i]!, vc[i]!, B, i * stride * 4, stride, sh ? shadow : null, sec ? clipOf : null));
+          const A = (a.mgStore as { buf: Float32Array }).buf.subarray(3 * stride * 4);
           for (let i = 0; i < ms.length * stride * 4; i++) if (!Object.is(A[i], B[i])) expect([look, sec, sh, i, A[i]]).toEqual([look, sec, sh, i, B[i]]);
+          // 쓴 자리는 한 구간으로 적힌다(판·모형·색이 같은 두 번째 쓰기는 아무것도 쓰지 않는다)
+          expect((a.mgStore as { dirty: number[] }).dirty).toEqual([3 * stride, (3 + ms.length) * stride]);
+          (a.mgStore as { dirty: number[] }).dirty.length = 0;
+          faceFill(a as never, c, runs, stride);
+          expect((a.mgStore as { dirty: number[] }).dirty).toEqual([]);
           for (const fog of [false, true]) {
             const t = sec ? 7 : 6;
             const p = host(), q = host();
+            slots(g, 'e', 0, t);
             lineFill(p as never, c, runs, fog, t);
-            ms.forEach((m, i) => lineTexels(q as never, f, m, cols[i]!, fog, i, t, sec ? clipOf : null));
-            const P = p.instBuf as Float32Array, Q = q.instBuf as Float32Array;
+            const Q = new Float32Array(4096 * 4);
+            ms.forEach((m, i) => lineTexels(q as never, f, m, cols[i]!, fog, Q, i * t * 4, sec ? clipOf : null));
+            const P = (p.mgStore as { buf: Float32Array }).buf;
             for (let i = 0; i < ms.length * t * 4; i++) if (!Object.is(P[i], Q[i])) expect([look, sec, fog, i, P[i]]).toEqual([look, sec, fog, i, Q[i]]);
           }
           delete (g as { org?: unknown }).org;

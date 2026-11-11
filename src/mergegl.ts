@@ -13,6 +13,8 @@
  * MERGE_KIT_WAIT_MS 안에 끝나지 않으면 그 페이지는 기다리지 않고 그물마다 이어 올린다(늦게 오면 그때부터 굽고, 기다리지 않고 올린 그물은 다 올린 뒤 planLoose가 묶는다).
  * 0.57.0: 곧장 굽기(direct·run·feed)·그리기 구간 그리기(drawFaces·drawEdges)·묶음 상태 지우기(free·leave·step)도 이 조각으로 옮겼다 — 렌더러에는 켤지 정하는 훑기·셈(mergeScan·mergeSrcOf)과 조각을 부르는 얇은 길만 둔다
  * 0.58.0: 곧장 구울 빛 기록을 걸음 사이에 들고 있다(mgHold — run·drain·unhold). 묶지 않을 그물이 끼어도, 걸음 몫을 넘어도 그물 버퍼로 돌아가지 않고, 굽기는 걸음 앞쪽에서 시작한다
+ * 0.61.0: 묶음 자리 자료 저장소(MergeStore — 묶음마다·종류마다 자리를 고정해 바뀐 자리만 쓰고 그 텍셀만 올린다)와 그리기 뼈대 길 도움(eachItem·blockRuns·RunList 등 —
+ * 0.60.0 렌더러 render() 안에 있던 것)도 이 조각에 둔다
  */
 import type { AttribFormat } from './attribs';
 import type { ViewFrame } from './camera';
@@ -29,7 +31,7 @@ import {
 } from './mergeopts';
 import type { MeshArrays, MeshLayout, ReleaseFlags } from './release';
 import type { GpuBufferPart, LineMemo, LineRec, MergeBlock, MergeGroup, MergeOrder, MergeRun, MeshRec, Prog, RenderState, RenderStats } from './renderer';
-import { NO_CLIP, type Plane4 } from './section';
+import { NO_CLIP, type Plane4, boxStraddles } from './section';
 import type { Box3, Mesh3d, Rgba } from './types';
 
 /** 이 모듈이 쓰는 렌더러 상태·도움 함수(렌더러가 자신을 넘긴다 — 이름은 Renderer3d 멤버와 같다) */
@@ -56,7 +58,6 @@ export interface MergeHost {
   quadWide: WebGLBuffer;
   vaos: Set<WebGLVertexArrayObject>;
   keys: WeakMap<object, object>;
-  instBuf: Float32Array;
   instM3: Float32Array;
   d4a: Float64Array;
   d4b: Float64Array;
@@ -79,9 +80,47 @@ export interface MergeHost {
   freeKey(key: object, target: 'element'): void;
   release(slots: readonly unknown[]): void;
   loc(p: Prog, name: string): WebGLUniformLocation | null;
-  instReserve(texels: number): boolean;
-  instPut(texels: number): number;
   drawLines(f: ViewFrame, r: LineRec, model: ArrayLike<number> | undefined, o: object, st: RenderState, stats: RenderStats, memo: LineMemo | null): void;
+  /** 0.61.0 묶음 자리 자료 저장소(처음 묶어 그릴 때 만든다 — 묶음이 모두 없어지면 놓는다) */
+  mgStore: MergeStore | null;
+}
+
+/** 0.61.0 자리 자료 저장소 그림 폭(텍셀 — 셰이더 k & 1023·k >> 10과 같다)과 줄을 늘리는 단위 */
+const STORE_W = 1024, STORE_STEP = 64;
+/** 0.61.0 자리 자료 저장소 그림을 묶어 두는 무늬 단위(렌더러가 쓰는 0~9와 겹치지 않는다 — WebGL2 정점 셰이더 무늬 단위는 16개 이상) */
+export const STORE_UNIT = 10;
+
+/**
+ * 0.61.0 묶음 자리 자료 저장소: 묶음마다·종류마다(면 f·윤곽선 e·숨은 점선 d) 그물 번호 자리를 고정해 둔 RGBA32F 그림(STORE_UNIT, 폭 1024)과 그 CPU 사본(buf — 올린 것과 같다).
+ * 0.60.0까지는 그리기 차례마다 구간 자리를 앞에서부터 이어 쓰고 모두 올렸다(8만 — 프레임마다 1,440,768텍셀, 23 MB). 이제 종류마다 프레임 값(sig — 시점·투영·그림자 행렬·
+ * 단면 평면·안개·텍셀 수)이 같고 자리의 모형·색·정점 색 깃발이 같으면 그 자리는 다시 쓰지도 올리지도 않는다(바뀐 자리가 든 줄만 올린다). 그래서 카메라가 그대로인 프레임은
+ * 강조·숨김·잘라냄이 바뀌어도(구간만 달라진다) 올리지 않고, 외곽선·주변 가림 깊이 차례는 면 차례가 쓴 자리를 그대로 읽는다
+ */
+export interface MergeStore {
+  tex: WebGLTexture | null;
+  /** 그림 줄 수·GPU 무늬 한도(줄) */
+  rows: number;
+  max: number;
+  buf: Float32Array;
+  /** 다음 빈 텍셀·살아 있는 자리 텍셀 수(버린 자리가 반을 넘으면 늘리지 않고 처음부터 다시 놓는다) */
+  top: number;
+  live: number;
+  /** 자리를 처음부터 다시 놓을 때마다 1씩(앞 자리는 버린다) */
+  ep: number;
+  /** 종류마다 마지막 프레임 값과 판(값이 바뀌면 판이 올라 그 종류 자리가 모두 낡는다) */
+  sig: Record<string, number[]>;
+  gen: Record<string, number>;
+  /** 이번 차례에 쓴 텍셀 구간 [시작, 끝, …] */
+  dirty: number[];
+}
+
+/** 0.61.0 묶음 하나의 종류 하나 자리: 그물 번호 i의 자리는 base + i·stride 텍셀(base는 stride의 배수). at[i] = 그 자리를 쓴 판, mdl[i] = 쓴 모형 */
+export interface MergeSlots {
+  ep: number;
+  base: number;
+  stride: number;
+  at: Uint32Array;
+  mdl: (ArrayLike<number> | undefined)[];
 }
 
 /** 0.57.0 묶어 그리는 목록의 항목 하나 — 묶음 구간(MergeRun) 또는 그물마다 그리기 */
@@ -105,13 +144,12 @@ export interface MergeDrawCtx {
   shadowVp: ArrayLike<number> | null;
   meshExtra: readonly string[];
   hiTint: Rgba;
-  /** 그 프로그램이 아니면 바꾼다(meshUse) */
-  use(p: Prog): void;
+  /** 그 프로그램이 아니면 바꾼다(meshUse — 바꿨으면 true: 자리 자료 그림 단위를 다시 건다) */
+  use(p: Prog): boolean;
   flagsNew(vcol: boolean, nrm: boolean, tint: number, alpha: number): boolean;
   /** 뒷면 버리기 켜고 끄기(기억이 다를 때만) */
   cullTo(c: boolean): void;
   drawParts(r: MeshRec, color: Rgba, alpha: number, tint: number, cull: boolean): void;
-  instUnit: number;
   dash: readonly [number, number];
 }
 
@@ -353,7 +391,7 @@ export function blockCapFree(k: MergeBlock): boolean {
 }
 
 /** 0.60.0 강조 id → 덩이 번호 · 65536 + 묶음 그물 번호(덩이 그물만 — 같은 id가 여럿이면 목록). 강조를 처음 쓸 때 한 번 */
-export function orderIds(o: MergeOrder): Map<string, number | number[]> {
+function orderIds(o: MergeOrder): Map<string, number | number[]> {
   const m = new Map<string, number | number[]>();
   o.blocks.forEach((k, j) => {
     for (let i = k.a; i < k.b; i++) {
@@ -366,6 +404,222 @@ export function orderIds(o: MergeOrder): Map<string, number | number[]> {
     }
   });
   return m;
+}
+
+// ───── 0.61.0 그리기 뼈대 길 도움(0.60.0 렌더러 render() 안에 있던 것 — 묶어 그리기가 꺼진 장면은 쓰지 않아 코어 조각에서 이 조각으로 옮겼다. 셈·차례는 같다) ─────
+
+/**
+ * 0.60.0 뼈대 차례로 보이는 그물마다 fn(보이는 목록과 같은 차례 — 보이는 목록을 만든 번호 vis). 덩이마다 먼저 blk(덩이, fn)를 묻고, 덩이를 다뤘으면(true) 그 그물들은 건너뛴다
+ * (blk는 예외 그물 — 숨김·잘라냄·강조 — 을 fn으로 넘기고 그 사이 구간을 통째로 더한다)
+ */
+export function eachItem(o: MergeOrder, vis: number, fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void {
+  for (const x of o.items) {
+    if ('src' in x) {
+      if (x.visAt === vis) fn(x);
+      continue;
+    }
+    if (blk && blk(x, fn)) continue;
+    const R = x.g.recs;
+    for (let i = x.a; i < x.b; i++) {
+      const r = R[i]!;
+      if (r.visAt === vis) fn(r);
+    }
+  }
+}
+
+/** 0.60.0 숨김 판이 바뀐 그리기에서 덩이마다 숨긴 그물 번호(보이는 목록을 만든 번호 seq가 아닌 그물) */
+export function blockHid(o: MergeOrder, seq: number): void {
+  for (const k of o.blocks) {
+    const hid: number[] = [];
+    for (let i = k.a; i < k.b; i++) if (k.g.recs[i]!.visAt !== seq) hid.push(i);
+    k.hid = hid;
+  }
+}
+
+/** 0.60.0 강조 모음이 든 덩이에 판 stamp와 강조한 묶음 그물 번호(모음·크기·뼈대가 바뀐 그리기에서) */
+export function blockHi(o: MergeOrder, set: ReadonlySet<string>, stamp: number): void {
+  const ids = (o.ids ??= orderIds(o));
+  const mark = (v: number): void => {
+    const k = o.blocks[Math.floor(v / 65536)]!;
+    if (k.hi !== stamp) {
+      k.hi = stamp;
+      k.hiL = [];
+    }
+    k.hiL.push(v % 65536);
+  };
+  for (const id of set) {
+    const x = ids.get(id);
+    if (x === undefined) continue;
+    if (typeof x === 'number') mark(x);
+    else for (const v of x) mark(v);
+  }
+}
+
+/** 0.60.0 오름차순 두 번호 목록을 합친다(겹친 번호는 하나 — 덩이 예외 그물) */
+export function mergeSorted(a: readonly number[], b: readonly number[]): number[] {
+  const out: number[] = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    const x = j >= b.length || (i < a.length && a[i]! <= b[j]!) ? a[i++]! : b[j++]!;
+    if (out[out.length - 1] !== x) out.push(x);
+  }
+  return out;
+}
+
+/** 0.60.0 이 그리기의 번호들: 그리기 번호(잘라냄 표시)·강조 판(0이면 강조 없음)·보이는 목록 번호 */
+export interface FrameMarks {
+  frame: number;
+  hi: number;
+  vis: number;
+}
+
+/**
+ * 0.60.0 덩이를 예외 그물(숨김·잘라냄 — withHi면 강조도) 사이 구간으로: 구간마다 add, 예외 그물은 보이면 fn(그물마다 길 그대로).
+ * 예외 번호(오름차순·겹침 없음)는 그리기마다 한 번 합친다
+ */
+export function blockRuns(k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number) => void, m: FrameMarks): void {
+  if (k.ex !== m.frame) {
+    k.ex = m.frame;
+    const cutL = k.cut === m.frame ? k.cutL : null;
+    k.exA = !cutL ? k.hid : !k.hid.length ? cutL : mergeSorted(k.hid, cutL);
+    k.exB = m.hi !== 0 && k.hi === m.hi ? mergeSorted(k.exA, k.hiL.slice().sort((p, q) => p - q)) : k.exA;
+  }
+  const R = k.g.recs;
+  let s = k.a;
+  for (const x of withHi ? k.exB : k.exA) {
+    if (x > s) add(s, x);
+    const r = R[x]!;
+    if (r.visAt === m.vis) fn(r);
+    s = x + 1;
+  }
+  if (s < k.b) add(s, k.b);
+}
+
+/** 0.60.0 묶음 그물마다 면 색·정점 색 쓰기(렌더러 colOf·vcolOf와 같은 값 — 겉모습이 없을 때). flat = 숨은 선 모드 바탕 채움 색, mono = 단색 모드 색 */
+export function faceCols(g: MergeGroup, flat: Rgba | null, mono: Rgba | null): [Rgba[], boolean[]] {
+  const fc = (g.fc ??= { cols: g.recs.map((r) => r.src.color), vc: g.recs.map((r) => r.hasColors) });
+  if (flat) return [oneCol(g, 'f', flat), noVc(g)];
+  if (mono) {
+    const key = `m${mono.join()}`;
+    const c = (g.cc ??= {}).f;
+    if (c && c.k === key) return [c.cols, noVc(g)];
+    const cols = fc.cols.map((x): Rgba => [mono[0], mono[1], mono[2], x[3]]);
+    g.cc.f = { k: key, cols };
+    return [cols, noVc(g)];
+  }
+  return [fc.cols, fc.vc];
+}
+
+/** 0.60.0 묶음 그물 수만큼 같은 색(쓰는 곳 slot마다 마지막 값을 둔다 — 값이 같으면 다시 쓴다) */
+export function oneCol(g: MergeGroup, slot: string, c: Rgba): Rgba[] {
+  const key = `c${c[0]},${c[1]},${c[2]},${c[3]}`;
+  const cc = (g.cc ??= {});
+  const x = cc[slot];
+  if (x && x.k === key) return x.cols;
+  const cols = new Array<Rgba>(g.recs.length).fill(c);
+  cc[slot] = { k: key, cols };
+  return cols;
+}
+
+/** 0.60.0 묶음 그물 수만큼 정점 색 끔 */
+export function noVc(g: MergeGroup): boolean[] {
+  return (g.nv ??= new Array<boolean>(g.recs.length).fill(false));
+}
+
+/**
+ * 0.60.0 묶음 그물마다 윤곽선 색(강조·그물마다 선 색이 없을 때 렌더러의 그물마다 col과 같은 값): map이 있으면(선 색 선택) 면 색마다 그 값, one이 있으면 모두 그 색,
+ * 아니면 면 색에 불투명도 a(X-ray 0.9)
+ */
+export function edgeCols(g: MergeGroup, face: () => Rgba[], one: Rgba | null, a: number, map: ((c: Rgba) => Rgba) | null): Rgba[] {
+  if (map) return face().map(map);
+  if (one) return oneCol(g, 'e', one);
+  const key = `w${a}`;
+  const cc = (g.cc ??= {});
+  const x = cc.e;
+  if (x && x.k === key) return x.cols;
+  const cols = face().map((c): Rgba => [c[0], c[1], c[2], a]);
+  cc.e = { k: key, cols };
+  return cols;
+}
+
+/** 0.60.0 덩이 그물의 윤곽선 구간 모음이 없는지(구간 모음 판 ver가 바뀐 뒤에만 다시 본다 — 있으면 그물마다 길이 지운다) */
+export function npOf(k: MergeBlock, ver: number): boolean {
+  if (k.npv !== ver) {
+    let np = true;
+    for (let i = k.a; np && i < k.b; i++) if (k.g.recs[i]!.edges?.parts) np = false;
+    k.np = np;
+    k.npv = ver;
+  }
+  return k.np;
+}
+
+/**
+ * 0.60.0 단면 하나 채우기 단위 거르기: 채우기 단위 묶음이 없는 덩이에서 토막 상자가 평면을 걸치는 토막의 보이는 그물만 push(차례 그대로). 다룰 수 없는 덩이면 false
+ */
+export function capBlock(k: MergeBlock, plane: Readonly<Plane4>, vis: number, push: (r: MeshRec) => void): boolean {
+  if (!k.ok || !blockCapFree(k)) return false;
+  const B = blockBoxes(k), R = k.g.recs;
+  for (let j = 0, s = k.a; s < k.b; j++, s += BLOCK_BOX) {
+    if (!boxStraddles(B[j]!, plane)) continue;
+    for (let i = s; i < Math.min(k.b, s + BLOCK_BOX); i++) if (R[i]!.visAt === vis) push(R[i]!);
+  }
+  return true;
+}
+
+/** 0.60.0 함께 쓰던 색 목록을 구간 제 목록으로(그물마다 늘이기 전에) */
+function own(u: MergeRun): void {
+  u.cols = u.cols.slice(u.a - u.o, u.b - u.o);
+  u.vc = u.vc.slice(u.a - u.o, u.b - u.o);
+  u.o = u.a;
+  u.sh = false;
+}
+
+/**
+ * 0.61.0 묶어 그리는 목록 모으기(0.52.0~0.60.0 render() 안 mergeAdd·mergeRange·mergeDo): 묶음 구간(MergeRun)과 그물마다 그리기(함수)를 장면 차례로.
+ * 마지막 구간은 앞 구간의 다음 번호이고 구간 균일 변수(강조·불투명도)·굵기가 같으면 늘인다
+ */
+export class RunList {
+  ops: MergeOp[] = [];
+  private u: MergeRun | null = null;
+
+  /** 묶음 그물 하나(w = 윤곽선 굵기 — 강조한 그물 2) */
+  add(r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number, w = 1): void {
+    const g = r.mg!, i = r.mi!;
+    const u = this.u;
+    if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha && u.w === w) {
+      if (u.sh) own(u);
+      u.b++;
+      u.cols.push(col);
+      u.vc.push(vcol);
+      return;
+    }
+    this.ops.push((this.u = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha, w }));
+  }
+
+  /** 깨끗한 덩이 [a, b)(그물마다 add를 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다) */
+  range(g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number): void {
+    const u = this.u;
+    if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha && u.w === 1) {
+      if (u.sh && u.cols === cols && u.vc === vc) {
+        u.b = b;
+        return;
+      }
+      if (u.sh) own(u);
+      for (let i = a; i < b; i++) {
+        u.cols.push(cols[i]!);
+        u.vc.push(vc[i]!);
+      }
+      u.b = b;
+      return;
+    }
+    this.ops.push((this.u = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha, w: 1 }));
+  }
+
+  /** 그물마다 그리기 하나(앞 구간은 더 늘이지 않는다 — 뒤 그물이 이 그리기를 앞지르지 않게) */
+  draw(fn: () => void): void {
+    this.ops.push(fn);
+    this.u = null;
+  }
 }
 
 /**
@@ -391,10 +645,19 @@ function shiftsOf(g: MergeGroup): void {
   g.sft = sft;
 }
 
-/** 0.52.0 묶음의 버퍼·VAO를 지운다(쓰는 그물 기록이 없을 때 — lost면 잊기만) */
+/**
+ * 0.52.0 묶음의 버퍼·VAO를 지운다(쓰는 그물 기록이 없을 때 — lost면 잊기만). 0.61.0 자리 자료 저장소의 그 묶음 자리를 놓고, 묶음이 모두 없어지면 저장소 그림도 놓는다
+ */
 export function free(h: MergeHost, g: MergeGroup, lost: boolean): void {
   if (!h.mgGroups.delete(g)) return;
   h.mgBytes -= g.bytes;
+  const s = h.mgStore;
+  if (s && g.ps) for (const k in g.ps) if (g.ps[k]!.ep === s.ep) s.live -= g.ps[k]!.at.length * g.ps[k]!.stride;
+  g.ps = undefined;
+  if (s && !h.mgGroups.size) {
+    if (!lost && s.tex) h.gl.deleteTexture(s.tex);
+    h.mgStore = null;
+  }
   if (lost) return;
   const gl = h.gl;
   for (const v of [g.vao, g.thin, g.wide]) if (v) gl.deleteVertexArray(v);
@@ -432,21 +695,164 @@ function wideAt(h: MergeHost, seg: WebGLBuffer, item: WebGLBuffer, first: number
 }
 
 /**
- * 자리 자료를 구간 차례로 이어 instBuf에 쓰고 한 번에 올린다(구간마다 u_instBase). 자리 자료 그림에 들어가지 않으면 false(그물마다 그린다).
- * 0.60.0: fill이 구간 차례로 자리 k = 0, 1, …에 모두 쓴다(그물마다 닫힘 함수를 부르지 않는다 — 다 묶은 큰 장면의 프레임마다 그물 수만큼 불렸다)
+ * 0.61.0 구간의 자리 자료를 저장소에(구간마다 u_instBase = 그 묶음 kind 자리의 첫 텍셀): 자리를 마련하고(storeSlots), 프레임 값이 바뀌었으면 판을 올리고,
+ * fill이 낡은 자리만 쓴 뒤 쓴 줄만 올린다. 저장소가 GPU 무늬 한도에 들지 않으면 false(그물마다 그린다 — 0.60.0까지 자리 자료 그림이 모자랄 때와 같다).
+ * 0.60.0까지는 구간 차례로 자리 k = 0, 1, …에 이어 쓰고 그 차례 자리를 모두 올렸다
  */
-function putRuns(h: MergeHost, runs: readonly MergeRun[], texels: number, fill: () => void): boolean {
-  let n = 0;
-  for (const u of runs) n += u.b - u.a;
-  if (!n || !h.instReserve(n * texels)) return false;
-  fill();
-  const base = h.instPut(n * texels);
-  let k = 0;
-  for (const u of runs) {
-    u.base = base + (k - u.a) * texels;
-    k += u.b - u.a;
+function putRuns(h: MergeHost, runs: readonly MergeRun[], kind: string, stride: number, sig: number[], fill: () => void): boolean {
+  if (!runs.length) return false;
+  const s = storeSlots(h, runs, kind, stride);
+  if (!s) return false;
+  const o = s.sig[kind];
+  let same = !!o && o.length === sig.length;
+  for (let i = 0; same && i < sig.length; i++) if (!Object.is(o![i], sig[i])) same = false;
+  if (!same) {
+    s.sig[kind] = sig;
+    s.gen[kind] = (s.gen[kind] ?? 0) + 1;
   }
+  for (const u of runs) u.base = u.g.ps![kind]!.base;
+  fill();
+  storePut(h, s);
   return true;
+}
+
+/**
+ * 0.61.0 이 차례 구간의 묶음마다 kind 자리(그물 수 × stride 텍셀)를 마련한다 — 없거나 텍셀 수가 다르면 저장소 끝에 새로. 늘려야 하는데 버린 자리(빠진 묶음·텍셀 수가 바뀐 자리)가
+ * ¼ 이상이거나 GPU 무늬 한도를 넘으면 자리를 모두 버리고 처음부터 다시 놓는다(그 앞 차례가 이미 건 그리기는 GL 차례대로 그때 그림을 읽는다). 그래도 넘으면 null
+ */
+function storeSlots(h: MergeHost, runs: readonly MergeRun[], kind: string, stride: number): MergeStore | null {
+  const gl = h.gl;
+  const s = (h.mgStore ??= {
+    tex: null,
+    rows: 0,
+    max: Math.max(1, Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 2048),
+    buf: new Float32Array(0),
+    top: 0,
+    live: 0,
+    ep: 1,
+    sig: {},
+    gen: {},
+    dirty: [],
+  });
+  const add = new Set<MergeGroup>();
+  let need = 0;
+  const want = (all: boolean): void => {
+    add.clear();
+    need = 0;
+    for (const u of runs) {
+      const g = u.g, R = g.ps?.[kind];
+      if (add.has(g) || (!all && R && R.ep === s.ep && R.stride === stride)) continue;
+      add.add(g);
+      need += (g.recs.length + 1) * stride;
+    }
+  };
+  want(false);
+  if (!need) return s;
+  const cap = s.max * STORE_W;
+  // 텍셀 수가 바뀌어 다시 놓는 묶음의 옛 자리도 버린 자리로 센다(단면·그림자를 켜고 끌 때 — 버린 자리가 ¼을 넘으면 늘리지 않고 처음부터)
+  let live = s.live;
+  for (const g of add) {
+    const old = g.ps?.[kind];
+    if (old && old.ep === s.ep) live -= old.at.length * old.stride;
+  }
+  if (s.top + need > cap || (s.top + need > s.rows * STORE_W && 4 * (live + need) <= 3 * (s.top + need))) {
+    s.ep++;
+    s.top = 0;
+    s.live = 0;
+    want(true);
+  }
+  if (s.top + need > cap) return null;
+  const keep = s.rows ? Math.ceil(s.top / STORE_W) : 0;
+  for (const g of add) {
+    const old = g.ps?.[kind];
+    if (old && old.ep === s.ep) s.live -= old.at.length * old.stride;
+    const n = g.recs.length, base = Math.ceil(s.top / stride) * stride;
+    (g.ps ??= {})[kind] = { ep: s.ep, base, stride, at: new Uint32Array(n), mdl: new Array(n) };
+    s.top = base + n * stride;
+    s.live += n * stride;
+  }
+  if (s.top > s.rows * STORE_W) {
+    // 그림을 늘린다(줄 STORE_STEP 단위, 적어도 1.25배 — 앞서 쓴 줄은 새 그림에 다시 올린다)
+    const rows = Math.min(s.max, Math.ceil(Math.max(s.top / STORE_W, s.rows * 1.25) / STORE_STEP) * STORE_STEP);
+    const buf = new Float32Array(rows * STORE_W * 4);
+    buf.set(s.buf);
+    gl.activeTexture(gl.TEXTURE0 + STORE_UNIT);
+    if (s.tex) gl.deleteTexture(s.tex);
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, STORE_W, rows, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    if (keep) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, STORE_W, keep, gl.RGBA, gl.FLOAT, buf, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    s.tex = tex;
+    s.rows = rows;
+    s.buf = buf;
+  }
+  return s;
+}
+
+/**
+ * 0.61.0 이번 차례에 쓴 텍셀 구간을 저장소 그림에 올린다: 한 줄이 안 되는 틈으로 이어진 구간은 하나로 모아 그 텍셀만(첫 줄 조각·가운데 온 줄·끝 줄 조각 — 많아야 세 번).
+ * 강조 하나를 바꾼 프레임은 그 그물 윤곽선 자리 6텍셀
+ */
+function storePut(h: MergeHost, s: MergeStore): void {
+  const D = s.dirty;
+  if (!D.length) return;
+  const gl = h.gl;
+  const ord = Array.from({ length: D.length / 2 }, (_, j) => j).sort((a, b) => D[a * 2]! - D[b * 2]!);
+  gl.activeTexture(gl.TEXTURE0 + STORE_UNIT);
+  gl.bindTexture(gl.TEXTURE_2D, s.tex);
+  const sub = (t: number, w: number, rows: number): void =>
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, t % STORE_W, Math.floor(t / STORE_W), w, rows, gl.RGBA, gl.FLOAT, s.buf, t * 4);
+  let t0 = -1, t1 = -1;
+  const up = (): void => {
+    if (t0 < 0) return;
+    let a = t0;
+    if (a % STORE_W) {
+      const e = Math.min(t1, (Math.floor(a / STORE_W) + 1) * STORE_W);
+      sub(a, e - a, 1);
+      a = e;
+    }
+    const full = Math.floor((t1 - a) / STORE_W);
+    if (full) {
+      sub(a, STORE_W, full);
+      a += full * STORE_W;
+    }
+    if (a < t1) sub(a, t1 - a, 1);
+  };
+  for (const j of ord) {
+    const a = D[j * 2]!, b = D[j * 2 + 1]!;
+    if (t0 >= 0 && a <= t1 + STORE_W) {
+      if (b > t1) t1 = b;
+      continue;
+    }
+    up();
+    t0 = a;
+    t1 = b;
+  }
+  up();
+  gl.activeTexture(gl.TEXTURE0);
+  D.length = 0;
+}
+
+/** 0.61.0 자리 하나(텍셀 t부터 n개)를 이번 차례에 썼다고 적는다(앞 구간에 맞닿으면 늘인다) */
+function dirty(D: number[], t: number, n: number): void {
+  const e = D.length;
+  if (e && D[e - 1] === t) D[e - 1] = t + n;
+  else D.push(t, t + n);
+}
+
+/**
+ * 0.61.0 프레임 값(같으면 자리를 다시 쓰지 않는다): 텍셀 수(+ 안개 깃발)·겉모습 유무·시점·투영·시점 투영(+ 그림자 행렬·단면 평면). 겉모습이 없으면 자리의 모형을 견주지 않으므로
+ * 겉모습을 켜고 끌 때 판이 바뀌어야 한다
+ */
+function frameSig(c: MergeDrawCtx, head: number[], more: (ArrayLike<number> | null)[]): number[] {
+  const v = [...head, c.look ? 1 : 0];
+  for (const m of [c.f.view, c.f.proj, c.f.viewProj, ...more]) if (m) for (let i = 0; i < m.length; i++) v.push(m[i]!);
+  return v;
 }
 
 /**
@@ -459,7 +865,11 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
   const runs = ops.filter((o): o is MergeRun => typeof o !== 'function');
   const stride = MERGE_MESH_TEXELS + (c.shadowOn ? 4 : 0) + (c.sec ? 1 : 0);
   const p = runs.length ? h.mergeVariant('mesh', [...c.meshExtra, ...(c.shadowOn ? ['SHADOW'] : []), ...(c.sec ? ['CLIP'] : [])]) : null;
-  const ok = !!p && (!c.shadowOn || !!c.shadowVp) && putRuns(h, runs, stride, () => faceFill(h, c, runs, stride));
+  const ok =
+    !!p &&
+    (!c.shadowOn || !!c.shadowVp) &&
+    putRuns(h, runs, 'f', stride, frameSig(c, [stride], [c.shadowOn ? c.shadowVp : null, c.sec ? c.clipOf(undefined) : null]), () => faceFill(h, c, runs, stride));
+  let unit = false;
   for (const op of ops) {
     if (typeof op === 'function') {
       op();
@@ -473,7 +883,11 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       }
       continue;
     }
-    c.use(p!);
+    // 자리 자료는 저장소 그림 단위에서(meshUse가 인스턴싱 단위로 건 것을 바꾼다)
+    if (c.use(p!) || !unit) {
+      gl.uniform1i(h.loc(p!, 'u_inst'), STORE_UNIT);
+      unit = true;
+    }
     gl.uniform1i(h.loc(p!, 'u_instBase'), op.base);
     if (p!.shadow || p!.clip1) gl.uniform1i(h.loc(p!, 'u_instStride'), stride);
     // 정점 색 쓰기는 자리 자료 깃발이라 균일 변수 u_vcol이 없다(기억에는 false로)
@@ -496,60 +910,76 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
 /**
  * 0.52.0 선 목록을 그린다(그물 윤곽선 — 1화소 굵기 1, 숨은 점선이면 dash): 묶음 구간은 MERGE 변종(가는 선·굵은 선 — drawLines와 같은 판정·균일 변수, 선 색은 자리 자료)으로
  * 그 선분 구간 그리기 한 번. 변종이 번역 중이거나 자리 자료가 모자라면 구간도 그물마다 drawLines로. 0.57.0 render() 안에서 이 조각으로 옮김(GL 호출 차례는 같다).
- * 0.60.0 단면 하나(c.sec)도 묶어 그린다: 그물마다 그릴 때(drawLines의 clip — 그 그물 로컬 평면)와 같은 평면을 자리 자료 7번째 텍셀에(MCLIP — 가는 선은 CLIP도, 0.59.0까지는 단면이 있으면 윤곽선·숨은 점선을 모두 그물마다 그렸다)
+ * 0.60.0 단면 하나(c.sec)도 묶어 그린다: 그물마다 그릴 때(drawLines의 clip — 그 그물 로컬 평면)와 같은 평면을 자리 자료 7번째 텍셀에(MCLIP — 가는 선은 CLIP도, 0.59.0까지는 단면이 있으면 윤곽선·숨은 점선을 모두 그물마다 그렸다).
+ * 0.61.0 굵기는 구간마다(op.w — 강조한 그물 2): 굵은 선·가는 선 판정(drawLines와 같다)과 프로그램을 구간마다 고르고, 고정 균일 변수는 이 차례에서 프로그램마다 한 번
+ * (프로그램의 균일 변수 값은 사이에 낀 그물마다 그리기가 바꾸지 않는다 — 다른 프로그램이다). 한쪽 변종이 번역 중이면 그 구간만 그물마다
  */
 export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[], o: { dashed: boolean; bias: number; capz: boolean }, memo: LineMemo | null): void {
   const gl = h.gl, st = c.st, stats = c.stats;
   const runs = ops.filter((x): x is MergeRun => typeof x !== 'function');
-  const wDev = st.dpr;
-  const wide = o.dashed || wDev > 1.01;
   const lineFog = st.fog ?? null;
   const clip = c.sec ? c.clipOf : null;
   const texels = MERGE_LINE_TEXELS + (clip ? 1 : 0);
-  const p = runs.length
-    ? h.mergeVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(lineFog ? ['FOG'] : []), ...(clip ? (wide ? ['MCLIP'] : ['CLIP', 'MCLIP']) : [])])
-    : null;
-  const ok = !!p && putRuns(h, runs, texels, () => lineFill(h, c, runs, !!lineFog, texels));
-  let set = false;
+  const wideOf = (u: MergeRun): boolean => o.dashed || u.w * st.dpr > 1.01;
+  const variant = (wide: boolean): Prog | null =>
+    h.mergeVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(lineFog ? ['FOG'] : []), ...(clip ? (wide ? ['MCLIP'] : ['CLIP', 'MCLIP']) : [])]);
+  let pw: Prog | null = null, pt: Prog | null = null;
+  if (runs.some(wideOf)) pw = variant(true);
+  if (!runs.every(wideOf)) pt = variant(false);
+  // 0.61.0 자리 종류: 윤곽선 e·숨은 점선 d(색이 달라 한 프레임에 둘 다 그리면 자리를 따로 둔다)
+  const kind = o.dashed ? 'd' : 'e';
+  const ok = (!!pw || !!pt) && putRuns(h, runs, kind, texels, frameSig(c, [texels, lineFog ? 1 : 0], [clip ? clip(undefined) : null]), () => lineFill(h, c, runs, !!lineFog, texels, kind));
+  /** 지금 쓰는 프로그램(사이에 그물마다 그리기가 끼면 null)·이 차례에서 고정 균일 변수를 보낸 프로그램과 그 굵기 */
+  let P: Prog | null = null;
+  const done = new Map<Prog, number>();
   for (const op of ops) {
     if (typeof op === 'function') {
       op();
-      set = false;
+      P = null;
       continue;
     }
-    if (!ok) {
+    const wide = wideOf(op);
+    const Q = ok ? (wide ? pw : pt) : null;
+    if (!Q) {
       for (let i = op.a; i < op.b; i++) {
         const r = op.g.recs[i]!;
         const model = c.mm(r);
-        const e = { color: op.cols[i - op.o]!, vcol: false, width: 1, dashed: o.dashed, alpha: op.alpha, clip: clip ? clip(model) : null, clips: null, first: 0, count: r.edges!.n };
+        const e = { color: op.cols[i - op.o]!, vcol: false, width: op.w, dashed: o.dashed, alpha: op.alpha, clip: clip ? clip(model) : null, clips: null, first: 0, count: r.edges!.n };
         h.drawLines(c.f, r.edges!, model, o.capz ? { ...e, bias: o.bias, capz: true } : e, st, stats, memo);
       }
+      P = null;
       continue;
     }
-    const P = p!;
-    if (!set) {
-      // drawLines와 같은 고정 균일 변수(선 색은 자리 자료 — 안개 깊이 행도)
-      set = true;
-      gl.useProgram(P.p);
-      gl.uniform1i(h.loc(P, 'u_inst'), c.instUnit);
-      gl.uniform1f(h.loc(P, 'u_vcol'), 0);
-      gl.uniform4f(h.loc(P, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(h.loc(P, 'u_bias'), o.bias);
-      if (wide) {
-        const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
-        gl.uniform2f(h.loc(P, 'u_viewport'), vw, vh);
-        gl.uniform1f(h.loc(P, 'u_width'), wDev);
-        gl.uniform2f(h.loc(P, 'u_dash'), o.dashed ? c.dash[0] * st.dpr : 0, c.dash[1] * st.dpr);
-        // 단면이 있으면 평면은 자리 자료(균일 변수가 아니다)
-        if (!clip) gl.uniform4f(h.loc(P, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
-      }
-      if (lineFog) {
-        gl.uniform4f(h.loc(P, 'u_fogCol'), lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
-        gl.uniform2f(h.loc(P, 'u_fog'), lineFog.start, lineFog.end);
+    if (Q !== P) {
+      P = Q;
+      gl.useProgram(Q.p);
+      if (!done.has(Q)) {
+        // drawLines와 같은 고정 균일 변수(선 색은 자리 자료 — 안개 깊이 행도)
+        done.set(Q, -1);
+        gl.uniform1i(h.loc(Q, 'u_inst'), STORE_UNIT);
+        gl.uniform1f(h.loc(Q, 'u_vcol'), 0);
+        gl.uniform4f(h.loc(Q, 'u_override'), 0, 0, 0, 0);
+        gl.uniform1f(h.loc(Q, 'u_bias'), o.bias);
+        if (wide) {
+          const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
+          gl.uniform2f(h.loc(Q, 'u_viewport'), vw, vh);
+          gl.uniform2f(h.loc(Q, 'u_dash'), o.dashed ? c.dash[0] * st.dpr : 0, c.dash[1] * st.dpr);
+          // 단면이 있으면 평면은 자리 자료(균일 변수가 아니다)
+          if (!clip) gl.uniform4f(h.loc(Q, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
+        }
+        if (lineFog) {
+          gl.uniform4f(h.loc(Q, 'u_fogCol'), lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
+          gl.uniform2f(h.loc(Q, 'u_fog'), lineFog.start, lineFog.end);
+        }
       }
     }
-    gl.uniform1i(h.loc(P, 'u_instBase'), op.base);
-    gl.uniform1f(h.loc(P, 'u_alpha'), op.alpha);
+    // 굵은 선 굵기(장치 화소 — drawLines의 wDev)
+    if (wide && done.get(Q) !== op.w * st.dpr) {
+      done.set(Q, op.w * st.dpr);
+      gl.uniform1f(h.loc(Q, 'u_width'), op.w * st.dpr);
+    }
+    gl.uniform1i(h.loc(Q, 'u_instBase'), op.base);
+    gl.uniform1f(h.loc(Q, 'u_alpha'), op.alpha);
     const g = op.g;
     const s0 = g.seg[op.a]!, s1 = g.seg[op.b]!;
     if (wide) {
@@ -855,9 +1285,9 @@ function attach(h: MergeHost, r: MeshRec, g: MergeGroup, i: number): void {
 }
 
 /**
- * 0.52.0 묶음 면 자리 자료 하나(instBuf의 i번째 자리 — 12텍셀): setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로(instMeshes와 같은 셈)
+ * 0.52.0 묶음 면 자리 자료 하나(12텍셀): setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로(instMeshes와 같은 셈)
  * + 그물 색(meshDraw의 u_color와 같은 값) + 정점 색 쓰기 깃발(meshDraw의 u_vcol — 법선 행렬 첫 텍셀의 w).
- * 0.53.0: stride(렌더러 mergeStride)·shadow(빛 투영·시점 — 그림자 행렬 4텍셀)·clip(모형 → 로컬 평면 — 맨 끝 1텍셀)
+ * 0.53.0: stride(렌더러 mergeStride)·shadow(빛 투영·시점 — 그림자 행렬 4텍셀)·clip(모형 → 로컬 평면 — 맨 끝 1텍셀). 0.61.0 d의 o번째 값부터 쓴다(자리 자료 저장소)
  */
 export function faceTexels(
   h: MergeHost,
@@ -865,15 +1295,15 @@ export function faceTexels(
   model: ArrayLike<number> | undefined,
   c: Rgba,
   vcol: boolean,
-  i: number,
+  d: Float32Array,
+  o: number,
   stride = MERGE_MESH_TEXELS,
   shadow: ArrayLike<number> | null = null,
   clip: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null = null,
 ): void {
-  const d = h.instBuf, m3 = h.instM3;
+  const m3 = h.instM3;
   const mv = model ? mat4Mul(f.view, model, h.d4a) : f.view;
   const mvp = model ? mat4Mul(f.proj, mv, h.d4b) : f.viewProj;
-  const o = i * stride * 4;
   for (let k = 0; k < 16; k++) {
     d[o + k] = mvp[k]!;
     d[o + 16 + k] = mv[k]!;
@@ -907,8 +1337,8 @@ export function faceTexels(
 }
 
 /**
- * 0.52.0 묶음 선 자리 자료 하나(instBuf의 i번째 자리 — 6텍셀): drawLines와 같은 시점·투영 · 모형, 안개면 setLineFog와 같은 시점 · 모형의 z 행(instLines와 같은 셈),
- * 선 색(drawLines의 u_color와 같은 값). 0.60.0: texels가 7이면 단면 하나의 로컬 평면(drawLines의 u_clip과 같은 값 — 7번째 텍셀)
+ * 0.52.0 묶음 선 자리 자료 하나(6텍셀): drawLines와 같은 시점·투영 · 모형, 안개면 setLineFog와 같은 시점 · 모형의 z 행(instLines와 같은 셈),
+ * 선 색(drawLines의 u_color와 같은 값). 0.60.0: clip을 주면 단면 하나의 로컬 평면(drawLines의 u_clip과 같은 값 — 7번째 텍셀). 0.61.0 d의 o번째 값부터 쓴다
  */
 export function lineTexels(
   h: MergeHost,
@@ -916,13 +1346,11 @@ export function lineTexels(
   model: ArrayLike<number> | undefined,
   c: Rgba,
   fog: boolean,
-  i: number,
-  texels = MERGE_LINE_TEXELS,
+  d: Float32Array,
+  o: number,
   clip: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null = null,
 ): void {
-  const d = h.instBuf;
   const mvp = model ? mat4Mul(f.viewProj, model, h.d4a) : f.viewProj;
-  const o = i * texels * 4;
   for (let k = 0; k < 16; k++) d[o + k] = mvp[k]!;
   if (fog) {
     const mv = model ? mat4Mul(f.view, model, h.d4b) : f.view;
@@ -966,25 +1394,36 @@ function col3(a: ArrayLike<number>, b0: number, b1: number, b2: number, b3: numb
 }
 
 /**
- * 0.60.0 묶음 면 자리 자료를 구간 차례로(자리 k = 0, 1, …). 이동뿐인 모형(shiftOnly)은 이 그리기의 공통 텍셀(시점 · 모형·투영 · 그것의 0~2열, 법선 행렬, 그림자 행렬 0~2열)을 복사하고
- * 3열만 센다 — faceTexels와 같은 셈이라 float32 값이 비트까지 같다. 그 밖의 모형(회전·늘이기·겉모습 행렬)과 모형이 없는 그물은 faceTexels 그대로
+ * 0.60.0 묶음 면 자리 자료를 구간 차례로. 이동뿐인 모형(shiftOnly)은 이 그리기의 공통 텍셀(시점 · 모형·투영 · 그것의 0~2열, 법선 행렬, 그림자 행렬 0~2열)을 복사하고
+ * 3열만 센다 — faceTexels와 같은 셈이라 float32 값이 비트까지 같다. 그 밖의 모형(회전·늘이기·겉모습 행렬)과 모형이 없는 그물은 faceTexels 그대로.
+ * 0.61.0 자리 자료 저장소의 그 묶음 kind 자리에(그물 번호 i → base + i·stride) 낡은 자리만 쓴다: 판(프레임 값 — 겉모습 유무도)·정점 색 깃발·색(float32)이 지난번 쓴 것과 같으면
+ * 건너뛴다. 모형은 겉모습이 있을 때만 견준다(없으면 그물 기록의 모형은 묶음이 사는 동안 그대로 — 그물 기록을 보지 않는다. 8만에서 기록을 그물마다 읽는 것이 프레임 대부분이었다)
  */
-export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], stride: number): void {
-  const f = c.f, shadow = c.shadowVp, clip = c.sec ? c.clipOf : null;
+export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], stride: number, kind = 'f'): void {
+  const f = c.f, shadow = c.shadowVp, clip = c.sec ? c.clipOf : null, look = c.look;
   const S = stride * 4;
   const V = f.view, P = f.proj;
   const t = h.d4c;
+  const s = h.mgStore!, d = s.buf, D = s.dirty, gen = s.gen[kind]!, F = Math.fround;
   let tpl: Float32Array | null = null;
   let cw: [Readonly<Plane4>, Readonly<Plane4>] | undefined;
-  let k = 0;
   for (const u of runs) {
     const g = u.g, recs = g.recs, cols = u.cols, vcs = u.vc, o0 = u.o;
+    const R = g.ps![kind]!, at = R.at, mdl = R.mdl, base = R.base;
     // 겉모습이 없으면 모형은 그물 기록 것 그대로라 묶음에 모아 둔 3열을 쓴다(그물 기록을 그물마다 보지 않는다)
-    if (!c.look) shiftsOf(g);
-    const org = c.look ? null : g.org!, sft = c.look ? null : g.sft!;
-    for (let i = u.a; i < u.b; i++, k++) {
+    if (!look) shiftsOf(g);
+    const org = look ? null : g.org!, sft = look ? null : g.sft!;
+    for (let i = u.a; i < u.b; i++) {
       const col = cols[i - o0]!, vcol = vcs[i - o0]!;
+      const o = (base + i * stride) * 4;
+      const lm = look ? c.mm(recs[i]!) : undefined;
+      if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 35] === (vcol ? 1 : 0) && d[o + 44] === F(col[0]) && d[o + 45] === F(col[1]) && d[o + 46] === F(col[2]) && d[o + 47] === F(col[3]))
+        continue;
+      at[i] = gen;
+      if (look) mdl[i] = lm;
+      dirty(D, base + i * stride, stride);
       let b0: number, b1: number, b2: number, b3: number;
+      let model: ArrayLike<number> | undefined;
       if (sft && sft[i]) {
         const q = i * 4;
         b0 = org![q]!;
@@ -992,9 +1431,9 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
         b2 = org![q + 2]!;
         b3 = org![q + 3]!;
       } else {
-        const model = c.mm(recs[i]!);
+        model = look ? lm : recs[i]!.model;
         if (!model || !shiftOnly(model)) {
-          faceTexels(h, f, model, col, vcol, k, stride, shadow, clip);
+          faceTexels(h, f, model, col, vcol, d, o, stride, shadow, clip);
           continue;
         }
         b0 = model[12]!;
@@ -1021,8 +1460,6 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
           for (let j = 0; j < 3; j++) for (let r = 0; r < 3; r++) tpl[48 + j * 4 + r] = lv[j * 4 + r]! * 0.5 + lv[j * 4 + 3]! * 0.5;
         }
       }
-      const d = h.instBuf;
-      const o = k * S;
       d.set(tpl, o);
       // 시점 · 모형 3열(t[0…3]), 투영 · 그것 3열(t[4…7])
       col3(V, b0, b1, b2, b3, t, 0);
@@ -1050,7 +1487,7 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
       if (clip) {
         const q = o + (stride - 1) * 4;
         if (sft && sft[i] === 2) shiftPlane(d, q, cw ??= planes(clip), org!, i * 4);
-        else putPlane(d, q, clip(c.mm(recs[i]!)));
+        else putPlane(d, q, clip(sft ? recs[i]!.model : model));
       }
     }
   }
@@ -1070,22 +1507,33 @@ function shiftPlane(d: Float32Array, at: number, cw: [Readonly<Plane4>, Readonly
   d[at + 3] = org[q]! * w[0] + org[q + 1]! * w[1] + org[q + 2]! * w[2] + org[q + 3]! * w[3];
 }
 
-/** 0.60.0 묶음 선 자리 자료를 구간 차례로(faceFill과 같은 길 — 이동뿐인 모형은 시점·투영 · 모형의 0~2열·안개 z 행 앞 세 칸을 복사하고 3열만 센다) */
-export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], fog: boolean, texels: number): void {
-  const f = c.f, clip = c.sec ? c.clipOf : null;
+/**
+ * 0.60.0 묶음 선 자리 자료를 구간 차례로(faceFill과 같은 길 — 이동뿐인 모형은 시점·투영 · 모형의 0~2열·안개 z 행 앞 세 칸을 복사하고 3열만 센다).
+ * 0.61.0 저장소의 그 묶음 kind 자리에 낡은 자리만(판·모형·색이 같으면 건너뛴다)
+ */
+export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[], fog: boolean, texels: number, kind = 'e'): void {
+  const f = c.f, clip = c.sec ? c.clipOf : null, look = c.look;
   const S = texels * 4;
   const Q = f.viewProj, V = f.view;
   const t = h.d4c;
+  const s = h.mgStore!, d = s.buf, D = s.dirty, gen = s.gen[kind]!, F = Math.fround;
   let tpl: Float32Array | null = null;
   let cw: [Readonly<Plane4>, Readonly<Plane4>] | undefined;
-  let k = 0;
   for (const u of runs) {
     const g = u.g, recs = g.recs, cols = u.cols, o0 = u.o;
-    if (!c.look) shiftsOf(g);
-    const org = c.look ? null : g.org!, sft = c.look ? null : g.sft!;
-    for (let i = u.a; i < u.b; i++, k++) {
+    const R = g.ps![kind]!, at = R.at, mdl = R.mdl, base = R.base;
+    if (!look) shiftsOf(g);
+    const org = look ? null : g.org!, sft = look ? null : g.sft!;
+    for (let i = u.a; i < u.b; i++) {
       const col = cols[i - o0]!;
+      const o = (base + i * texels) * 4;
+      const lm = look ? c.mm(recs[i]!) : undefined;
+      if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 20] === F(col[0]) && d[o + 21] === F(col[1]) && d[o + 22] === F(col[2]) && d[o + 23] === F(col[3])) continue;
+      at[i] = gen;
+      if (look) mdl[i] = lm;
+      dirty(D, base + i * texels, texels);
       let b0: number, b1: number, b2: number, b3: number;
+      let model: ArrayLike<number> | undefined;
       if (sft && sft[i]) {
         const q = i * 4;
         b0 = org![q]!;
@@ -1093,9 +1541,9 @@ export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
         b2 = org![q + 2]!;
         b3 = org![q + 3]!;
       } else {
-        const model = c.mm(recs[i]!);
+        model = look ? lm : recs[i]!.model;
         if (!model || !shiftOnly(model)) {
-          lineTexels(h, f, model, col, fog, k, texels, clip);
+          lineTexels(h, f, model, col, fog, d, o, clip);
           continue;
         }
         b0 = model[12]!;
@@ -1114,8 +1562,6 @@ export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
           tpl[18] = mv[10]!;
         }
       }
-      const d = h.instBuf;
-      const o = k * S;
       d.set(tpl, o);
       col3(Q, b0, b1, b2, b3, t, 0);
       d[o + 12] = t[0]!;
@@ -1129,7 +1575,7 @@ export function lineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
       d[o + 23] = col[3];
       if (clip) {
         if (sft && sft[i] === 2) shiftPlane(d, o + 24, cw ??= planes(clip), org!, i * 4);
-        else putPlane(d, o + 24, clip(c.mm(recs[i]!)));
+        else putPlane(d, o + 24, clip(sft ? recs[i]!.model : model));
       }
     }
   }
