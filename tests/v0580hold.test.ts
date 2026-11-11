@@ -257,3 +257,133 @@ describe('0.58.0 빛 기록을 걸음 사이에 들고 있기', () => {
     expect(w.r.meshes.length).toBeGreaterThanOrEqual(MERGE_UPLOAD_MESHES);
   });
 });
+
+describe('0.58.0 들고 있는 동안의 문맥 복구·변종 실패', () => {
+  const N = MERGE_UPLOAD_MESHES + 100;
+  /** 25번째마다 법선이 있는 장면(놓기 normals — 그 그물만 코어가 법선을 지운다. 되찾으면 그 그물은 곧장 굽지 않고 그물마다, 나머지는 빛 기록) */
+  const withNormals = (): Scene3d =>
+    scene(N, 0, undefined, (m, i) => {
+      if (i % 25 === 24) {
+        const n = new Float32Array(m.positions.length);
+        for (let k = 2; k < n.length; k += 3) n[k] = 1;
+        m.normals = n;
+      }
+      return m;
+    });
+  const lose = (w: W): void => (w.v.canvas as unknown as FakeElement).fire('webglcontextlost', { preventDefault: () => undefined });
+  const restore = (w: W): void => (w.v.canvas as unknown as FakeElement).fire('webglcontextrestored', {});
+  /** 놓은 장면을 다 올리고 문맥을 잃었다 되찾은 직후(다시 나눠 올리는 중 — 아직 한 걸음도 안 갔다) */
+  function restored(): { w: W; keep: Scene3d } {
+    const w = make();
+    w.v.setScene(withNormals(), { incremental: { budgetMs: 8 }, release: { normals: true } });
+    w.v.fit(false);
+    bake(w);
+    lose(w);
+    restore(w);
+    expect(w.r.uploading).toBe(true);
+    return { w, keep: withNormals() };
+  }
+  const normalsOf = (keep: Scene3d, id: string): { normals: Float32Array } => ({ normals: keep.meshes.find((m) => m.id === id)!.normals as Float32Array });
+  /** 들지 않은 뷰어: 되찾은 장면을 한 걸음에 다 올린 뒤 다시 받을 배열을 준다 */
+  function refRestored(): W {
+    const { w, keep } = restored();
+    expect(w.r.uploadSome(Infinity)).toBe(true);
+    expect(w.r.mgHold.length).toBe(0);
+    for (const m of w.v.restoreNeed!.meshes) expect(w.v.restoreMeshArrays(m.id, normalsOf(keep, m.id))).toBe(true);
+    bake(w);
+    return w;
+  }
+  /** 몫 0으로 한 걸음에 그물 하나씩(시계와 상관없게 멈춘다) */
+  function stepTo(w: W, upto: number): void {
+    vi.spyOn(performance, 'now').mockReturnValue(1000);
+    while (w.r.mgHold.length + w.r.meshes.length < upto) w.r.uploadSome(0);
+    vi.restoreAllMocks();
+  }
+  const expectEnd = (w: W, ref: W): void => {
+    expect(w.r.mgHold.length).toBe(0);
+    expect(w.r.mgLight).toBe(0);
+    expect(w.r.meshes.some((r) => r.light)).toBe(false);
+    expect(w.r.meshes.map((r) => r.src.id)).toEqual(ref.r.meshes.map((r) => r.src.id));
+    expect(w.v.stats.merged.groups).toBe(ref.v.stats.merged.groups);
+    expect(w.v.stats.merged.meshes).toBe(ref.v.stats.merged.meshes);
+    expect(w.v.stats.drawCalls).toBe(ref.v.stats.drawCalls);
+    expect(w.gl.liveBuffers).toBe(ref.gl.liveBuffers);
+    expect(liveVaos(w.gl)).toBe(liveVaos(ref.gl));
+    expect(shot(w)).toEqual(shot(ref));
+  };
+
+  it('restoreMeshArrays가 들고 있는 그물(놓은 법선을 기다리는 그물 버퍼 기록)을 받으면 그 그물에 올리고, 끝 그림·GL 객체 수가 들지 않은 뷰어와 같다', () => {
+    const ref = refRestored();
+    const { w, keep } = restored();
+    stepTo(w, 40);
+    expect(w.r.meshes.length).toBe(0);
+    expect(w.r.mgHold.length).toBe(40);
+    expect(w.r.mgHold[24]!.light).toBe(false);
+    expect(w.r.mgLight).toBe(39);
+    // 들고 있는 기록의 놓은 꼴도 다시 받을 것으로 센다
+    const need = w.v.restoreNeed!.meshes.map((m) => m.id);
+    expect(need).toContain('b24');
+    expect(w.v.restoreMeshArrays('b24', normalsOf(keep, 'b24'))).toBe(true);
+    expect(w.r.mgHold.length).toBe(0);
+    expect(w.r.mgLight).toBe(0);
+    expect(w.r.meshes.length).toBe(40);
+    expect(w.r.meshes[24]!.src.id).toBe('b24');
+    expect(w.v.restoreNeed!.meshes.map((m) => m.id)).not.toContain('b24');
+    expect(w.v.restoreMeshArrays('b24', normalsOf(keep, 'b24'))).toBe(false);
+    for (const id of need) if (id !== 'b24') expect(w.v.restoreMeshArrays(id, normalsOf(keep, id))).toBe(true);
+    bake(w);
+    expectEnd(w, ref);
+  });
+
+  it('들고 있는 빛 기록에 restoreMeshArrays를 부르면(받을 것이 없다) false이고, 끝 그림·GL 객체 수가 같다', () => {
+    const ref = refRestored();
+    const { w, keep } = restored();
+    stepTo(w, 20);
+    expect(w.r.mgHold.length).toBe(20);
+    expect(w.r.mgHold[3]!.light).toBe(true);
+    expect(w.v.restoreMeshArrays('b3', { normals: normalsOf(keep, 'b24').normals })).toBe(false);
+    expect(w.r.meshes.some((r) => r.light)).toBe(false);
+    for (const m of w.v.restoreNeed!.meshes) expect(w.v.restoreMeshArrays(m.id, normalsOf(keep, m.id))).toBe(true);
+    bake(w);
+    expectEnd(w, ref);
+  });
+
+  it('들고 있는 동안 묶음 변종을 못 만들면(연결 실패) 다음 걸음이 그물 버퍼로 돌려 예외 없이 끝까지 올리고 끈 뷰어와 같은 그림', () => {
+    const off = make();
+    off.v.setRenderOptions({ merging: false });
+    off.v.setScene(scene(N));
+    off.v.fit(false);
+    bake(off);
+    const w = make();
+    // 묶음 변종(정점 속성 a_item을 쓰는 프로그램)만 연결에 실패한다
+    const link = w.gl.getProgramParameter.bind(w.gl) as (p: unknown, pname?: number) => boolean;
+    (w.gl as unknown as { getProgramParameter: (p: { shaders: { src: string }[] }, pname?: number) => boolean }).getProgramParameter = (p, pname) => {
+      if (pname !== 0x91b1 && p.shaders.some((s) => s.src.includes('a_item'))) return false;
+      return link(p, pname);
+    };
+    w.v.setScene(scene(N), { incremental: { budgetMs: 8 } });
+    w.v.fit(false);
+    // 첫 단위를 굽고 다음 단위의 빛 기록을 든다(아직 그리지 않아 변종을 찾지 않았다)
+    stepTo(w, MERGE_UPLOAD_MESHES + 30);
+    expect(w.r.meshes.length).toBe(MERGE_UPLOAD_MESHES);
+    expect(w.r.mgHold.length).toBe(30);
+    // 부를 때마다 몫을 넘기는 시계 — 프레임마다 그물 하나씩
+    let t = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => (t += 1000));
+    // 이 프레임의 그리기가 변종 실패를 알게 된다(그동안 기록은 아직 들고 있다)
+    w.v.renderNow();
+    expect(w.r.mgHold.length).toBeGreaterThan(0);
+    // 다음 걸음이 그물 버퍼로 돌린다
+    w.v.renderNow();
+    expect(w.r.mgHold.length).toBe(0);
+    expect(w.r.mgLight).toBe(0);
+    expect(w.r.meshes.some((r) => r.light)).toBe(false);
+    vi.restoreAllMocks();
+    bake(w);
+    expect(w.r.uploading).toBe(false);
+    expect(w.r.mgHold.length).toBe(0);
+    expect(w.r.meshes.map((r) => r.src.id)).toEqual(off.r.meshes.map((r) => r.src.id));
+    expect(w.v.stats.merged.pending).toBe(0);
+    expect(shot(w)).toEqual(shot(off));
+  });
+});
