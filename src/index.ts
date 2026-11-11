@@ -62,6 +62,7 @@ export type {
   SectionPlane,
   SectionState,
   SegmentHighlightOptions,
+  MergeWaitResult,
   SetMeshOptions,
   SnapshotOptions,
   TrianglesNearOptions,
