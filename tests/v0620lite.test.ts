@@ -165,7 +165,7 @@ describe('0.62.0 이동뿐 꼴 셈', () => {
     expect(m).toContain('uniform mat4 u_mvp0;\nuniform mat4 u_mv0;\nuniform mat3 u_nmat0;\nuniform mat4 u_shadow0;\n');
     expect(m).toContain('  int k = u_instBase + int(a_item) * 3 + j;\n');
     expect(m).toContain('  mat4 u_mvp = mat4(u_mvp0[0], u_mvp0[1], u_mvp0[2], instAt(0));\n');
-    expect(m).toContain('  mat4 u_mv = mat4(u_mv0[0], u_mv0[1], u_mv0[2], vec4(m3.xyz, 1.0));\n  mat3 u_nmat = u_nmat0;\n  vec4 u_color = instAt(2);\n  float u_vcol = m3.w;\n');
+    expect(m).toContain('  mat4 u_mv = mat4(u_mv0[0], u_mv0[1], u_mv0[2], vec4(m3.xyz, 1.0));\n  mat3 u_nmat = u_nmat0;\n  vec4 u_color = instAt(2);\n  float fl = m3.w;\n');
     expect(m).toContain('  mat4 u_shadowM = mat4(u_shadow0[0], u_shadow0[1], u_shadow0[2], instAt(3));\n');
     expect(m).toContain('  gl_Position = u_mvp * vec4(a_pos, 1.0);\n  v_vpos = (u_mv * vec4(a_pos, 1.0)).xyz;\n');
     expect(m).not.toContain('instAt(4)');

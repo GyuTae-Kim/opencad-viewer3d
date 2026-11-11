@@ -90,7 +90,8 @@ describe('0.52.0 mergeShader', () => {
     const m = mergeShader(withDefines(MESH_VS, 'INST', 'MERGE'), 'mesh');
     expect(m).toContain('layout(location=5) in float a_item;');
     expect(m).toContain('int k = u_instBase + int(a_item) * 12 + j;');
-    expect(m).toContain('  vec4 u_color = instAt(11);\n  float u_vcol = instAt(8).w;\n');
+    // 0.62.0 정점 색 쓰기 깃발에 강조 2를 더한다(깃발을 풀어 v_hi로 — 조각 셰이더 mergeFrag)
+    expect(m).toContain('  vec4 u_color = instAt(11);\n  float fl = instAt(8).w;\n  float u_vcol = fl > 1.5 ? fl - 2.0 : fl;\n  v_hi = fl > 1.5 ? 1.0 : 0.0;\n');
     expect(m).not.toContain('uniform vec4 u_color;');
     expect(m).not.toContain('uniform float u_vcol;');
     expect(m).not.toContain('gl_InstanceID * 11');

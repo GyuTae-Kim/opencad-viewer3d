@@ -112,9 +112,9 @@ describe('0.61.0 묶음 자리 자료 저장소', () => {
     step(on, off, 'still', () => undefined, 'zero');
     step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0), 'some');
     step(on, off, 'still-2', () => undefined, 'zero');
-    // 강조: 면 자리는 그대로(강조는 구간 균일 변수), 굵은 윤곽선 구간(0.61.0 — 묶어 그린다)의 선 색만 그 그물 윤곽선 자리에.
+    // 강조: 굵은 윤곽선 구간(0.61.0 — 묶어 그린다)의 선 색은 그 그물 윤곽선 자리에, 0.62.0 강조 깃발은 그 그물 면 자리에(0.61.0은 면 자리 그대로 — 강조는 구간 균일 변수).
     // 쓴 자리 텍셀만 올린다(윤곽선 자리 6·면 자리 12 — 한 줄이 안 되는 틈으로 이어진 자리는 그 사이도 함께)
-    step(on, off, 'hover', (w) => w.v.highlight(['b3']), [6, 6]);
+    step(on, off, 'hover', (w) => w.v.highlight(['b3']), [18, 18]);
     step(on, off, 'hover-2', (w) => w.v.highlight(['b4', 'b5', 'b77', 'b300']), rows(10));
     step(on, off, 'hide', (w) => w.v.setItemVisible('b10', false), 'zero');
     step(on, off, 'group-hide', (w) => w.v.setGroupVisible('g1', false), 'zero');

@@ -110,8 +110,10 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     const shadowOn = /^#define SHADOW$/m.test(vs), clipOn = /^#define CLIP$/m.test(vs);
     const lite = merge && MSHIFT.test(vs);
     const stride = inst ? ((U.get('u_instStride')?.[0] as number | undefined) ?? (lite ? 3 : merge ? 12 : 11)) : 0;
-    // 정점 색 쓰기(u_vcol)는 묶음 변종에서 자리 자료(법선 행렬 첫 텍셀 w — 이동뿐 꼴은 시점 · 모형 3열 w) — 정점마다 셰이더가 고르는 색(v_col = u_vcol > 0.5 ? a_col : u_color)으로 견준다
-    const flags = JSON.stringify([U.get('u_hasNrm'), f32(U.get('u_tint')), U.get('u_alpha'), U.get('u_ortho'), U.get('u_flipFace')]);
+    // 정점 색 쓰기(u_vcol)는 묶음 변종에서 자리 자료(법선 행렬 첫 텍셀 w — 이동뿐 꼴은 시점 · 모형 3열 w) — 정점마다 셰이더가 고르는 색(v_col = u_vcol > 0.5 ? a_col : u_color)으로 견준다.
+    // 0.62.0 그 깃발에 강조 2를 더한다 — 강조 섞기 몫은 조각 셰이더가 읽는 값(u_tint.a × 강조 깃발)으로 정점마다 견준다(그물마다 그릴 때는 u_tint.a 그대로)
+    const flags = JSON.stringify([U.get('u_hasNrm'), U.get('u_alpha'), U.get('u_ortho'), U.get('u_flipFace')]);
+    const tint = f32(U.get('u_tint')) ?? [0, 0, 0, 0];
     const vl = verts();
     for (let n = 0; n < nInst; n++) {
       const tri: string[] = [];
@@ -122,7 +124,10 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const mv = lite ? cols012(U, 'u_mv0', at(1)) : inst ? [...at(4), ...at(5), ...at(6), ...at(7)] : f32(U.get('u_mv'))!;
         const nm = lite ? f32(U.get('u_nmat0'))! : inst ? [...at(8).slice(0, 3), ...at(9).slice(0, 3), ...at(10).slice(0, 3)] : f32(U.get('u_nmat'))!;
         const col = lite ? at(2) : merge ? at(11) : f32(U.get('u_color'));
-        const vcol = lite ? at(1)[3]! : merge ? at(8)[3]! : ((U.get('u_vcol')?.[0] as number | undefined) ?? 0);
+        const fl = lite ? at(1)[3]! : merge ? at(8)[3]! : ((U.get('u_vcol')?.[0] as number | undefined) ?? 0);
+        const hi = merge && fl > 1.5;
+        const vcol = hi ? fl - 2 : fl;
+        const tintA = merge ? Math.fround(tint[3]! * (hi ? 1 : 0)) : tint[3]!;
         const P = attr(d.attribs.get(0), v, 3)!;
         const N = attr(d.attribs.get(1), v, 3);
         const C = attr(d.attribs.get(2), v, 4) ?? [0, 0, 0, 1];
@@ -130,7 +135,7 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const sm = !shadowOn ? null : lite ? cols012(U, 'u_shadow0', at(3)) : inst ? [...at(s0), ...at(s0 + 1), ...at(s0 + 2), ...at(s0 + 3)] : f32(U.get('u_shadowM'));
         const cp = !clipOn ? null : inst ? at(stride - 1) : f32(U.get('u_clip'));
         const extra = [sm ? mul4(sm, P[0]!, P[1]!, P[2]!) : null, cp ? cp[0]! * P[0]! + cp[1]! * P[1]! + cp[2]! * P[2]! + cp[3]! : null];
-        tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, vcol > 0.5 ? C : col, ...extra]));
+        tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, vcol > 0.5 ? C : col, ...extra, [...tint.slice(0, 3), tintA]]));
         if (tri.length === (mode === 'TRIANGLES' ? 3 : 2)) {
           out.push(`mesh|${mode}|${state}|${flags}|${tri.join(';')}`);
           tri.length = 0;

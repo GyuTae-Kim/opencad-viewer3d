@@ -477,24 +477,34 @@ export interface FrameMarks {
 
 /**
  * 0.60.0 덩이를 예외 그물(숨김·잘라냄 — withHi면 강조도) 사이 구간으로: 구간마다 add, 예외 그물은 보이면 fn(그물마다 길 그대로).
- * 예외 번호(오름차순·겹침 없음)는 그리기마다 한 번 합친다
+ * 예외 번호(오름차순·겹침 없음)는 그리기마다 한 번 합친다. 0.62.0 withHi가 아니면 구간 안 강조한 그물 번호(오름차순 — 없으면 null)를 add에 함께 준다(면 구간의 강조 깃발)
  */
-export function blockRuns(k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number) => void, m: FrameMarks): void {
+export function blockRuns(k: MergeBlock, fn: (r: MeshRec) => void, withHi: boolean, add: (a: number, b: number, hl: number[] | null) => void, m: FrameMarks): void {
   if (k.ex !== m.frame) {
     k.ex = m.frame;
     const cutL = k.cut === m.frame ? k.cutL : null;
     k.exA = !cutL ? k.hid : !k.hid.length ? cutL : mergeSorted(k.hid, cutL);
-    k.exB = m.hi !== 0 && k.hi === m.hi ? mergeSorted(k.exA, k.hiL.slice().sort((p, q) => p - q)) : k.exA;
+    k.hs = m.hi !== 0 && k.hi === m.hi ? k.hiL.slice().sort((p, q) => p - q) : null;
+    k.exB = k.hs ? mergeSorted(k.exA, k.hs) : k.exA;
   }
   const R = k.g.recs;
+  const hs = withHi ? null : k.hs;
+  let p = 0;
+  const span = (a: number, b: number): void => {
+    if (!hs) return add(a, b, null);
+    while (p < hs.length && hs[p]! < a) p++;
+    const q = p;
+    while (p < hs.length && hs[p]! < b) p++;
+    add(a, b, p > q ? hs.slice(q, p) : null);
+  };
   let s = k.a;
   for (const x of withHi ? k.exB : k.exA) {
-    if (x > s) add(s, x);
+    if (x > s) span(s, x);
     const r = R[x]!;
     if (r.visAt === m.vis) fn(r);
     s = x + 1;
   }
-  if (s < k.b) add(s, k.b);
+  if (s < k.b) span(s, k.b);
 }
 
 /** 0.60.0 묶음 그물마다 면 색·정점 색 쓰기(렌더러 colOf·vcolOf와 같은 값 — 겉모습이 없을 때). flat = 숨은 선 모드 바탕 채움 색, mono = 단색 모드 색 */
@@ -584,24 +594,40 @@ export class RunList {
   ops: MergeOp[] = [];
   private u: MergeRun | null = null;
 
+  /**
+   * hiAmt(0.62.0 면 차례 — 강조를 자리 깃발로): null이 아니면 tint > 0인 그물은 구간을 끊지 않고 강조 번호(hl)로 적고, 구간 균일 변수 tint는 늘 hiAmt
+   * (면 색 차례 0.5, 깊이만 그리는 차례 0 — 깃발은 같게 써 두 차례가 같은 자리를 읽는다). null이면 0.61.0처럼 tint가 다르면 구간을 끊는다(윤곽선)
+   */
+  constructor(readonly hiAmt: number | null = null) {}
+
   /** 묶음 그물 하나(w = 윤곽선 굵기 — 강조한 그물 2) */
   add(r: MeshRec, col: Rgba, vcol: boolean, tint: number, alpha: number, w = 1): void {
     const g = r.mg!, i = r.mi!;
     const u = this.u;
-    if (u && u.g === g && u.b === i && u.tint === tint && u.alpha === alpha && u.w === w) {
+    const mix = this.hiAmt !== null, t = mix ? this.hiAmt! : tint;
+    if (u && u.g === g && u.b === i && u.tint === t && u.alpha === alpha && u.w === w) {
       if (u.sh) own(u);
       u.b++;
       u.cols.push(col);
       u.vc.push(vcol);
+      if (mix && tint > 0) (u.hl ??= []).push(i);
       return;
     }
-    this.ops.push((this.u = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint, alpha, w }));
+    this.ops.push((this.u = { g, a: i, b: i + 1, base: 0, cols: [col], vc: [vcol], o: i, sh: false, tint: t, alpha, w, hl: !mix ? undefined : tint > 0 ? [i] : null }));
   }
 
-  /** 깨끗한 덩이 [a, b)(그물마다 add를 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다) */
-  range(g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number): void {
+  /**
+   * 깨끗한 덩이 [a, b)(그물마다 add를 부른 것과 같은 구간 — cols·vc는 묶음 그물 번호로 찾는 묶음 전체 목록이라 늘이기만 하면 고치지 않는다).
+   * hl = 그 안 강조한 그물 번호(오름차순 — hiAmt가 있는 목록에서만)
+   */
+  range(g: MergeGroup, a: number, b: number, cols: Rgba[], vc: boolean[], tint: number, alpha: number, hl: number[] | null = null): void {
     const u = this.u;
-    if (u && u.g === g && u.b === a && u.tint === tint && u.alpha === alpha && u.w === 1) {
+    const t = this.hiAmt ?? tint;
+    if (u && u.g === g && u.b === a && u.tint === t && u.alpha === alpha && u.w === 1) {
+      if (hl) {
+        if (u.hl) for (const x of hl) u.hl.push(x);
+        else u.hl = hl;
+      }
       if (u.sh && u.cols === cols && u.vc === vc) {
         u.b = b;
         return;
@@ -614,7 +640,7 @@ export class RunList {
       u.b = b;
       return;
     }
-    this.ops.push((this.u = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint, alpha, w: 1 }));
+    this.ops.push((this.u = { g, a, b, base: 0, cols, vc, o: 0, sh: true, tint: t, alpha, w: 1, hl: this.hiAmt === null ? undefined : hl }));
   }
 
   /** 그물마다 그리기 하나(앞 구간은 더 늘이지 않는다 — 뒤 그물이 이 그리기를 앞지르지 않게) */
@@ -923,10 +949,18 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
     const L = lite(op.g, look);
     const p = L ? pL : pF;
     if (!ok || !p) {
+      // 그물마다(강조 깃발이 있는 구간은 강조한 그물만 tint — 그물마다 그릴 때의 강조 섞기와 같다)
+      const hl = op.hl;
+      let q = 0;
       for (let i = op.a; i < op.b; i++) {
         const r = op.g.recs[i]!;
+        let t = op.tint;
+        if (hl !== undefined) {
+          while (hl && q < hl.length && hl[q]! < i) q++;
+          if (!hl || hl[q] !== i) t = 0;
+        }
         c.use(plain(r));
-        c.drawParts(r, op.cols[i - op.o]!, op.alpha, op.tint, op.g.cull);
+        c.drawParts(r, op.cols[i - op.o]!, op.alpha, t, op.g.cull);
       }
       continue;
     }
@@ -1507,12 +1541,20 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
     if (!look) shiftsOf(g);
     const org = look ? null : g.org!, sft = look ? null : g.sft!;
     if (fresh && u.b > u.a) dirty(D, base + u.a * stride, (u.b - u.a) * stride);
+    const hl = u.hl;
+    let p = 0;
     for (let i = u.a; i < u.b; i++) {
       const col = cols[i - o0]!, vcol = vcs[i - o0]!;
+      // 0.62.0 깃발 = 정점 색 쓰기 + 강조 2(강조 섞기는 셰이더가 구간 균일 변수 몫에 곱한다)
+      let fl = vcol ? 1 : 0;
+      if (hl) {
+        while (p < hl.length && hl[p]! < i) p++;
+        if (hl[p] === i) fl += 2;
+      }
       const o = (base + i * stride) * 4;
       const lm = look ? c.mm(recs[i]!) : undefined;
       if (!fresh) {
-        if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 35] === (vcol ? 1 : 0) && d[o + 44] === F(col[0]) && d[o + 45] === F(col[1]) && d[o + 46] === F(col[2]) && d[o + 47] === F(col[3]))
+        if (at[i] === gen && (!look || mdl[i] === lm) && d[o + 35] === fl && d[o + 44] === F(col[0]) && d[o + 45] === F(col[1]) && d[o + 46] === F(col[2]) && d[o + 47] === F(col[3]))
           continue;
         dirty(D, base + i * stride, stride);
       }
@@ -1530,6 +1572,7 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
         model = look ? lm : recs[i]!.model;
         if (!model || !shiftOnly(model)) {
           faceTexels(h, f, model, col, vcol, d, o, stride, shadow, clip);
+          d[o + 35] = fl;
           continue;
         }
         b0 = model[12]!;
@@ -1568,7 +1611,7 @@ export function faceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly MergeRun[
       d[o + 29] = t[1]!;
       d[o + 30] = t[2]!;
       d[o + 31] = t[3]!;
-      d[o + 35] = vcol ? 1 : 0;
+      d[o + 35] = fl;
       d[o + 44] = col[0];
       d[o + 45] = col[1];
       d[o + 46] = col[2];
@@ -1745,8 +1788,16 @@ export function liteFaceFill(h: MergeHost, c: MergeDrawCtx, runs: readonly Merge
     shiftsOf(g);
     const org = g.org!, sft = g.sft!, nom = g.nom;
     if (fresh && u.b > u.a) dirty(D, base + u.a * stride, (u.b - u.a) * stride);
+    const hl = u.hl;
+    let p = 0;
     for (let i = u.a; i < u.b; i++) {
-      const col = cols[i - o0]!, fl = vcs[i - o0] ? 1 : 0;
+      const col = cols[i - o0]!;
+      // 깃발 = 정점 색 쓰기 + 강조 2(faceFill과 같다)
+      let fl = vcs[i - o0] ? 1 : 0;
+      if (hl) {
+        while (p < hl.length && hl[p]! < i) p++;
+        if (hl[p] === i) fl += 2;
+      }
       const o = (base + i * stride) * 4;
       if (!fresh) {
         if (at[i] === gen && d[o + 7] === fl && d[o + 8] === F(col[0]) && d[o + 9] === F(col[1]) && d[o + 10] === F(col[2]) && d[o + 11] === F(col[3])) continue;
@@ -1868,6 +1919,20 @@ export function liteLineFill(h: MergeHost, c: MergeDrawCtx, runs: readonly Merge
   }
 }
 
+/** 0.62.0 묶음 그물 자리 깃발 풀기(정점 색 쓰기 0·1 + 강조 2 — 작은 정수라 셈이 정확하다) */
+const FLAGS = '  float u_vcol = fl > 1.5 ? fl - 2.0 : fl;\n  v_hi = fl > 1.5 ? 1.0 : 0.0;\n';
+
+/**
+ * 0.62.0 묶어 그리기 그물 변종(MERGE)의 조각 셰이더: 강조 섞기 몫(구간 균일 변수 u_tint.a — 면 차례 0.5)에 그물마다 강조 깃발 v_hi(0·1)를 곱한다.
+ * 그물마다 그릴 때 강조한 그물은 u_tint.a = 0.5, 아닌 그물은 0이라 섞는 몫이 같은 값이다(0.5·1 = 0.5, 0.5·0 = 0). 0.61.0까지는 강조 섞기가 구간 균일 변수라
+ * 강조한 그물마다 면 구간이 둘로 끊겼다(8만 강조 825개 — 면 그리기 1,650번 남짓)
+ */
+export function mergeFrag(fs: string): string {
+  let s = replaceOnce(fs, 'uniform vec4 u_tint;\n', 'uniform vec4 u_tint;\nflat in float v_hi;\n');
+  s = replaceOnce(s, '  c = mix(c, u_tint.rgb, u_tint.a);\n', '  c = mix(c, u_tint.rgb, u_tint.a * v_hi);\n');
+  return s;
+}
+
 /** 한 번만 나오는 글을 바꾼다(없거나 둘 이상이면 예외 — 바꿀 자리를 잘못 찾지 않게) */
 function replaceOnce(src: string, from: string, to: string): string {
   const i = src.indexOf(from);
@@ -1896,8 +1961,10 @@ export function mergeShader(vs: string, kind: 'mesh' | 'line'): string {
   let s = replaceOnce(vs, 'uniform int u_instBase;\n', `uniform int u_instBase;\nlayout(location=5) in float a_item;\n${decl}`);
   s = replaceOnce(s, 'uniform vec4 u_color;\n', '');
   if (kind === 'mesh') {
-    // 그물: 정점 색 쓰기(u_vcol)도 자리마다(법선 행렬 첫 텍셀의 w — 정점 색이 있는 그물과 없는 그물을 한 묶음에)
+    // 그물: 정점 색 쓰기(u_vcol)도 자리마다(법선 행렬 첫 텍셀의 w — 정점 색이 있는 그물과 없는 그물을 한 묶음에).
+    // 0.62.0 그 깃발에 강조 2를 더한다(깃발 0~3 — v_hi로 조각 셰이더에, mergeFrag가 강조 섞기 몫에 곱한다)
     s = replaceOnce(s, 'uniform float u_vcol;\n', '');
+    s = replaceOnce(s, 'out vec4 v_col;\n', 'out vec4 v_col;\nflat out float v_hi;\n');
     s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * 11 + j;\n', `  int k = u_instBase + int(a_item) * ${lite ? 3 : 12} + j;\n`);
     // 0.53.0 그림자(SHADOW)·단면 하나(CLIP): 자리 텍셀 수 u_instStride(12 + 4 + 1)로 읽고, 그림자 행렬은 색 텍셀 뒤 12~15(단면 평면은 인스턴싱과 같이 맨 끝)
     s = replaceOnce(s, '  int k = u_instBase + gl_InstanceID * u_instStride + j;\n', '  int k = u_instBase + int(a_item) * u_instStride + j;\n');
@@ -1910,12 +1977,12 @@ export function mergeShader(vs: string, kind: 'mesh' | 'line'): string {
       ? replaceOnce(
           s,
           '  mat4 u_mvp = mat4(instAt(0), instAt(1), instAt(2), instAt(3));\n  mat4 u_mv = mat4(instAt(4), instAt(5), instAt(6), instAt(7));\n  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n',
-          '  mat4 u_mvp = mat4(u_mvp0[0], u_mvp0[1], u_mvp0[2], instAt(0));\n  vec4 m3 = instAt(1);\n  mat4 u_mv = mat4(u_mv0[0], u_mv0[1], u_mv0[2], vec4(m3.xyz, 1.0));\n  mat3 u_nmat = u_nmat0;\n  vec4 u_color = instAt(2);\n  float u_vcol = m3.w;\n',
+          `  mat4 u_mvp = mat4(u_mvp0[0], u_mvp0[1], u_mvp0[2], instAt(0));\n  vec4 m3 = instAt(1);\n  mat4 u_mv = mat4(u_mv0[0], u_mv0[1], u_mv0[2], vec4(m3.xyz, 1.0));\n  mat3 u_nmat = u_nmat0;\n  vec4 u_color = instAt(2);\n  float fl = m3.w;\n${FLAGS}`,
         )
       : replaceOnce(
           s,
           '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n',
-          '  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n  vec4 u_color = instAt(11);\n  float u_vcol = instAt(8).w;\n',
+          `  mat3 u_nmat = mat3(instAt(8).xyz, instAt(9).xyz, instAt(10).xyz);\n  vec4 u_color = instAt(11);\n  float fl = instAt(8).w;\n${FLAGS}`,
         );
   } else {
     // 0.60.0 단면 하나(MCLIP): 자리마다 로컬 평면을 7번째 텍셀에서(같은 이름의 전역 변수 — 아래 식은 그대로, 굵은 선은 늘 있던 u_clip, 가는 선은 CLIP의 u_clip)
