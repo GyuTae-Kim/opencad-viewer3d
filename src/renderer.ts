@@ -680,6 +680,9 @@ export interface MergeGroup {
    */
   org?: Float64Array;
   sft?: Uint8Array;
+  /** 0.62.0 그물 모형이 모두 이동뿐인지(sft 1·2이거나 모형이 없다 — nom. 겉모습이 없으면 자리 자료를 MSHIFT 꼴로: 면 3·선 2텍셀) */
+  mov?: boolean;
+  nom?: Uint8Array;
   fc?: { cols: Rgba[]; vc: boolean[] };
   nv?: boolean[];
   cc?: Record<string, { k: string; cols: Rgba[] }>;

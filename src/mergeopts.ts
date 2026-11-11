@@ -36,6 +36,12 @@ export const MERGE_DEAD_RATIO = 0.25;
 export const MERGE_MESH_TEXELS = 12;
 export const MERGE_LINE_TEXELS = 6;
 /**
+ * 0.62.0 이동뿐인 묶음(모든 그물 모형이 원점만 옮긴 것 — 겉모습이 없을 때)의 자리 텍셀 수(셰이더 MSHIFT 변종): 면 3(시점 투영 · 모형 3열·시점 · 모형 3열과 깃발·색),
+ * 선 2(시점 투영 · 모형 3열·색). 0~2열·법선 행렬은 그물마다 같아 그리기마다 균일 변수로 한 번 보낸다(그림자 +1 — 3열, 안개 +1 — z 행 끝 칸, 단면 +1 — 로컬 평면)
+ */
+export const MERGE_LITE_MESH_TEXELS = 3;
+export const MERGE_LITE_LINE_TEXELS = 2;
+/**
  * 0.57.0 조각을 이미 받은 페이지에서 나눠 올리는 장면을 setScene 안에서 곧 훑을 그물 수 상한(이 수까지는 훑기가 짧다 — 이 컴퓨터 가운데값 1만 4 ms·1만 6,384개 6.6 ms, 첫 걸음부터 그물마다 GL 객체 없이 곧장 굽는다).
  * 더 큰 장면은 0.54.0처럼 첫 그림 뒤 걸음의 몫 안에서 훑는다(8만 그물 훑기가 setScene을 50~90 ms 붙잡아 첫 그림을 늦췄다)
  */
