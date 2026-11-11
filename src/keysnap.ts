@@ -11,6 +11,7 @@
  */
 import type { SnapAxis } from './inference';
 import type { SnapKind } from './types';
+import type { MeasureFormat } from './viewer';
 
 /** 키보드 붙잡기 할 일: 커서 옮기기 넷, 다음·앞 후보, 찍기(고르기), 커서 끄기 */
 export type KeySnapAction = 'left' | 'right' | 'up' | 'down' | 'next' | 'prev' | 'commit' | 'exit';
@@ -313,6 +314,28 @@ export interface KeySnapNumberCore {
  * 돌려준 글을 그 자리에 그대로 넣는다(거리도 — 코어가 단위를 붙이지 않는다). 글이 아니거나 빈 글·예외면 코어 기본 글(core.text)
  */
 export type KeySnapNumberFn = (value: number, core: KeySnapNumberCore) => string | null | undefined;
+
+/**
+ * 0.58.0 키보드 알림의 앱 수 꼴을 측정 거리 글상자에도 쓰는 글 꼴(Viewer3dOptions.formatMeasure·setMeasureFormat에 준다 — 주지 않으면 지금과 같은 글이다): 코어 기본 글 틀에
+ * 수 자리만 fn으로 바꾼다(거리 'distance'·차 'dx'·'dy'·'dz' — 키보드 알림과 같은 종류·같은 코어 글. 글이 아니거나 빈 글·예외면 코어 글이라 fn이 늘 그러면 core.lines와 글자까지 같다).
+ * 내장 두 점 측정은 두 줄, 글을 주지 않은 거리 덧그림은 거리 한 줄
+ */
+export function measureFormatOf(fn: KeySnapNumberFn): MeasureFormat {
+  return (m, core) => {
+    const num = (v: number, kind: KeySnapNumberKind): string => {
+      const text = kind === 'distance' && core.unit ? `${core.num(v)} ${core.unit}` : core.num(v);
+      try {
+        const s = fn(v, { kind, text, digits: core.digits, unit: core.unit });
+        if (typeof s === 'string' && s.trim()) return s;
+      } catch {
+        // 앱 함수 오류 — 코어 글
+      }
+      return text;
+    };
+    if (core.source === 'annotation') return [num(m.distance, 'distance')];
+    return [`거리 ${num(m.distance, 'distance')}`, `ΔX ${num(m.dx, 'dx')}  ΔY ${num(m.dy, 'dy')}  ΔZ ${num(m.dz, 'dz')}`];
+  };
+}
 
 /**
  * 세계 점 글: 'X 1, Y 2, Z 3'(num = 수 꼴 — 뷰어는 측정 글과 같은 자릿수, 0.47.0 msgs = 글 틀, 0.53.0 글 함수도).

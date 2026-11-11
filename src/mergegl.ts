@@ -12,6 +12,7 @@
  * 다 올린 뒤에는 mergeStep이 planLoose와 같은 셈으로) 받기를 건다. 받기가
  * MERGE_KIT_WAIT_MS 안에 끝나지 않으면 그 페이지는 기다리지 않고 그물마다 이어 올린다(늦게 오면 그때부터 굽고, 기다리지 않고 올린 그물은 다 올린 뒤 planLoose가 묶는다).
  * 0.57.0: 곧장 굽기(direct·run·feed)·그리기 구간 그리기(drawFaces·drawEdges)·묶음 상태 지우기(free·leave·step)도 이 조각으로 옮겼다 — 렌더러에는 켤지 정하는 훑기·셈(mergeScan·mergeSrcOf)과 조각을 부르는 얇은 길만 둔다
+ * 0.58.0: 곧장 구울 빛 기록을 걸음 사이에 들고 있다(mgHold — run·drain·unhold). 묶지 않을 그물이 끼어도, 걸음 몫을 넘어도 그물 버퍼로 돌아가지 않고, 굽기는 걸음 앞쪽에서 시작한다
  */
 import type { AttribFormat } from './attribs';
 import type { ViewFrame } from './camera';
@@ -47,6 +48,7 @@ export interface MergeHost {
   mgWait: MeshRec[];
   mgWaitVerts: number;
   mgLight: number;
+  mgHold: MeshRec[];
   mgDirty: boolean;
   readonly mgOff: boolean;
   mgScan: object | null;
@@ -192,27 +194,63 @@ export function direct(h: MergeHost, m: Mesh3d): boolean {
 }
 
 /**
- * 0.57.0 나눠 올리는 걸음에서 묶음 하나가 찰 때까지 잇는다(direct인 그물 — 빛 기록을 만들어 기다림에 넣고 단위가 차면 곧 굽는다, 이 함수 안에서 끝나므로 걸음 사이에 빛 기록이 남지 않는다).
- * 사이의 묶지 않을 그물은 작고 몫이 남았으면 함께(그물마다 버퍼 — 묶음을 그만큼 일찍 끊지 않게), 몫을 넘었거나 조각 올리기를 탈 크기면 지금까지의 빛 기록을 그물 버퍼로 바꾸고 돌아간다
- * (0.56.0처럼 다음 걸음에 이어 기다린다 — 묶음 나누기가 같다)
+ * 0.58.0 mgHold의 맨 앞부터 구웠거나 그물 버퍼가 된 기록을 보이는 목록(meshes)으로 옮긴다. 맨 앞이 아직 빛 기록이면 그대로 둔다 —
+ * 들고 있는 기록은 장면 차례 그대로라, 차례를 지키려면 앞선 빛 기록이 구워질 때까지 뒤의 그물 버퍼 기록도 함께 기다린다
  */
-export function run(h: MergeHost, p: { scene: { meshes: readonly Mesh3d[] }; mi: number }, t0: number, budgetMs: number): void {
+export function drain(h: MergeHost): void {
+  const H = h.mgHold;
+  if (!H.length || H[0]!.light) return;
+  let n = 1;
+  while (n < H.length && !H[n]!.light) n++;
+  for (let i = 0; i < n; i++) h.meshes.push(H[i]!);
+  if (n === H.length) H.length = 0;
+  else H.splice(0, n);
+}
+
+/**
+ * 0.58.0 들고 있던 빛 기록을 모두 그물 버퍼로 돌리고 보이는 목록으로 옮긴다(걸음 사이에 앱이 setMesh·removeMesh·restoreMeshArrays를 부를 때, 묶어 그리기를 끌 때 —
+ * 렌더러의 그물 기록을 찾는 길은 모두 meshes를 본다). 그물들은 기다림에 남아 다음 굽기가 그대로 묶는다(묶음 나누기가 같다)
+ */
+export function unhold(h: MergeHost): void {
+  if (!h.mgHold.length) return;
+  settle(h, h.mgHold);
+  h.gl.bindVertexArray(null);
+  drain(h);
+}
+
+/**
+ * 0.57.0 나눠 올리는 걸음에서 곧장 구울 그물(direct)을 잇는다: 빛 기록을 만들어 기다림에 넣고 단위가 차면 곧 굽는다.
+ * 0.58.0: 빛 기록을 걸음 사이에 들고 있는다(mgHold — 그리기·고르기가 보는 meshes 밖). 0.57.0은 몫을 넘었거나 큰 그물·묶지 않을 그물이 끼면 그때까지의 기록을 그물 버퍼로 돌렸다
+ * (반투명 500개마다 하나로 1만 걸음 안 버퍼 6,523). 이제 몫이 다하면 들고 돌아가고, 다음 걸음이 잇는다. 끼어든 그물은 렌더러의 그물마다 길로 올라가 차례를 지켜 함께 기다린다.
+ * 다음 그물이 굽기를 부를 듯하고 이 걸음 몫을 절반 넘게 썼으면(fresh가 아닐 때) 다음 걸음 처음으로 미룬다(굽기가 걸음 몫 끝에 겹치지 않게 — 버퍼 잡기를 미루는 것과 같은 판단).
+ * 미뤘으면 true(이번 걸음에서 더 올리지 않는다). 다 올리면 남은 기다림을 굽고 들고 있던 기록이 모두 보인다
+ */
+export function run(h: MergeHost, p: { scene: { meshes: readonly Mesh3d[] }; mi: number }, t0: number, budgetMs: number, fresh: boolean): boolean {
   const ms = p.scene.meshes;
+  let m = ms[p.mi]!;
+  let light = direct(h, m);
   for (;;) {
-    const m = ms[p.mi]!;
-    const light = direct(h, m);
+    if (!fresh && willBake(h, m, p.mi + 1 >= ms.length) && performance.now() - t0 > budgetMs / 2) return true;
+    fresh = false;
     const give = h.restoreQ.get(m.id) ?? null;
     h.restoreQ.delete(m.id);
     const r = h.sceneMeshRec(m, { give, light });
-    h.meshes.push(r);
+    (light || h.mgHold.length ? h.mgHold : h.meshes).push(r);
     p.mi++;
     h.mergeOffer(r);
-    if (p.mi >= ms.length) return h.mergeUploadEnd();
-    if (!h.mgLight) return;
-    const next = ms[p.mi]!;
-    if (direct(h, next)) continue;
-    if (!small(next) || performance.now() - t0 >= budgetMs) return settle(h, h.mgWait);
+    if (p.mi >= ms.length) h.mergeUploadEnd();
+    drain(h);
+    if (p.mi >= ms.length || performance.now() - t0 >= budgetMs) return false;
+    m = ms[p.mi]!;
+    light = direct(h, m);
+    if (!light) return false;
   }
+}
+
+/** 0.58.0 다음 그물을 올리면 굽기가 일어날 듯한지(단위가 차거나 장면 끝 — feed·mergeUploadEnd와 같은 셈, 미루는 판단에만 쓴다. 묶음 나누기를 바꾸지 않는다) */
+function willBake(h: MergeHost, next: Mesh3d, last: boolean): boolean {
+  if (!h.mgWait.length) return false;
+  return last || h.mgWait.length + 1 >= MERGE_UPLOAD_MESHES || h.mgWaitVerts + Math.floor(next.positions.length / 3) >= MERGE_UPLOAD_VERTS;
 }
 
 /** 0.54.0 다 올린 장면의 프레임마다 굽기(렌더러 mergeStep — 조각이 있을 때): 살필 것이 있으면 먼저 차례를 정하고 몫(mergeBudgetMs와 지난 그리기 시간 가운데 큰 것 — 적어도 묶음 하나) 안에서 굽는다 */

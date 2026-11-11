@@ -1715,6 +1715,9 @@ let faceKit: FaceKit | null = null;
 let faceKitLoad: Promise<void> | null = null;
 let faceKitFailed = false;
 
+/** 0.58.0 Viewer3d.whenMerged 결과: 'done' 끝남 · 'lost' 기다리는 동안 문맥을 잃음 · 'disposed' 기다리는 동안 뷰어를 없앰 */
+export type MergeWaitResult = 'done' | 'lost' | 'disposed';
+
 export class Viewer3d {
   /**
    * 0.54.0 묶어 그리기 조각(묶음 굽기 코드 — 앱 번들러가 따로 나눈 조각)을 미리 받는다. 받았으면 true, 받지 못했으면 false(그 뒤 이 페이지는 그물마다 그린다).
@@ -2016,6 +2019,8 @@ export class Viewer3d {
   private lostCbs = new Set<() => void>();
   /** 0.29.0 되찾은 뒤 다시 올리기가 다 끝났을 때 알림 */
   private restoreDoneCbs = new Set<() => void>();
+  /** 0.58.0 whenMerged 약속을 푸는 함수들(끝나거나 문맥을 잃거나 뷰어를 없앨 때 — 풀면 비운다) */
+  private mergeWaits: ((r: MergeWaitResult) => void)[] = [];
   /** 0.29.0 문맥을 잃은 뒤 다시 올리기가 아직 끝나지 않았는지(잃는 순간부터 끝 알림까지 — restorePending) */
   private restoreWait = false;
   /** 0.29.0 문맥 복구 알림을 부르는 동안(그 사이 앱이 다시 준 것으로 끝 알림이 먼저 가지 않게) */
@@ -2726,12 +2731,40 @@ export class Viewer3d {
   }
 
   /**
+   * 0.58.0 미룬 올리기·나눠 올리기·묶음 굽기가 끝나면 풀리는 약속(STEP — `stats.merged.pending`을 100 ms마다 살피던 것을 대신한다). 할 일이 없으면 곧 'done'.
+   * - 'done': 올리기가 없고 `stats.merged.pending`이 0이다. 조각 받기가 늦거나('late') 실패해도 그물마다 다 올린 뒤 'done'이다(까닭은 `Viewer3d.mergingState()`). 늦게 온 조각이 그 뒤에 구우면 이 약속과 상관없다
+   * - 'lost': 그 사이 WebGL 문맥을 잃었다(되찾으면 코어가 다시 올린다 — 끝은 onContextRestoreDone)
+   * - 'disposed': 그 사이 뷰어를 없앴다
+   *
+   * 기다리는 동안 장면을 바꾸면 새 장면까지 기다린다. 프레임이 돌아야 끝나므로 탭이 숨어 있으면 그때까지 풀리지 않는다(폴링과 같다). 약속을 기다리기만 하고 그리기는 뷰어가 건다
+   */
+  whenMerged(): Promise<MergeWaitResult> {
+    if (this.disposed) return Promise.resolve('disposed');
+    if (this.lost) return Promise.resolve('lost');
+    if (this.mergeIdle) return Promise.resolve('done');
+    return new Promise((res) => this.mergeWaits.push(res));
+  }
+
+  /** 0.58.0 미룬 올리기·나눠 올리기·굽기 할 일이 없는지(stats.merged.pending은 나눠 올리는 동안 0이라 uploading도 본다) */
+  private get mergeIdle(): boolean {
+    return !this.renderer.uploading && this.renderer.mergePending === 0;
+  }
+
+  /** 0.58.0 whenMerged 약속을 모두 푼다 */
+  private settleMergeWaits(r: MergeWaitResult): void {
+    const list = this.mergeWaits;
+    this.mergeWaits = [];
+    for (const res of list) res(r);
+  }
+
+  /**
    * 뷰어를 없앤다: 입력·관찰·타이머를 풀고 GPU 자료를 지운 뒤 문맥을 놓는다.
    * 장면·BVH·강조 같은 큰 자료의 참조도 놓는다(앱이 뷰어 객체를 들고 있어도 장면 배열이 메모리에 남지 않게). 그 뒤의 호출은 아무것도 하지 않는다.
    */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.settleMergeWaits('disposed');
     this.listenWalkRelease(false);
     this.listenShiftRelease(false);
     this.listenMotion(false);
@@ -8023,6 +8056,7 @@ export class Viewer3d {
       this.finishAnim();
       // 0.29.0: 되찾은 뒤 다시 올리기가 끝날 때까지(onContextRestoreDone·restorePending)
       if (!this.disposed) this.restoreWait = true;
+      this.settleMergeWaits('lost');
       this.renderer.forget();
       if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
@@ -8553,6 +8587,8 @@ export class Viewer3d {
     // 0.42.0 인스턴싱 변종을 아직 번역 중이면(그동안 그물마다 그렸다) 다음 프레임에 다시 그린다 — 다 되면 모아 그린다.
     // 0.52.0 굽기를 기다리는 묶음이 있어도(프레임마다 몫 안에서 굽는다 — 0.54.0 조각을 받는 동안은 걸지 않고 onMergeReady로)
     if (this.renderer.instPending || this.renderer.mergeSteps) this.invalidate();
+    // 0.58.0 미룬 올리기·굽기 끝 알림(whenMerged — 굽기 줄·차례 정하기는 이 그리기가 줄였다)
+    if (this.mergeWaits.length && this.mergeIdle) this.settleMergeWaits('done');
     this.drawOverlay(f);
     if (this.opts.viewCube) this.drawCube();
     this.frameMs = performance.now() - t0;

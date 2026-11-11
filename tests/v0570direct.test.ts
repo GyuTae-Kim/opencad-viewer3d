@@ -3,7 +3,7 @@
  *  - 조각을 받은 뒤 한 번에 올리기·나눠 올리기(훑기가 짧은 장면은 첫 걸음부터): 올리는 동안 GL 버퍼·VAO가 묶음 수만큼만 늘고 끝 그림이 끈 뷰어와 같다
  *  - 큰 장면(MERGE_SCAN_FIRST 초과)의 첫 단위는 첫 그림을 그물마다 그린다(훑기 전 — 묶일지 모른다), 그 뒤는 곧장 굽는다
  *  - 묶음에 못 든 빛 기록(정점 색 반투명·그물 하나뿐인 열쇠)은 그때 그물 버퍼를 만든다
- *  - 빛 기록은 한 동기 구간 안에서만 있다(걸음 사이·그리기가 보지 못한다) — 몫을 넘긴 나눠 올리기는 그물마다 길로 돌아가 묶음 나누기가 같다
+ *  - 빛 기록은 그리기가 보는 목록(meshes)에 들지 않는다 — 0.58.0부터 걸음 사이에는 mgHold에 들고 있고(tests/v0580hold), 묶음 나누기가 같다
  *  - 조각 올리기를 탈 큰 그물이 사이에 있어도 묶음 나누기·끝값이 한 번에 올린 뷰어와 같다
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -47,7 +47,7 @@ const boxes = (n: number, each?: (m: Mesh3d, i: number) => void): Scene3d => ({
 });
 
 type Rec = { light?: boolean; mg?: unknown; vao: unknown; src: Mesh3d };
-type Rend = { uploadSome: (b: number) => boolean; uploading: boolean; meshes: Rec[]; mgLight: number };
+type Rend = { uploadSome: (b: number) => boolean; uploading: boolean; meshes: Rec[]; mgLight: number; mgHold: Rec[] };
 type W = { v: Viewer3d; gl: FakeGL; r: Rend; peak: { buffers: number; vaos: number; reset: () => void } };
 
 /** 살아 있는 GL 버퍼·VAO 수의 가장 큰 값(만들 때마다 — 한 호출 안에서 만들고 지운 것도) */
@@ -119,7 +119,8 @@ describe('0.57.0 곧장 굽기', () => {
     w.peak.reset();
     w.v.setScene(boxes(N), { incremental: { budgetMs: 8 } });
     w.v.fit(false);
-    w.v.renderNow();
+    // 0.58.0 첫 단위가 찰 때까지 몇 걸음 걸릴 수 있다(몫 8 ms를 지킨다 — 시계에 달린 수라 걸음 수는 보지 않는다)
+    for (let i = 0; i < 2000 && !w.v.stats.merged.groups; i++) w.v.renderNow();
     expect(w.v.stats.merged.groups).toBeGreaterThan(0);
     bake(w);
     expect(w.peak.buffers).toBeLessThan(40);
@@ -170,7 +171,7 @@ describe('0.57.0 곧장 굽기', () => {
     expect(shot(w)).toEqual(offShot(() => boxes(N, vary)));
   });
 
-  it('빛 기록은 걸음 사이에 남지 않는다 — 묶지 않을 그물이 낀 장면을 몫 0으로 나눠 올려도 묶음 나누기·끝값이 같다', () => {
+  it('빛 기록은 그리기가 보는 목록에 들지 않는다 — 묶지 않을 그물이 낀 장면을 몫 0으로 나눠 올려도 묶음 나누기·끝값이 같다', () => {
     const N = 3000;
     const vary = (m: Mesh3d, i: number): void => {
       if (i % 5 === 0) m.color = [m.color[0], m.color[1], m.color[2], 0.5];
@@ -183,9 +184,10 @@ describe('0.57.0 곧장 굽기', () => {
     w.v.setScene(boxes(N, vary), { incremental: { budgetMs: 0 } });
     for (let i = 0; i < 40_000 && w.r.uploading; i++) {
       w.r.uploadSome(0);
-      expect(w.r.mgLight).toBe(0);
       expect(w.r.meshes.some((r) => r.light)).toBe(false);
     }
+    expect(w.r.mgLight).toBe(0);
+    expect(w.r.mgHold.length).toBe(0);
     w.v.fit(false);
     bake(w);
     expect(w.v.stats.merged.meshes).toBe(ref.v.stats.merged.meshes);
@@ -196,7 +198,7 @@ describe('0.57.0 곧장 굽기', () => {
     expect(shot(w)).toEqual(shot(ref));
   });
 
-  it('조각 올리기를 탈 큰 그물이 사이에 있어도(빛 기록은 그물 버퍼로 돌아가고 다음 걸음에 잇는다) 끝값·그림이 한 번에 올린 뷰어와 같다', () => {
+  it('조각 올리기를 탈 큰 그물이 사이에 있어도(빛 기록은 들고 있고 큰 그물을 다 채운 뒤 잇는다) 끝값·그림이 한 번에 올린 뷰어와 같다', () => {
     const N = 2400;
     // 색인 220만 개(8 MiB 넘음 — 삼각형은 넓이 0)
     const vary = (m: Mesh3d, i: number): void => {
