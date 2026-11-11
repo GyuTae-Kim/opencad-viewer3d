@@ -336,15 +336,19 @@ function attach(h: MergeHost, r: MeshRec, g: MergeGroup, i: number): void {
   }
   if (r.mg) h.mergeRelease(r);
   else {
-    gl.deleteVertexArray(r.vao);
-    h.vaos.delete(r.vao);
-    if (r.edges)
-      for (const v of [r.edges.wide, r.edges.thin]) {
-        gl.deleteVertexArray(v);
-        h.vaos.delete(v);
-      }
+    // 0.57.0 빛 기록(그물마다 GL 객체를 만들지 않고 곧장 구운 그물)은 지울 VAO가 없다(쓰는 기록 수만 — 버퍼도 없어 놓을 것이 없다)
+    if (!r.light) {
+      gl.deleteVertexArray(r.vao);
+      h.vaos.delete(r.vao);
+      if (r.edges)
+        for (const v of [r.edges.wide, r.edges.thin]) {
+          gl.deleteVertexArray(v);
+          h.vaos.delete(v);
+        }
+    }
     h.release(r.slots);
   }
+  r.light = false;
   r.slots = [];
   r.vao = g.vao;
   r.attrs = g.attrs;

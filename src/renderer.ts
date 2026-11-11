@@ -85,6 +85,7 @@ import {
   MERGE_UPLOAD_MESHES,
   MERGE_UPLOAD_VERTS,
   type MergingOptions,
+  MERGE_SCAN_FIRST,
 } from './mergeopts';
 // 0.54.0: 묶음 나누기·굽기(merge.ts·mergegl.ts)는 값으로 가져오지 않는다 — 묶어 그리기를 켤 장면에서만 import()로 받는 조각(loadMergeKit)
 import type { MergeSrc } from './merge';
@@ -626,7 +627,15 @@ export interface MeshRec {
   vbase?: number;
   /** 0.52.0 장면에서 빠진(바꾸거나 뺀) 기록이면 true(굽기를 기다리던 묶음에서 뺀다) */
   dropped?: boolean;
+  /**
+   * 0.57.0 아직 GL 객체가 없는 기록(곧장 구울 그물 — mergeDirect): vao·attrs의 버퍼 자리는 NO_GL 자리표다. 한 동기 구간(uploadWhole·mergeRun) 안에서만 있고
+   * 구워지면(mergegl attach) 묶음 저장소를, 굽기에 못 들면 그 자리에서 그물 버퍼를(mergeSolid) 갖는다 — 그리기·고르기·setMesh는 이 상태를 보지 못한다
+   */
+  light?: boolean;
 }
+
+/** 0.57.0 빛 기록(MeshRec.light)의 GL 객체 자리표(GL에 넘기지 않는다 — 있다/없다 판정만) */
+const NO_GL = Object.freeze({}) as WebGLBuffer & WebGLVertexArrayObject;
 
 /**
  * 0.52.0 묶음 하나(구운 것): 그물 기록(장면 차례 — 번호 = 정점 a_item), 면 VAO(위치 0·법선 1·색 2·그물 번호 5·이은 색인)와 그물마다 색인 시작,
@@ -1025,6 +1034,8 @@ export class Renderer3d {
   /** 0.52.0 장면을 올리는 동안 굽기를 기다리는 그물 기록(장면 차례)과 그 정점 수 */
   private mgWait: MeshRec[] = [];
   private mgWaitVerts = 0;
+  /** 0.57.0 mgWait 가운데 빛 기록 수(GL 객체 없이 곧 구울 것 — 동기 구간 끝에 늘 0) */
+  private mgLight = 0;
   /** 0.52.0 한 그리기에서 묶음 굽기에 쓸 몫(ms — 적어도 묶음 하나) */
   mergeBudgetMs = 8;
   /** 0.52.0 구운 묶음들과 굽기를 기다리는 묶음(그물 기록 목록 — 장면 차례), 묶음 버퍼 바이트 합 */
@@ -1962,7 +1973,8 @@ export class Renderer3d {
     if (this.mgOff || (mode === 'auto' && scene.meshes.length < this.merging.min)) return;
     if (mode === 'on') this.wantKit();
     this.mgScan = { scene, phase: 0, i: 0, seen: new WeakSet<object>(), n: 0, c: 0 };
-    if (!defer) this.mergeScan(Infinity);
+    // 0.57.0 조각이 이미 있고 훑기가 짧은 장면(1만 6천 그물까지 — 2~5 ms)은 나눠 올려도 곧 훑는다: 첫 걸음부터 곧장 구워(mergeDirect) 첫 단위의 그물마다 GL 객체를 만들지 않는다
+    if (!defer || (mergeKit && scene.meshes.length <= MERGE_SCAN_FIRST)) this.mergeScan(Infinity);
   }
 
   /**
@@ -2092,23 +2104,92 @@ export class Renderer3d {
    * 0.54.0: 조각이 있을 때만 부른다(mergeOffer·mergeFeedUnfed)
    */
   private mergeFeed(r: MeshRec): void {
-    if (!this.mgActive || this.mgOff || !mergeKit) return;
+    if (!this.mgActive || this.mgOff || !mergeKit) {
+      if (r.light) this.mergeSolid(r);
+      return;
+    }
     const s = this.mergeSrcOf(r);
-    if (!s) return;
+    if (!s) {
+      // 0.57.0 곧장 굽겠다던 기록이 묶을 수 없는 그물로 드러나면(정점 색 반투명 등 — mergeDirect의 어림 밖) 그때 그물 버퍼를 만든다(그물마다 그리는 길)
+      if (r.light) this.mergeSolid(r);
+      return;
+    }
     // 0.53.0: 이 그물을 더하면 정점이 굽기 단위를 넘으면 먼저 굽는다(넘은 뒤에 구우면 단위를 조금 넘은 기다림이 고르게 반으로 나뉘어 묶음이 두 배 — 정점이 많은 그물의 장면)
     if (this.mgWait.length && this.mgWaitVerts + s.src.nv > MERGE_UPLOAD_VERTS) this.mergeFlushWait();
     this.mgWait.push(r);
     this.mgWaitVerts += s.src.nv;
+    if (r.light) this.mgLight++;
     if (this.mgWait.length >= MERGE_UPLOAD_MESHES || this.mgWaitVerts >= MERGE_UPLOAD_VERTS) this.mergeFlushWait();
   }
 
   /**
    * 0.52.0 굽기를 기다리는 그물을 묶음으로 나눠 곧 굽는다(묶음에 들지 못한 그물은 그물마다 버퍼 그대로).
-   * 0.53.0: 열쇠마다 굽기 단위로 고르게 나눈다(mergeChunksByKey — 정점이 많아 한 단위를 넘으면 끝 묶음이 그물 하나로 남아 그물마다 남지 않게)
+   * 0.53.0: 열쇠마다 굽기 단위로 고르게 나눈다(mergeChunksByKey — 정점이 많아 한 단위를 넘으면 끝 묶음이 그물 하나로 남아 그물마다 남지 않게).
+   * 0.57.0: 묶음에 들지 못한 빛 기록(그물 하나뿐인 묶음·열쇠가 다른 그물 — 0.56.0과 같은 판정)은 여기서 그물 버퍼를 만든다
    */
   private mergeFlushWait(): void {
     // 0.54.0 굽기는 조각(mergegl flushWait — 0.53.0과 같은 셈). 조각이 없으면 기다림을 그대로 둔다
-    if (mergeKit) mergeKit.flushWait(this.host);
+    if (!mergeKit) return;
+    const list = this.mgLight ? this.mgWait : null;
+    mergeKit.flushWait(this.host);
+    if (list) this.mergeSolidAll(list);
+  }
+
+  /**
+   * 0.57.0 이 그물을 그물마다 GL 객체 없이 곧장 구울지(빛 기록 — meshRec light): 조각이 있고 이 장면에서 켜졌고 훑기를 마쳤을 때(훑기 전·중은 묶일지 모른다 — 첫 그림을 그물마다 그린다),
+   * 받기 전·늦음·실패·끔이 아니고(mgActive·조각이 있어야 한다), 앱이 다시 준 배열을 함께 올릴 그물(restoreQ)·코어가 전에 지운 그물(laid — 올린 꼴과 다시 받을 것을 세는 길)·
+   * 놓기가 법선을 지울 그물(0.56.0도 묶이지 않는다)이 아닐 때, 조각 올리기(CHUNK_MIN_BYTES)를 탈 크기가 아니고 훑기가 묶을 수 있어 보인다고 세는 그물일 때만.
+   * 어림과 mergeSrcOf(정점 색 반투명 등)가 갈리면 mergeFeed가 그 자리에서 그물 버퍼를 만든다
+   */
+  private mergeDirect(m: Mesh3d): boolean {
+    if (!mergeKit || !this.mgActive || this.mgScan || this.mgOff || this.restoreQ.has(m.id) || this.laid.has(m) || (this.rel?.normals && m.normals)) return false;
+    const nv = Math.floor(m.positions.length / 3);
+    if (!nv || nv > MERGE_MESH_VERTS || m.texture || m.backTexture || m.backColor || pbrSource(m) || !(m.color[3] >= 0.999)) return false;
+    if ((m.edges ? m.edges.length / 6 : 0) > MERGE_MESH_SEGMENTS) return false;
+    return ![m.positions, m.normals, m.indices, m.colors, m.edges].some((a) => !!a && this.mgShared.has(a)) && this.mergeSmall(m);
+  }
+
+  /** 0.57.0 그물 배열 바이트 합이 조각 올리기 문턱 안인지(uploadSome이 chunkFor로 나눠 올리지 않을 크기 — 같은 배열·이미 올린 배열을 빼지 않은 위 한계) */
+  private mergeSmall(m: Mesh3d): boolean {
+    let n = 0;
+    for (const a of [m.positions, m.normals, m.colors, m.uvs, m.backUvs, m.indices, m.edges]) n += a?.byteLength ?? 0;
+    return n <= CHUNK_MIN_BYTES;
+  }
+
+  /** 0.57.0 빛 기록에 그물 버퍼·VAO를 만들어 준다(묶음에 들지 못해 그물마다 그리는 길로 떨어질 때 — 같은 배열로 만들어 기록 값·쓰는 기록 수는 그대로) */
+  private mergeSolid(r: MeshRec): void {
+    Object.assign(r, this.meshRec(r.src), { light: false });
+    this.gl.bindVertexArray(null);
+  }
+
+  /** 0.57.0 목록의 남은 빛 기록을 모두 그물 버퍼로(mergeFlushWait 뒤·mergeRun을 묶음 전에 끝낼 때) */
+  private mergeSolidAll(list: readonly MeshRec[]): void {
+    this.mgLight = 0;
+    for (const r of list) if (r.light) this.mergeSolid(r);
+  }
+
+  /**
+   * 0.57.0 나눠 올리는 걸음에서 묶음 하나가 찰 때까지 잇는다(mergeDirect인 그물 — 빛 기록을 만들어 기다림에 넣고 단위가 차면 곧 굽는다, 이 함수 안에서 끝나므로 걸음 사이에 빛 기록이 남지 않는다).
+   * 사이의 묶지 않을 그물은 작고 몫이 남았으면 함께(그물마다 버퍼 — 묶음을 그만큼 일찍 끊지 않게), 몫을 넘었거나 조각 올리기를 탈 크기면 지금까지의 빛 기록을 그물 버퍼로 바꾸고 돌아간다
+   * (0.56.0처럼 다음 걸음에 이어 기다린다 — 묶음 나누기가 같다)
+   */
+  private mergeRun(p: { scene: Scene3d; mi: number }, t0: number, budgetMs: number): void {
+    const ms = p.scene.meshes;
+    for (;;) {
+      const m = ms[p.mi]!;
+      const light = this.mergeDirect(m);
+      const give = this.restoreQ.get(m.id) ?? null;
+      this.restoreQ.delete(m.id);
+      const r = this.sceneMeshRec(m, { give, light });
+      this.meshes.push(r);
+      p.mi++;
+      this.mergeOffer(r);
+      if (p.mi >= ms.length) return this.mergeUploadEnd();
+      if (!this.mgLight) return;
+      const next = ms[p.mi]!;
+      if (this.mergeDirect(next)) continue;
+      if (!this.mergeSmall(next) || performance.now() - t0 >= budgetMs) return this.mergeSolidAll(this.mgWait);
+    }
   }
 
   /** 0.54.0 조각 함수에 넘기는 렌더러 상태(이 렌더러 자신 — MergeHost의 이름은 Renderer3d 멤버와 같다) */
@@ -2460,9 +2541,11 @@ export class Renderer3d {
   /** 장면을 한 번에 올린다(setScene — 0.56.0 통째로 미룬 것은 다음 걸음 uploadSome에서). 미룬 동안 앱이 다시 준 배열(문맥 복구 — restoreMeshArrays)이 있으면 함께 올린다 */
   private uploadWhole(scene: Scene3d): void {
     for (const m of scene.meshes) {
+      // 0.57.0 곧장 구울 수 있는 그물은 그물마다 버퍼·VAO를 만들지 않고 기록만(빛 기록 — 묶음이 찰 때 구워 묶음 버퍼가 저장소가 되고, 못 들면 그때 그물 버퍼를 만든다)
+      const light = this.mergeDirect(m);
       const give = this.restoreQ.get(m.id) ?? null;
       this.restoreQ.delete(m.id);
-      const r = this.sceneMeshRec(m, { give });
+      const r = this.sceneMeshRec(m, { give, light });
       this.meshes.push(r);
       // 0.52.0 묶을 그물이 모이면 곧 굽고 그물 버퍼를 놓는다(그물이 아주 많아도 GL 객체가 쌓이지 않게 — 0.54.0 조각이 아직 없으면 다 올린 뒤 mergeStep이)
       this.mergeOffer(r);
@@ -2538,6 +2621,14 @@ export class Renderer3d {
       if (kind === 'mesh' && p!.chunk === undefined && this.mergeHold(s.meshes[p!.mi]!, budgetMs)) {
         this.mgHeld = !this.mgScan;
         break;
+      }
+      // 0.57.0 곧장 구울 그물이면 묶음 하나가 찰 때까지 GL 객체 없이 잇는다(이 호출 안에서 굽기까지 끝난다)
+      if (kind === 'mesh' && p!.chunk === undefined && this.mergeDirect(s.meshes[p!.mi]!)) {
+        first = false;
+        this.mergeRun(p!, t0, budgetMs);
+        this.gl.bindVertexArray(null);
+        if (p!.mi >= s.meshes.length && p!.li >= s.lines.length && p!.pi >= pts.length) this.pending = null;
+        continue;
       }
       first = false;
       const item = kind === 'mesh' ? s.meshes[p!.mi]! : kind === 'line' ? s.lines[p!.li]! : pts[p!.pi]!;
@@ -2648,7 +2739,7 @@ export class Renderer3d {
    * 장면 그물 기록(쓰는 버퍼 자리를 센다). 0.25.0: 놓기 선택이 있으면 올린 뒤 그 배열을 그물에서 지운다(strip).
    * from·keep·give는 meshRec 참고
    */
-  private sceneMeshRec(m: Mesh3d, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null } = {}): MeshRec {
+  private sceneMeshRec(m: Mesh3d, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null; light?: boolean } = {}): MeshRec {
     const r = this.meshRec(m, o);
     this.retain(r.slots);
     this.strip(m, r);
@@ -3052,7 +3143,7 @@ export class Renderer3d {
    * - 코어가 전에 지운 그물 객체(laid)의 뒷면은 따로 준 backUvs였으면 uvs로 대신하지 않는다
    * 0.26.0: 법선·무늬 좌표의 속성 꼴(정수 배열이면 정규화)을 함께 정한다(물려받은 버퍼는 앞 기록의 꼴)
    */
-  private meshAttribs(m: Mesh3d, nv: number, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null }): { attrs: MeshAttribs; slots: (Slot | null)[]; ownBack: boolean } {
+  private meshAttribs(m: Mesh3d, nv: number, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null; light?: boolean }): { attrs: MeshAttribs; slots: (Slot | null)[]; ownBack: boolean } {
     const give = o.give ?? null;
     const from = o.from ?? null;
     const fl = from?.lay ?? null;
@@ -3061,7 +3152,8 @@ export class Renderer3d {
     const slots: (Slot | null)[] = [null, null, null, null, null, null, null];
     const put = (s: number, data: VertexArray, stride: number): WebGLBuffer => {
       slots[s] = { key: this.keyOf(data), target: 'array', stride };
-      return this.arrayBuf(data, SLOT_PARTS[s]!);
+      // 0.57.0 빛 기록은 버퍼를 만들지 않고 자리표만(있다/없다는 그물마다 올릴 때와 같다)
+      return o.light ? NO_GL : this.arrayBuf(data, SLOT_PARTS[s]!);
     };
     const pos = put(0, m.positions, 3);
     let nrm: WebGLBuffer | null = null;
@@ -3137,12 +3229,13 @@ export class Renderer3d {
    * 그물 기록. 0.25.0: 정점 속성 버퍼·버퍼 자리를 기록에 기억한다(다시 묶기·쓰는 기록 수 세기에 배열을 보지 않는다).
    * 놓은 꼴(lay)이 있으면 그 가운데 지금 GPU에 없는 것을 miss에 적는다 — 그동안 법선 없이(평면 음영)·무늬 없이(color) 그린다
    */
-  private meshRec(m: Mesh3d, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null } = {}): MeshRec {
+  private meshRec(m: Mesh3d, o: { from?: MeshRec | null; keep?: boolean; give?: MeshArrays | null; light?: boolean } = {}): MeshRec {
     const gl = this.gl;
     const nv = Math.floor(m.positions.length / 3);
-    const vao = this.vao();
+    const light = !!o.light;
+    const vao = light ? NO_GL : this.vao();
     const { attrs, slots, ownBack } = this.meshAttribs(m, nv, o);
-    this.bindAttribs(attrs);
+    if (!light) this.bindAttribs(attrs);
     const hasNormals = !!attrs.nrm;
     const hasColors = !!attrs.col;
     let count: number;
@@ -3153,13 +3246,16 @@ export class Renderer3d {
     const indexed = !!I;
     let elem: WebGLBuffer | null = null;
     if (I) {
-      elem = this.elemBuf(I, 'indices');
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elem);
+      if (light) elem = NO_GL;
+      else {
+        elem = this.elemBuf(I, 'indices');
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elem);
+      }
       slots[5] = { key: this.keyOf(I), target: 'element', stride: 0 };
       // 0.50.0: 정점이 하나도 없으면(빈 positions에 색인만) 그리지 않는다 — 넓이 0 삼각형도 가리킬 정점이 없다
       count = nv > 0 ? I.length - (I.length % 3) : 0;
     } else count = nv - (nv % 3);
-    gl.bindVertexArray(null);
+    if (!light) gl.bindVertexArray(null);
     const uv = m.texture && this.texSrc.has(m.texture) ? attrs.uvN : 0;
     const texAlpha = uv > 0 && this.texSrc.get(m.texture!)!.alpha === true;
     let transparent = m.color[3] < 0.999 || texAlpha;
@@ -3172,7 +3268,7 @@ export class Renderer3d {
           break;
         }
     }
-    const edges = hasMeshEdges(m) ? this.lineRec(m.id, m.group, m.edges!, undefined, 'edges') : null;
+    const edges = !hasMeshEdges(m) ? null : light ? { id: m.id, group: m.group, n: Math.floor(m.edges!.length / 6), pos: NO_GL, col: null, wide: NO_GL, thin: NO_GL } : this.lineRec(m.id, m.group, m.edges!, undefined, 'edges');
     // 0.50.0: 윤곽선 버퍼는 깨진 끝점 선분을 NaN으로 바꾼 사본일 수 있다(lineRec — segmentFix)
     if (edges) slots[6] = { key: this.keyOf(segmentFix(m.edges!).fix ?? m.edges!), target: 'array', stride: 0 };
     const box = meshBounds(m);
@@ -3190,9 +3286,11 @@ export class Renderer3d {
     // 0.43.0 PBR 필드(없으면 null — 0.42.0 그물). 무늬 그림이 없어도 PBR 그림이 무늬 좌표를 쓰면 축척·이동을 함께 든다
     const pbr = pbrSource(m);
     const uvT0 = uv || (pbr && attrs.uvN) ? uvTransformOf(m.uvTransform) : null;
-    let geo = `${this.bufId(attrs.pos)}|${this.bufId(attrs.nrm)}${fmt(attrs.nrmF)}|${this.bufId(attrs.col)}|${this.bufId(attrs.uv)}${fmt(attrs.uvF)}:${uv}|${this.bufId(elem)}|${count}|${uv ? m.texture : ''}|${uvT0 ? uvT0.join() : ''}|${texAlpha ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`;
+    // 0.57.0 빛 기록은 버퍼 번호가 없어 저마다 다른 열쇠(구우면 그물 저장소가 묶음으로 바뀌어 이 열쇠로 모아 그리지 않는다 — 그물마다 그리는 길로 떨어지면 mergeSolid가 고친다)
+    let geo = light ? `L${++this.bufSeq}` : `${this.bufId(attrs.pos)}|${this.bufId(attrs.nrm)}${fmt(attrs.nrmF)}|${this.bufId(attrs.col)}|${this.bufId(attrs.uv)}${fmt(attrs.uvF)}:${uv}|${this.bufId(elem)}|${count}|${uv ? m.texture : ''}|${uvT0 ? uvT0.join() : ''}|${texAlpha ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`;
     if (pbr) geo += `|pbr:${attrs.uvN}:${JSON.stringify(pbr)}`;
     return {
+      light,
       pbr,
       geo,
       back,

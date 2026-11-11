@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
 import type { FakeGL } from './fakegl';
 import { expandFrame } from './drawexpand';
-import { MERGE_AUTO_MIN, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
+import { MERGE_AUTO_MIN, MERGE_SCAN_FIRST, MERGE_UPLOAD_MESHES } from '../src/mergeopts';
 import { boxMesh } from '../src/synth';
 import type { Mesh3d, Scene3d } from '../src/types';
 import { Viewer3d } from '../src/viewer';
@@ -160,8 +160,8 @@ describe('0.54.0 묶어 그리기 조각 나눠 받기', () => {
     expect(expandFrame(gl, () => v.renderNow())).toEqual(expandFrame(ref.gl, () => ref.v.renderNow()));
   });
 
-  it('조각을 받은 뒤에도 나눠 올리기의 첫 그림 앞에는 굽지 않는다(첫 걸음 몫이 커도) — 훑기는 첫 그림 뒤 걸음에서', () => {
-    const N = MERGE_UPLOAD_MESHES * 2 + 100;
+  it('조각을 받은 뒤에도 큰 장면(0.57.0 — 그물 MERGE_SCAN_FIRST 초과)의 나눠 올리기 첫 그림 앞에는 굽지 않는다(첫 걸음 몫이 커도) — 훑기는 첫 그림 뒤 걸음에서', () => {
+    const N = MERGE_SCAN_FIRST + 100;
     const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false, renderMode: 'shadedEdges', viewCube: false });
     views.push(v);
     const r = (v as unknown as { renderer: Record<string, unknown> }).renderer as unknown as Rend;

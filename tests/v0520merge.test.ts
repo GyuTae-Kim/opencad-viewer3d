@@ -343,10 +343,10 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     expect(shot(on)).toEqual(shot(off));
   });
 
-  it('나눠 올리는 동안은 그물마다, 다 올린 뒤 굽는다', () => {
+  it('나눠 올리면(조각을 받았고 훑기가 짧은 장면 — 0.57.0) 첫 걸음부터 곧장 굽고, 다 올리면 끝 그림이 끈 뷰어와 같다', () => {
     const w = view(scene(), true, { incremental: true });
     w.v.renderNow();
-    expect(w.v.stats.merged.groups).toBe(0);
+    expect(w.v.stats.merged.groups).toBeGreaterThan(0);
     for (let i = 0; i < 500 && (w.v as unknown as { renderer: { uploading: boolean } }).renderer.uploading; i++) w.v.renderNow();
     bake(w);
     expect(w.v.stats.merged.groups).toBeGreaterThan(0);
