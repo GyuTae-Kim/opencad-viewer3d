@@ -1707,6 +1707,8 @@ const UPLOAD_DRAW_GAP = 3;
  * 0.61.0은 묶음 모두를 다시 합쳐 8만 그물에서 숨김을 하나씩 더하는 프레임마다 그리기 밖 약 20 ms였다
  */
 const VIS_CHUNK = 64;
+/** 0.63.0 렌더러에 알릴 숨김을 바꾼 항목 id 기록 한도(넘으면 앞 판들은 모른다 — 렌더러는 한 번 처음부터 만든다) */
+const VIS_LOG = 4096;
 /** 0.62.0 보이는 범위 덩어리(뷰어 visChunks): 묶음 차례 목록·id → 차례·덩어리마다 모두 보일 때 범위와 든 묶음 이름(groups — 없으면 빈 집합) */
 interface VisChunks {
   items: Map<string, Item>;
@@ -1794,6 +1796,12 @@ export class Viewer3d {
   private hiddenItems = new Set<string>();
   /** 0.60.0 숨김 판(숨김을 바꿀 때마다 1씩 — 렌더러가 같은 판의 보이는 목록을 다시 쓴다) */
   private visVer = 0;
+  /**
+   * 0.63.0 판 visBase 뒤의 숨김 바꾸기가 모두 항목 하나씩(setItemVisible)이면 그 id 차례(k번째가 판 visBase + k + 1). 다른 바꾸기(묶음·장면·구간 숨김)나
+   * VIS_LOG개를 넘으면 visBase를 지금 판으로(그 앞은 모른다 — 렌더러 visDelta가 null)
+   */
+  private visIds: string[] = [];
+  private visBase = 0;
   private hi = new Set<string>();
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
@@ -2278,6 +2286,8 @@ export class Viewer3d {
     this.hiddenGroups.clear();
     this.hiddenItems.clear();
     this.visVer++;
+    this.visBase = this.visVer;
+    this.visIds = [];
     this.hi.clear();
     this.ranges.clear();
     this.rangeSel.clear();
@@ -3493,11 +3503,16 @@ export class Viewer3d {
   setItemVisible(id: string, on: boolean): void {
     if (on) this.hiddenItems.delete(id);
     else this.hiddenItems.add(id);
-    this.visibilityChanged();
+    this.visibilityChanged(id);
   }
 
-  private visibilityChanged(): void {
+  /** id: 항목 하나만 바꿨으면 그 id(0.63.0 렌더러에 알릴 바꾼 항목 — 없으면 그 앞 판들은 모른다고 적는다) */
+  private visibilityChanged(id?: string): void {
     this.visVer++;
+    if (id === undefined || this.visIds.length >= VIS_LOG) {
+      this.visBase = this.visVer;
+      this.visIds = [];
+    } else this.visIds.push(id);
     this.shadowVer++;
     this.visBox = null;
     this.visLists = null;
@@ -8754,6 +8769,7 @@ export class Viewer3d {
       dpr,
       visible: (id, g) => this.visible(id, g),
       visKey: this.visVer,
+      visDelta: (since) => (since >= this.visBase && since <= this.visVer ? this.visIds.slice(since - this.visBase) : null),
       highlight: this.hi,
       ranges: this.ranges,
       grid: this.gridOn,

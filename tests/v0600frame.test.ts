@@ -376,16 +376,21 @@ describe('0.60.0 그물마다 훑지 않는다', () => {
     w.v.orbitBy(0.1, 0);
     w.v.renderNow();
     expect(n).toBe(0);
-    // 숨김을 바꾼 첫 그리기만 그물마다 묻는다(보이는 범위 등 뷰어 몫도 함께) — 그 뒤 프레임·강조는 묻지 않는다
+    // 숨김을 바꾼 첫 그리기만 묻는다 — 0.63.0 항목 하나를 바꾸면 그 그물과 뷰어 보이는 범위 덩어리(64개)만(0.62.0까지는 그물마다), 그 뒤 프레임·강조는 묻지 않는다
     w.v.setItemVisible('b1', false);
     w.v.renderNow();
     const n1 = n;
-    expect(n1).toBeGreaterThanOrEqual(3000);
+    expect(n1).toBeGreaterThan(0);
+    expect(n1).toBeLessThanOrEqual(1 + 64);
     w.v.orbitBy(0.1, 0);
     w.v.renderNow();
     w.v.highlight(['b2']);
     w.v.renderNow();
     expect(n).toBe(n1);
+    // 묶음 숨김은 그물마다 묻는다
+    w.v.setGroupVisible('g1', false);
+    w.v.renderNow();
+    expect(n - n1).toBeGreaterThanOrEqual(3000);
   });
 
   it('뼈대: 덩이·묶음 밖 그물, 맞는지(그물 수·덩이 끝·묶음 수·묶음 밖 그물 자리)', () => {

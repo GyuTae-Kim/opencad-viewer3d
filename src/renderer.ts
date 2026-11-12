@@ -300,6 +300,11 @@ export interface RenderState {
    * (주지 않으면 0.59.0처럼 그리기마다 그물마다 묻는다)
    */
   visKey?: number;
+  /**
+   * 0.63.0 숨김 판 since 뒤로 보이는지가 바뀌었을 수 있는 항목 id(그 차례 — 같은 id가 거듭 들 수 있다). 모르면 null(묶음 숨김·장면 바꾸기 등 — 렌더러는 처음부터 만든다).
+   * 주면 판이 바뀐 그리기에서 그 그물만 보이는 목록을 고친다
+   */
+  visDelta?: (since: number) => readonly string[] | null;
   highlight: ReadonlySet<string>;
   ranges: ReadonlyMap<string, DrawRange>;
   grid: boolean;
@@ -604,6 +609,8 @@ export interface MeshRec {
   visAt?: number;
   /** 0.60.0 그리기 뼈대(MergeOrder)에서 든 덩이 번호(묶음 밖 −1 — 뼈대를 만들 때 meshes의 모든 기록에 적는다) */
   bk?: number;
+  /** 0.63.0 뼈대의 장면 차례 번호(MergeOrder.si를 만들 때 적는다 — 보이는 목록에 넣고 뺄 자리) */
+  si?: number;
   edges: LineRec | null;
   /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
   wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
@@ -776,6 +783,8 @@ export interface MergeOrder {
   loose: MeshRec[];
   /** 강조 id → 덩이 번호 · 65536 + 묶음 그물 번호(처음 쓸 때 — 같은 id가 여럿이면 목록) */
   ids?: Map<string, number | number[]>;
+  /** 0.63.0 id → 장면 차례 번호(meshes — 숨김을 고칠 때 처음 쓸 때 만들고 기록마다 MeshRec.si를 적는다. 같은 id가 여럿이면 목록) */
+  si?: Map<string, number | number[]>;
 }
 
 interface PointRec {
@@ -4696,8 +4705,10 @@ export class Renderer3d {
     const O = this.orderNow();
     let visibleMeshes: MeshRec[];
     let visSeq: number;
-    const VM = this.visMemo;
-    if (O && st.visKey !== undefined && VM && VM.ord === O && VM.key === st.visKey) {
+    const VM = O && st.visKey !== undefined && this.visMemo?.ord === O ? this.visMemo : null;
+    // 0.63.0 판이 바뀌었어도 그 사이 바뀐 것이 항목 숨김 몇 개뿐이면(visDelta) 그 그물만 고친다(조각 visPatch — 보이는 목록·덩이 숨긴 번호)
+    if (VM && (VM.key === st.visKey || mergeKit!.visPatch(O!, this.meshes, VM.list, VM.seq, st.visDelta?.(VM.key) ?? null, vis))) {
+      VM.key = st.visKey!;
       visibleMeshes = VM.list;
       visSeq = VM.seq;
     } else {

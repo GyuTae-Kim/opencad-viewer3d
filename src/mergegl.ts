@@ -441,6 +441,66 @@ export function blockHid(o: MergeOrder, seq: number): void {
   }
 }
 
+/** 0.63.0 숨김을 고칠 id가 이보다 많으면 보이는 목록을 처음부터 만든다(그물마다 묻는 것이 넣고 빼기보다 싸다) */
+const VIS_PATCH = 1024;
+
+/**
+ * 0.63.0 숨김 판이 바뀐 그리기에서 그 사이 숨김을 바꾼 항목 id(뷰어 visDelta — 모르면 null)의 그물만 고친다: 보이는지 다시 묻고 바뀌었으면
+ * 보이는 목록(list — 장면 차례, 장면 차례 번호 si로 이분 찾기)에 넣거나 빼고 visAt(보이면 seq, 아니면 0)을, 덩이 그물이면 그 덩이 숨긴 번호(오름차순)도 고친다.
+ * 처음부터 만든 목록·번호(blockHid)와 같다. 0.60.0~0.62.0은 판이 바뀔 때마다 그물마다 묻고 목록·덩이 번호를 모두 다시 만들었다(8만 — 숨김을 하나씩 더하는 프레임 약 17 ms).
+ * 고칠 수 없으면(모름·많음) false
+ */
+export function visPatch(o: MergeOrder, M: readonly MeshRec[], list: MeshRec[], seq: number, ids: readonly string[] | null, vis: (id: string, g: string | undefined) => boolean): boolean {
+  if (!ids || ids.length > VIS_PATCH) return false;
+  const at = (o.si ??= sceneIds(M));
+  const one = (r: MeshRec): void => {
+    const on = vis(r.src.id, r.src.group);
+    if (on === (r.visAt === seq)) return;
+    const s = r.si!;
+    let lo = 0, hi = list.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (list[m]!.si! < s) lo = m + 1;
+      else hi = m;
+    }
+    if (on) list.splice(lo, 0, r);
+    else list.splice(lo, 1);
+    r.visAt = on ? seq : 0;
+    if (r.bk! < 0) return;
+    const L = o.blocks[r.bk!]!.hid, i = r.mi!;
+    lo = 0;
+    hi = L.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (L[m]! < i) lo = m + 1;
+      else hi = m;
+    }
+    if (on) L.splice(lo, 1);
+    else L.splice(lo, 0, i);
+  };
+  for (const id of ids) {
+    const x = at.get(id);
+    if (x === undefined) continue;
+    if (typeof x === 'number') one(M[x]!);
+    else for (const j of x) one(M[j]!);
+  }
+  return true;
+}
+
+/** 0.63.0 id → 장면 차례 번호(같은 id가 여럿이면 목록)와 기록마다 si */
+function sceneIds(M: readonly MeshRec[]): Map<string, number | number[]> {
+  const m = new Map<string, number | number[]>();
+  for (let j = 0; j < M.length; j++) {
+    const r = M[j]!;
+    r.si = j;
+    const id = r.src.id, x = m.get(id);
+    if (x === undefined) m.set(id, j);
+    else if (typeof x === 'number') m.set(id, [x, j]);
+    else x.push(j);
+  }
+  return m;
+}
+
 /** 0.60.0 강조 모음이 든 덩이에 판 stamp와 강조한 묶음 그물 번호(모음·크기·뼈대가 바뀐 그리기에서) */
 export function blockHi(o: MergeOrder, set: ReadonlySet<string>, stamp: number): void {
   const ids = (o.ids ??= orderIds(o));
