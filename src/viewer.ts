@@ -2768,7 +2768,6 @@ export class Viewer3d {
     for (const p of s.points ?? []) this.items.set(p.id, { kind: 'point', item: p });
   }
 
-  /** 그물 하나를 넣거나 바꾸거나 뺀 뒤: 장면에서 다시 셀 것(범위·마주 보기·원점 쓰기)과 화면 상태(그림자·단면 테두리·측정 미리 보기) */
   /**
    * 0.63.0 장면 범위(sceneBounds와 같은 값 — 비트까지): 그물은 SCENE_CHUNK개 덩어리마다 합친 범위를 두고, 합칠 때의 그물 객체·그물 수가 그대로인 덩어리는 다시 합치지 않는다
    * (setMesh는 바꾼 자리를 비운다 — 같은 객체를 제자리에서 고친 그물). 축마다 극값에 처음 닿은 꼭짓점 값이라 덩어리째 합쳐도 차례대로 합친 값과 같다(0.62.0 보이는 범위 덩어리와
@@ -2800,6 +2799,7 @@ export class Viewer3d {
     return b;
   }
 
+  /** 그물 하나를 넣거나 바꾸거나 뺀 뒤: 장면에서 다시 셀 것(범위·마주 보기·원점 쓰기)과 화면 상태(그림자·단면 테두리·측정 미리 보기) */
   private sceneEdited(): void {
     const s = this.sceneRef!;
     this.bbList = s.meshes.filter((m) => hasBillboard(m));
