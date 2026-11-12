@@ -210,6 +210,19 @@ describe('0.63.0 같은 꼴 그물 바꾸기 — 묶음 자리에서 갈아 쓰�
     const [b1, v1] = live(on);
     expect(b1).toBeGreaterThan(b0);
     expect(v1).toBeGreaterThan(v0);
+    // 빠진 그물이 있는 묶음도 그리기 뼈대를 프레임마다 다시 만들지 않는다(0.62.0은 dead > 0이면 늘 다시) — 그물을 더 빼면 다시 만든다
+    const ord = (): unknown => (on.v as unknown as { renderer: { mgOrder: unknown } }).renderer.mgOrder;
+    on.v.renderNow();
+    const o1 = ord();
+    expect(o1).not.toBeNull();
+    on.v.orbitBy(0.1, 0);
+    on.v.renderNow();
+    on.v.setItemVisible('b40', false);
+    on.v.renderNow();
+    expect(ord()).toBe(o1);
+    on.v.removeMesh('b77');
+    on.v.renderNow();
+    expect(ord()).not.toBe(o1);
     // 정점 색이 없는 묶음에 정점 색 그물: 그 묶음에는 색 버퍼가 없다 — 빠진다
     const plain = view({ name: 'p', units: 'mm', meshes: Array.from({ length: 300 }, (_, i) => ({ ...box(i * 3 + 1), group: undefined })), lines: [] }, true);
     const plainOff = view({ name: 'p', units: 'mm', meshes: Array.from({ length: 300 }, (_, i) => ({ ...box(i * 3 + 1), group: undefined })), lines: [] }, false);
