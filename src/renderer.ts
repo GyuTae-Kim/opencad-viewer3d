@@ -659,6 +659,8 @@ export interface MergeGroup {
   segItem: WebGLBuffer | null;
   /** 그물 기록이 가리키는 정점 속성(그물마다 그리기·구간 모음·삼각형 변) */
   attrs: MeshAttribs;
+  /** 0.63.0 이은 색인 버퍼(같은 꼴 그물 바꾸기가 그 그물 자리 색인을 다시 쓴다 — bufs에도 든다) */
+  ib: WebGLBuffer;
   bufs: WebGLBuffer[];
   bytes: number;
   dead: number;
@@ -757,6 +759,9 @@ export interface MergeBlock {
   exB: number[];
   /** 0.62.0 이 그리기의 강조한 그물 번호(오름차순 — 강조가 없으면 null, ex 번호의 그리기에서) */
   hs?: number[] | null;
+  /** 0.63.0 뼈대를 만들 때 묶음의 빠진 그물 수(dead)·쓰는 기록 수(live) — 달라지면 뼈대를 다시 만든다(조각 orderValid) */
+  gd: number;
+  gl: number;
   /** 그물 세계 범위(MeshRec.box)를 토막(조각 BLOCK_BOX개)마다 합친 상자·채우기 단위 묶음(capGroup)이 없는지(처음 쓸 때 — 조각 blockBoxes·blockCapFree) */
   boxes?: Box3[];
   ncg?: boolean;
@@ -2888,6 +2893,8 @@ export class Renderer3d {
     this.restoreQ.delete(m.id);
     const i = this.meshes.findIndex((r) => r.src.id === m.id);
     const old = i >= 0 ? this.meshes[i]! : null;
+    // 0.63.0 묶음에 든 그물을 같은 꼴 그물로 바꾸면 묶음 자리에 그대로 갈아 쓴다(그물마다 버퍼를 만들지 않고 다시 살필 것도 없다)
+    if (old?.mg && this.mergeSwap(old, m, i)) return [];
     // 0.52.0 묶음을 다시 살핀다. 바꾸는 그물이 묶음 저장소에 있으면 새 기록이 들어설 때(installMesh — dropMeshRec) 빠진다 — 그때까지 앞 기록은 묶음 자리를 그린다
     // (묶음 저장소의 그물은 그물 버퍼가 없어 제자리 고치기가 앞 기록을 바꾸지 않는다)
     this.mgDirty = true;
@@ -2905,6 +2912,24 @@ export class Renderer3d {
     this.installMesh(m, i, { keep: !!ranges });
     if (old && ranges) this.refreshSharing(old.src, m);
     return skipped;
+  }
+
+  /**
+   * 0.63.0 묶음에 든 그물 기록 old(meshes의 i번째)를 그물 m으로 묶음 자리에서 갈아 쓴다(조각 swap — 정점·색인·윤곽선 수와 묶음 열쇠가 같을 때).
+   * m이 곧장 구울 그물(mergeDirect)이면 GL 객체 없는 빛 기록을 만들어 묶을 수 있는지(mergeSrcOf) 보고, 갈아 쓰지 못하면 그 기록을 놓고 false(0.62.0 길 — 그물마다 버퍼)
+   */
+  private mergeSwap(old: MeshRec, m: Mesh3d, i: number): boolean {
+    if (!mergeKit || old.mg!.rebuild || old.lay || old.miss || !this.mergeDirect(m)) return false;
+    const r = this.sceneMeshRec(m, { light: true });
+    const s = this.mergeSrcOf(r);
+    if (!s || s.key !== old.mg!.key || !mergeKit.swap(this.host, old, r, s.src)) {
+      this.release(r.slots);
+      return false;
+    }
+    this.meshes[i] = r;
+    // 뼈대(덩이 범위·잘라내기 덩어리 견주기)를 다시 만든다
+    this.forgetOrder();
+    return true;
   }
 
   /** 0.25.0: 놓은 배열(앞 기록이 지운 것) 가운데 새 그물이 주지 않아 vertices 구간을 올리지 못하는 속성 */

@@ -327,7 +327,7 @@ export function orderBuild(h: MergeHost): MergeOrder {
       if (!plain) k.ok = false;
       if (!r.edges) k.edges = false;
     } else {
-      k = { g, a: i, b: i + 1, at: j, ok: plain, edges: !!g.thin && !!r.edges, cut: 0, hi: 0, np: false, npv: -1, hid: [], cutL: [], hiL: [], ex: 0, exA: [], exB: [] };
+      k = { g, a: i, b: i + 1, at: j, ok: plain, edges: !!g.thin && !!r.edges, cut: 0, hi: 0, np: false, npv: -1, hid: [], cutL: [], hiL: [], ex: 0, exA: [], exB: [], gd: g.dead, gl: g.live };
       items.push(k);
       at.push(j);
       blocks.push(k);
@@ -339,8 +339,11 @@ export function orderBuild(h: MergeHost): MergeOrder {
 
 /**
  * 0.60.0 뼈대가 지금 장면 차례와 맞는지(덩이·묶음 밖 그물 수만큼만 본다): meshes는 끝에 더하기·한 자리 빼기·한 자리 바꾸기·통째 비우기로만 바뀌고,
- * 묶음 그물이 빠지거나(leave — dead) 다른 묶음으로 옮기면(letGo — live) 그 묶음 수가 준다. 그래서 그물 수가 같고, 덩이마다 묶음의 그물이 모두 남았고
- * 덩이 첫·끝 자리가 같은 기록이며, 묶음 밖 그물이 그 자리에 그대로(묶이지 않고) 있으면 차례가 같다
+ * 묶음 그물이 빠지거나(leave — dead) 다른 묶음으로 옮기면(letGo — live) 그 묶음 수가 준다. 그래서 그물 수가 같고, 덩이마다 묶음의 빠진·쓰는 그물 수가 뼈대를
+ * 만들 때와 같고 덩이 첫·끝 자리가 같은 기록이며, 묶음 밖 그물이 그 자리에 그대로(묶이지 않고) 있으면 차례가 같다.
+ * 0.63.0: 0.60.0~0.62.0은 묶음에 빠진 그물이 하나라도 있으면(dead > 0·live < 그물 수 — 뼈대를 만든 뒤가 아니라도) 맞지 않다고 보아, 그물을 바꾸거나 뺀 뒤
+ * 다시 굽기(planLoose 문턱)까지 프레임마다 뼈대·보이는 목록·잘라내기 덩어리를 다시 만들었다(가짜 WebGL 8만 그물 하나 바꾼 뒤 가만히 프레임 약 4 → 26 ms).
+ * 덩이는 쓰는 그물만 잇단 번호로 덮으므로(빠진 자리에서 끊긴다) 만들 때의 수와 견주면 된다
  */
 export function orderValid(h: MergeHost, o: MergeOrder): boolean {
   const M = h.meshes;
@@ -354,7 +357,7 @@ export function orderValid(h: MergeHost, o: MergeOrder): boolean {
       continue;
     }
     const g = x.g;
-    if (g.dead || g.live !== g.recs.length || M[p] !== g.recs[x.a] || M[p + x.b - x.a - 1] !== g.recs[x.b - 1]) return false;
+    if (g.dead !== x.gd || g.live !== x.gl || M[p] !== g.recs[x.a] || M[p + x.b - x.a - 1] !== g.recs[x.b - 1]) return false;
   }
   return true;
 }
@@ -1318,7 +1321,7 @@ export function bake(h: MergeHost, list: readonly MeshRec[]): void {
   buf(gl.ARRAY_BUFFER, a.item, 'indices');
   gl.enableVertexAttribArray(5);
   gl.vertexAttribPointer(5, 1, gl.UNSIGNED_SHORT, false, 2, 0);
-  buf(gl.ELEMENT_ARRAY_BUFFER, a.idx, 'indices');
+  const ib = buf(gl.ELEMENT_ARRAY_BUFFER, a.idx, 'indices');
   let thin: WebGLVertexArrayObject | null = null, wide: WebGLVertexArrayObject | null = null;
   let segBuf: WebGLBuffer | null = null, segItem: WebGLBuffer | null = null;
   if (a.seg && a.segItem) {
@@ -1353,6 +1356,7 @@ export function bake(h: MergeHost, list: readonly MeshRec[]): void {
     segBuf,
     segItem,
     attrs: { pos: posBuf, nrm: nrmBuf, col: colBuf, uv: null, uvN: 0, buv: null, buvN: 0, nrmF, uvF: null, buvF: null },
+    ib,
     bufs,
     bytes: mergeBytes(a),
     dead: 0,
@@ -1408,6 +1412,64 @@ function attach(h: MergeHost, r: MeshRec, g: MergeGroup, i: number): void {
   r.mg = g;
   r.mi = i;
   g.live++;
+}
+
+/**
+ * 0.63.0 묶음에 든 그물 기록 old를 같은 꼴 그물의 빛 기록 r(GL 객체 없음 — 렌더러 setMesh가 만든다, s = 그 이은 배열 자료)로 묶음 자리에서 갈아 쓴다.
+ * 같은 꼴: 그 그물 자리의 정점·그리는 색인·윤곽선 선분 수가 같고(묶음 열쇠 — 법선 값 꼴·한쪽 면 — 는 렌더러가 견준다), 정점 색이 있으면 묶음에 색 버퍼가 있다.
+ * 그 자리의 위치·법선·색(없으면 0 — mergeArrays와 같다)·색인(묶음 정점 번호로)·윤곽선을 bufferSubData로 다시 쓰고 묶음 그물 번호·버퍼·VAO는 그대로라
+ * 다시 구운 묶음과 같은 바이트다. 묶음의 그물 값 캐시(면 색·이동뿐 3열)와 저장소 그 자리를 낡게 하고, 앞 기록의 구간 캐시·삼각형 변(묶음 정점 번호 색인)을 놓는다.
+ * 0.62.0까지는 바꾼 그물을 그물마다 버퍼·VAO로 올리고(묶음에서 빠진다) 다시 굽기(planLoose — 묶음 밖 + 빠진 그물 256개 이상이거나 묶음의 ¼ 넘음)까지 그물마다 그렸다.
+ * 꼴이 다르거나 다시 굽는 중인 묶음이면 false(아무것도 바꾸지 않는다 — 렌더러가 0.62.0 길로)
+ */
+export function swap(h: MergeHost, old: MeshRec, r: MeshRec, s: MergeSrc): boolean {
+  const g = old.mg!, i = old.mi!;
+  const v0 = g.vStart[i]!, nv = g.vStart[i + 1]! - v0, t0 = g.tri[i]!, ni = g.tri[i + 1]! - t0, e0 = g.seg[i]!, ns = g.seg[i + 1]! - e0;
+  if (g.rebuild || s.nv !== nv || s.count !== ni || (s.edges ? s.ns : 0) !== ns || (!!s.colors && !g.attrs.col) || !!s.normals !== !!g.attrs.nrm) return false;
+  const gl = h.gl;
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, g.attrs.pos);
+  gl.bufferSubData(gl.ARRAY_BUFFER, v0 * 12, s.positions, 0, nv * 3);
+  if (g.attrs.nrm) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.attrs.nrm);
+    gl.bufferSubData(gl.ARRAY_BUFFER, v0 * s.per * s.normals!.BYTES_PER_ELEMENT, s.normals!, 0, nv * s.per);
+  }
+  if (g.attrs.col) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.attrs.col);
+    gl.bufferSubData(gl.ARRAY_BUFFER, v0 * 16, s.colors ?? new Float32Array(nv * 4), 0, nv * 4);
+  }
+  if (ns) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.segBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, e0 * 24, s.edges!, 0, ns * 6);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  const I = new Uint32Array(ni), S = s.indices;
+  for (let j = 0; j < ni; j++) I[j] = (S ? S[j]! : j) + v0;
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.ib);
+  gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, t0 * 4, I);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  // 앞 기록: 묶음에서 빠지되(빠진 그물 수 dead는 그대로 — 자리를 새 기록이 쓴다) 묶음 버퍼·VAO는 지우지 않는다
+  old.dropped = true;
+  old.mg = null;
+  g.live--;
+  h.dropParts(old);
+  if (old.edges) h.dropParts(old.edges);
+  if (old.wire) {
+    gl.deleteVertexArray(old.wire.vao);
+    h.vaos.delete(old.wire.vao);
+    const k = h.keys.get(old.wire.idx);
+    if (k) h.freeKey(k, 'element');
+    old.wire = null;
+  }
+  g.recs[i] = r;
+  attach(h, r, g, i);
+  g.fc = g.cc = g.org = g.sft = g.nom = g.mov = undefined;
+  if (g.ps)
+    for (const k in g.ps) {
+      g.ps[k]!.at[i] = 0;
+      g.ps[k]!.mdl[i] = undefined;
+    }
+  return true;
 }
 
 /**

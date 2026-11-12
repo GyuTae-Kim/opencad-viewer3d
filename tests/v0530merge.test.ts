@@ -75,6 +75,12 @@ const box = (i: number, k = 0): Mesh3d => {
   return m;
 };
 const boxes = (n: number): Scene3d => ({ name: 'b', units: 'mm', meshes: Array.from({ length: n }, (_, i) => box(i)), lines: [] });
+/** 꼴이 다른 바꾸기(삼각형 하나 뺀 상자 — 0.63.0 같은 꼴 바꾸기는 묶음 자리에서 갈아 써서 다시 굽기 차례를 타지 않는다) */
+const cut = (i: number): Mesh3d => {
+  const m = box(i, 1);
+  m.indices = m.indices!.slice(0, 33);
+  return m;
+};
 
 type W = { v: Viewer3d; gl: FakeGL; baked: number[][] };
 type G = { recs: { src: { id: string } }[]; live: number };
@@ -147,9 +153,9 @@ describe('0.53.0 다시 굽기 — 뷰어', () => {
       for (let i = 0; i < N; i++) if (i % 10 < 3) v.removeMesh(`b${i}`);
     });
     check('빼기');
-    // 20% 바꾸기 — 52차는 바꾼 그물끼리 새 묶음을 구워 옛 묶음과 엇갈렸다(1만에서 그리기 4,006)
+    // 20% 바꾸기 — 52차는 바꾼 그물끼리 새 묶음을 구워 옛 묶음과 엇갈렸다(1만에서 그리기 4,006). 0.63.0 반은 같은 꼴(묶음 자리에서 갈아 쓴다), 반은 꼴이 다르다(빠진다)
     both((v) => {
-      for (let i = 0; i < N; i++) if (i % 10 === 5 || i % 10 === 6) v.setMesh(box(i, 1));
+      for (let i = 0; i < N; i++) if (i % 10 === 5 || i % 10 === 6) v.setMesh(i % 10 === 5 ? box(i, 1) : cut(i));
     });
     check('바꾸기');
     // 더하기(장면 끝 — 끝 묶음이 거느린다. MERGE_LOOSE개 이상이라 다시 굽는다)
@@ -171,9 +177,9 @@ describe('0.53.0 다시 굽기 — 뷰어', () => {
     bake(w);
     const g0 = [...rend(w).mgGroups];
     expect(g0.length).toBe(3);
-    // 끝 묶음 자리 그물 몇 개만 바꾸기: 다시 굽지 않는다(그물마다 — 52차와 같다)
+    // 끝 묶음 자리 그물 몇 개만 꼴이 다른 그물로 바꾸기: 다시 굽지 않는다(그물마다 — 52차와 같다)
     const nBake = w.baked.length;
-    for (let i = N - 10; i < N; i++) w.v.setMesh(box(i, 1));
+    for (let i = N - 10; i < N; i++) w.v.setMesh(cut(i));
     bake(w);
     expect(w.baked.length).toBe(nBake);
     expect(w.v.stats.merged.meshes).toBe(N - 10);
