@@ -3679,6 +3679,8 @@ export class Renderer3d {
     const gl = this.gl;
     this.texSrc.clear();
     for (const t of scene.textures ?? []) if (t && typeof t.id === 'string' && !this.texSrc.has(t.id)) this.texSrc.set(t.id, t);
+    // 0.63.0 장면에 무늬가 없고 올린 무늬도 없으면 쓸 무늬·지울 무늬가 없다(0.62.0은 setMesh·removeMesh마다 그물 기록 Map을 만들고 그물마다 셌다 — 8만 그물에서 바꾸기 호출의 40%)
+    if (!this.texSrc.size && !this.textures.size) return;
     const used = new Map<string, Texture3d>();
     // 0.25.0: 올린 그물은 기록이 기억한 무늬 좌표 값 수로, 코어가 배열을 지운 그물은 그 꼴로 센다(배열과 그 길이를 다시 보지 않는다)
     const recs = this.meshes.length ? new Map(this.meshes.map((r) => [r.src, r])) : null;

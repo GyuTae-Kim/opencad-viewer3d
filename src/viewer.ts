@@ -14,7 +14,7 @@
  * 프레임은 상태가 바뀔 때만 requestAnimationFrame 한 번으로 그린다.
  */
 import type { Box3, LineSet3d, Mesh3d, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint } from './types';
-import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, okCoord, sceneBounds, transformBox, unionBox } from './bounds';
+import { boxCenter, boxIsEmpty, boxSphere, emptyBox, expandPoint, forgetBounds, itemBounds, itemRangesBounds, lineBounds, meshBounds, okCoord, pointBounds, transformBox, unionBox } from './bounds';
 import { type CutRanges, type IndexRange, type RangePart, cutBits, cutMaskAt, cutParts, cutRuns, mergeRanges, partCuts, partitionRanges, rangeTester } from './ranges';
 import type { FaceOutline } from './pickpreview';
 import { type Bvh, type PrimKind, buildBvh, primCount as bvhPrimCount } from './bvh';
@@ -1709,6 +1709,8 @@ const UPLOAD_DRAW_GAP = 3;
 const VIS_CHUNK = 64;
 /** 0.63.0 렌더러에 알릴 숨김을 바꾼 항목 id 기록 한도(넘으면 앞 판들은 모른다 — 렌더러는 한 번 처음부터 만든다) */
 const VIS_LOG = 4096;
+/** 0.63.0 장면 범위 덩어리 하나의 그물 수(뷰어 sceneBox — setMesh·removeMesh 뒤 그물 객체가 바뀐 덩어리만 다시 합친다) */
+const SCENE_CHUNK = 256;
 /** 0.62.0 보이는 범위 덩어리(뷰어 visChunks): 묶음 차례 목록·id → 차례·덩어리마다 모두 보일 때 범위와 든 묶음 이름(groups — 없으면 빈 집합) */
 interface VisChunks {
   items: Map<string, Item>;
@@ -1802,6 +1804,8 @@ export class Viewer3d {
    */
   private visIds: string[] = [];
   private visBase = 0;
+  /** 0.63.0 장면 그물 범위 덩어리(sceneBox): 그물 차례마다 합칠 때의 그물 객체(refs), SCENE_CHUNK개 덩어리마다 합친 범위와 그물 수 */
+  private meshBox: { refs: (Mesh3d | undefined)[]; box: Box3[]; n: number[] } = { refs: [], box: [], n: [] };
   private hi = new Set<string>();
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
@@ -2329,7 +2333,8 @@ export class Viewer3d {
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
     // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(0.49.0은 무한 범위에서 격자를 만들다 예외를 냈다)
-    this.allBox = boundsOk(scene.bounds) ? scene.bounds! : sceneBounds(scene);
+    this.meshBox = { refs: [], box: [], n: [] };
+    this.allBox = boundsOk(scene.bounds) ? scene.bounds! : this.sceneBox(scene);
     this.visBox = null;
     this.boundsVer++;
     this.rebuildGrid();
@@ -2412,6 +2417,7 @@ export class Viewer3d {
     clearTimeout(this.bvhTimer);
     if (this.gpu) this.renderer.clear();
     this.allBox = emptyBox();
+    this.meshBox = { refs: [], box: [], n: [] };
     this.visBox = null;
     this.boundsVer++;
     this.visChunks = null;
@@ -2486,6 +2492,8 @@ export class Viewer3d {
     if (prev && k < 0) k = meshes.findIndex((m) => m.id === mesh.id);
     if (k >= 0) meshes[k] = mesh;
     else meshes.push(mesh);
+    // 0.63.0 같은 객체를 제자리에서 고쳤을 수 있다 — 그 자리의 장면 범위 덩어리를 다시 합친다
+    if (k >= 0) this.meshBox.refs[k] = undefined;
     const scene: Scene3d = { ...s, meshes };
     this.sceneRef = scene;
     if (prev) this.items.set(mesh.id, { kind: 'mesh', item: mesh });
@@ -2761,6 +2769,37 @@ export class Viewer3d {
   }
 
   /** 그물 하나를 넣거나 바꾸거나 뺀 뒤: 장면에서 다시 셀 것(범위·마주 보기·원점 쓰기)과 화면 상태(그림자·단면 테두리·측정 미리 보기) */
+  /**
+   * 0.63.0 장면 범위(sceneBounds와 같은 값 — 비트까지): 그물은 SCENE_CHUNK개 덩어리마다 합친 범위를 두고, 합칠 때의 그물 객체·그물 수가 그대로인 덩어리는 다시 합치지 않는다
+   * (setMesh는 바꾼 자리를 비운다 — 같은 객체를 제자리에서 고친 그물). 축마다 극값에 처음 닿은 꼭짓점 값이라 덩어리째 합쳐도 차례대로 합친 값과 같다(0.62.0 보이는 범위 덩어리와
+   * 같은 까닭). 선분·점 묶음은 차례대로. 0.62.0은 setMesh·removeMesh마다 그물 모두를 다시 합쳤다(8만 그물에서 바꾸기 호출의 절반 남짓)
+   */
+  private sceneBox(s: Scene3d): Box3 {
+    const M = s.meshes, C = this.meshBox;
+    if (C.refs.length > M.length) C.refs.length = M.length;
+    const nk = Math.ceil(M.length / SCENE_CHUNK);
+    if (C.box.length > nk) C.box.length = C.n.length = nk;
+    let b = emptyBox();
+    for (let a = 0, k = 0; a < M.length; a += SCENE_CHUNK, k++) {
+      const e = Math.min(M.length, a + SCENE_CHUNK);
+      let ok = C.n[k] === e - a;
+      for (let i = a; ok && i < e; i++) if (C.refs[i] !== M[i]) ok = false;
+      if (!ok) {
+        let x = emptyBox();
+        for (let i = a; i < e; i++) {
+          x = unionBox(x, meshBounds(M[i]!));
+          C.refs[i] = M[i];
+        }
+        C.box[k] = x;
+        C.n[k] = e - a;
+      }
+      b = unionBox(b, C.box[k]!);
+    }
+    for (const l of s.lines) b = unionBox(b, lineBounds(l));
+    for (const p of s.points ?? []) b = unionBox(b, pointBounds(p));
+    return b;
+  }
+
   private sceneEdited(): void {
     const s = this.sceneRef!;
     this.bbList = s.meshes.filter((m) => hasBillboard(m));
@@ -2773,7 +2812,7 @@ export class Viewer3d {
     this.cutDirty = true;
     this.shadowVer++;
     // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(빈 상자·뒤집힌 상자는 0.49.0도 다시 셌다)
-    const box = boundsOk(s.bounds) ? s.bounds! : sceneBounds(s);
+    const box = boundsOk(s.bounds) ? s.bounds! : this.sceneBox(s);
     const moved = !sameBox(box, this.allBox);
     this.allBox = box;
     if (moved || hadOrigin !== this.usesOrigin) this.rebuildGrid();
