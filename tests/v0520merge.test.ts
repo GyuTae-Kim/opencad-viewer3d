@@ -307,16 +307,23 @@ describe('0.52.0 묶어 그리기 — 뷰어', () => {
     };
     both((v) => v.fit(false));
     const n0 = on.v.stats.merged.meshes;
-    // 바꾸기(같은 id, 새 배열): 그 그물만 빠진다
+    // 바꾸기(같은 id, 새 배열 — 같은 꼴): 0.63.0 묶음 자리에서 갈아 쓴다(묶음 그물 수 그대로)
     both((v) => v.setMesh({ ...boxMesh('d2', [0, 0, 0], [12, 12, 12], [1, 0.5, 0, 1]), origin: [60, 0, 0] }));
+    expect(on.v.stats.merged.meshes).toBe(n0);
+    // 꼴이 다른 그물(윤곽선 없음)로 바꾸면 그 그물만 빠진다(그물마다)
+    both((v) => {
+      const b = boxMesh('d5', [0, 0, 0], [9, 9, 9], [0.2, 0.8, 0.4, 1]);
+      delete b.edges;
+      v.setMesh({ ...b, origin: [150, 0, 0] });
+    });
     expect(on.v.stats.merged.meshes).toBe(n0 - 1);
-    // 제자리 고치기(vertices): 앞 기록을 바로 뺀다
+    // 제자리 고치기(vertices — 같은 꼴): 묶음 자리에 다시 쓴다
     both((v) => {
       const m = v.scene!.meshes.find((x) => x.id === 'd4')!;
       m.positions[0] = -3;
       v.setMesh(m, { vertices: [{ start: 0, count: 1 }] });
     });
-    expect(on.v.stats.merged.meshes).toBe(n0 - 2);
+    expect(on.v.stats.merged.meshes).toBe(n0 - 1);
     // 많이 빼면 그 묶음을 풀고 남은 그물로 다시 굽는다
     const g0 = on.v.stats.merged.groups;
     both((v) => {
