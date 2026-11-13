@@ -1611,6 +1611,8 @@ function primCount(it: Item): number {
 
 const selPrims = (s: RangeSelection | null | undefined): readonly IndexRange[] | undefined => (!s ? undefined : Array.isArray(s) ? s : (s as { prims?: readonly IndexRange[] }).prims);
 const selEdges = (s: RangeSelection | null | undefined): readonly IndexRange[] | undefined => (!s || Array.isArray(s) ? undefined : (s as { edges?: readonly IndexRange[] }).edges);
+/** 0.64.0 합친 구간 목록 둘이 같은지(mergeRanges 결과끼리) */
+const sameRanges = (a: readonly IndexRange[], b: readonly IndexRange[]): boolean => a.length === b.length && a.every((x, i) => x.start === b[i]!.start && x.count === b[i]!.count);
 
 interface Section {
   /** 기준 방향(단위) */
@@ -3532,14 +3534,20 @@ export class Viewer3d {
     return [...out.values()];
   }
 
+  /** 묶음 켜고 끄기. 0.64.0: 지금 상태와 같은 값이면 아무것도 하지 않는다(숨김 판·다시 그리기를 남기지 않는다) */
   setGroupVisible(group: string, on: boolean): void {
+    if (!on === this.hiddenGroups.has(group)) return;
     if (on) this.hiddenGroups.delete(group);
     else this.hiddenGroups.add(group);
     this.visibilityChanged();
   }
 
-  /** 항목 하나 켜고 끄기(id) */
+  /**
+   * 항목 하나 켜고 끄기(id). 0.64.0: 지금 상태와 같은 값이면(그 id를 이미 숨겼거나 숨기지 않았으면) 아무것도 하지 않는다 — 숨김 판·바꾼 항목 기록·다시 그리기를 남기지 않는다.
+   * 그래서 보이기를 바꿀 때마다 모든 항목에 부르는 앱도 렌더러는 바뀐 항목만 다시 묻는다(0.63.0은 같은 값 호출도 바꾼 항목 기록에 들어 기록이 1,024개를 넘으면 그물마다 물었다)
+   */
   setItemVisible(id: string, on: boolean): void {
+    if (!on === this.hiddenItems.has(id)) return;
     if (on) this.hiddenItems.delete(id);
     else this.hiddenItems.add(id);
     this.visibilityChanged(id);
@@ -4095,13 +4103,18 @@ export class Viewer3d {
    * 묶음 안 일부 숨기기: 그물은 삼각형 번호, 선분 묶음은 선분 번호, 점 묶음은 점 번호 범위({ start, count }) 목록.
    * { prims, edges }로 주면 그물 윤곽선(Mesh3d.edges의 선분 번호)도 숨긴다(주지 않으면 윤곽선은 그대로).
    * 숨긴 구간은 그리지 않고 고르기·측정·단면 테두리·전체 보기 범위에서도 뺀다. null이면 그 묶음의 숨김을 푼다. 장면을 바꾸면 풀린다.
+   * 0.64.0: 합친 구간이 지금 숨긴 구간(윤곽선 구간도)과 같으면 아무것도 하지 않는다(숨김 판·다시 그리기를 남기지 않는다)
    */
   setHiddenRanges(id: string, sel: RangeSelection | null): void {
     const it = this.items.get(id);
     if (!it || this.disposed) return;
+    const hidden = mergeRanges(selPrims(sel), primCount(it));
+    const eHidden = it.kind === 'mesh' && it.item.edges ? mergeRanges(selEdges(sel), Math.floor(it.item.edges.length / 6)) : [];
+    const cur = this.rangeSel.get(id);
+    if (sameRanges(cur?.hidden ?? [], hidden) && sameRanges(cur?.eHidden ?? [], eHidden)) return;
     const r = this.rangeState(id);
-    r.hidden = mergeRanges(selPrims(sel), primCount(it));
-    r.eHidden = it.kind === 'mesh' && it.item.edges ? mergeRanges(selEdges(sel), Math.floor(it.item.edges.length / 6)) : [];
+    r.hidden = hidden;
+    r.eHidden = eHidden;
     this.rangesChanged(it);
     this.visibilityChanged();
   }
