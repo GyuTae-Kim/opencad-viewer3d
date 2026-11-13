@@ -109,7 +109,7 @@ function scene(): Scene3d {
   return { name: 's', units: 'mm', meshes, lines: [] };
 }
 
-const plan = (w: W): { id: number; volatile: boolean } | null => w.r.instPlan as { id: number; volatile: boolean } | null;
+const plan = (w: W): { id: number; volatile: boolean; fix: number } | null => w.r.instPlan as { id: number; volatile: boolean; fix: number } | null;
 
 describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
   it('가만히 있는 프레임은 올리지 않고, 돌린 프레임은 자리 텍셀만, 숨김·강조 하나는 바뀐 자리부터만 — 그린 도형은 뼈대를 끈 뷰어와 같다', () => {
@@ -127,7 +127,8 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     const hide = step(on, off, 'hide', (w) => w.v.setItemVisible('a4', false));
     expect(hide).toBeGreaterThan(0);
     expect(hide).toBeLessThanOrEqual(2 * 11 + 2 * 5 + 11 * 5);
-    expect(plan(on)!.id).not.toBe(id0);
+    // 0.69.0 숨김 하나는 뼈대를 고쳐 다시 쓴다(같은 뼈대 — 0.68.0은 새로 모았다)
+    expect(plan(on)!.id).toBe(id0);
     expect(step(on, off, 'hide-still', () => undefined)).toBe(0);
     const hi = step(on, off, 'highlight', (w) => w.v.highlight(['b5']));
     expect(hi).toBeGreaterThan(0);
@@ -174,23 +175,39 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     const same = (label: string): void => {
       expect(plan(on)?.id, label).toBe(id);
     };
+    // 0.69.0 뼈대를 고쳐 다시 쓴다(같은 뼈대 — 고친 수가 는다)
+    let fx = plan(on)!.fix;
     const fresh = (label: string): void => {
       expect(plan(on)?.id, label).not.toBe(id);
       id = plan(on)!.id;
+      fx = plan(on)!.fix;
+    };
+    const fixed = (label: string): void => {
+      expect(plan(on)?.id, label).toBe(id);
+      expect(plan(on)!.fix, label).toBeGreaterThan(fx);
+      fx = plan(on)!.fix;
     };
     step(on, off, 'still-2', () => undefined);
     same('still-2');
-    // 강조만 바뀌면 새로 모으되 같은 그물 수는 다시 세지 않는다(보이는 그물·차례가 같다), 숨김이 바뀌면 다시 센다
-    const counts = (): unknown => (on.r.instPlan as { geoN: unknown }).geoN;
+    // 0.69.0 강조·숨김만 바뀌면 뼈대를 고친다(같은 그물 수는 더하고 뺀다 — 0.68.0은 새로 모았다). 모드만 바뀌면 새로 모으되 같은 그물 수는 다시 세지 않는다(보이는 그물·차례가 같다)
+    const counts = (): Map<string, number> => (on.r.instPlan as { geoN: Map<string, number> }).geoN;
     const n0 = counts();
     step(on, off, 'hi-only', (w) => w.v.highlight(['a2', 'b7']));
-    fresh('hi-only');
+    fixed('hi-only');
     expect(counts()).toBe(n0);
+    const sum = (): number => [...counts().values()].reduce((a, b) => a + b, 0);
+    const c0 = sum();
     step(on, off, 'hide-count', (w) => w.v.setItemVisible('c3', false));
-    fresh('hide-count');
-    expect(counts()).not.toBe(n0);
+    fixed('hide-count');
+    expect(sum()).toBe(c0 - 1);
     step(on, off, 'show-count', (w) => (w.v.setItemVisible('c3', true), w.v.highlight(null)));
-    fresh('show-count');
+    fixed('show-count');
+    expect(sum()).toBe(c0);
+    step(on, off, 'mode-only', (w) => w.v.setRenderMode('shaded'));
+    fresh('mode-only');
+    expect(counts()).toBe(n0);
+    step(on, off, 'mode-back', (w) => w.v.setRenderMode('shadedEdges'));
+    fresh('mode-back');
     // Mesh3d.color 값을 제자리에서 고친다(스타일 객체 — 그 색을 쓰는 자리 모두)
     const tint = (sc: Scene3d, i: number, v: number): void => {
       (sc.meshes.find((m) => m.id === 'a1')!.color as unknown as number[])[i] = v;
@@ -216,14 +233,14 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     fresh('color-object');
     step(on, off, 'color-still', () => undefined);
     same('color-still');
-    // 장면 고치기: 같은 꼴 바꾸기(새 기록)·빼기
+    // 장면 고치기: 같은 꼴 바꾸기(새 기록)·빼기 — 0.69.0 보이는 그물이 바뀐 것이라 뼈대를 고친다
     step(on, off, 'set-mesh', (w) => {
       const m = (w === on ? sc1 : sc2).meshes.find((x) => x.id === 'a6')!;
       w.v.setMesh({ ...m, matrix: placeAt(5, 5, 5, 20, true) });
     });
-    fresh('set-mesh');
+    fixed('set-mesh');
     step(on, off, 'remove', (w) => w.v.removeMesh('c5'));
-    fresh('remove');
+    fixed('remove');
     step(on, off, 'min', (w) => w.v.setRenderOptions({ instancing: { min: 11 } }));
     fresh('min');
     step(on, off, 'min-back', (w) => w.v.setRenderOptions({ instancing: true }));
@@ -244,7 +261,7 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     step(on, off, 'look-dim', (w) => w.v.setItemOpacity('b4', 0.3));
     fresh('look-dim');
     step(on, off, 'look-hi', (w) => w.v.highlight(['a3', 'b4']));
-    fresh('look-hi');
+    fixed('look-hi');
     step(on, off, 'look-off', (w) => w.v.clearItemLooks());
     fresh('look-off');
     step(on, off, 'look-off-still', () => undefined);
