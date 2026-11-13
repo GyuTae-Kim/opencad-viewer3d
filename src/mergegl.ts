@@ -302,39 +302,54 @@ export function step(h: MergeHost): void {
 /**
  * 0.60.0 그리기 뼈대를 만든다: 장면 차례(meshes)를 같은 묶음의 잇단 번호 덩이와 묶음 밖 그물로 나누고, 기록마다 덩이 번호(bk — 밖은 −1)를 적는다.
  * 그리기는 뼈대가 맞는 동안(orderValid) 깨끗한 덩이(모두 보이고·잘라낸 그물·강조·겉모습·구간이 없음)를 그물마다 보지 않고 구간 하나로 더한다 —
- * 다 묶은 큰 장면에서 프레임마다 그물 기록을 차례대로 훑던 일(보임·잘라냄·강조·색 — 8만 그물에서 그리기 시간의 절반 가까이)이 덩이 수만큼으로 준다
+ * 다 묶은 큰 장면에서 프레임마다 그물 기록을 차례대로 훑던 일(보임·잘라냄·강조·색 — 8만 그물에서 그리기 시간의 절반 가까이)이 덩이 수만큼으로 준다.
+ * 0.66.0 덩이를 이을 때 장면 차례 다음 기록이 묶음의 다음 번호 기록(g.recs — 묶음에 든 기록 r은 g.recs[r.mi] = r)이고 그 묶음에 들었는지만 보고, 덩이 판정은 묶음마다
+ * 그물 깃발(groupFlags)로 센다(0.65.0은 기록마다 묶음 번호·판정 다섯 값을 읽었다 — 다시 굽기 뒤처럼 뼈대를 다시 만드는 그리기의 큰 몫, 가짜 WebGL 8만 약 5 ms). 같은 뼈대다
  */
 export function orderBuild(h: MergeHost): MergeOrder {
   const M = h.meshes;
   const items: (MergeBlock | MeshRec)[] = [];
   const at: number[] = [];
   const blocks: MergeBlock[] = [];
-  let k: MergeBlock | null = null;
-  for (let j = 0; j < M.length; j++) {
+  for (let j = 0, e = 0; j < M.length; j = e) {
     const r = M[j]!;
     const g = r.mg;
+    e = j + 1;
     if (!g) {
-      k = null;
       r.bk = -1;
       items.push(r);
       at.push(j);
       continue;
     }
-    const i = r.mi!;
-    const plain = !r.transparent && !r.back && !r.pbr && !r.tex;
-    if (k && k.g === g && k.b === i) {
-      k.b++;
-      if (!plain) k.ok = false;
-      if (!r.edges) k.edges = false;
-    } else {
-      k = { g, a: i, b: i + 1, ok: plain, edges: !!g.thin && !!r.edges, cut: 0, hi: 0, np: false, npv: -1, hid: [], cutL: [], hiL: [], ex: 0, exA: [], exB: [], gd: g.dead, gl: g.live };
-      items.push(k);
-      at.push(j);
-      blocks.push(k);
+    const R = g.recs, F = groupFlags(g), a = r.mi!;
+    let b = a + 1;
+    while (e < M.length && b < R.length && M[e] === R[b] && R[b]!.mg === g) {
+      b++;
+      e++;
     }
-    r.bk = blocks.length - 1;
+    let fl = 0;
+    for (let i = a; i < b; i++) fl |= F[i]!;
+    const bk = blocks.length;
+    const k: MergeBlock = { g, a, b, ok: !(fl & 1), edges: !!g.thin && !(fl & 2), cut: 0, hi: 0, np: false, npv: -1, hid: [], cutL: [], hiL: [], ex: 0, exA: [], exB: [], gd: g.dead, gl: g.live };
+    items.push(k);
+    at.push(j);
+    blocks.push(k);
+    for (let t = j; t < e; t++) M[t]!.bk = bk;
   }
   return { n: M.length, items, at: Int32Array.from(at), blocks };
+}
+
+/** 0.66.0 기록 하나의 뼈대 덩이 판정 깃발(1 = 그물마다 그릴 꼴 — 반투명·뒷면·PBR·무늬, 2 = 윤곽선 없음 — orderBuild·blockReset과 같은 판정) */
+function recFlags(r: MeshRec): number {
+  return (r.transparent || r.back || r.pbr || r.tex ? 1 : 0) | (r.edges ? 0 : 2);
+}
+
+/** 0.66.0 묶음 그물마다 뼈대 덩이 판정 깃발(처음 쓸 때 — 묶음의 기록은 갈아 쓸 때만 바뀌고 그때 그 자리를 고친다: swapCaches) */
+function groupFlags(g: MergeGroup): Uint8Array {
+  if (g.pf) return g.pf;
+  const F = new Uint8Array(g.recs.length);
+  for (let i = 0; i < F.length; i++) F[i] = recFlags(g.recs[i]!);
+  return (g.pf = F);
 }
 
 /**
@@ -636,13 +651,14 @@ export function eachItem(o: MergeOrder, vis: number, fn: (r: MeshRec) => void, b
   }
 }
 
-/** 0.60.0 숨김 판이 바뀐 그리기에서 덩이마다 숨긴 그물 번호(보이는 목록을 만든 번호 seq가 아닌 그물) */
-export function blockHid(o: MergeOrder, seq: number): void {
-  for (const k of o.blocks) {
-    const hid: number[] = [];
-    for (let i = k.a; i < k.b; i++) if (k.g.recs[i]!.visAt !== seq) hid.push(i);
-    k.hid = hid;
-  }
+/**
+ * 0.60.0 숨김 판이 바뀐 그리기에서 덩이마다 숨긴 그물 번호(보이는 목록을 만든 번호가 아닌 그물). 0.66.0 렌더러 visBuild가 모은 숨은 기록(hid — 장면 차례)만 본다:
+ * 덩이 그물은 모두 장면에 있고 visBuild가 장면 그물마다 그 번호로 visAt·visNo를 적으므로 그 번호가 아닌 덩이 그물은 hid에 든 것뿐이며, 장면 차례로 넣으면 덩이마다
+ * 번호가 오름차순이다(0.65.0은 덩이 그물마다 visAt을 읽었다 — 가짜 WebGL 8만 뼈대를 다시 만든 그리기 약 1.5 ms)
+ */
+export function blockHid(o: MergeOrder, hid: readonly MeshRec[]): void {
+  for (const k of o.blocks) k.hid = [];
+  for (const r of hid) if (r.bk! >= 0) o.blocks[r.bk!]!.hid.push(r.mi!);
 }
 
 /** 0.63.0 숨김을 고칠 id가 이보다 많으면 보이는 목록을 처음부터 만든다(그물마다 묻는 것이 넣고 빼기보다 싸다) */
@@ -962,6 +978,7 @@ function shiftsOf(g: MergeGroup): void {
  */
 function swapCaches(g: MergeGroup, i: number, r: MeshRec): void {
   g.cc = undefined;
+  if (g.pf) g.pf[i] = recFlags(r);
   if (g.fc) {
     g.fc.cols[i] = r.src.color;
     g.fc.vc[i] = r.hasColors;
