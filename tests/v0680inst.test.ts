@@ -117,8 +117,9 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     expect(on.v.stats.instanced.draws).toBeGreaterThan(0);
     expect(step(on, off, 'still', () => undefined)).toBe(0);
     expect(on.up.calls).toBe(0);
-    // 면 35자리(a11 반투명은 그물마다) × 11 + 윤곽선 24자리(a·b) × 5 — 줄 맞춤 없이(0.67.0은 묶음마다 1,024텍셀 줄)
-    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(35 * 11 + 24 * 5);
+    // 면 35자리(a11 반투명은 그물마다) × 11 + 윤곽선 24자리(a·b) × 5 — 줄 맞춤 없이(0.67.0은 묶음마다 1,024텍셀 줄).
+    // 0.69.0 회전 표 꼴(묶음마다 회전 셋 이하 — 0°·돈 것·누운 것): 면 묶음 아홉 = 회전 26항목 × 9 + 35자리 × 2, 윤곽선 묶음 둘 = 회전 셋씩 × 3 + 24자리 × 2
+    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(26 * 9 + 35 * 2 + 6 * 3 + 24 * 2);
     expect(step(on, off, 'still-2', () => undefined)).toBe(0);
     const id0 = plan(on)!.id;
     expect(step(on, off, 'still-3', () => undefined)).toBe(0);
@@ -132,13 +133,14 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     expect(step(on, off, 'hide-still', () => undefined)).toBe(0);
     const hi = step(on, off, 'highlight', (w) => w.v.highlight(['b5']));
     expect(hi).toBeGreaterThan(0);
-    expect(hi).toBeLessThan(35 * 11 + 24 * 5);
+    expect(hi).toBeLessThan(26 * 9 + 35 * 2 + 6 * 3 + 24 * 2);
     expect(step(on, off, 'highlight-still', () => undefined)).toBe(0);
     step(on, off, 'show', (w) => w.v.setItemVisible('a4', true));
     // 강조한 b5는 따로 묶인다(자리 수는 같다) — 차례마다 자리 사이 한 줄이 안 되는 틈은 함께 올린다(0.67.0은 묶음마다 1,024텍셀 줄 — 묶음 열 남짓)
     const oh = step(on, off, 'orbit-hi', (w) => w.v.orbitBy(0.05, 0.01));
-    expect(oh).toBeGreaterThanOrEqual(35 * 11 + 24 * 5);
-    expect(oh).toBeLessThan(2 * (35 * 11 + 24 * 5));
+    // 0.69.0 회전 표 꼴: 혼자 남은 b5는 자리가 하나라 0.68.0 꼴(면 11·윤곽선 5)
+    expect(oh).toBeGreaterThanOrEqual(26 * 9 + 34 * 2 + 11 + 6 * 3 + 23 * 2 + 5);
+    expect(oh).toBeLessThan(2 * (26 * 9 + 35 * 2 + 6 * 3 + 24 * 2));
     step(on, off, 'group-hide', (w) => (w.v.setGroupVisible('g1', false), w.v.highlight(null)));
     step(on, off, 'section', (w) => w.v.setSection({ normal: [1, 0, 0], offset: -119985 }));
     expect(step(on, off, 'section-still', () => undefined)).toBe(0);
@@ -300,7 +302,8 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     const id = plan(on)!.id;
     expect(step(on, off, 'still-2', () => undefined)).toBe(0);
     expect(plan(on)!.id).toBe(id);
-    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(35 * 11 + 24 * 5);
+    // 0.69.0 회전 표 꼴: 둘째 시험이 PAL[1] 값을 PAL[2]와 같게 바꿔 면 묶음이 꼴마다 둘(4·7·4·8·4·8자리, 회전 셋씩)이다 — 18항목 × 9 + 35 × 2, 윤곽선 6 × 3 + 24 × 2
+    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(18 * 9 + 35 * 2 + 6 * 3 + 24 * 2);
     step(on, off, 'hide', (w) => (w.v.setItemVisible('m7', false), w.v.setItemVisible('b2', false)));
     step(on, off, 'hide-still', () => undefined);
     step(on, off, 'highlight', (w) => w.v.highlight(['m9', 'a3']));

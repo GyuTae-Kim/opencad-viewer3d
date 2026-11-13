@@ -639,6 +639,10 @@ export interface MeshRec {
    * 이 차례에 있는지(그 자리의 그물이 이것인지) 보고, 고친 묶음에 장면 차례로 넣고 묶음 차례를 맞춘다
    */
   ipx?: number;
+  /** 0.69.0 인스턴싱 회전 표 열쇠(Renderer3d.rotKey — 모형 0~2열 12값의 등록 번호)와 그때 모형·등록부 판(모형·판이 같으면 다시 셈하지 않는다) */
+  rk?: number;
+  rkm?: ArrayLike<number>;
+  rke?: number;
   edges: LineRec | null;
   /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
   wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
@@ -997,20 +1001,38 @@ interface InstSlot {
   ep: number;
   base: number;
   cap: number;
-  /** 자리를 놓은 자리 텍셀 수(면 11·12·15·16, 선 5 — 바뀌면 다시 놓는다: 넉넉히 남은 칸까지 함께 올리지 않게) */
+  /** 자리를 놓은 자리 텍셀 수(면 11·12·15·16, 선 5, 0.69.0 회전 표 꼴 면 2·3·4·선 2 — 바뀌면 다시 놓는다: 넉넉히 남은 칸까지 함께 올리지 않게) */
   st: number;
   kind: string;
   gen: number;
   n: number;
   mdl: (ArrayLike<number> | undefined)[];
   src: object | null;
+  /** 0.69.0 회전 표 꼴(종류 r·rl)로 쓴 표 항목 열쇠(InstRot.tk — 같은 판·같은 열쇠면 표를 다시 쓰지 않는다. 표는 자리 첫 텍셀부터, 그물 자리는 그 뒤) */
+  tk: readonly number[] | null;
 }
 
-/** 0.68.0 자리를 드는 묶음(저장소 열쇠 sk — 차례·그물 열쇠·그 열쇠 안 묶음 차례, 지난번 자리 slot — 같은 묶음 객체면 열쇠를 찾지 않는다) */
+/** 0.68.0 자리를 드는 묶음(저장소 열쇠 sk — 차례·그물 열쇠·그 열쇠 안 묶음 차례, 지난번 자리 slot — 같은 묶음 객체면 열쇠를 찾지 않는다). 0.69.0 rt = 회전 표 */
 interface InstHolder {
   sk: string;
   slot: InstSlot | null;
+  rt?: InstRot;
 }
+
+/**
+ * 0.69.0 인스턴싱 묶음의 회전 표(Renderer3d.instRot): src = 센 목록(그물 목록 또는 선 묶음 모형 배열 — 같은 배열·같은 등록부 판이면 다시 세지 않는다),
+ * ok = 회전 표 꼴로 쓰는지(등록부가 한도가 아니면), tk = 항목마다 열쇠(등록 번호, −1 = 모형 없음 — 시점·시점 투영 행렬 그대로), rid = 자리마다 항목 번호
+ */
+interface InstRot {
+  src: object;
+  ep: number;
+  ok: boolean;
+  tk: number[];
+  rid: Int32Array;
+}
+
+/** 0.69.0 회전 표 열쇠 등록부 한도(넘으면 새 회전은 0.68.0 꼴 — 장면을 바꾸면 비운다) */
+const ROT_MAX = 1 << 16;
 
 /** 0.42.0 모아 그릴 선 묶음 하나(같은 선 버퍼·같은 색·굵기·불투명도 — 자리 행렬만 다르다). recs·models는 장면 차례. 0.68.0 자리 자료 저장소 자리(InstHolder) */
 interface LineBatch extends InstHolder {
@@ -1239,6 +1261,20 @@ export class Renderer3d {
   instPlanOff = false;
   /** 0.69.0 인스턴싱 뼈대 고치기 시험용 끄기(true면 0.68.0처럼 보이는 그물·강조가 바뀌면 새로 모은다) */
   instFixOff = false;
+  /**
+   * 0.69.0 인스턴싱 회전 표 꼴: 열쇠 등록부(번호마다 모형 0~2열 12값 rotV[12·번호…], 값 비트 해시 → 번호(같은 해시면 목록)), 판(장면을 바꾸면 비우고 올린다),
+   * 해시 자리(12값을 Uint32로 읽는다), 묶음 표를 셀 때 번호 → 항목(rotAt이 rotSeq면 rotIx — 비우지 않고 쓴다), 표 항목 모형 자리, 시험용 끄기(0.68.0 꼴)
+   */
+  private rotV: number[] = [];
+  private rotH = new Map<number, number | number[]>();
+  private rotEp = 1;
+  private rotF = new Float64Array(12);
+  private rotU = new Uint32Array(this.rotF.buffer);
+  private rotAt = new Int32Array(64);
+  private rotIx = new Int32Array(64);
+  private rotSeq = 0;
+  private rotM = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  instRotOff = false;
   /** 0.68.0 이 그리기에서 찾은 인스턴싱 변종(정의 열쇠 — 묶음마다 정의 배열을 잇고 정렬하지 않는다. 그리기마다 비운다) */
   private ivm = new Map<string, Prog>();
   private instM3 = new Float32Array(9);
@@ -2040,6 +2076,117 @@ export class Renderer3d {
     this.instDirty.length = 0;
     this.instCompact = false;
     this.instPlan = null;
+    // 0.69.0 회전 표 열쇠 등록부도(기록마다 적은 열쇠·묶음 표는 판이 달라 다시 센다)
+    this.rotV = [];
+    this.rotH.clear();
+    this.rotEp++;
+  }
+
+  /**
+   * 0.69.0 모형 m(기록 r의 모형)의 회전 표 열쇠: 0~2열 12값(왼쪽 위 3×3과 그 세 열의 w 칸)의 등록 번호 — 처음 보는 값이면 등록한다(값의 비트가 같은 것끼리 한 번호,
+   * −0과 0은 다른 번호). 0~2열이 같은 모형끼리는 시점 · 모형·투영 · 그것의 0~2열과 법선 행렬이 같다(mat4Mul의 j열은 모형 j열만 읽는다). 등록부가 한도면 −2
+   */
+  private rotKey(r: MeshRec, m: ArrayLike<number>): number {
+    if (r.rkm === m && r.rke === this.rotEp) return r.rk!;
+    const F = this.rotF, U = this.rotU, V = this.rotV;
+    for (let j = 0; j < 12; j++) F[j] = m[j]!;
+    let h = 0x811c9dc5;
+    for (let j = 0; j < 24; j++) h = Math.imul(h ^ U[j]!, 0x01000193);
+    const same = (k: number): boolean => {
+      for (let j = 0; j < 12; j++) if (!Object.is(V[k * 12 + j], F[j])) return false;
+      return true;
+    };
+    const x = this.rotH.get(h);
+    let k = -1;
+    if (typeof x === 'number') {
+      if (same(x)) k = x;
+    } else if (x) for (const y of x) if (same(y)) k = y;
+    if (k < 0) {
+      k = V.length / 12;
+      if (k >= ROT_MAX) return -2;
+      for (let j = 0; j < 12; j++) V.push(F[j]!);
+      if (x === undefined) this.rotH.set(h, k);
+      else if (typeof x === 'number') this.rotH.set(h, [x, k]);
+      else x.push(k);
+    }
+    r.rkm = m;
+    r.rke = this.rotEp;
+    r.rk = k;
+    return k;
+  }
+
+  /**
+   * 0.69.0 인스턴싱 묶음 h의 회전 표(자리 list — 선 묶음은 그 모형 models, 그물 묶음은 기록 모형): 자리마다 모형 0~2열 열쇠로 항목을 나누고(모형 없음은 열쇠 −1 항목 하나 —
+   * 지난 표에 있고 아직 든 열쇠는 지난 차례, 새 열쇠는 처음 보는 차례로 뒤에: 숨김·강조로 자리가 빠지거나 들어도 표가 같으면 표·앞 자리를 다시 쓰지 않는다) 회전 표 꼴로 쓴다. 항목 K ≤ 자리 n이라 텍셀은 0.68.0 꼴 이하다(면 9K + 2n ≤ 11n — 안개 선만 4K + 2n이라 K가 n에 가까우면 5n보다 조금 많다),
+   * 셈은 K가 n이면 0.68.0 꼴보다 3열 몫만큼 많다. 묶음마다 꼴을 가르면 회전이 다른 묶음 사이에 프로그램을 바꿔 GL 호출이 늘어(가짜 WebGL 강조 가만히 — useProgram 48 → 89)
+   * 겉모습이 없으면 모든 묶음을 이 꼴로 그린다. 같은 목록 배열·같은 등록부 판이면 지난 표(가만히 프레임은 세지 않는다). 겉모습이 있으면 부르지 않는다
+   * (겉모습 행렬은 그리기마다 모형을 바꾼다). 등록부가 한도면 null(0.68.0 꼴)
+   */
+  private instRot(h: InstHolder, list: readonly MeshRec[], models: readonly (ArrayLike<number> | undefined)[] | null): InstRot | null {
+    const src = models ?? list;
+    const c = h.rt;
+    if (c && c.src === src && c.ep === this.rotEp) return c.ok ? c : null;
+    const n = list.length;
+    const rid = new Int32Array(n), key = new Int32Array(n), tk: number[] = [];
+    // 자리마다 열쇠(모형 없음 −1)와 든 열쇠 표시(s)
+    const s = ++this.rotSeq;
+    let ok = n >= 1, hasNom = false;
+    for (let i = 0; ok && i < n; i++) {
+      const m = models ? models[i] : list[i]!.model;
+      if (!m) {
+        key[i] = -1;
+        hasNom = true;
+        continue;
+      }
+      const k = this.rotKey(list[i]!, m);
+      if (k < 0) {
+        ok = false;
+        break;
+      }
+      if (k >= this.rotAt.length) {
+        let L = this.rotAt.length;
+        while (L <= k) L *= 2;
+        const a = new Int32Array(L), b = new Int32Array(L);
+        a.set(this.rotAt);
+        b.set(this.rotIx);
+        this.rotAt = a;
+        this.rotIx = b;
+      }
+      key[i] = k;
+      this.rotAt[k] = s;
+    }
+    if (ok) {
+      // 지난 표의 열쇠는 지난 차례 그대로(숨김·강조로 자리가 빠지거나 들어도 표가 같으면 표·앞 자리를 다시 쓰지 않는다 — 빠진 열쇠도 표의 반이 넘지 않으면 둔다:
+      // 숨긴 부품을 바꾸며 그 회전이 묶음에서 잠깐 빠져도 표가 같다), 새 열쇠는 처음 보는 차례로 뒤에
+      const t = ++this.rotSeq;
+      let nom = -1;
+      if (c && c.ep === this.rotEp) {
+        let gone = 0;
+        for (const k of c.tk) if (k < 0 ? !hasNom : this.rotAt[k] !== s) gone++;
+        const keep = 2 * gone <= c.tk.length;
+        for (const k of c.tk) {
+          if (k < 0) {
+            if (hasNom || keep) nom = tk.push(-1) - 1;
+          } else if (keep || this.rotAt[k] === s) {
+            this.rotAt[k] = t;
+            this.rotIx[k] = tk.push(k) - 1;
+          }
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        const k = key[i]!;
+        if (k < 0) {
+          if (nom < 0) nom = tk.push(-1) - 1;
+          rid[i] = nom;
+        } else if (this.rotAt[k] === t) rid[i] = this.rotIx[k]!;
+        else {
+          this.rotAt[k] = t;
+          rid[i] = this.rotIx[k] = tk.push(k) - 1;
+        }
+      }
+    }
+    h.rt = { src, ep: this.rotEp, ok, tk, rid };
+    return ok ? h.rt : null;
   }
 
   /**
@@ -2062,10 +2209,11 @@ export class Renderer3d {
   /**
    * 0.68.0 묶음 h의 자리(n자리 × stride텍셀)를 마련한다: h.slot이 이 판(instEp)의 자리이고 같은 자리 텍셀 수로 들어가면 그대로, 아니면 열쇠 h.sk의 자리, 그것도 모자라거나
    * 자리 텍셀 수가 바뀌었으면 저장소 끝에 새로(줄을 맞추지 않고 이어서 — 늘리는 자리는 조금 넉넉히). 그림을 늘려야 하는데 버린 자리가 ¼을 넘으면 다음 그리기 처음에 자리를 모두 버리고 처음부터 놓는다
-   * (그리기 안에서는 버리지 않는다 — 한 차례의 묶음을 모두 쓴 뒤 올리고 그리므로 앞 묶음 자리를 덮으면 안 된다). 그림 한도에 들지 않으면 null(그물마다 그린다)
+   * (그리기 안에서는 버리지 않는다 — 한 차례의 묶음을 모두 쓴 뒤 올리고 그리므로 앞 묶음 자리를 덮으면 안 된다). 그림 한도에 들지 않으면 null(그물마다 그린다).
+   * 0.69.0 head = 자리 앞 표 텍셀 수(회전 표 꼴)
    */
-  private instSlot(h: InstHolder, n: number, stride: number): InstSlot | null {
-    const need = n * stride;
+  private instSlot(h: InstHolder, n: number, stride: number, head = 0): InstSlot | null {
+    const need = head + n * stride;
     let q = h.slot && h.slot.ep === this.instEp ? h.slot : (this.instSlots.get(h.sk) ?? null);
     if (q && q.ep !== this.instEp) q = null;
     if (q && need <= q.cap && q.st === stride) return (h.slot = q);
@@ -2082,7 +2230,7 @@ export class Renderer3d {
       this.instGrow(base + cap, max);
     }
     if (q) this.instLive -= q.cap;
-    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null };
+    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null, tk: null };
     this.instSlots.set(h.sk, s);
     this.instTop = base + cap;
     this.instLive += cap;
@@ -2238,6 +2386,223 @@ export class Renderer3d {
     }
     this.instDirty.push(q.base + i0 * stride, q.base + n * stride);
     return q.base;
+  }
+
+  /**
+   * 0.69.0 그물 자리 자료의 회전 표 꼴(IROT 변종 — 겉모습이 없을 때, rt = instRot): 0.68.0 꼴은 자리마다 시점에 달린
+   * 11텍셀(시점 투영 · 모형·시점 · 모형·법선 행렬)을 행렬 곱 둘과 역행렬로 썼다(가짜 WebGL 2만 꼴 24 돌림 — 그리기 시간의 ~80%가 이 쓰기). 시점 · 모형의 j열(j < 3)은
+   * 모형 j열만, 법선 행렬은 그 0~2열만 읽으므로 회전마다 같다 — 표 항목(자리 첫 텍셀 ib 앞 r번째 — ib − (r + 1)·T부터 T = 9 + 그림자 3텍셀)에 instMeshes와 같은 곱으로 한 번 쓰고
+   * (그림자 행렬 0~2열도 같은 맞춤), 자리에는 3열만 instMeshes와 같은 셈·같은 차례로 쓴다 — 텍셀 0 = 시점 투영 · 모형 3열, 1 = 시점 · 모형 3열 xyz와 w = 표 번호,
+   * 그다음 그림자 행렬 3열(그림자)·로컬 평면(단면). 모형이 없는 자리는 표 열쇠 −1(시점 투영·시점 행렬 그대로 — 0.68.0과 같다). 칸의 float32 값이 비트까지 같다.
+   * 같은 판·같은 표 열쇠면 표는 다시 쓰지 않고 자리는 instMeshes처럼 모형이 지난번과 다른 첫 자리부터. 자리 첫 텍셀(u_instBase) 또는 −1
+   */
+  private instMeshesRot(
+    f: ViewFrame,
+    h: InstHolder,
+    list: readonly MeshRec[],
+    rt: InstRot,
+    extra: { shadow?: ArrayLike<number> | null; clip?: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null } = {},
+  ): number {
+    const n = list.length;
+    const shadow = extra.shadow ?? null, clip = extra.clip ?? null;
+    const stride = 2 + (shadow ? 1 : 0) + (clip ? 1 : 0), T = 9 + (shadow ? 3 : 0), tk = rt.tk, tn = tk.length;
+    const q = this.instSlot(h, n, stride, tn * T);
+    if (!q) return -1;
+    const kind = `r${stride}`;
+    // 판은 0.68.0 꼴 면 종류와 같은 프레임 값(시점·투영·시점 투영·그림자 행렬·단면 평면)
+    const gen = this.instGen(`m${Renderer3d.instStride(!!shadow, !!clip)}`, () => [...f.view, ...f.proj, ...f.viewProj, ...Array.from(shadow ?? []), ...(clip ? (clip(undefined) ?? NO_CLIP) : [])]);
+    const ib = q.base + tn * T;
+    let i0 = 0, tab = true;
+    if (q.kind === kind && q.gen === gen && q.tk !== null && q.tk.length === tn && q.tk.every((x, j) => x === tk[j])) {
+      tab = false;
+      if (q.src === list && q.n === n) return ib;
+      const e = Math.min(n, q.n);
+      while (i0 < e && q.mdl[i0] === list[i0]!.model) i0++;
+    }
+    q.kind = kind;
+    q.gen = gen;
+    q.n = n;
+    q.src = list;
+    q.mdl.length = n;
+    q.tk = tk;
+    const d = this.instBuf, m3 = this.instM3, V = f.view, P = f.proj, Q = f.viewProj, L = shadow;
+    if (tab) {
+      const M = this.rotM, R = this.rotV;
+      for (let t = 0; t < tn; t++) {
+        const k = tk[t]!;
+        let mv: ArrayLike<number> = V, mvp: ArrayLike<number> = Q, lv: ArrayLike<number> | null = L;
+        if (k >= 0) {
+          for (let j = 0; j < 12; j++) M[j] = R[k * 12 + j]!;
+          mv = mat4Mul(V, M, this.d4a);
+          mvp = mat4Mul(P, mv, this.d4b);
+          if (L) lv = mat4Mul(L, M, this.d4c);
+        }
+        const o = (ib - (t + 1) * T) * 4;
+        for (let j = 0; j < 12; j++) {
+          d[o + j] = mvp[j]!;
+          d[o + 12 + j] = mv[j]!;
+        }
+        normalMatrix(mv, m3);
+        for (let c = 0; c < 3; c++) {
+          d[o + 24 + c * 4] = m3[c * 3]!;
+          d[o + 25 + c * 4] = m3[c * 3 + 1]!;
+          d[o + 26 + c * 4] = m3[c * 3 + 2]!;
+          d[o + 27 + c * 4] = 0;
+        }
+        if (lv)
+          for (let j = 0; j < 3; j++) {
+            for (let r = 0; r < 3; r++) d[o + 36 + j * 4 + r] = lv[j * 4 + r]! * 0.5 + lv[j * 4 + 3]! * 0.5;
+            d[o + 39 + j * 4] = lv[j * 4 + 3]!;
+          }
+      }
+      this.instDirty.push(q.base, ib);
+    }
+    if (i0 === n) return ib;
+    const v0 = V[0]!, v1 = V[1]!, v2 = V[2]!, v3 = V[3]!, v4 = V[4]!, v5 = V[5]!, v6 = V[6]!, v7 = V[7]!;
+    const v8 = V[8]!, v9 = V[9]!, v10 = V[10]!, v11 = V[11]!, v12 = V[12]!, v13 = V[13]!, v14 = V[14]!, v15 = V[15]!;
+    const p0 = P[0]!, p1 = P[1]!, p2 = P[2]!, p3 = P[3]!, p4 = P[4]!, p5 = P[5]!, p6 = P[6]!, p7 = P[7]!;
+    const p8 = P[8]!, p9 = P[9]!, p10 = P[10]!, p11 = P[11]!, p12 = P[12]!, p13 = P[13]!, p14 = P[14]!, p15 = P[15]!;
+    const Z = L ?? V;
+    const l0 = Z[0]!, l1 = Z[1]!, l2 = Z[2]!, l3 = Z[3]!, l4 = Z[4]!, l5 = Z[5]!, l6 = Z[6]!, l7 = Z[7]!;
+    const l8 = Z[8]!, l9 = Z[9]!, l10 = Z[10]!, l11 = Z[11]!, l12 = Z[12]!, l13 = Z[13]!, l14 = Z[14]!, l15 = Z[15]!;
+    const rid = rt.rid;
+    for (let i = i0; i < n; i++) {
+      const m = list[i]!.model;
+      q.mdl[i] = m;
+      const o = (ib + i * stride) * 4;
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 1;
+      if (!m) {
+        // 모형 없음: instMeshes처럼 시점 투영·시점 행렬 3열 그대로
+        d[o] = Q[12]!;
+        d[o + 1] = Q[13]!;
+        d[o + 2] = Q[14]!;
+        d[o + 3] = Q[15]!;
+        d[o + 4] = v12;
+        d[o + 5] = v13;
+        d[o + 6] = v14;
+      } else {
+        b0 = m[12]!;
+        b1 = m[13]!;
+        b2 = m[14]!;
+        b3 = m[15]!;
+        // 시점 · 모형 3열, 투영 · 그것 3열(mat4Mul과 같은 셈·차례)
+        const t0 = 0 + v0 * b0 + v4 * b1 + v8 * b2 + v12 * b3;
+        const t1 = 0 + v1 * b0 + v5 * b1 + v9 * b2 + v13 * b3;
+        const t2 = 0 + v2 * b0 + v6 * b1 + v10 * b2 + v14 * b3;
+        const t3 = 0 + v3 * b0 + v7 * b1 + v11 * b2 + v15 * b3;
+        d[o] = 0 + p0 * t0 + p4 * t1 + p8 * t2 + p12 * t3;
+        d[o + 1] = 0 + p1 * t0 + p5 * t1 + p9 * t2 + p13 * t3;
+        d[o + 2] = 0 + p2 * t0 + p6 * t1 + p10 * t2 + p14 * t3;
+        d[o + 3] = 0 + p3 * t0 + p7 * t1 + p11 * t2 + p15 * t3;
+        d[o + 4] = t0;
+        d[o + 5] = t1;
+        d[o + 6] = t2;
+      }
+      d[o + 7] = rid[i]!;
+      let e = o + 8;
+      if (L) {
+        // 그림자 행렬 3열(instMeshes와 같은 맞춤 — 모형이 없으면 빛 행렬 3열 그대로)
+        let s0 = l12, s1 = l13, s2 = l14, s3 = l15;
+        if (m) {
+          s0 = 0 + l0 * b0 + l4 * b1 + l8 * b2 + l12 * b3;
+          s1 = 0 + l1 * b0 + l5 * b1 + l9 * b2 + l13 * b3;
+          s2 = 0 + l2 * b0 + l6 * b1 + l10 * b2 + l14 * b3;
+          s3 = 0 + l3 * b0 + l7 * b1 + l11 * b2 + l15 * b3;
+        }
+        d[e] = s0 * 0.5 + s3 * 0.5;
+        d[e + 1] = s1 * 0.5 + s3 * 0.5;
+        d[e + 2] = s2 * 0.5 + s3 * 0.5;
+        d[e + 3] = s3;
+        e += 4;
+      }
+      if (clip) {
+        const c = clip(m) ?? NO_CLIP;
+        d[e] = c[0];
+        d[e + 1] = c[1];
+        d[e + 2] = c[2];
+        d[e + 3] = c[3];
+      }
+    }
+    this.instDirty.push(ib + i0 * stride, ib + n * stride);
+    return ib;
+  }
+
+  /**
+   * 0.69.0 선 자리 자료의 회전 표 꼴(IROT 변종 — instMeshesRot과 같은 때): 표 항목(T = 3 + 안개 1텍셀) = 시점 투영 · 모형 0~2열(+ 안개면 시점 · 모형 z 행 앞 세 칸),
+   * 자리 = 텍셀 0 시점 투영 · 모형 3열, 1 = (안개 z 행 끝 칸, 표 번호, 0, 0). instLines와 같은 셈이라 칸 값이 비트까지 같다. 자리 첫 텍셀 또는 −1
+   */
+  private instLinesRot(f: ViewFrame, h: InstHolder, models: readonly (ArrayLike<number> | undefined)[], fog: boolean, rt: InstRot): number {
+    const n = models.length, T = fog ? 4 : 3, tk = rt.tk, tn = tk.length;
+    const q = this.instSlot(h, n, 2, tn * T);
+    if (!q) return -1;
+    const kind = fog ? 'rlf' : 'rl';
+    const gen = this.instGen(fog ? 'lf' : 'l', () => (fog ? [...f.viewProj, ...f.view] : [...f.viewProj]));
+    const ib = q.base + tn * T;
+    let i0 = 0, tab = true;
+    if (q.kind === kind && q.gen === gen && q.tk !== null && q.tk.length === tn && q.tk.every((x, j) => x === tk[j])) {
+      tab = false;
+      if (q.src === models && q.n === n) return ib;
+      const e = Math.min(n, q.n);
+      while (i0 < e && q.mdl[i0] === models[i0]) i0++;
+    }
+    q.kind = kind;
+    q.gen = gen;
+    q.n = n;
+    q.src = models;
+    q.mdl.length = n;
+    q.tk = tk;
+    const d = this.instBuf, V = f.view, Q = f.viewProj;
+    if (tab) {
+      const M = this.rotM, R = this.rotV;
+      for (let t = 0; t < tn; t++) {
+        const k = tk[t]!;
+        let mvp: ArrayLike<number> = Q, mv: ArrayLike<number> = V;
+        if (k >= 0) {
+          for (let j = 0; j < 12; j++) M[j] = R[k * 12 + j]!;
+          mvp = mat4Mul(Q, M, this.d4a);
+          if (fog) mv = mat4Mul(V, M, this.d4b);
+        }
+        const o = (ib - (t + 1) * T) * 4;
+        for (let j = 0; j < 12; j++) d[o + j] = mvp[j]!;
+        if (fog) {
+          d[o + 12] = mv[2]!;
+          d[o + 13] = mv[6]!;
+          d[o + 14] = mv[10]!;
+          d[o + 15] = 0;
+        }
+      }
+      this.instDirty.push(q.base, ib);
+    }
+    if (i0 === n) return ib;
+    const q0 = Q[0]!, q1 = Q[1]!, q2 = Q[2]!, q3 = Q[3]!, q4 = Q[4]!, q5 = Q[5]!, q6 = Q[6]!, q7 = Q[7]!;
+    const q8 = Q[8]!, q9 = Q[9]!, q10 = Q[10]!, q11 = Q[11]!, q12 = Q[12]!, q13 = Q[13]!, q14 = Q[14]!, q15 = Q[15]!;
+    const v2 = V[2]!, v6 = V[6]!, v10 = V[10]!, v14 = V[14]!;
+    const rid = rt.rid;
+    for (let i = i0; i < n; i++) {
+      const m = models[i];
+      q.mdl[i] = m;
+      const o = (ib + i * 2) * 4;
+      let w = v14;
+      if (!m) {
+        d[o] = q12;
+        d[o + 1] = q13;
+        d[o + 2] = q14;
+        d[o + 3] = q15;
+      } else {
+        const b0 = m[12]!, b1 = m[13]!, b2 = m[14]!, b3 = m[15]!;
+        d[o] = 0 + q0 * b0 + q4 * b1 + q8 * b2 + q12 * b3;
+        d[o + 1] = 0 + q1 * b0 + q5 * b1 + q9 * b2 + q13 * b3;
+        d[o + 2] = 0 + q2 * b0 + q6 * b1 + q10 * b2 + q14 * b3;
+        d[o + 3] = 0 + q3 * b0 + q7 * b1 + q11 * b2 + q15 * b3;
+        if (fog) w = 0 + v2 * b0 + v6 * b1 + v10 * b2 + v14 * b3;
+      }
+      d[o + 4] = fog ? w : 0;
+      d[o + 5] = rid[i]!;
+      d[o + 6] = 0;
+      d[o + 7] = 0;
+    }
+    this.instDirty.push(ib + i0 * 2, ib + n * 2);
+    return ib;
   }
 
   /** 0.43.0 그물 자리 하나의 텍셀 수: 11(행렬) + 그림자 행렬 4 + 단면 평면 1 — 셰이더 u_instStride */
@@ -2727,22 +3092,25 @@ export class Renderer3d {
     models: readonly (ArrayLike<number> | undefined)[],
     o: { width: number; dashed: boolean; noFog?: boolean; capz?: boolean },
     st: RenderState,
-    wire?: { vao: WebGLVertexArrayObject; count: number } | null,
+    wire: { vao: WebGLVertexArrayObject; count: number } | null,
+    recs: readonly MeshRec[],
   ): { p: Prog; base: number; n: number; wide: boolean } | null {
     if (!r && !wire) return null;
     const fog = !o.noFog && st.fog ? st.fog : null;
     const wDev = o.width * st.dpr;
     const fast = !!r && st.interacting && r.n > FAST_LINES_WHILE_MOVING;
     const wide = !!r && !wire && !fast && (o.dashed || wDev > 1.01);
+    // 0.69.0 겉모습이 없으면 회전 표 꼴(IROT — 회전마다 표 한 번, 자리마다 3열만)
+    const rt = !st.look && !this.instRotOff ? this.instRot(h, recs, models) : null;
     // 변종이 아직 번역 중이면 그리지 않는다(부르는 쪽이 자리마다). 0.68.0 같은 정의의 변종은 이 그리기에서 한 번만 찾는다
-    const vk = `${wide ? 'w' : 't'}${wide && o.capz ? 1 : 0}${fog ? 1 : 0}`;
+    const vk = `${wide ? 'w' : 't'}${wide && o.capz ? 1 : 0}${fog ? 1 : 0}${rt ? 'r' : ''}`;
     let p = this.ivm.get(vk) ?? null;
     if (!p) {
-      p = this.instVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(fog ? ['FOG'] : [])]);
+      p = this.instVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(fog ? ['FOG'] : []), ...(rt ? ['IROT'] : [])]);
       if (!p) return null;
       this.ivm.set(vk, p);
     }
-    const base = this.instLines(f, h, models, !!fog);
+    const base = rt ? this.instLinesRot(f, h, models, !!fog, rt) : this.instLines(f, h, models, !!fog);
     return base < 0 ? null : { p, base, n: models.length, wide };
   }
 
@@ -5108,7 +5476,7 @@ export class Renderer3d {
       const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
       // 0.68.0 묶음마다 변종을 고르고 자리 자료를 저장소에 쓴 뒤(바뀐 자리만) 한 번에 올리고 그린다.
       // 뼈대를 다시 쓰는 차례(replay)의 그물에는 구간 모음이 없다(구간이 있으면 뼈대를 만들지 않고, 만들 때 이 고리가 지웠다)
-      const prep: { list: MeshRec[]; p: Prog | null; base: number }[] = [];
+      const prep: { list: MeshRec[]; p: Prog | null; base: number; rot: boolean }[] = [];
       for (const b of bs) {
         if (!replay) for (const r of b.list) if (r.parts) this.dropParts(r);
         // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
@@ -5116,24 +5484,27 @@ export class Renderer3d {
         // 0.51.0 화면 밖으로 잘라낸 자리는 묶음에서 뺀다(묶음 나누기·차례·상태는 빼기 전 그대로 — 남은 자리만 자리 자료에)
         const list = culledN ? b.list.filter((r) => r.culledAt !== frameNo) : b.list;
         if (!list.length) {
-          prep.push({ list, p: null, base: -1 });
+          prep.push({ list, p: null, base: -1, rot: false });
           continue;
         }
+        // 0.69.0 겉모습이 없으면 회전 표 꼴(IROT — 회전마다 표 한 번, 자리마다 3열만)
+        const rt = !look && !this.instRotOff ? this.instRot(b, list, null) : null;
         // 0.68.0 같은 정의의 변종은 이 그리기에서 한 번만 찾는다(그 밖 정의는 그리기 안에서 같다)
-        const vk = `m${b.tex ? 1 : 0}${usePbr ? b.pk : ''}`;
+        const vk = `m${b.tex ? 1 : 0}${rt ? 'r' : '-'}${usePbr ? b.pk : ''}`;
         let p = ivm.get(vk) ?? null;
         if (!p) {
-          p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
+          p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(rt ? ['IROT'] : []), ...(usePbr ? b.pbr : [])]);
           if (p) ivm.set(vk, p);
         }
-        prep.push({ list, p, base: p ? this.instMeshes(f, b, list, mm, { shadow: shadowVp, clip: sec ? clipOf : null }) : -1 });
+        const extra = { shadow: shadowVp, clip: sec ? clipOf : null };
+        prep.push({ list, p, base: !p ? -1 : rt ? this.instMeshesRot(f, b, list, rt, extra) : this.instMeshes(f, b, list, mm, extra), rot: !!rt });
       }
       this.instFlush();
       for (let j = 0; j < bs.length; j++) {
         const b = bs[j]!;
         const r0 = b.list[0]!;
         const cull = r0.src.doubleSided === false;
-        const { list, p, base } = prep[j]!;
+        const { list, p, base, rot } = prep[j]!;
         if (!list.length) continue;
         if (!p || base < 0) {
           for (const r of list) {
@@ -5145,7 +5516,8 @@ export class Renderer3d {
         }
         if (p !== cur) meshUse(p);
         gl.uniform1i(this.loc(p, 'u_instBase'), base);
-        if (p.shadow || p.clip1) gl.uniform1i(this.loc(p, 'u_instStride'), Renderer3d.instStride(!!p.shadow, !!p.clip1));
+        // 0.69.0 회전 표 꼴 자리 텍셀 수는 2 + 그림자 1 + 단면 1(그림자·단면이 없으면 셰이더에 박혀 있다 — 0.68.0과 같은 호출)
+        if (p.shadow || p.clip1) gl.uniform1i(this.loc(p, 'u_instStride'), rot ? 2 + (p.shadow ? 1 : 0) + (p.clip1 ? 1 : 0) : Renderer3d.instStride(!!p.shadow, !!p.clip1));
         instState(r0, b.color, 1, b.tint, cull, b.vcol);
         if (p.uv) this.pbrBind(p, r0, pbrOf(r0));
         gl.bindVertexArray(r0.vao);
@@ -6178,7 +6550,7 @@ export class Renderer3d {
           const wire = typeof key === 'string' ? this.wireOf(b0.recs[0]!) : null;
           const e = wire ? null : b0.recs[0]!.edges!;
           const o = { color: b.color, vcol: false as const, width: b.width, dashed: false as const, alpha: b.alpha };
-          lineJobs.push({ b, e, wire, o, x: this.linesInstPrep(f, b0, e, b.models, o, st, wire) });
+          lineJobs.push({ b, e, wire, o, x: this.linesInstPrep(f, b0, e, b.models, o, st, wire, b.recs) });
         }
       if (lineJobs.length) this.instFlush();
       for (const { b, e, wire, o, x } of lineJobs) {
@@ -6294,7 +6666,7 @@ export class Renderer3d {
           const b = culledN ? cutBatch(b0) : b0;
           if (!b.recs.length) continue;
           const e = b0.recs[0]!.edges!, o = backEdgeDash(dashCol, b.alpha);
-          dashJobs.push({ b, e, o, x: this.linesInstPrep(f, b0, e, b.models, o, st) });
+          dashJobs.push({ b, e, o, x: this.linesInstPrep(f, b0, e, b.models, o, st, null, b.recs) });
         }
       if (dashJobs.length) this.instFlush();
       for (const { b, e, o, x } of dashJobs) {

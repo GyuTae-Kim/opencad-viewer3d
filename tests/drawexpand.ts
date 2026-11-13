@@ -47,12 +47,14 @@ const MCLIP = /^#define MCLIP$/m;
 const MSHIFT = /^#define MSHIFT$/m;
 /** 0.67.0 회전 표 꼴(0~2열·법선 행렬·그림자 0~2열·안개 z 행 앞 세 칸은 자리 앞 표 항목 — 면은 깃발 칸에 4·표 번호, 선은 텍셀 2의 y가 표 번호) */
 const MROT = /^#define MROT$/m;
+/** 0.69.0 인스턴싱 회전 표 꼴(0~2열·법선 행렬·그림자 0~2열·안개 z 행 앞 세 칸은 자리 앞 표 항목 — 면은 텍셀 1의 w, 선은 텍셀 1의 y가 표 번호) */
+const IROT = /^#define IROT$/m;
 
-/** 셰이더 정의(INST·MERGE·MCLIP·MSHIFT·MROT — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
+/** 셰이더 정의(INST·MERGE·MCLIP·MSHIFT·MROT·IROT — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
 const defsOf = (vs: string): string =>
   [...vs.matchAll(/^#define (\w+)$/gm)]
     .map((m) => m[1]!)
-    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP' && d !== 'MSHIFT' && d !== 'MROT')
+    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP' && d !== 'MSHIFT' && d !== 'MROT' && d !== 'IROT')
     .sort()
     .join(',');
 
@@ -73,6 +75,21 @@ type LineLayout = {
   rot: ((at: (j: number) => number[], tab: (k: number) => number[]) => { mvp: number[]; mvz: number[] | null }) | null;
 };
 function lineLayout(vs: string, merge: boolean, mclip: boolean): LineLayout {
+  if (!merge && IROT.test(vs)) {
+    // 0.69.0 인스턴싱 회전 표 꼴: 자리 2텍셀(시점 투영 · 모형 3열, (안개 z 행 끝 칸, 표 번호)), 항목 r은 base − (r + 1)·(3 + 안개)부터
+    const fog = FOG.test(vs) ? 1 : 0;
+    return {
+      n: 2,
+      col: 5,
+      clip: 6,
+      lite: false,
+      mvz: () => null,
+      rot: (at, tab) => {
+        const kt = -(at(1)[1]! + 1) * (3 + fog);
+        return { mvp: [...tab(kt), ...tab(kt + 1), ...tab(kt + 2), ...at(0)], mvz: fog ? [...tab(kt + 3).slice(0, 3), at(1)[0]!] : null };
+      },
+    };
+  }
   if (merge && MROT.test(vs)) {
     const fog = FOG.test(vs) ? 1 : 0;
     return {
@@ -134,7 +151,9 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     const shadowOn = /^#define SHADOW$/m.test(vs), clipOn = /^#define CLIP$/m.test(vs);
     const lite = merge && MSHIFT.test(vs);
     const rot = merge && MROT.test(vs);
-    const stride = inst ? ((U.get('u_instStride')?.[0] as number | undefined) ?? (lite || rot ? 3 : merge ? 12 : 11)) : 0;
+    // 0.69.0 인스턴싱 회전 표 꼴(자리 2텍셀 — 그림자·단면이 있으면 u_instStride 3·4, 표 번호는 텍셀 1의 w)
+    const irot = inst && !merge && IROT.test(vs);
+    const stride = inst ? ((U.get('u_instStride')?.[0] as number | undefined) ?? (irot ? 2 : lite || rot ? 3 : merge ? 12 : 11)) : 0;
     /** 0.67.0 회전 표 항목 텍셀 수(면 9 + 그림자 3) */
     const RT = 9 + (shadowOn ? 3 : 0);
     // 정점 색 쓰기(u_vcol)는 묶음 변종에서 자리 자료(법선 행렬 첫 텍셀 w — 이동뿐 꼴은 시점 · 모형 3열 w) — 정점마다 셰이더가 고르는 색(v_col = u_vcol > 0.5 ? a_col : u_color)으로 견준다.
@@ -148,17 +167,17 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const item = merge ? attr(d.attribs.get(5), v, 1)![0]! : n;
         const at = (j: number): number[] => texel(d, base + item * stride + j);
         // 0.67.0 회전 표 꼴: 깃발 칸 = 깃발 + 4·표 번호, 항목은 base − (번호 + 1)·RT부터
-        const fv = rot ? at(1)[3]! : 0, rr = Math.floor(fv * 0.25);
+        const fv = rot ? at(1)[3]! : 0, rr = irot ? at(1)[3]! : Math.floor(fv * 0.25);
         const tb = (j: number): number[] => texel(d, base - (rr + 1) * RT + j);
-        const mvp = rot
+        const mvp = rot || irot
           ? [...tb(0), ...tb(1), ...tb(2), ...at(0)]
           : lite
             ? cols012(U, 'u_mvp0', at(0))
             : inst
               ? [...at(0), ...at(1), ...at(2), ...at(3)]
               : f32(U.get('u_mvp'))!;
-        const mv = rot ? [...tb(3), ...tb(4), ...tb(5), ...at(1)] : lite ? cols012(U, 'u_mv0', at(1)) : inst ? [...at(4), ...at(5), ...at(6), ...at(7)] : f32(U.get('u_mv'))!;
-        const nm = rot
+        const mv = rot || irot ? [...tb(3), ...tb(4), ...tb(5), ...at(1)] : lite ? cols012(U, 'u_mv0', at(1)) : inst ? [...at(4), ...at(5), ...at(6), ...at(7)] : f32(U.get('u_mv'))!;
+        const nm = rot || irot
           ? [...tb(6).slice(0, 3), ...tb(7).slice(0, 3), ...tb(8).slice(0, 3)]
           : lite
             ? f32(U.get('u_nmat0'))!
@@ -176,8 +195,8 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const s0 = merge ? 12 : 11;
         const sm = !shadowOn
           ? null
-          : rot
-            ? [...tb(9), ...tb(10), ...tb(11), ...at(3)]
+          : rot || irot
+            ? [...tb(9), ...tb(10), ...tb(11), ...at(irot ? 2 : 3)]
             : lite
               ? cols012(U, 'u_shadow0', at(3))
               : inst
