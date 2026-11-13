@@ -1726,7 +1726,7 @@ interface VisChunks {
   /** 0.66.0 덩어리에 그물이 아닌 묶음(선분·점)이 드는지(그림자 범위는 그 덩어리만 묶음마다) */
   other: boolean[];
 }
-const cubeSize =(px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
+const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
 function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
   if (t === false) return false;
