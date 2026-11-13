@@ -140,6 +140,8 @@ type W = { v: Viewer3d; gl: FakeGL };
 function view(sc: Scene3d = scene(), mode: 'shaded' | 'shadedEdges' | 'wireframe' | 'hiddenLine' | 'xray' | 'monochrome' = 'shadedEdges'): W {
   const v = new Viewer3d(dom.host() as unknown as HTMLElement, { animate: false, keyboard: false, renderMode: mode, viewCube: false });
   views.push(v);
+  // 0.69.0 keys가 자리마다 온 행렬 꼴(겉모습이 있을 때 쓰는 꼴)의 자리 자료를 읽는다 — 회전 표 꼴(기본)의 잘라내기는 v0690rot이 본다(확대)
+  (v as unknown as { renderer: { instRotOff: boolean } }).renderer.instRotOff = true;
   const gl = (v.canvas as unknown as FakeElement).gl!;
   gl.logDraws = true;
   v.setScene(sc);

@@ -109,7 +109,7 @@ function scene(): Scene3d {
   return { name: 's', units: 'mm', meshes, lines: [] };
 }
 
-const plan = (w: W): { id: number; volatile: boolean } | null => w.r.instPlan as { id: number; volatile: boolean } | null;
+const plan = (w: W): { id: number; volatile: boolean; fix: number } | null => w.r.instPlan as { id: number; volatile: boolean; fix: number } | null;
 
 describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
   it('가만히 있는 프레임은 올리지 않고, 돌린 프레임은 자리 텍셀만, 숨김·강조 하나는 바뀐 자리부터만 — 그린 도형은 뼈대를 끈 뷰어와 같다', () => {
@@ -117,8 +117,9 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     expect(on.v.stats.instanced.draws).toBeGreaterThan(0);
     expect(step(on, off, 'still', () => undefined)).toBe(0);
     expect(on.up.calls).toBe(0);
-    // 면 35자리(a11 반투명은 그물마다) × 11 + 윤곽선 24자리(a·b) × 5 — 줄 맞춤 없이(0.67.0은 묶음마다 1,024텍셀 줄)
-    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(35 * 11 + 24 * 5);
+    // 면 35자리(a11 반투명은 그물마다) × 11 + 윤곽선 24자리(a·b) × 5 — 줄 맞춤 없이(0.67.0은 묶음마다 1,024텍셀 줄).
+    // 0.69.0 회전 표 꼴(묶음마다 회전 셋 이하 — 0°·돈 것·누운 것): 면 묶음 아홉 = 회전 26항목 × 9 + 35자리 × 2, 윤곽선 묶음 둘 = 회전 셋씩 × 3 + 24자리 × 2
+    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(26 * 9 + 35 * 2 + 6 * 3 + 24 * 2);
     expect(step(on, off, 'still-2', () => undefined)).toBe(0);
     const id0 = plan(on)!.id;
     expect(step(on, off, 'still-3', () => undefined)).toBe(0);
@@ -127,17 +128,19 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     const hide = step(on, off, 'hide', (w) => w.v.setItemVisible('a4', false));
     expect(hide).toBeGreaterThan(0);
     expect(hide).toBeLessThanOrEqual(2 * 11 + 2 * 5 + 11 * 5);
-    expect(plan(on)!.id).not.toBe(id0);
+    // 0.69.0 숨김 하나는 뼈대를 고쳐 다시 쓴다(같은 뼈대 — 0.68.0은 새로 모았다)
+    expect(plan(on)!.id).toBe(id0);
     expect(step(on, off, 'hide-still', () => undefined)).toBe(0);
     const hi = step(on, off, 'highlight', (w) => w.v.highlight(['b5']));
     expect(hi).toBeGreaterThan(0);
-    expect(hi).toBeLessThan(35 * 11 + 24 * 5);
+    expect(hi).toBeLessThan(26 * 9 + 35 * 2 + 6 * 3 + 24 * 2);
     expect(step(on, off, 'highlight-still', () => undefined)).toBe(0);
     step(on, off, 'show', (w) => w.v.setItemVisible('a4', true));
     // 강조한 b5는 따로 묶인다(자리 수는 같다) — 차례마다 자리 사이 한 줄이 안 되는 틈은 함께 올린다(0.67.0은 묶음마다 1,024텍셀 줄 — 묶음 열 남짓)
     const oh = step(on, off, 'orbit-hi', (w) => w.v.orbitBy(0.05, 0.01));
-    expect(oh).toBeGreaterThanOrEqual(35 * 11 + 24 * 5);
-    expect(oh).toBeLessThan(2 * (35 * 11 + 24 * 5));
+    // 0.69.0 회전 표 꼴: 혼자 남은 b5는 자리가 하나라 0.68.0 꼴(면 11·윤곽선 5)
+    expect(oh).toBeGreaterThanOrEqual(26 * 9 + 34 * 2 + 11 + 6 * 3 + 23 * 2 + 5);
+    expect(oh).toBeLessThan(2 * (26 * 9 + 35 * 2 + 6 * 3 + 24 * 2));
     step(on, off, 'group-hide', (w) => (w.v.setGroupVisible('g1', false), w.v.highlight(null)));
     step(on, off, 'section', (w) => w.v.setSection({ normal: [1, 0, 0], offset: -119985 }));
     expect(step(on, off, 'section-still', () => undefined)).toBe(0);
@@ -174,23 +177,39 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     const same = (label: string): void => {
       expect(plan(on)?.id, label).toBe(id);
     };
+    // 0.69.0 뼈대를 고쳐 다시 쓴다(같은 뼈대 — 고친 수가 는다)
+    let fx = plan(on)!.fix;
     const fresh = (label: string): void => {
       expect(plan(on)?.id, label).not.toBe(id);
       id = plan(on)!.id;
+      fx = plan(on)!.fix;
+    };
+    const fixed = (label: string): void => {
+      expect(plan(on)?.id, label).toBe(id);
+      expect(plan(on)!.fix, label).toBeGreaterThan(fx);
+      fx = plan(on)!.fix;
     };
     step(on, off, 'still-2', () => undefined);
     same('still-2');
-    // 강조만 바뀌면 새로 모으되 같은 그물 수는 다시 세지 않는다(보이는 그물·차례가 같다), 숨김이 바뀌면 다시 센다
-    const counts = (): unknown => (on.r.instPlan as { geoN: unknown }).geoN;
+    // 0.69.0 강조·숨김만 바뀌면 뼈대를 고친다(같은 그물 수는 더하고 뺀다 — 0.68.0은 새로 모았다). 모드만 바뀌면 새로 모으되 같은 그물 수는 다시 세지 않는다(보이는 그물·차례가 같다)
+    const counts = (): Map<string, number> => (on.r.instPlan as { geoN: Map<string, number> }).geoN;
     const n0 = counts();
     step(on, off, 'hi-only', (w) => w.v.highlight(['a2', 'b7']));
-    fresh('hi-only');
+    fixed('hi-only');
     expect(counts()).toBe(n0);
+    const sum = (): number => [...counts().values()].reduce((a, b) => a + b, 0);
+    const c0 = sum();
     step(on, off, 'hide-count', (w) => w.v.setItemVisible('c3', false));
-    fresh('hide-count');
-    expect(counts()).not.toBe(n0);
+    fixed('hide-count');
+    expect(sum()).toBe(c0 - 1);
     step(on, off, 'show-count', (w) => (w.v.setItemVisible('c3', true), w.v.highlight(null)));
-    fresh('show-count');
+    fixed('show-count');
+    expect(sum()).toBe(c0);
+    step(on, off, 'mode-only', (w) => w.v.setRenderMode('shaded'));
+    fresh('mode-only');
+    expect(counts()).toBe(n0);
+    step(on, off, 'mode-back', (w) => w.v.setRenderMode('shadedEdges'));
+    fresh('mode-back');
     // Mesh3d.color 값을 제자리에서 고친다(스타일 객체 — 그 색을 쓰는 자리 모두)
     const tint = (sc: Scene3d, i: number, v: number): void => {
       (sc.meshes.find((m) => m.id === 'a1')!.color as unknown as number[])[i] = v;
@@ -216,14 +235,14 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     fresh('color-object');
     step(on, off, 'color-still', () => undefined);
     same('color-still');
-    // 장면 고치기: 같은 꼴 바꾸기(새 기록)·빼기
+    // 장면 고치기: 같은 꼴 바꾸기(새 기록)·빼기 — 0.69.0 보이는 그물이 바뀐 것이라 뼈대를 고친다
     step(on, off, 'set-mesh', (w) => {
       const m = (w === on ? sc1 : sc2).meshes.find((x) => x.id === 'a6')!;
       w.v.setMesh({ ...m, matrix: placeAt(5, 5, 5, 20, true) });
     });
-    fresh('set-mesh');
+    fixed('set-mesh');
     step(on, off, 'remove', (w) => w.v.removeMesh('c5'));
-    fresh('remove');
+    fixed('remove');
     step(on, off, 'min', (w) => w.v.setRenderOptions({ instancing: { min: 11 } }));
     fresh('min');
     step(on, off, 'min-back', (w) => w.v.setRenderOptions({ instancing: true }));
@@ -244,7 +263,7 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     step(on, off, 'look-dim', (w) => w.v.setItemOpacity('b4', 0.3));
     fresh('look-dim');
     step(on, off, 'look-hi', (w) => w.v.highlight(['a3', 'b4']));
-    fresh('look-hi');
+    fixed('look-hi');
     step(on, off, 'look-off', (w) => w.v.clearItemLooks());
     fresh('look-off');
     step(on, off, 'look-off-still', () => undefined);
@@ -283,7 +302,8 @@ describe('0.68.0 인스턴싱 자리 자료 저장소·뼈대', () => {
     const id = plan(on)!.id;
     expect(step(on, off, 'still-2', () => undefined)).toBe(0);
     expect(plan(on)!.id).toBe(id);
-    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(35 * 11 + 24 * 5);
+    // 0.69.0 회전 표 꼴: 둘째 시험이 PAL[1] 값을 PAL[2]와 같게 바꿔 면 묶음이 꼴마다 둘(4·7·4·8·4·8자리, 회전 셋씩)이다 — 18항목 × 9 + 35 × 2, 윤곽선 6 × 3 + 24 × 2
+    expect(step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0))).toBe(18 * 9 + 35 * 2 + 6 * 3 + 24 * 2);
     step(on, off, 'hide', (w) => (w.v.setItemVisible('m7', false), w.v.setItemVisible('b2', false)));
     step(on, off, 'hide-still', () => undefined);
     step(on, off, 'highlight', (w) => w.v.highlight(['m9', 'a3']));
