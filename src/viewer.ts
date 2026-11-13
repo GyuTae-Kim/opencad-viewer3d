@@ -2065,6 +2065,8 @@ export class Viewer3d {
   } = { profiles: null, hiddenEdges: 0, hiddenEdgesShaded: false, hiddenEdgeColor: null, edgeColor: null };
   /** 묶음별 겉모습(불투명도·고르기·색·행렬). 장면을 바꾸면 비운다 */
   private looks = new Map<string, LookState>();
+  /** 0.68.0 겉모습 판(looks를 바꿀 때마다 1씩 — 렌더러 RenderState.lookKey, 같으면 인스턴싱 뼈대를 다시 쓴다) */
+  private lookVer = 0;
   /** 묶음 행렬을 건 묶음 id(있으면 보이는 범위를 다시 모은다 — 0.32.0부터 수를 세지 않고 모아 둔다: 하나 바꿀 때 겉모습 전체를 훑지 않게) */
   private lookMoved = new Set<string>();
   private lineModels = new WeakMap<LineSet3d | PointSet3d, ArrayLike<number>>();
@@ -2320,6 +2322,7 @@ export class Viewer3d {
     this.ranges.clear();
     this.rangeSel.clear();
     this.looks.clear();
+    this.lookVer++;
     this.lookMoved.clear();
     this.lineModels = new WeakMap();
     this.segHi = null;
@@ -2407,6 +2410,7 @@ export class Viewer3d {
     const hadSection = !!this.sec;
     this.rangeSel.clear();
     this.looks.clear();
+    this.lookVer++;
     this.lookMoved.clear();
     this.upload = null;
     this.releaseOpt = null;
@@ -2592,7 +2596,7 @@ export class Viewer3d {
     // 0.50.0: 뺀 그물의 입력 알림도 뺀다
     if (this.issues.length) this.issues = this.issues.filter((i) => i.id !== id || i.kind !== 'mesh');
     this.rangeSel.delete(id);
-    this.looks.delete(id);
+    if (this.looks.delete(id)) this.lookVer++;
     this.lookMoved.delete(id);
     if (this.gpu) this.renderer.removeMesh(id, this.sceneRef, uniq && k >= 0 ? k : undefined);
     this.sceneEdited(m, null);
@@ -5718,6 +5722,7 @@ export class Viewer3d {
     if (!this.looks.size) return;
     const moved = this.lookMoved.size > 0;
     this.looks.clear();
+    this.lookVer++;
     this.lookMoved.clear();
     this.lookChanged(moved);
   }
@@ -5728,8 +5733,9 @@ export class Viewer3d {
     this.lookChanged(moved ? [id] : false);
   }
 
-  /** 겉모습 하나를 둔다(빈 겉모습이면 지운다 — 다시 셀 것은 lookChanged가 버린다) */
+  /** 겉모습 하나를 둔다(빈 겉모습이면 지운다 — 다시 셀 것은 lookChanged가 버린다). 0.68.0 겉모습 판을 올린다(겉모습 객체를 제자리에서 고친 뒤에도 여기를 지난다) */
   private storeLook(id: string, l: LookState): void {
+    this.lookVer++;
     if (l.alpha === undefined && l.pickable === undefined && !l.color && !l.matrix && !l.edgeColor && !l.profileColor && !l.pickOpaque && !l.pickThrough) this.looks.delete(id);
     else this.looks.set(id, l);
     if (l.matrix) this.lookMoved.add(id);
@@ -9064,6 +9070,8 @@ export class Viewer3d {
       parts: this.secRanged ? (id) => this.renderParts(id) : this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
       look: this.bbList.length ? this.billboardLook() : this.looks.size ? (id) => this.looks.get(id) : null,
+      // 0.68.0 겉모습 판(마주 보는 그물의 겉모습은 카메라마다 바뀌어 주지 않는다)
+      ...(this.bbList.length ? {} : { lookKey: this.lookVer }),
       hiddenEdges: this.renderOpts.hiddenEdges,
       profiles: this.renderOpts.profiles
         ? {

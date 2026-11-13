@@ -105,8 +105,10 @@ describe('0.42.0 같은 그물 자리 모아 그리기', () => {
     const d = frame(w);
     const lines = instanced(d).filter((e) => e.op === 'drawArraysInstanced');
     expect(lines.map((e) => [opName(w, e), e.args[1], e.args[2], e.args[3]])).toEqual([['LINES', 0, 24, 12]]);
-    // 그물 자료 12 × 11텍셀 = 한 줄 → 선 자료는 둘째 줄(텍셀 1024)부터 5텍셀씩
-    const data = Array.from({ length: 12 }, (_, i) => texels(w, 1024 + i * 5, 4));
+    // 선 자료는 그 그리기의 u_instBase부터 5텍셀씩(0.68.0 자리 자료 저장소 — 그물 자료 12 × 11텍셀 바로 뒤, 0.67.0까지는 둘째 줄 텍셀 1024부터)
+    const at = uni(lines[0]!, 'u_instBase')[0] as number;
+    expect(at).toBe(12 * 11);
+    const data = Array.from({ length: 12 }, (_, i) => texels(w, at + i * 5, 4));
     w.v.setRenderOptions({ instancing: false });
     // 그물 윤곽선 16개(가는 선) 뒤에 격자 넷
     const per = frame(w).filter((e) => e.op === 'drawArrays' && w.gl.nameOf(e.args[0]!) === 'LINES');
