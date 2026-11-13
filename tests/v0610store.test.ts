@@ -113,14 +113,15 @@ describe('0.61.0 묶음 자리 자료 저장소', () => {
     step(on, off, 'orbit', (w) => w.v.orbitBy(0.05, 0), 'some');
     step(on, off, 'still-2', () => undefined, 'zero');
     // 강조: 굵은 윤곽선 구간(0.61.0 — 묶어 그린다)의 선 색은 그 그물 윤곽선 자리에, 0.62.0 강조 깃발은 그 그물 면 자리에(0.61.0은 면 자리 그대로 — 강조는 구간 균일 변수).
-    // 쓴 자리 텍셀만 올린다(윤곽선 자리 6·면 자리 12 — 한 줄이 안 되는 틈으로 이어진 자리는 그 사이도 함께)
-    step(on, off, 'hover', (w) => w.v.highlight(['b3']), [18, 18]);
+    // 쓴 자리 텍셀만 올린다(윤곽선 자리 6·면 자리 12 — 한 줄이 안 되는 틈으로 이어진 자리는 그 사이도 함께).
+    // 0.67.0 이동뿐 그물에 돌린 행렬이 섞인 묶음은 회전 표 꼴(MROT — 면 자리 3·윤곽선 자리 3)
+    step(on, off, 'hover', (w) => w.v.highlight(['b3']), [6, 6]);
     step(on, off, 'hover-2', (w) => w.v.highlight(['b4', 'b5', 'b77', 'b300']), rows(10));
     step(on, off, 'hide', (w) => w.v.setItemVisible('b10', false), 'zero');
     step(on, off, 'group-hide', (w) => w.v.setGroupVisible('g1', false), 'zero');
     step(on, off, 'group-show', (w) => (w.v.setGroupVisible('g1', true), w.v.highlight(null)), rows(8));
-    // 제자리 색 고치기(같은 배열 안 값 — 0.60.0처럼 보인다): 그 면 자리 텍셀만(12텍셀)
-    step(on, off, 'color-in-place', (w) => void ((w.sc.meshes[14]!.color as unknown as number[])[0] = 0.95), [12, 12]);
+    // 제자리 색 고치기(같은 배열 안 값 — 0.60.0처럼 보인다): 그 면 자리 텍셀만(0.67.0 회전 표 꼴 3텍셀)
+    step(on, off, 'color-in-place', (w) => void ((w.sc.meshes[14]!.color as unknown as number[])[0] = 0.95), [3, 3]);
     // 겉모습을 처음 켜면 판이 바뀐다(겉모습이 없으면 자리의 모형을 견주지 않는다) — 그 뒤 겉모습 하나 더는 그 자리만
     step(on, off, 'look-on', (w) => w.v.setItemColor('b16', [1, 0, 0, 1]), 'some');
     step(on, off, 'look-color', (w) => w.v.setItemColor('b18', [0, 1, 0, 1]), [12, 12]);
@@ -162,8 +163,9 @@ describe('0.61.0 묶음 자리 자료 저장소', () => {
   });
 
   it('무늬 한도가 작으면 자리를 처음부터 다시 놓고(같은 그림), 그래도 넘으면 그 차례는 그물마다 그린다', () => {
-    // 300개: 면 자리 3,600텍셀 남짓·윤곽선 1,800텍셀 남짓 — 5줄(5,120)이면 하나씩만 들어 차례마다 다시 놓는다, 3줄이면 면은 그물마다
-    for (const rows of [5, 3]) {
+    // 300개: 0.67.0 회전 표 꼴로 면 자리 1,300텍셀 남짓·윤곽선 1,000텍셀 남짓(0.61.0 온 꼴은 3,600·1,800 — 5줄·3줄로 쟀다) —
+    // 2줄(2,048)이면 하나씩만 들어 차례마다 다시 놓는다, 1줄이면 면은 그물마다
+    for (const rows of [2, 1]) {
       const on = view(grid(300), true, rows), off = view(grid(300), false);
       bake(on);
       bake(off);
@@ -175,7 +177,7 @@ describe('0.61.0 묶음 자리 자료 저장소', () => {
       expect(s.max, `${rows}`).toBe(rows);
       expect(s.rows, `${rows}`).toBeLessThanOrEqual(rows);
       expect(on.v.stats.merged.draws, `${rows}`).toBeGreaterThan(0);
-      if (rows === 5) expect(s.ep).toBeGreaterThan(3);
+      if (rows === 2) expect(s.ep).toBeGreaterThan(3);
       else expect(on.v.stats.drawCalls).toBeGreaterThan(300);
     }
   });
@@ -186,8 +188,8 @@ describe('0.61.0 묶음 자리 자료 저장소', () => {
     type S = { top: number; live: number; rows: number; ep: number };
     const s0 = w.r.mgStore as S;
     const ep0 = s0.ep;
-    // 면 12·윤곽선 6텍셀 — 묶음마다 맞춤 자리 하나씩
-    expect(s0.live).toBeGreaterThanOrEqual(3000 * 18 - 13 * 6 * 18);
+    // 면 3·윤곽선 3텍셀(0.67.0 회전 표 꼴 — 0.61.0 온 꼴은 12·6) + 표 — 묶음마다 맞춤 자리 하나씩
+    expect(s0.live).toBeGreaterThanOrEqual(3000 * 6 - 13 * 6 * 6);
     let peak = 0;
     for (let k = 0; k < 3; k++)
       for (const set of [

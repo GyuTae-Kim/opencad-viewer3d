@@ -708,6 +708,24 @@ export interface MergeGroup {
   ps?: Record<string, MergeSlots>;
   /** 0.66.0 그물마다 뼈대 덩이 판정 깃발(1 = 그물마다 그릴 꼴 — 반투명·뒷면·PBR·무늬, 2 = 윤곽선 없음 — 처음 쓸 때, 갈아 쓰면 그 자리만: 조각 orderBuild) */
   pf?: Uint8Array;
+  /** 0.67.0 회전 표 꼴(MROT — 조각 mergegl rotsOf): 그물마다 표 번호·모형 3열, 서로 다른 모형 0~2열(처음 쓸 때 만든다, 갈아 쓰면 그 자리만) */
+  rt?: MergeRot;
+}
+
+/**
+ * 0.67.0 묶음의 회전 표(MROT): 모형 0~2열(왼쪽 위 3×3과 그 세 열의 w 칸 — 12값)이 같은 그물끼리 표 항목 하나를 함께 쓴다. 시점 · 모형·투영 · 그것의 0~2열과
+ * 법선 행렬은 모형 0~2열만 읽어 같은 항목 그물은 비트까지 같다 — 돌리는 프레임은 항목마다 한 번, 그물마다 3열만 센다(이동뿐 꼴 MSHIFT의 일반화)
+ */
+export interface MergeRot {
+  /** 그물 i의 표 번호 */
+  rid: Uint32Array;
+  /** 그물 i의 모형 3열(m12…m15 — 모형이 없으면 0, nom 1) */
+  c3: Float64Array;
+  nom: Uint8Array;
+  /** 항목 r의 모형 0~2열(12값 — 모형이 없는 그물만 든 항목은 단위 행렬) */
+  rm: number[];
+  /** 0~2열 값 열쇠 → 항목 번호 */
+  key: Map<string, number>;
 }
 
 /**
