@@ -85,6 +85,8 @@ export interface MergeHost {
   drawLines(f: ViewFrame, r: LineRec, model: ArrayLike<number> | undefined, o: object, st: RenderState, stats: RenderStats, memo: LineMemo | null): void;
   /** 0.61.0 묶음 자리 자료 저장소(처음 묶어 그릴 때 만든다 — 묶음이 모두 없어지면 놓는다) */
   mgStore: MergeStore | null;
+  /** 0.65.0 그리기 뼈대(맞으면 planLoose가 덩이째 센다) */
+  readonly mgOrder: MergeOrder | null;
 }
 
 /** 0.61.0 자리 자료 저장소 그림 폭(텍셀 — 셰이더 k & 1023·k >> 10과 같다)과 줄을 늘리는 단위 */
@@ -307,7 +309,6 @@ export function orderBuild(h: MergeHost): MergeOrder {
   const items: (MergeBlock | MeshRec)[] = [];
   const at: number[] = [];
   const blocks: MergeBlock[] = [];
-  const loose: MeshRec[] = [];
   let k: MergeBlock | null = null;
   for (let j = 0; j < M.length; j++) {
     const r = M[j]!;
@@ -317,7 +318,6 @@ export function orderBuild(h: MergeHost): MergeOrder {
       r.bk = -1;
       items.push(r);
       at.push(j);
-      loose.push(r);
       continue;
     }
     const i = r.mi!;
@@ -327,14 +327,218 @@ export function orderBuild(h: MergeHost): MergeOrder {
       if (!plain) k.ok = false;
       if (!r.edges) k.edges = false;
     } else {
-      k = { g, a: i, b: i + 1, at: j, ok: plain, edges: !!g.thin && !!r.edges, cut: 0, hi: 0, np: false, npv: -1, hid: [], cutL: [], hiL: [], ex: 0, exA: [], exB: [], gd: g.dead, gl: g.live };
+      k = { g, a: i, b: i + 1, ok: plain, edges: !!g.thin && !!r.edges, cut: 0, hi: 0, np: false, npv: -1, hid: [], cutL: [], hiL: [], ex: 0, exA: [], exB: [], gd: g.dead, gl: g.live };
       items.push(k);
       at.push(j);
       blocks.push(k);
     }
     r.bk = blocks.length - 1;
   }
-  return { n: M.length, items, at: Int32Array.from(at), blocks, loose };
+  return { n: M.length, items, at: Int32Array.from(at), blocks };
+}
+
+/**
+ * 0.65.0 덩이 a~b의 판정(orderBuild와 같다 — 그물마다 그릴 꼴이 없는지·모두 윤곽선이 있는지)과 그리기마다 쓰는 표시를 처음 값으로. ok0·e0은 가르기 전 덩이(잇기면 두 덩이 모두)의
+ * 판정 — 참이면 이 덩이도 참이라 그물마다 보지 않는다
+ */
+function blockReset(k: MergeBlock, ok0: boolean, e0: boolean): void {
+  let ok = true, edges = !!k.g.thin;
+  if (!ok0 || !e0) {
+    const R = k.g.recs;
+    for (let i = k.a; i < k.b; i++) {
+      const r = R[i]!;
+      if (!ok0 && (r.transparent || r.back || r.pbr || r.tex)) ok = false;
+      if (!e0 && !r.edges) edges = false;
+    }
+  }
+  k.ok = ok;
+  k.edges = edges;
+  k.cut = k.hi = k.ex = 0;
+  k.np = false;
+  k.npv = -1;
+  k.cutL = [];
+  k.hiL = [];
+  k.exA = [];
+  k.exB = [];
+  k.hs = undefined;
+  k.boxes = undefined;
+  k.ncg = undefined;
+}
+
+/**
+ * 0.65.0 그물 기록 하나를 바꾸거나 빼거나 끝에 더한 뒤 그리기 뼈대를 다시 만들지 않고 고친다 — 고친 뼈대는 orderBuild가 만들 것과 덩이·묶음 밖 그물·차례(at)가 같다
+ * (덩이 번호 차례만 다를 수 있다: 덩이를 가르면 뒤 토막은 끝 번호 — 덩이 번호 차례를 보는 곳은 없다). j = 장면 차례(meshes는 이미 고쳤다), old = 그 자리에 있던 기록
+ * (더하기면 null — 묶음에 들었으면 이미 빠졌다: leave), rec = 그 자리의 새 기록(빼기면 null — 묶음 밖이어야 한다). 묶음 그물이 빠지면 그 덩이를 그 번호에서 가르고
+ * 그 묶음의 덩이마다 빠진·쓰는 그물 수(gd·gl)를 지금 값으로, 덩이 숨긴 번호를 나눈다. 장면 차례가 밀리면(빼기·더하기) id → 장면 차례 표를 버린다(처음 쓸 때 다시).
+ * 0.64.0은 뼈대를 다시 만들고 보이는 목록·덩이 숨긴 번호·잘라내기 덩어리를 그물마다 다시 셌다(가짜 WebGL 8만 — 첫 프레임 약 15~20 ms). 맞지 않으면 false(렌더러가 뼈대를 잊는다)
+ */
+export function orderEdit(h: MergeHost, o: MergeOrder, j: number, old: MeshRec | null, rec: MeshRec | null): boolean {
+  const M = h.meshes;
+  if ((rec && (rec.mg || M[j] !== rec)) || M.length !== o.n + (old ? 0 : 1) - (rec ? 0 : 1)) return false;
+  const items = o.items, at = o.at;
+  if (!old) {
+    // 끝에 더한 묶음 밖 그물
+    if (!rec || j !== o.n) return false;
+    rec.bk = -1;
+    items.push(rec);
+    const a = new Int32Array(at.length + 1);
+    a.set(at);
+    a[at.length] = j;
+    o.at = a;
+    o.n++;
+    o.si = undefined;
+    return true;
+  }
+  // 그 자리를 덮는 뼈대 항목(at ≤ j인 마지막)
+  let lo = 0, hi = items.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (at[m]! <= j) lo = m + 1;
+    else hi = m;
+  }
+  const t = lo - 1;
+  if (t < 0) return false;
+  const x = items[t]!;
+  // 항목 t 자리에 들어갈 항목과 그 장면 차례
+  const add: (MergeBlock | MeshRec)[] = [];
+  const pos: number[] = [];
+  if ('src' in x) {
+    if (x !== old || at[t] !== j) return false;
+  } else {
+    const k = x, g = k.g, mi = old.mi!, b = k.b, hid = k.hid, ok0 = k.ok, e0 = k.edges;
+    if (old.bk === undefined || o.blocks[old.bk] !== k || mi < k.a || mi >= b || at[t]! + mi - k.a !== j) return false;
+    // 묶음을 놓았으면(쓰는 그물이 없다) 덩이는 이 그물 하나뿐이었다
+    if (!h.mgGroups.has(g) && b - k.a !== 1) return false;
+    let right: MergeBlock | null = null;
+    if (mi > k.a) {
+      // 앞 토막은 이 덩이로(번호 그대로), 뒤 토막은 새 덩이(끝 번호)
+      k.b = mi;
+      k.hid = hid.filter((v) => v < mi);
+      blockReset(k, ok0, e0);
+      add.push(k);
+      pos.push(at[t]!);
+      if (b > mi + 1) {
+        right = { g, a: mi + 1, b, ok: true, edges: true, cut: 0, hi: 0, np: false, npv: -1, hid: hid.filter((v) => v > mi), cutL: [], hiL: [], ex: 0, exA: [], exB: [], gd: 0, gl: 0 };
+        o.blocks.push(right);
+        const bk = o.blocks.length - 1;
+        for (let i = mi + 1; i < b; i++) g.recs[i]!.bk = bk;
+      }
+    } else if (b > mi + 1) {
+      // 뒤 토막만 — 이 덩이로
+      right = k;
+      k.a = mi + 1;
+      k.hid = hid.filter((v) => v > mi);
+    } else {
+      // 이 그물 하나뿐인 덩이 — 비운 덩이로 남긴다(뼈대 항목에서는 빠지고 덩이 번호는 그대로)
+      k.a = k.b = mi;
+      k.hid = [];
+    }
+    if (rec) {
+      add.push(rec);
+      pos.push(j);
+    }
+    if (right) {
+      blockReset(right, ok0, e0);
+      add.push(right);
+      pos.push(rec ? j + 1 : j);
+    }
+    for (const y of o.blocks) if (y.g === g) (y.gd = g.dead), (y.gl = g.live);
+    o.ids = undefined;
+  }
+  if (rec) {
+    if ('src' in x) {
+      add.push(rec);
+      pos.push(j);
+    }
+    rec.bk = -1;
+    rec.si = old.si;
+  }
+  // 묶음 밖 그물을 묶음 밖 그물로 바꾸면 그 자리만
+  if (add.length === 1 && 'src' in x && rec) {
+    items[t] = rec;
+    return true;
+  }
+  // 항목 t를 add로 바꾸고 뒤 항목의 장면 차례를 민다(빼기면 1 당긴다)
+  const d = rec ? 0 : -1;
+  const na = new Int32Array(items.length - 1 + add.length);
+  na.set(at.subarray(0, t));
+  for (let q = 0; q < pos.length; q++) na[t + q] = pos[q]!;
+  for (let u = t + 1; u < items.length; u++) na[u - 1 + add.length] = at[u]! + d;
+  items.splice(t, 1, ...add);
+  o.at = na;
+  // 항목을 통째로 뺐으면 그 앞뒤가 같은 묶음의 잇단 번호 덩이일 수 있다 — 하나로(orderBuild는 이어 붙인다)
+  const p = items[t - 1], q = items[t];
+  if (!add.length && p && q && !('src' in p) && !('src' in q) && p.g === q.g && p.b === q.a) {
+    const R = p.g.recs, bk = R[p.a]!.bk!;
+    for (let i = q.a; i < q.b; i++) R[i]!.bk = bk;
+    p.hid = p.hid.concat(q.hid);
+    p.b = q.b;
+    blockReset(p, p.ok && q.ok, p.edges && q.edges);
+    q.a = q.b;
+    q.hid = [];
+    items.splice(t, 1);
+    o.at = Int32Array.from([...na.subarray(0, t), ...na.subarray(t + 1)]);
+    o.ids = undefined;
+  }
+  if (!rec) {
+    o.n--;
+    o.si = undefined;
+  }
+  return true;
+}
+
+/** 0.65.0 렌더러의 보이는 목록(visMemo — 뼈대 ord·번호 seq·장면 차례 목록) */
+type VisMemo = { ord: MergeOrder; seq: number; list: MeshRec[] } | null;
+
+/**
+ * 0.65.0 orderEdit 뒤 보이는 목록·숨김 표시(MeshRec.visAt·visNo — 지난 목록 번호 S)를 그 기록만 옮긴다: 새 기록이 보이는지는 묶음 이름이 같으면 앞 기록 것, 아니면
+ * 뷰어가 준 값(vis). 끝에 더한 보이는 그물은 목록 끝에 둔다. 모르거나(숨은 자리에 보이는 그물·vis 없음) 목록 안 자리를 모르면 false(렌더러가 보이는 목록만 다시 —
+ * 숨김 판이 같으면 새 기록만 묻는다)
+ */
+export function orderVis(o: MergeOrder, vm: VisMemo, S: number | undefined, old: MeshRec | null, rec: MeshRec | null, vis: boolean | undefined): boolean {
+  if (S === undefined) return true;
+  const was = !old ? undefined : old.visAt === S ? true : old.visNo === S ? false : undefined;
+  const now = !rec ? undefined : old && was !== undefined && old.src.group === rec.src.group ? was : vis;
+  if (now === true) rec!.visAt = S;
+  else if (now === false) rec!.visNo = S;
+  if (!vm || vm.ord !== o || vm.seq !== S) return true;
+  const L = vm.list;
+  if (was) {
+    const k = L.indexOf(old!);
+    if (k < 0 || (rec && now === undefined)) return false;
+    if (now) L[k] = rec!;
+    else L.splice(k, 1);
+    return true;
+  }
+  // 끝에 더한 보이는 그물은 목록 끝(장면 차례 끝)
+  if (rec && now !== false) return !!now && !old && (L.push(rec), true);
+  return true;
+}
+
+/**
+ * 0.65.0 같은 꼴 바꾸기(swap) 뒤 그리기 뼈대를 다시 만들지 않고 갈아 쓴 기록 r에 앞 기록 old의 자리를 옮긴다. 덩이는 묶음 그물 번호(a~b)로 덮고 swap은 같은 묶음·
+ * 같은 번호에 r을 넣으며(빠진·쓰는 그물 수 그대로) 장면 차례도 그 자리라 뼈대가 맞다(orderValid). 보이는지는 id·묶음 이름으로 정해지므로 같은 이름이면 앞 기록의
+ * 보이는 목록 자리·번호를 그대로 쓴다. 덩이의 토막 상자·윤곽선 구간 모음 없음 표시는 다시 본다. 0.63.0~0.64.0은 뼈대·보이는 목록·잘라내기 덩어리 견주기를 모두 다시
+ * 했다(가짜 WebGL 8만 — 첫 프레임 약 20 ms). 덩이 판정(묶음 이름·윤곽선·채우기 단위·그물마다 그릴 꼴)이 갈리면 false(렌더러가 뼈대를 다시 만든다)
+ */
+export function orderSwap(o: MergeOrder, vm: VisMemo, old: MeshRec, r: MeshRec): boolean {
+  if (old.bk === undefined || old.bk < 0) return false;
+  const k = o.blocks[old.bk];
+  const plain = (x: MeshRec): boolean => !x.transparent && !x.back && !x.pbr && !x.tex;
+  if (!k || k.g !== r.mg || r.mi !== old.mi || r.mi! < k.a || r.mi! >= k.b) return false;
+  if (old.src.group !== r.src.group || old.src.capGroup !== r.src.capGroup || !!old.edges !== !!r.edges || plain(old) !== plain(r)) return false;
+  if (vm && vm.ord === o && old.visAt === vm.seq) {
+    const j = vm.list.indexOf(old);
+    if (j < 0) return false;
+    vm.list[j] = r;
+  }
+  r.bk = old.bk;
+  r.si = old.si;
+  r.visAt = old.visAt;
+  r.visNo = old.visNo;
+  k.boxes = undefined;
+  k.npv = -1;
+  return true;
 }
 
 /**
@@ -466,6 +670,8 @@ export function visPatch(o: MergeOrder, M: readonly MeshRec[], list: MeshRec[], 
     if (on) list.splice(lo, 0, r);
     else list.splice(lo, 1);
     r.visAt = on ? seq : 0;
+    // 0.65.0 숨은 그물 표시(뼈대를 다시 만들 때 렌더러 visBuild가 다시 묻지 않는다)
+    if (!on) r.visNo = seq;
     if (r.bk! < 0) return;
     const L = o.blocks[r.bk!]!.hid, i = r.mi!;
     lo = 0;
@@ -747,6 +953,44 @@ function shiftsOf(g: MergeGroup): void {
   g.sft = sft;
   g.nom = nom;
   g.mov = mov;
+}
+
+/**
+ * 0.65.0 같은 꼴 바꾸기(swap) 뒤 묶음의 그물 값 캐시를 그 번호 i만 고친다(처음부터 센 값과 같다): 면 색·정점 색(fc)은 그 자리, 이동뿐 3열(org·sft·nom·mov)도
+ * 그 자리 — 다만 앞 기록이 이동뿐 꼴이 아니었으면 묶음 전체가 이동뿐인지 다시 세야 해 버린다. 색에서 만든 캐시(cc — 단색·윤곽선 불투명도 등)는 버린다.
+ * 0.63.0~0.64.0은 모두 버려 다음 그리기가 묶음 그물마다 다시 셌다(가짜 WebGL 8만에서 그물 100개를 바꾼 뒤 첫 프레임의 큰 몫)
+ */
+function swapCaches(g: MergeGroup, i: number, r: MeshRec): void {
+  g.cc = undefined;
+  if (g.fc) {
+    g.fc.cols[i] = r.src.color;
+    g.fc.vc[i] = r.hasColors;
+  }
+  if (!g.org) return;
+  const old = g.sft![i]! !== 0 || !!g.nom?.[i];
+  if (!old) {
+    g.org = g.sft = g.nom = g.mov = undefined;
+    return;
+  }
+  const org = g.org, sft = g.sft!, m = r.model;
+  org.fill(0, i * 4, i * 4 + 4);
+  sft[i] = 0;
+  if (g.nom) g.nom[i] = 0;
+  if (!m) {
+    (g.nom ??= new Uint8Array(g.recs.length))[i] = 1;
+    return;
+  }
+  if (!shiftOnly(m)) {
+    g.mov = false;
+    return;
+  }
+  let pure = true;
+  for (let j = 0; j < 12; j++) if (Object.is(m[j], -0)) pure = false;
+  sft[i] = pure ? 2 : 1;
+  org[i * 4] = m[12]!;
+  org[i * 4 + 1] = m[13]!;
+  org[i * 4 + 2] = m[14]!;
+  org[i * 4 + 3] = m[15]!;
 }
 
 /** 0.62.0 이 그리기에서 묶음 g의 자리를 MSHIFT 꼴(이동뿐 — 면 3·선 2텍셀)로 쓰는지: 겉모습이 없고 그물 모형이 모두 이동뿐(모형이 없는 그물 포함) */
@@ -1210,32 +1454,51 @@ export function planLoose(h: MergeHost): void {
   };
   const loose = new Map<MeshRec, { key: string; nv: number }>();
   for (const g of h.mgGroups) g.plan = { seq: -1, mi: -1, gaps: 0, own: 0, broken: false, n: 0, nv: 0 };
-  for (const r of h.meshes) {
-    const g = r.mg;
-    if (g) {
-      const l = lane(g.key), p = g.plan!, i = r.mi!;
-      if (p.seq >= 0) {
-        p.gaps += l.seq - p.seq - 1;
-        if (i <= p.mi) p.broken = true;
-      } else if (!l.last && l.head) {
-        p.own += l.head;
-        l.head = 0;
-      }
-      p.seq = l.seq++;
-      p.mi = i;
-      p.n++;
-      p.nv += g.vStart[i + 1]! - g.vStart[i]!;
-      l.last = g;
-      continue;
+  // 0.65.0 같은 묶음의 잇단 번호 그물 len개(장면 차례로 잇달아)를 한 번에: 둘째부터는 낀 그물이 없고(줄 번호가 이어진다) 번호가 늘어 차례 거스름도 없어
+  // 그물마다 센 것과 같다. 줄은 앞과 같은 묶음이면 다시 찾지 않는다(열쇠 글자열 Map — 0.64.0은 그물마다 찾았다)
+  let lg: MergeGroup | null = null;
+  let ll: Lane | null = null;
+  const run = (g: MergeGroup, i: number, len: number): void => {
+    if (g !== lg) {
+      lg = g;
+      ll = lane(g.key);
     }
+    const l = ll!, p = g.plan!;
+    if (p.seq >= 0) {
+      p.gaps += l.seq - p.seq - 1;
+      if (i <= p.mi) p.broken = true;
+    } else if (!l.last && l.head) {
+      p.own += l.head;
+      l.head = 0;
+    }
+    p.seq = l.seq + len - 1;
+    l.seq += len;
+    p.mi = i + len - 1;
+    p.n += len;
+    p.nv += g.vStart[i + len]! - g.vStart[i]!;
+    l.last = g;
+  };
+  const looseOne = (r: MeshRec): void => {
     const s = h.mergeSrcOf(r);
-    if (!s) continue;
+    if (!s) return;
     loose.set(r, { key: s.key, nv: s.src.nv });
     const l = lane(s.key);
     l.seq++;
     if (l.last) l.last.plan!.own++;
     else l.head++;
-  }
+  };
+  // 그리기 뼈대가 장면 차례와 맞으면 덩이째(덩이는 같은 묶음의 잇단 번호 — 맞는 동안 그 그물은 모두 묶음에 들어 있다), 아니면 그물마다
+  const O = h.mgOrder;
+  if (O && orderValid(h, O))
+    for (const x of O.items) {
+      if ('src' in x) looseOne(x);
+      else if (x.b > x.a) run(x.g, x.a, x.b - x.a);
+    }
+  else
+    for (const r of h.meshes) {
+      if (r.mg) run(r.mg, r.mi!, 1);
+      else looseOne(r);
+    }
   if (!h.mgActive && loose.size >= (mode === 'on' ? 2 : h.merging.min)) h.mgActive = true;
   if (!h.mgActive) return;
   // 2) 더럽혀진 묶음, ¼을 넘는 묶음, 다시 굽는 때
@@ -1523,7 +1786,7 @@ export function swap(h: MergeHost, old: MeshRec, r: MeshRec, s: MergeSrc): boole
   }
   g.recs[i] = r;
   attach(h, r, g, i);
-  g.fc = g.cc = g.org = g.sft = g.nom = g.mov = undefined;
+  swapCaches(g, i, r);
   if (g.ps)
     for (const k in g.ps) {
       g.ps[k]!.at[i] = 0;

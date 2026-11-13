@@ -1849,6 +1849,10 @@ export class Viewer3d {
   private anim: { from: CameraState; to: CameraState; t0: number; dur: number; done: (arrived: boolean) => void } | null = null;
   private allBox: Box3 = emptyBox();
   private visBox: Box3 | null = null;
+  /** 0.65.0 화면 맞춤 범위(fitBox — visBox를 버릴 때 함께 버린다) */
+  private fitBx: Box3 | null = null;
+  /** 0.65.0 장면에서 맞춤에서 뺀 묶음(fit: false — setScene·setMesh·removeMesh가 고친다). 비었으면 맞춤 범위 = 보이는 범위 */
+  private noFit = new Set<AnyItem>();
   /**
    * 0.62.0 보이는 범위 덩어리(묶음 차례 VIS_CHUNK개마다 모두 보일 때의 범위 — 숨김이 바뀌어도 그대로 쓴다). 묶음·범위 캐시·판(boundsVer — 장면·그물·겉모습 행렬을
    * 바꿀 때 오른다)이 같을 때만 쓴다
@@ -2297,6 +2301,9 @@ export class Viewer3d {
     this.rebuildItems();
     this.bbList = scene.meshes.filter((m) => hasBillboard(m));
     this.bbCamKey = '';
+    // 0.65.0 맞춤에서 뺀 묶음(fit: false)
+    this.noFit.clear();
+    for (const list of [scene.meshes, scene.lines, scene.points ?? []]) for (const it of list as AnyItem[]) if (it.fit === false) this.noFit.add(it);
     this.hiddenGroups.clear();
     this.hiddenItems.clear();
     this.visVer++;
@@ -2346,13 +2353,13 @@ export class Viewer3d {
     this.meshBox = { box: [], n: [] };
     this.meshTwice = false;
     this.allBox = boundsOk(scene.bounds) ? scene.bounds! : this.sceneBox(scene);
-    this.visBox = null;
+    this.visBox = this.fitBx = null;
     this.boundsVer++;
     this.rebuildGrid();
     if (!opts.keepView) {
       const a = dirToAngles(VIEW_DIRS.seIso);
       this.dropAnim();
-      this.cam = fitCamera({ ...this.cam, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH);
+      this.cam = fitCamera({ ...this.cam, yaw: a.yaw, pitch: a.pitch }, this.fitBox(), this.cssW / this.cssH);
       this.pendingFit = !this.sizeKnown;
     }
     this.scheduleBvh();
@@ -2430,7 +2437,8 @@ export class Viewer3d {
     this.allBox = emptyBox();
     this.meshBox = { box: [], n: [] };
     this.meshTwice = false;
-    this.visBox = null;
+    this.visBox = this.fitBx = null;
+    this.noFit.clear();
     this.boundsVer++;
     this.visChunks = null;
     this.rebuildGrid();
@@ -2508,6 +2516,9 @@ export class Viewer3d {
     else meshes.push(mesh);
     // 0.63.0 같은 객체를 제자리에서 고쳤을 수 있다 — 그 자리의 장면 범위 덩어리를 다시 합친다
     if (k >= 0) this.boxDirty(k);
+    // 0.65.0 맞춤에서 뺀 묶음(같은 객체를 제자리에서 고쳤으면 지금 값으로 — 장면에 그 객체가 남았으면 그대로)
+    if (prev && this.noFit.has(prev) && (prev === mesh || !meshes.includes(prev))) this.noFit.delete(prev);
+    if (mesh.fit === false) this.noFit.add(mesh);
     const scene: Scene3d = { ...s, meshes };
     this.sceneRef = scene;
     if (prev) this.items.set(mesh.id, { kind: 'mesh', item: mesh });
@@ -2533,7 +2544,8 @@ export class Viewer3d {
     const inc = opts.incremental;
     if (inc) this.meshBudget = Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8);
     if (this.gpu) {
-      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc, at: uniq && (k >= 0 || !prev) ? k : undefined });
+      // 0.65.0 그 그물이 지금 보이는지(렌더러가 보이는 목록에 그 기록만 넣는다)
+      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc, at: uniq && (k >= 0 || !prev) ? k : undefined, vis: this.visible(mesh.id, mesh.group) });
       if (skipped.length) console.warn(`opencad-viewer3d: setMesh('${mesh.id}')의 vertices 구간은 놓은 ${skipped.join('·')}에 올리지 않았습니다(올려 둔 것을 그대로 씁니다 — 바뀌었으면 그 배열을 통째로 주세요)`);
     }
     this.sceneEdited(prev ?? null, mesh);
@@ -2569,6 +2581,7 @@ export class Viewer3d {
     }
     this.sceneRef = { ...s, meshes };
     this.items.delete(id);
+    this.noFit.delete(m);
     // 0.50.0: 뺀 그물의 입력 알림도 뺀다
     if (this.issues.length) this.issues = this.issues.filter((i) => i.id !== id || i.kind !== 'mesh');
     this.rangeSel.delete(id);
@@ -2887,7 +2900,7 @@ export class Viewer3d {
     else if (hadOrigin)
       this.usesOrigin = s.meshes.some((m) => hasOrigin(m.origin)) || s.lines.some((l) => hasOrigin(l.origin)) || (s.points ?? []).some((p) => hasOrigin(p.origin));
     this.visLists = null;
-    this.visBox = null;
+    this.visBox = this.fitBx = null;
     this.boundsVer++;
     this.cutDirty = true;
     this.shadowVer++;
@@ -3080,12 +3093,27 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  /** 보이는 것 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다 — 끝 자리에 닿으면 true, 닿기 전에 끊기면 false) */
+  /**
+   * 보이는 것 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다 — 끝 자리에 닿으면 true, 닿기 전에 끊기면 false).
+   * 0.65.0 맞춤 범위는 Scene3d.fitRange 규칙을 따르고 fit: false 묶음을 뺀다(fitBounds — 키 F·가운데 두 번·표준 뷰·첫 장면 맞춤도 같은 범위)
+   */
   fit(animate = this.animate): Promise<boolean> {
-    return this.goto(fitCamera(this.cam, this.visibleBox(), this.cssW / this.cssH), animate);
+    return this.goto(fitCamera(this.cam, this.fitBox(), this.cssW / this.cssH), animate);
   }
 
-  /** 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다) */
+  /**
+   * 0.65.0 지금 화면 맞춤 범위(fit·setView 등이 맞추는 세계 축 나란 상자 — 사본). Scene3d.fitRange 규칙과 숨김·fit: false를 따른다.
+   * 장면이 없거나 보이는 것이 없으면 빈 상자(min > max)다
+   */
+  get fitBounds(): Box3 {
+    const b = this.fitBox();
+    return { min: [b.min[0], b.min[1], b.min[2]], max: [b.max[0], b.max[1], b.max[2]] };
+  }
+
+  /**
+   * 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다).
+   * 0.65.0 fit: false 묶음도 id로 주면 맞춘다
+   */
   fitItems(ids: readonly string[], animate = this.animate): Promise<boolean> {
     let b = emptyBox();
     for (const id of new Set(ids)) {
@@ -3106,7 +3134,7 @@ export class Viewer3d {
     const a = dirToAngles(dir, 0);
     const { roll: _r, shiftX: _x, shiftY: _y, ...base } = this.cam;
     void _r, _x, _y;
-    return this.goto(fitCamera({ ...base, yaw: a.yaw, pitch: a.pitch }, this.visibleBox(), this.cssW / this.cssH), animate);
+    return this.goto(fitCamera({ ...base, yaw: a.yaw, pitch: a.pitch }, this.fitBox(), this.cssW / this.cssH), animate);
   }
 
   /** 카메라 굴림(라디안, 0.7.0): 화면 위 방향을 보는 축 둘레로(+면 카메라가 반시계로 기울어 장면은 시계로). 0이면 없앤다 */
@@ -3424,16 +3452,16 @@ export class Viewer3d {
     return (this.cam.fovY * 180) / Math.PI;
   }
 
-  /** 걷기 빠르기(초당 세계 단위) */
+  /** 걷기 빠르기(초당 세계 단위 — 0.65.0 맞춤 범위로 잰다) */
   private walkSpeed(): number {
-    return this.walkOpts.speed ?? Math.max(boxSphere(this.visibleBox()).radius * 0.4, 1e-6);
+    return this.walkOpts.speed ?? Math.max(boxSphere(this.fitBox()).radius * 0.4, 1e-6);
   }
 
-  /** 눈높이(세계 단위): 정하지 않았으면 장면 단위로 1.6 m */
+  /** 눈높이(세계 단위): 정하지 않았으면 장면 단위로 1.6 m(단위를 모르면 0.65.0 맞춤 범위로 잰다) */
   private eyeHeight(): number {
     if (this.walkOpts.eyeHeight !== undefined) return this.walkOpts.eyeHeight;
     const u = this.sceneRef?.units;
-    return u === 'mm' ? 1600 : u === 'inch' ? 63 : u === 'm' ? 1.6 : Math.max(boxSphere(this.visibleBox()).radius * 0.1, 1e-6);
+    return u === 'mm' ? 1600 : u === 'inch' ? 63 : u === 'm' ? 1.6 : Math.max(boxSphere(this.fitBox()).radius * 0.1, 1e-6);
   }
 
   /** 걷기: 누른 키·조이스틱 입력만큼 이 프레임 움직이고, 입력이 남아 있으면 다음 프레임을 부른다 */
@@ -3639,7 +3667,7 @@ export class Viewer3d {
       this.visIds = [];
     } else this.visIds.push(id);
     this.shadowVer++;
-    this.visBox = null;
+    this.visBox = this.fitBx = null;
     this.visLists = null;
     this.cutDirty = true;
     this.invalidate();
@@ -5721,7 +5749,7 @@ export class Viewer3d {
         if (r) r.box = null;
       }
     if (moved === true || (moved && moved.length)) {
-      this.visBox = null;
+      this.visBox = this.fitBx = null;
       this.boundsVer++;
       this.cutDirty = true;
       this.wheelAnchor = null;
@@ -6044,13 +6072,22 @@ export class Viewer3d {
     return !this.hiddenItems.has(id) && (group === undefined || !this.hiddenGroups.has(group));
   }
 
+  /**
+   * 보이는 범위(가까운·먼 면·그림자·주변 가림·확대 한도·걷기 떨어질 깊이 — fit: false 묶음도 넣는다). 숨긴 묶음·항목·구간, 겉모습 행렬로 옮긴 묶음, 마주 보는 그물이
+   * 하나도 없으면 장면 범위: 기본 규칙은 allBox(Scene3d.bounds, 없으면 묶음 범위 합), 0.65.0 'visible' 규칙(Scene3d.fitRange)은 Scene3d.bounds 대신 묶음 범위 합
+   * (sceneBox — 덩어리째, 그물을 바꾸면 그 덩어리만). 하나라도 있으면 보이는 묶음 범위의 합(보이는 것이 없으면 allBox)
+   */
   private visibleBox(): Box3 {
     if (this.visBox) return this.visBox;
     const s = this.sceneRef;
     if (!s) return (this.visBox = emptyBox());
     let ranged = false;
     for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
-    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoved.size && !this.bbList.length) return (this.visBox = this.allBox);
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoved.size && !this.bbList.length) {
+      if (s.fitRange !== 'visible' || !boundsOk(s.bounds)) return (this.visBox = this.allBox);
+      const all = this.sceneBox(s);
+      return (this.visBox = boxIsEmpty(all) ? this.allBox : all);
+    }
     // 0.62.0 숨긴 구간·마주 보는 그물이 없으면 덩어리째(같은 값 — chunkedVisibleBox)
     let b = !ranged && !this.bbList.length ? this.chunkedVisibleBox() : null;
     if (!b) {
@@ -6058,6 +6095,21 @@ export class Viewer3d {
       for (const it of this.items.values()) if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     }
     return (this.visBox = boxIsEmpty(b) ? this.allBox : b);
+  }
+
+  /**
+   * 0.65.0 화면 맞춤 범위(fit·키 F·가운데 두 번·setView·뷰 키·뷰 큐브·첫 장면 맞춤·걷기 빠르기·눈높이): 맞춤에서 뺀 묶음(fit: false)이 없으면 보이는 범위 그대로.
+   * 있으면 fit: false가 아닌 보이는 묶음 범위의 합 — 다만 기본 규칙에서 아무것도 숨기지 않았으면 보이는 범위(Scene3d.bounds) 그대로. 맞출 묶음이 없으면 보이는 범위
+   */
+  private fitBox(): Box3 {
+    if (this.fitBx) return this.fitBx;
+    const all = this.visibleBox();
+    const s = this.sceneRef;
+    // 보이는 범위가 Scene3d.bounds 그 객체면 기본 규칙에서 숨긴 것이 없거나(그대로 쓴다) 보이는 묶음이 없다(합도 비어 같은 값)
+    if (!s || !this.noFit.size || (s.fitRange !== 'visible' && all === s.bounds)) return (this.fitBx = all);
+    let b = emptyBox();
+    for (const it of this.items.values()) if (it.item.fit !== false && this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    return (this.fitBx = boxIsEmpty(b) ? all : b);
   }
 
   /**

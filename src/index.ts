@@ -1,7 +1,7 @@
 /**
  * 3D 뷰어 공개 입구. 화면 껍데기는 여기서만 가져다 쓴다.
  */
-export type { Box3, LineSet3d, Mesh3d, NormalArray, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, SnapPriority, Texture3d, UvArray, UvTransform } from './types';
+export type { Box3, FitRange, LineSet3d, Mesh3d, NormalArray, Pick3d, PointSet3d, Rgba, Scene3d, SnapKind, SnapPoint, SnapPriority, Texture3d, UvArray, UvTransform } from './types';
 export { packNormals, packUvs } from './attribs';
 export { hypot3 } from './math';
 export { SNAPSHOT_MAX_PIXELS, TEXTURE_REDRAW_MS, TEXTURE_REDRAW_SLOW, Viewer3d } from './viewer';
