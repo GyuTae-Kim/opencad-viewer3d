@@ -1611,6 +1611,8 @@ function primCount(it: Item): number {
 
 const selPrims = (s: RangeSelection | null | undefined): readonly IndexRange[] | undefined => (!s ? undefined : Array.isArray(s) ? s : (s as { prims?: readonly IndexRange[] }).prims);
 const selEdges = (s: RangeSelection | null | undefined): readonly IndexRange[] | undefined => (!s || Array.isArray(s) ? undefined : (s as { edges?: readonly IndexRange[] }).edges);
+/** 0.64.0 합친 구간 목록 둘이 같은지(mergeRanges 결과끼리) */
+const sameRanges = (a: readonly IndexRange[], b: readonly IndexRange[]): boolean => a.length === b.length && a.every((x, i) => x.start === b[i]!.start && x.count === b[i]!.count);
 
 interface Section {
   /** 기준 방향(단위) */
@@ -1804,8 +1806,16 @@ export class Viewer3d {
    */
   private visIds: string[] = [];
   private visBase = 0;
-  /** 0.63.0 장면 그물 범위 덩어리(sceneBox): 그물 차례마다 합칠 때의 그물 객체(refs), SCENE_CHUNK개 덩어리마다 합친 범위와 그물 수 */
-  private meshBox: { refs: (Mesh3d | undefined)[]; box: Box3[]; n: number[] } = { refs: [], box: [], n: [] };
+  /**
+   * 0.63.0 장면 그물 범위 덩어리(sceneBox): 덩어리마다 잇단 그물 수(n)와 합친 범위(box — 다시 합칠 덩어리는 undefined).
+   * 0.64.0 그물 수가 덩어리마다 다를 수 있다(처음에는 SCENE_CHUNK개씩) — 그물을 빼면 그 덩어리만 줄여 다시 합치고, 끝에 더하면 끝 덩어리에 붙인다
+   */
+  private meshBox: { box: (Box3 | undefined)[]; n: number[] } = { box: [], n: [] };
+  /**
+   * 0.64.0 같은 그물 객체가 장면에 두 번 이상 든 채 removeMesh로 뺀 적이 있다(장면을 바꾸거나 비울 때까지). 그때는 렌더러 그물 기록이 장면 그물보다 남을 수 있어
+   * 자리 힌트를 주지 않는다(idsUnique)
+   */
+  private meshTwice = false;
   private hi = new Set<string>();
   private ranges = new Map<string, DrawRange>();
   private marker: { pos: V3; kind: MarkerKind; opts: MarkerOptions } | null = null;
@@ -2333,7 +2343,8 @@ export class Viewer3d {
     this.texReset();
     if (this.gpu) this.renderer.setScene(scene, { incremental: !!inc, release: this.releaseOpt });
     // 0.50.0: 유한하지 않거나 한도 밖인 Scene3d.bounds는 쓰지 않는다(0.49.0은 무한 범위에서 격자를 만들다 예외를 냈다)
-    this.meshBox = { refs: [], box: [], n: [] };
+    this.meshBox = { box: [], n: [] };
+    this.meshTwice = false;
     this.allBox = boundsOk(scene.bounds) ? scene.bounds! : this.sceneBox(scene);
     this.visBox = null;
     this.boundsVer++;
@@ -2417,7 +2428,8 @@ export class Viewer3d {
     clearTimeout(this.bvhTimer);
     if (this.gpu) this.renderer.clear();
     this.allBox = emptyBox();
-    this.meshBox = { refs: [], box: [], n: [] };
+    this.meshBox = { box: [], n: [] };
+    this.meshTwice = false;
     this.visBox = null;
     this.boundsVer++;
     this.visChunks = null;
@@ -2487,16 +2499,20 @@ export class Viewer3d {
     this.boxes.delete(mesh);
     this.models.delete(mesh);
     this.cutCache.delete(mesh);
+    // 0.64.0 장면 id가 모두 다르면 렌더러에 그물 자리를 알리고(더하는 그물이면 −1 — 기록이 없다) 묶음 표에는 더한 그물만 넣는다
+    const uniq = this.idsUnique(s);
     const meshes = s.meshes.slice();
     let k = prev ? meshes.indexOf(prev) : -1;
     if (prev && k < 0) k = meshes.findIndex((m) => m.id === mesh.id);
     if (k >= 0) meshes[k] = mesh;
     else meshes.push(mesh);
     // 0.63.0 같은 객체를 제자리에서 고쳤을 수 있다 — 그 자리의 장면 범위 덩어리를 다시 합친다
-    if (k >= 0) this.meshBox.refs[k] = undefined;
+    if (k >= 0) this.boxDirty(k);
     const scene: Scene3d = { ...s, meshes };
     this.sceneRef = scene;
     if (prev) this.items.set(mesh.id, { kind: 'mesh', item: mesh });
+    // 묶음 표는 장면 차례(그물 → 선분 → 점)다 — 선분·점 묶음이 없고 표가 장면 그대로면 끝에 넣은 것이 다시 만든 표와 같다(0.63.0은 그물을 더할 때마다 다시 만들었다 — 8만 약 12 ms)
+    else if (uniq && !s.lines.length && !s.points?.length) this.items.set(mesh.id, { kind: 'mesh', item: mesh });
     else this.rebuildItems();
     const r = this.rangeSel.get(mesh.id);
     if (r) {
@@ -2517,10 +2533,10 @@ export class Viewer3d {
     const inc = opts.incremental;
     if (inc) this.meshBudget = Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8);
     if (this.gpu) {
-      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc });
+      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc, at: uniq && (k >= 0 || !prev) ? k : undefined });
       if (skipped.length) console.warn(`opencad-viewer3d: setMesh('${mesh.id}')의 vertices 구간은 놓은 ${skipped.join('·')}에 올리지 않았습니다(올려 둔 것을 그대로 씁니다 — 바뀌었으면 그 배열을 통째로 주세요)`);
     }
-    this.sceneEdited();
+    this.sceneEdited(prev ?? null, mesh);
     this.queueBvh(mesh);
     // 0.29.0: 다시 받을 그물을 새 배열로 바꿨으면 되찾은 뒤 끝일 수 있다
     this.checkRestoreDone();
@@ -2538,15 +2554,28 @@ export class Viewer3d {
     const it = this.items.get(id);
     if (this.disposed || !s || !it || it.kind !== 'mesh') return false;
     const m = it.item;
-    this.sceneRef = { ...s, meshes: s.meshes.filter((x) => x !== m) };
+    const uniq = this.idsUnique(s);
+    // 0.64.0 장면에 한 번 든 그물이면 그 자리만 빼고(0.63.0은 filter로 그물마다 견줬다) 장면 범위는 그 덩어리만 줄인다. 같은 객체가 여러 번이면 모두 뺀다(앞과 같다)
+    const k = s.meshes.indexOf(m);
+    let meshes: Mesh3d[];
+    if (k >= 0 && s.meshes.indexOf(m, k + 1) < 0) {
+      meshes = s.meshes.slice();
+      meshes.splice(k, 1);
+      this.boxCut(k);
+    } else {
+      meshes = s.meshes.filter((x) => x !== m);
+      if (s.meshes.length - meshes.length > 1) this.meshTwice = true;
+      this.meshBox = { box: [], n: [] };
+    }
+    this.sceneRef = { ...s, meshes };
     this.items.delete(id);
     // 0.50.0: 뺀 그물의 입력 알림도 뺀다
     if (this.issues.length) this.issues = this.issues.filter((i) => i.id !== id || i.kind !== 'mesh');
     this.rangeSel.delete(id);
     this.looks.delete(id);
     this.lookMoved.delete(id);
-    if (this.gpu) this.renderer.removeMesh(id, this.sceneRef);
-    this.sceneEdited();
+    if (this.gpu) this.renderer.removeMesh(id, this.sceneRef, uniq && k >= 0 ? k : undefined);
+    this.sceneEdited(m, null);
     // 0.29.0: 다시 받을 그물을 뺐으면 되찾은 뒤 끝일 수 있다
     this.checkRestoreDone();
     return true;
@@ -2769,43 +2798,94 @@ export class Viewer3d {
   }
 
   /**
-   * 0.63.0 장면 범위(sceneBounds와 같은 값 — 비트까지): 그물은 SCENE_CHUNK개 덩어리마다 합친 범위를 두고, 합칠 때의 그물 객체·그물 수가 그대로인 덩어리는 다시 합치지 않는다
-   * (setMesh는 바꾼 자리를 비운다 — 같은 객체를 제자리에서 고친 그물). 축마다 극값에 처음 닿은 꼭짓점 값이라 덩어리째 합쳐도 차례대로 합친 값과 같다(0.62.0 보이는 범위 덩어리와
-   * 같은 까닭). 선분·점 묶음은 차례대로. 0.62.0은 setMesh·removeMesh마다 그물 모두를 다시 합쳤다(8만 그물에서 바꾸기 호출의 절반 남짓)
+   * 0.64.0 장면 그물·선분·점 id가 모두 다르고 묶음 표가 장면 그대로인지(표 크기 = 그물·선분·점 수 — 같은 id가 있거나 removeMesh가 같은 id의 다른 그물을 남겼으면 작다),
+   * 같은 그물 객체를 두 번 넣었다 뺀 적이 없는지(meshTwice). 그러면 렌더러 그물 기록은 장면 그물마다 많아야 하나라 장면 자리로 찾아도 처음부터 찾은 것과 같다
+   */
+  private idsUnique(s: Scene3d): boolean {
+    return !this.meshTwice && this.items.size === s.meshes.length + s.lines.length + (s.points?.length ?? 0);
+  }
+
+  /** 0.64.0 장면 그물 차례 k가 든 범위 덩어리 번호(덩어리를 아직 만들지 않았으면 −1) */
+  private boxChunk(k: number): number {
+    const N = this.meshBox.n;
+    for (let c = 0, a = 0; c < N.length; a += N[c]!, c++) if (k < a + N[c]!) return c;
+    return -1;
+  }
+
+  /** 0.64.0 그물 차례 k를 바꿨다(같은 객체를 제자리에서 고쳤을 수도) — 그 덩어리를 다시 합친다 */
+  private boxDirty(k: number): void {
+    const c = this.boxChunk(k);
+    if (c >= 0) this.meshBox.box[c] = undefined;
+  }
+
+  /** 0.64.0 그물 차례 k를 뺐다 — 그 덩어리 그물 수를 줄여 다시 합친다(뒤 덩어리는 그대로 — 0.63.0은 차례가 밀린 뒤 덩어리를 모두 다시 합쳤다, 8만 앞쪽 빼기 약 17 ms) */
+  private boxCut(k: number): void {
+    const C = this.meshBox, c = this.boxChunk(k);
+    if (c < 0) return;
+    if (--C.n[c]! > 0) C.box[c] = undefined;
+    else {
+      C.n.splice(c, 1);
+      C.box.splice(c, 1);
+    }
+  }
+
+  /**
+   * 0.63.0 장면 범위(sceneBounds와 같은 값 — 비트까지): 그물은 덩어리마다 합친 범위를 두고 바꾸거나 뺀 그물의 덩어리만 다시 합친다(boxDirty·boxCut).
+   * 축마다 극값에 처음 닿은 꼭짓점 값이라 잇단 덩어리째 합쳐도 차례대로 합친 값과 같다(0.62.0 보이는 범위 덩어리와 같은 까닭). 선분·점 묶음은 차례대로.
+   * 0.64.0 덩어리 그물 수가 서로 달라도 된다: 끝에 더한 그물은 끝 덩어리를 SCENE_CHUNK개까지 채우고 새 덩어리로(0.63.0은 그물 차례마다 합칠 때의 객체를 두고 모두 견줬다)
    */
   private sceneBox(s: Scene3d): Box3 {
     const M = s.meshes, C = this.meshBox;
-    if (C.refs.length > M.length) C.refs.length = M.length;
-    const nk = Math.ceil(M.length / SCENE_CHUNK);
-    if (C.box.length > nk) C.box.length = C.n.length = nk;
-    let b = emptyBox();
-    for (let a = 0, k = 0; a < M.length; a += SCENE_CHUNK, k++) {
-      const e = Math.min(M.length, a + SCENE_CHUNK);
-      let ok = C.n[k] === e - a;
-      for (let i = a; ok && i < e; i++) if (C.refs[i] !== M[i]) ok = false;
-      if (!ok) {
-        let x = emptyBox();
-        for (let i = a; i < e; i++) {
-          x = unionBox(x, meshBounds(M[i]!));
-          C.refs[i] = M[i];
-        }
-        C.box[k] = x;
-        C.n[k] = e - a;
+    let tot = 0;
+    for (const x of C.n) tot += x;
+    // 장면 그물 수보다 많으면(있을 수 없다 — 지킴) 처음부터
+    if (tot > M.length) {
+      C.box = [];
+      C.n = [];
+      tot = 0;
+    }
+    while (tot < M.length) {
+      const L = C.n.length - 1;
+      if (L >= 0 && C.n[L]! < SCENE_CHUNK) {
+        const add = Math.min(SCENE_CHUNK - C.n[L]!, M.length - tot);
+        C.n[L]! += add;
+        C.box[L] = undefined;
+        tot += add;
+      } else {
+        const add = Math.min(SCENE_CHUNK, M.length - tot);
+        C.n.push(add);
+        C.box.push(undefined);
+        tot += add;
       }
-      b = unionBox(b, C.box[k]!);
+    }
+    let b = emptyBox();
+    for (let c = 0, a = 0; c < C.n.length; a += C.n[c]!, c++) {
+      let x = C.box[c];
+      if (!x) {
+        x = emptyBox();
+        for (let i = a, e = a + C.n[c]!; i < e; i++) x = unionBox(x, meshBounds(M[i]!));
+        C.box[c] = x;
+      }
+      b = unionBox(b, x);
     }
     for (const l of s.lines) b = unionBox(b, lineBounds(l));
     for (const p of s.points ?? []) b = unionBox(b, pointBounds(p));
     return b;
   }
 
-  /** 그물 하나를 넣거나 바꾸거나 뺀 뒤: 장면에서 다시 셀 것(범위·마주 보기·원점 쓰기)과 화면 상태(그림자·단면 테두리·측정 미리 보기) */
-  private sceneEdited(): void {
+  /**
+   * 그물 하나를 넣거나 바꾸거나 뺀 뒤: 장면에서 다시 셀 것(범위·마주 보기·원점 쓰기)과 화면 상태(그림자·단면 테두리·측정 미리 보기).
+   * prev = 바꾸기 앞 그물·뺀 그물, next = 넣은 그물(빼기면 null). 0.64.0 마주 보는 그물 목록은 prev가 그 목록에 들었거나 next가 마주 보는 그물일 때만 다시 훑고
+   * (0.63.0은 그물마다 훑었다 — 8만 약 1.5 ms), 원점 쓰기는 next에 원점이 있으면 켜고 없으면 켜져 있을 때만 원점 있는 것을 처음 만날 때까지 훑는다
+   */
+  private sceneEdited(prev: Mesh3d | null, next: Mesh3d | null): void {
     const s = this.sceneRef!;
-    this.bbList = s.meshes.filter((m) => hasBillboard(m));
+    if ((next && hasBillboard(next)) || (prev && this.bbList.includes(prev))) this.bbList = s.meshes.filter((m) => hasBillboard(m));
     this.bbCamKey = '';
     const hadOrigin = this.usesOrigin;
-    this.usesOrigin = s.meshes.some((m) => hasOrigin(m.origin)) || s.lines.some((l) => hasOrigin(l.origin)) || (s.points ?? []).some((p) => hasOrigin(p.origin));
+    if (next && hasOrigin(next.origin)) this.usesOrigin = true;
+    else if (hadOrigin)
+      this.usesOrigin = s.meshes.some((m) => hasOrigin(m.origin)) || s.lines.some((l) => hasOrigin(l.origin)) || (s.points ?? []).some((p) => hasOrigin(p.origin));
     this.visLists = null;
     this.visBox = null;
     this.boundsVer++;
@@ -3532,14 +3612,20 @@ export class Viewer3d {
     return [...out.values()];
   }
 
+  /** 묶음 켜고 끄기. 0.64.0: 지금 상태와 같은 값이면 아무것도 하지 않는다(숨김 판·다시 그리기를 남기지 않는다) */
   setGroupVisible(group: string, on: boolean): void {
+    if (!on === this.hiddenGroups.has(group)) return;
     if (on) this.hiddenGroups.delete(group);
     else this.hiddenGroups.add(group);
     this.visibilityChanged();
   }
 
-  /** 항목 하나 켜고 끄기(id) */
+  /**
+   * 항목 하나 켜고 끄기(id). 0.64.0: 지금 상태와 같은 값이면(그 id를 이미 숨겼거나 숨기지 않았으면) 아무것도 하지 않는다 — 숨김 판·바꾼 항목 기록·다시 그리기를 남기지 않는다.
+   * 그래서 보이기를 바꿀 때마다 모든 항목에 부르는 앱도 렌더러는 바뀐 항목만 다시 묻는다(0.63.0은 같은 값 호출도 바꾼 항목 기록에 들어 기록이 1,024개를 넘으면 그물마다 물었다)
+   */
   setItemVisible(id: string, on: boolean): void {
+    if (!on === this.hiddenItems.has(id)) return;
     if (on) this.hiddenItems.delete(id);
     else this.hiddenItems.add(id);
     this.visibilityChanged(id);
@@ -4095,13 +4181,18 @@ export class Viewer3d {
    * 묶음 안 일부 숨기기: 그물은 삼각형 번호, 선분 묶음은 선분 번호, 점 묶음은 점 번호 범위({ start, count }) 목록.
    * { prims, edges }로 주면 그물 윤곽선(Mesh3d.edges의 선분 번호)도 숨긴다(주지 않으면 윤곽선은 그대로).
    * 숨긴 구간은 그리지 않고 고르기·측정·단면 테두리·전체 보기 범위에서도 뺀다. null이면 그 묶음의 숨김을 푼다. 장면을 바꾸면 풀린다.
+   * 0.64.0: 합친 구간이 지금 숨긴 구간(윤곽선 구간도)과 같으면 아무것도 하지 않는다(숨김 판·다시 그리기를 남기지 않는다)
    */
   setHiddenRanges(id: string, sel: RangeSelection | null): void {
     const it = this.items.get(id);
     if (!it || this.disposed) return;
+    const hidden = mergeRanges(selPrims(sel), primCount(it));
+    const eHidden = it.kind === 'mesh' && it.item.edges ? mergeRanges(selEdges(sel), Math.floor(it.item.edges.length / 6)) : [];
+    const cur = this.rangeSel.get(id);
+    if (sameRanges(cur?.hidden ?? [], hidden) && sameRanges(cur?.eHidden ?? [], eHidden)) return;
     const r = this.rangeState(id);
-    r.hidden = mergeRanges(selPrims(sel), primCount(it));
-    r.eHidden = it.kind === 'mesh' && it.item.edges ? mergeRanges(selEdges(sel), Math.floor(it.item.edges.length / 6)) : [];
+    r.hidden = hidden;
+    r.eHidden = eHidden;
     this.rangesChanged(it);
     this.visibilityChanged();
   }
@@ -6209,9 +6300,24 @@ export class Viewer3d {
    * 그물을 잇달아 바꾸는 동안에는 만들지 않고(고르기는 필요할 때 그 자리에서 만든다) 바꾸기가 멈추면 만든다
    */
   private queueBvh(m: Mesh3d): void {
-    this.bvhTasks.push(this.meshBvhTask(m));
-    if (this.opts.pickEdges && m.edges && m.edges.length >= 6) this.bvhTasks.push(this.edgeBvhTask(m));
-    this.runBvhTasks();
+    this.bvhPut(this.meshBvhTask(m));
+    if (this.opts.pickEdges && m.edges && m.edges.length >= 6) this.bvhPut(this.edgeBvhTask(m));
+    this.runBvhTasks(true);
+  }
+
+  /**
+   * 0.64.0 남은 일 줄(bvhHead 뒤 — 늘 n 차례로 정렬돼 있다)에서 n이 같은 일들 뒤 자리에 t를 넣는다: 끝에 더하고 안정 정렬한 줄과 같은 차례다.
+   * 0.63.0은 바꿀 때마다 남은 줄 모두를 다시 정렬했다(장면을 올린 뒤 BVH를 다 만들기 전 — 8만 그물·윤곽선 일 16만 개에서 바꾸기 호출마다 약 3 ms)
+   */
+  private bvhPut(t: { n: number; run: () => void }): void {
+    const T = this.bvhTasks;
+    let lo = this.bvhHead, hi = T.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (T[mid]!.n <= t.n) lo = mid + 1;
+      else hi = mid;
+    }
+    T.splice(lo, 0, t);
   }
 
   /** 그물 BVH 일(그 사이 그물이 바뀌었거나 빠졌으면 건너뛴다) */
@@ -6223,7 +6329,8 @@ export class Viewer3d {
     return { n: m.edges!.length, run: () => void (this.items.get(m.id)?.item === m && this.bvhFor('segment', m.edges!, undefined, true)) };
   }
 
-  private runBvhTasks(): void {
+  /** sorted: 줄이 이미 정렬돼 있다(0.64.0 queueBvh — bvhPut) */
+  private runBvhTasks(sorted = false): void {
     clearTimeout(this.bvhTimer);
     const gen = this.bvhGen;
     // 0.50.0: 이미 한 일(앞 bvhHead개)을 떼어 낸 뒤 정렬한다 — 0.49.0이 shift로 앞에서 하나씩 뺀 줄과 같은 줄·같은 차례(정렬은 안정)
@@ -6232,7 +6339,7 @@ export class Viewer3d {
       this.bvhHead = 0;
     }
     const tasks = this.bvhTasks;
-    tasks.sort((a, b) => a.n - b.n);
+    if (!sorted) tasks.sort((a, b) => a.n - b.n);
     const step = (): void => {
       if (gen !== this.bvhGen || this.disposed || tasks !== this.bvhTasks) return;
       // 끄는 중이면 미룬다
