@@ -195,6 +195,13 @@ export interface LineSet3d {
   hiddenEdges?: boolean;
   /** 0.65.0 false면 화면 맞춤 범위에 넣지 않는다(Mesh3d.fit과 같은 뜻 — setScene 때 읽는다) */
   fit?: boolean;
+  /**
+   * 0.67.0 화면 맞춤 범위에 넣을 이 묶음의 상자(세계 좌표 — origin을 더한 좌표, 선택. NC 70차 요청): 주면 맞춤 범위에 묶음 범위 대신 이 상자와 묶음의 보이는 범위가
+   * 겹친 곳을 넣는다 — 묶음 안 일부 선분(추정 안전 높이에서 출발한 이송 등)을 맞춤에서 빼거나 끝점만 넣을 때. 맞춤 규칙·쓰는 곳은 fit과 같고(기본 규칙에서 아무것도
+   * 숨기지 않았으면 Scene3d.bounds 그대로) fit: false가 앞선다. 겉모습 행렬(setItemMatrix)로 옮기면 상자도 옮긴다. 그리기·고르기·가까운·먼 면·fitItems(이 id)는
+   * 묶음 범위 그대로. 유한하지 않거나 뒤집힌 상자는 없는 것으로 본다. setScene 때 읽는다
+   */
+  fitBox?: Box3;
 }
 
 /** 점 묶음(구멍 중심·측정점 등) */

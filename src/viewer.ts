@@ -1854,7 +1854,10 @@ export class Viewer3d {
   /** 0.65.0 화면 맞춤 범위(fitBox — visBox를 버릴 때 함께 버린다). 0.66.0 그림자 깊이 그림 범위(shadowBox)도 */
   private fitBx: Box3 | null = null;
   private shBx: Box3 | null = null;
-  /** 0.65.0 장면에서 맞춤에서 뺀 묶음(fit: false — setScene·setMesh·removeMesh가 고친다). 비었으면 맞춤 범위 = 보이는 범위 */
+  /**
+   * 0.65.0 장면에서 맞춤에서 뺀 묶음(fit: false — setScene·setMesh·removeMesh가 고친다). 비었으면 맞춤 범위 = 보이는 범위.
+   * 0.67.0 맞춤 상자를 준 선분 묶음(LineSet3d.fitBox — setScene)도 든다(맞춤 범위가 묶음 범위와 다른 묶음 — fitPart)
+   */
   private noFit = new Set<AnyItem>();
   /**
    * 0.62.0 보이는 범위 덩어리(묶음 차례 VIS_CHUNK개마다 모두 보일 때의 범위 — 숨김이 바뀌어도 그대로 쓴다). 묶음·범위 캐시·판(boundsVer — 장면·그물·겉모습 행렬을
@@ -2304,9 +2307,10 @@ export class Viewer3d {
     this.rebuildItems();
     this.bbList = scene.meshes.filter((m) => hasBillboard(m));
     this.bbCamKey = '';
-    // 0.65.0 맞춤에서 뺀 묶음(fit: false)
+    // 0.65.0 맞춤에서 뺀 묶음(fit: false). 0.67.0 맞춤 상자를 준 선분 묶음(LineSet3d.fitBox)도 — 맞춤 범위가 묶음 범위와 다른 묶음
     this.noFit.clear();
     for (const list of [scene.meshes, scene.lines, scene.points ?? []]) for (const it of list as AnyItem[]) if (it.fit === false) this.noFit.add(it);
+    for (const l of scene.lines) if (l.fitBox) this.noFit.add(l);
     this.hiddenGroups.clear();
     this.hiddenItems.clear();
     this.visVer++;
@@ -6123,9 +6127,25 @@ export class Viewer3d {
     let b = !ranged && !this.bbList.length && this.visChunksOk() ? this.chunkedVisibleBox(1) : null;
     if (!b) {
       b = emptyBox();
-      for (const it of this.items.values()) if (it.item.fit !== false && this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+      for (const it of this.items.values()) if (it.item.fit !== false && this.visible(it.item.id, it.item.group)) b = unionBox(b, this.fitPart(it, this.visibleBoundsOf(it)));
     }
     return (this.fitBx = boxIsEmpty(b) ? all : b);
+  }
+
+  /**
+   * 0.67.0 묶음이 맞춤 범위에 넣는 것(full — 그 묶음의 보이는 범위): 맞춤 상자(LineSet3d.fitBox — 겉모습 행렬로 옮긴다)를 준 선분 묶음은 그 상자와 full이 겹친 곳
+   * (겹치지 않으면 빈 상자), 그 밖은 full 그대로. 깨진 상자(유한하지 않음·뒤집힘)는 없는 것으로 본다
+   */
+  private fitPart(it: Item, full: Box3): Box3 {
+    const fb = it.kind === 'line' ? it.item.fitBox : undefined;
+    if (!fb || !boundsOk(fb)) return full;
+    const lm = this.looks.get(it.item.id)?.matrix;
+    const x = lm ? transformBox(fb, lm) : fb;
+    const o: Box3 = {
+      min: [Math.max(x.min[0], full.min[0]), Math.max(x.min[1], full.min[1]), Math.max(x.min[2], full.min[2])],
+      max: [Math.min(x.max[0], full.max[0]), Math.min(x.max[1], full.max[1]), Math.min(x.max[2], full.max[2])],
+    };
+    return boxIsEmpty(o) ? emptyBox() : o;
   }
 
   /**
@@ -6211,7 +6231,7 @@ export class Viewer3d {
       for (let i = j * VIS_CHUNK; i < Math.min(C.list.length, (j + 1) * VIS_CHUNK); i++) {
         const it = C.list[i]!;
         if ((mode === 1 && it.item.fit === false) || (mode === 2 && it.kind !== 'mesh')) continue;
-        if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.boundsOf(it.item));
+        if (this.visible(it.item.id, it.item.group)) b = unionBox(b, mode === 1 ? this.fitPart(it, this.boundsOf(it.item)) : this.boundsOf(it.item));
       }
     }
     return b;
