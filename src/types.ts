@@ -136,6 +136,12 @@ export interface Mesh3d {
   metallicTexture?: string;
   /** 0.43.0 거칠기 그림 값이 매끈함(1 − 거칠기)이면 true(SketchUp roughness_texture_invert) */
   roughnessInvert?: boolean;
+  /**
+   * 0.65.0 false면 화면 맞춤 범위에 넣지 않는다(선택 — 기본 넣음): 전체 보기(fit·키 F·가운데 단추 두 번)·표준 뷰(setView·뷰 키·뷰 큐브)·첫 장면 맞춤·
+   * 걷기 빠르기와 눈높이가 이 묶음을 빼고 맞춘다(보조선·보조점처럼 멀리 뻗는 묶음). 그리기·고르기·측정·가까운·먼 면·그림자는 그대로다. fitItems로 이 id를
+   * 따로 주면 맞춘다. 기본 맞춤 규칙에서 아무것도 숨기지 않았으면 Scene3d.bounds를 그대로 쓴다(Scene3d.fitRange). setScene·setMesh 때 읽는다
+   */
+  fit?: boolean;
 }
 
 /**
@@ -187,6 +193,8 @@ export interface LineSet3d {
    * 그물 윤곽선(Mesh3d.edges)처럼 이 묶음에도 그린다 — 면 뒤로 가려진 부분만 흐린 점선으로. 모서리를 선분 묶음으로 주는 해석기(SketchUp)용
    */
   hiddenEdges?: boolean;
+  /** 0.65.0 false면 화면 맞춤 범위에 넣지 않는다(Mesh3d.fit과 같은 뜻 — setScene 때 읽는다) */
+  fit?: boolean;
 }
 
 /** 점 묶음(구멍 중심·측정점 등) */
@@ -202,7 +210,19 @@ export interface PointSet3d {
   pointIds?: Uint32Array;
   /** 좌표 원점(세계 좌표, 선택). 있으면 positions는 이 점 기준(세계 = origin + position). Mesh3d.origin 참고 */
   origin?: [number, number, number];
+  /** 0.65.0 false면 화면 맞춤 범위에 넣지 않는다(Mesh3d.fit과 같은 뜻 — setScene 때 읽는다) */
+  fit?: boolean;
 }
+
+/**
+ * 화면 맞춤 범위 규칙(0.65.0 — Scene3d.fitRange):
+ * - 'bounds'(기본 — 0.64.0과 같다): 아무것도 숨기지 않았으면(묶음·항목·구간 숨김, 겉모습 행렬로 옮긴 묶음, 마주 보는 그물이 없으면) Scene3d.bounds(없으면 묶음 범위 합),
+ *   하나라도 있으면 보이는 묶음 범위의 합. Scene3d.bounds에 넣지 않은 것(예: 기계 좌표 쪽 추정 이동)은 숨김이 없을 때만 맞춤에서 빠진다
+ * - 'visible': 숨김과 상관없이 늘 보이는 묶음 범위의 합(Scene3d.bounds를 맞춤에 쓰지 않는다 — 격자·단면·위치 범위·측정 자릿수는 그대로 Scene3d.bounds).
+ *   Scene3d.bounds에 형상만 넣고 주석은 맞춤에 넣는 해석기(SketchUp)용
+ * 두 규칙 모두 fit: false 묶음은 묶음 범위 합에서 뺀다
+ */
+export type FitRange = 'bounds' | 'visible';
 
 /** 해석기가 돌려주는 장면 */
 export interface Scene3d {
@@ -213,6 +233,8 @@ export interface Scene3d {
   points?: PointSet3d[];
   /** 알고 있으면(없으면 뷰어가 계산) */
   bounds?: Box3;
+  /** 0.65.0 화면 맞춤 범위 규칙(FitRange — 없으면 'bounds') */
+  fitRange?: FitRange;
   /** 무늬 그림(Mesh3d.texture가 id로 가리킨다) */
   textures?: Texture3d[];
   /** 해석 중 생긴 알림(지원하지 않는 요소 등) — 화면에 목록으로 보인다 */
