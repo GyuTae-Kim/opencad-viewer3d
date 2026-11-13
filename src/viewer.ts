@@ -1723,8 +1723,10 @@ interface VisChunks {
   at: Map<string, number>;
   box: Box3[];
   groups: Set<string>[];
+  /** 0.66.0 덩어리에 그물이 아닌 묶음(선분·점)이 드는지(그림자 범위는 그 덩어리만 묶음마다) */
+  other: boolean[];
 }
-const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
+const cubeSize =(px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
 function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
   if (t === false) return false;
@@ -1849,8 +1851,9 @@ export class Viewer3d {
   private anim: { from: CameraState; to: CameraState; t0: number; dur: number; done: (arrived: boolean) => void } | null = null;
   private allBox: Box3 = emptyBox();
   private visBox: Box3 | null = null;
-  /** 0.65.0 화면 맞춤 범위(fitBox — visBox를 버릴 때 함께 버린다) */
+  /** 0.65.0 화면 맞춤 범위(fitBox — visBox를 버릴 때 함께 버린다). 0.66.0 그림자 깊이 그림 범위(shadowBox)도 */
   private fitBx: Box3 | null = null;
+  private shBx: Box3 | null = null;
   /** 0.65.0 장면에서 맞춤에서 뺀 묶음(fit: false — setScene·setMesh·removeMesh가 고친다). 비었으면 맞춤 범위 = 보이는 범위 */
   private noFit = new Set<AnyItem>();
   /**
@@ -2353,7 +2356,7 @@ export class Viewer3d {
     this.meshBox = { box: [], n: [] };
     this.meshTwice = false;
     this.allBox = boundsOk(scene.bounds) ? scene.bounds! : this.sceneBox(scene);
-    this.visBox = this.fitBx = null;
+    this.visBox = this.fitBx = this.shBx = null;
     this.boundsVer++;
     this.rebuildGrid();
     if (!opts.keepView) {
@@ -2437,7 +2440,7 @@ export class Viewer3d {
     this.allBox = emptyBox();
     this.meshBox = { box: [], n: [] };
     this.meshTwice = false;
-    this.visBox = this.fitBx = null;
+    this.visBox = this.fitBx = this.shBx = null;
     this.noFit.clear();
     this.boundsVer++;
     this.visChunks = null;
@@ -2848,6 +2851,14 @@ export class Viewer3d {
    * 0.64.0 덩어리 그물 수가 서로 달라도 된다: 끝에 더한 그물은 끝 덩어리를 SCENE_CHUNK개까지 채우고 새 덩어리로(0.63.0은 그물 차례마다 합칠 때의 객체를 두고 모두 견줬다)
    */
   private sceneBox(s: Scene3d): Box3 {
+    let b = this.sceneMeshBox(s);
+    for (const l of s.lines) b = unionBox(b, lineBounds(l));
+    for (const p of s.points ?? []) b = unionBox(b, pointBounds(p));
+    return b;
+  }
+
+  /** 0.66.0 장면 그물 범위 합(sceneBox의 그물 몫 — 덩어리째, 0.66.0 그림자 깊이 그림 범위도 쓴다) */
+  private sceneMeshBox(s: Scene3d): Box3 {
     const M = s.meshes, C = this.meshBox;
     let tot = 0;
     for (const x of C.n) tot += x;
@@ -2881,8 +2892,6 @@ export class Viewer3d {
       }
       b = unionBox(b, x);
     }
-    for (const l of s.lines) b = unionBox(b, lineBounds(l));
-    for (const p of s.points ?? []) b = unionBox(b, pointBounds(p));
     return b;
   }
 
@@ -2900,7 +2909,7 @@ export class Viewer3d {
     else if (hadOrigin)
       this.usesOrigin = s.meshes.some((m) => hasOrigin(m.origin)) || s.lines.some((l) => hasOrigin(l.origin)) || (s.points ?? []).some((p) => hasOrigin(p.origin));
     this.visLists = null;
-    this.visBox = this.fitBx = null;
+    this.visBox = this.fitBx = this.shBx = null;
     this.boundsVer++;
     this.cutDirty = true;
     this.shadowVer++;
@@ -3667,7 +3676,7 @@ export class Viewer3d {
       this.visIds = [];
     } else this.visIds.push(id);
     this.shadowVer++;
-    this.visBox = this.fitBx = null;
+    this.visBox = this.fitBx = this.shBx = null;
     this.visLists = null;
     this.cutDirty = true;
     this.invalidate();
@@ -5749,7 +5758,7 @@ export class Viewer3d {
         if (r) r.box = null;
       }
     if (moved === true || (moved && moved.length)) {
-      this.visBox = this.fitBx = null;
+      this.visBox = this.fitBx = this.shBx = null;
       this.boundsVer++;
       this.cutDirty = true;
       this.wheelAnchor = null;
@@ -6107,36 +6116,76 @@ export class Viewer3d {
     const s = this.sceneRef;
     // 보이는 범위가 Scene3d.bounds 그 객체면 기본 규칙에서 숨긴 것이 없거나(그대로 쓴다) 보이는 묶음이 없다(합도 비어 같은 값)
     if (!s || !this.noFit.size || (s.fitRange !== 'visible' && all === s.bounds)) return (this.fitBx = all);
-    let b = emptyBox();
-    for (const it of this.items.values()) if (it.item.fit !== false && this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    // 0.66.0 숨긴 구간·마주 보는 그물이 없고 보이는 범위 덩어리가 이미 있으면 덩어리째(숨긴 묶음·맞춤에서 뺀 묶음이 든 덩어리만 묶음마다 — 같은 값). 0.65.0은 맞출 때마다
+    // 묶음마다 합쳤다(그물 수에 비례). 덩어리가 없으면(숨김이 한 번도 없던 'visible' 장면의 첫 맞춤 등) 덩어리를 새로 만들기보다 묶음마다 합치는 편이 싸다
+    let ranged = false;
+    for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
+    let b = !ranged && !this.bbList.length && this.visChunksOk() ? this.chunkedVisibleBox(1) : null;
+    if (!b) {
+      b = emptyBox();
+      for (const it of this.items.values()) if (it.item.fit !== false && this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    }
     return (this.fitBx = boxIsEmpty(b) ? all : b);
+  }
+
+  /**
+   * 0.66.0 그림자 깊이 그림 범위: 그림자를 드리우고 받는 것 — 보이는 그물(fit: false 그물도, 겉모습 행렬로 옮긴 자리·숨긴 구간을 뺀 범위)의 합. 선분·점은 그림자를 드리우지도
+   * 받지도 않아(그물 조각 셰이더만 깊이 그림을 읽는다) 넣지 않는다 — 0.65.0까지는 보이는 범위(선분·점·기본 규칙의 Scene3d.bounds)라 그물 밖으로 멀리 뻗은 선분이 있으면
+   * 깊이 그림 한 칸이 커져 그늘이 거칠었다. 숨김이 없으면 장면 그물 범위 덩어리(sceneMeshBox), 있으면 보이는 범위 덩어리, 숨긴 구간·마주 보는 그물이 있으면 묶음마다.
+   * 보이는 그물이 없으면 보이는 범위
+   */
+  private shadowBox(): Box3 {
+    if (this.shBx) return this.shBx;
+    const s = this.sceneRef;
+    if (!s) return (this.shBx = emptyBox());
+    let ranged = false;
+    for (const r of this.rangeSel.values()) if (r.hidden.length) ranged = true;
+    let b: Box3 | null = null;
+    if (!this.hiddenGroups.size && !this.hiddenItems.size && !ranged && !this.lookMoved.size && !this.bbList.length) b = this.sceneMeshBox(s);
+    else if (!ranged && !this.bbList.length) b = this.chunkedVisibleBox(2);
+    if (!b) {
+      b = emptyBox();
+      for (const it of this.items.values()) if (it.kind === 'mesh' && this.visible(it.item.id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
+    }
+    return (this.shBx = boxIsEmpty(b) ? this.visibleBox() : b);
+  }
+
+  /** 0.66.0 보이는 범위 덩어리(visChunks)가 지금 묶음 표·범위 캐시·판과 맞는지 */
+  private visChunksOk(): boolean {
+    const C = this.visChunks;
+    return !!C && C.items === this.items && C.boxes === this.boxes && C.ver === this.boundsVer && C.size === this.items.size;
   }
 
   /**
    * 0.62.0 보이는 범위를 덩어리째: 묶음 차례 VIS_CHUNK개마다 모두 보일 때의 범위(unionBox로 차례대로 합친 것)를 두고, 숨긴 묶음이 든 덩어리(숨긴 id의 덩어리·숨긴 이름이 든 덩어리)만
    * 묶음마다 합친다. unionBox를 차례대로 합친 값은 각 축에서 극값에 처음 닿은 꼭짓점의 값(같은 수 ±0이면 앞의 것)이라 덩어리 범위를 차례대로 합쳐도 비트까지 같다.
-   * 덩어리는 묶음·범위 캐시·판(boundsVer)이 같은 동안 그대로 쓴다(숨김만 바뀐 그리기는 다시 세지 않는다)
+   * 덩어리는 묶음·범위 캐시·판(boundsVer)이 같은 동안 그대로 쓴다(숨김만 바뀐 그리기는 다시 세지 않는다).
+   * 0.66.0 mode 1(맞춤 범위)은 맞춤에서 뺀 묶음(noFit)이 든 덩어리, 2(그림자 범위)는 그물이 아닌 묶음이 든 덩어리도 묶음마다 합치며 그 묶음을 뺀다
    */
-  private chunkedVisibleBox(): Box3 {
+  private chunkedVisibleBox(mode: 0 | 1 | 2 = 0): Box3 | null {
     let C = this.visChunks;
-    if (!C || C.items !== this.items || C.boxes !== this.boxes || C.ver !== this.boundsVer || C.size !== this.items.size) {
+    if (!C || !this.visChunksOk()) {
       const list = [...this.items.values()];
       const at = new Map<string, number>();
       const box: Box3[] = [];
       const groups: Set<string>[] = [];
+      const other: boolean[] = [];
       for (let s = 0; s < list.length; s += VIS_CHUNK) {
         let b = emptyBox();
         const gs = new Set<string>();
+        let o = false;
         for (let i = s; i < Math.min(list.length, s + VIS_CHUNK); i++) {
           const it = list[i]!;
           at.set(it.item.id, i);
           if (it.item.group !== undefined) gs.add(it.item.group);
+          if (it.kind !== 'mesh') o = true;
           b = unionBox(b, this.boundsOf(it.item));
         }
         box.push(b);
         groups.push(gs);
+        other.push(o);
       }
-      C = this.visChunks = { items: this.items, boxes: this.boxes, ver: this.boundsVer, size: this.items.size, list, at, box, groups };
+      C = this.visChunks = { items: this.items, boxes: this.boxes, ver: this.boundsVer, size: this.items.size, list, at, box, groups, other };
     }
     const dirty = new Uint8Array(C.box.length);
     for (const id of this.hiddenItems) {
@@ -6147,6 +6196,12 @@ export class Viewer3d {
       C.groups.forEach((gs, j) => {
         if (gs.size) for (const g of this.hiddenGroups) if (gs.has(g)) dirty[j] = 1;
       });
+    if (mode === 1)
+      for (const x of this.noFit) {
+        const i = C.at.get(x.id);
+        if (i !== undefined) dirty[Math.floor(i / VIS_CHUNK)] = 1;
+      }
+    else if (mode === 2) C.other.forEach((o, j) => o && (dirty[j] = 1));
     let b = emptyBox();
     for (let j = 0; j < C.box.length; j++) {
       if (!dirty[j]) {
@@ -6155,6 +6210,7 @@ export class Viewer3d {
       }
       for (let i = j * VIS_CHUNK; i < Math.min(C.list.length, (j + 1) * VIS_CHUNK); i++) {
         const it = C.list[i]!;
+        if ((mode === 1 && it.item.fit === false) || (mode === 2 && it.kind !== 'mesh')) continue;
         if (this.visible(it.item.id, it.item.group)) b = unionBox(b, this.boundsOf(it.item));
       }
     }
@@ -8959,7 +9015,7 @@ export class Viewer3d {
     const F = this.fogOpt;
     return {
       light,
-      shadow: L && shadows ? { box: this.visibleBox(), size: (typeof shadows === 'object' ? shadows.size : undefined) ?? 2048, bias: (typeof shadows === 'object' ? shadows.bias : undefined) ?? 0.0015, version: this.shadowVer } : null,
+      shadow: L && shadows ? { box: this.shadowBox(), size: (typeof shadows === 'object' ? shadows.size : undefined) ?? 2048, bias: (typeof shadows === 'object' ? shadows.bias : undefined) ?? 0.0015, version: this.shadowVer } : null,
       fog: F ? { color: F.color === undefined ? colors.background : typeof F.color === 'string' ? this.rgba(F.color) : F.color, start: F.start, end: F.end } : null,
       mode: this.mode,
       colors,
