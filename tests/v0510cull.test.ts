@@ -164,6 +164,23 @@ function subseq(a: DrawEntry[], b: DrawEntry[]): boolean {
   return true;
 }
 const instItems = (d: DrawEntry[]): number => d.filter(isInst).reduce((s, e) => s + e.args[e.args.length - 1]!, 0);
+/**
+ * 0.68.0 그리기 기록 열쇠(그린 뒤 곧 센다): 모아 그린 그리기는 자리 자료 첫 텍셀(u_instBase — 자리 자료 저장소 자리라 자리 수가 바뀐 프레임 뒤에는 다를 수 있다)
+ * 대신 그 그리기가 읽는 자리 자료 값으로(면 자리 수 × u_instStride·11텍셀, 선 u_instN × 5텍셀)
+ */
+function keys(w: W, d: DrawEntry[]): string[] {
+  const t = w.gl.textureAt(5);
+  return d.map((e) => {
+    if (!isInst(e)) return key(e);
+    const u = new Map(JSON.parse(e.uniforms) as [string, unknown[]][]);
+    const base = u.get('u_instBase')![0] as number;
+    const face = e.op === 'drawElementsInstanced';
+    const n = face ? e.args[4]! : (u.get('u_instN')![0] as number);
+    const stride = face ? ((u.get('u_instStride')?.[0] as number | undefined) ?? 11) : 5;
+    u.delete('u_instBase');
+    return JSON.stringify([e.op, e.args, e.prog, e.attribs, e.element, [...u], Array.from(t!.floats!.subarray(base * 4, (base + n * stride) * 4))]);
+  });
+}
 /** 맞춘 뒤 확대(가운데 근처만 화면에) */
 function zoomIn(w: W): void {
   w.v.fit(false);
@@ -177,6 +194,7 @@ describe('0.51.0 화면 밖 잘라내기 — 뷰어', () => {
       expect(w.v.renderOptions.culling).toBe(true);
       zoomIn(w);
       const on = frame(w);
+      const onKeys = keys(w, on);
       const culled = w.v.stats.culled;
       w.v.setRenderOptions({ culling: false });
       const off = frame(w);
@@ -187,7 +205,7 @@ describe('0.51.0 화면 밖 잘라내기 — 뷰어', () => {
       // 모아 그린 자리 수는 잘라낸 같은 정의 자리만큼 준다
       expect(instItems(on), mode).toBeLessThanOrEqual(instItems(off));
       w.v.setRenderOptions({ culling: true });
-      expect(frame(w).map(key)).toEqual(on.map(key));
+      expect(keys(w, frame(w))).toEqual(onKeys);
     }
   });
 

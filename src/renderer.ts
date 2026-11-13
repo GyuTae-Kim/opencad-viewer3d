@@ -321,6 +321,10 @@ export interface RenderState {
   parts?: (id: string) => ItemParts | undefined;
   /** 묶음별 겉모습(없으면 모두 장면 그대로) */
   look?: ((id: string) => ItemLook | undefined) | null;
+  /**
+   * 0.68.0 look의 판: 겉모습이 바뀔 때마다 달라지는 수(같으면 look이 돌려주는 값이 같다 — 늘 바뀌는 겉모습이면 주지 않는다). 주면 겉모습이 있어도 인스턴싱 뼈대를 다시 쓴다
+   */
+  lookKey?: number;
   /** 화면 밖 그리기(그림 저장): 대상 크기(장치 화소). 없으면 그리기 버퍼 크기 */
   viewport?: readonly [number, number];
   /** 투명 바탕(그림 저장): 바탕을 비우고 알파를 곱해 쌓는다(결과 색은 알파를 곱한 값) */
@@ -620,6 +624,16 @@ export interface MeshRec {
   bk?: number;
   /** 0.63.0 뼈대의 장면 차례 번호(MergeOrder.si를 만들 때 적는다 — 보이는 목록에 넣고 뺄 자리) */
   si?: number;
+  /**
+   * 0.68.0 인스턴싱 뼈대(InstPlan.id) 표시: 면·외곽선 깊이·윤곽선·숨은 점선 차례 묶음에 든 뼈대(ipf·ipz·ipe·ipd), 어느 차례든 든 뼈대(ipm)와 그때 색 객체(ipc —
+   * 뼈대를 다시 쓸 때 Mesh3d.color를 바꿔 끼웠는지 본다)
+   */
+  ipf?: number;
+  ipz?: number;
+  ipe?: number;
+  ipd?: number;
+  ipm?: number;
+  ipc?: Rgba;
   edges: LineRec | null;
   /** 삼각형 변 그리기(와이어프레임) — idx는 이 기록만의 색인 배열(그물을 바꿀 때 색인이 같으면 넘겨 쓰고, 아니면 지운다) */
   wire: { vao: WebGLVertexArrayObject; count: number; idx: Uint32Array } | null;
@@ -969,8 +983,32 @@ export function mergeKitState(): MergeKitState {
   return mergeKit ? 'ready' : mergeKitFailed ? 'failed' : mergeKitLate ? 'late' : mergeKitLoad ? 'loading' : 'idle';
 }
 
-/** 0.42.0 모아 그릴 선 묶음 하나(같은 선 버퍼·같은 색·굵기·불투명도 — 자리 행렬만 다르다). recs·models는 장면 차례 */
-interface LineBatch {
+/**
+ * 0.68.0 인스턴싱 자리 자료 저장소(Renderer3d.instTex — 단위 INST_UNIT)의 자리 하나: 첫 텍셀 base부터 cap텍셀(같은 열쇠의 묶음이 프레임을 넘어 같은 자리를 쓴다).
+ * kind·gen = 쓴 종류(면 m + 자리 텍셀 수, 선 l + 안개)와 그 프레임 값 판, n·mdl = 쓴 자리 수와 자리마다 쓴 모형(같은 판에서 모형이 같은 앞 자리는 다시 쓰지 않는다),
+ * src = 그때 받은 목록 배열(인스턴싱 뼈대의 묶음 목록은 만든 뒤 고치지 않는다 — 같은 배열·같은 판이면 자리마다 견주지 않는다)
+ */
+interface InstSlot {
+  ep: number;
+  base: number;
+  cap: number;
+  /** 자리를 놓은 자리 텍셀 수(면 11·12·15·16, 선 5 — 바뀌면 다시 놓는다: 넉넉히 남은 칸까지 함께 올리지 않게) */
+  st: number;
+  kind: string;
+  gen: number;
+  n: number;
+  mdl: (ArrayLike<number> | undefined)[];
+  src: object | null;
+}
+
+/** 0.68.0 자리를 드는 묶음(저장소 열쇠 sk — 차례·그물 열쇠·그 열쇠 안 묶음 차례, 지난번 자리 slot — 같은 묶음 객체면 열쇠를 찾지 않는다) */
+interface InstHolder {
+  sk: string;
+  slot: InstSlot | null;
+}
+
+/** 0.42.0 모아 그릴 선 묶음 하나(같은 선 버퍼·같은 색·굵기·불투명도 — 자리 행렬만 다르다). recs·models는 장면 차례. 0.68.0 자리 자료 저장소 자리(InstHolder) */
+interface LineBatch extends InstHolder {
   color: Rgba;
   width: number;
   alpha: number;
@@ -978,12 +1016,52 @@ interface LineBatch {
   models: (ArrayLike<number> | undefined)[];
 }
 
+/**
+ * 0.42.0 그물 자리 묶음 하나: 같은 그물·같은 색·강조·정점 색·무늬 쓰기(균일 변수가 모두 같고 자리 행렬만 다르다). 0.68.0 render() 밖으로(인스턴싱 뼈대가 든다)
+ */
+interface MeshBatch extends InstHolder {
+  color: Rgba;
+  tint: number;
+  vcol: boolean;
+  tex: boolean;
+  /** 0.43.0 PBR 변종 정의(같은 그물 열쇠는 PBR 필드도 같다 — 색을 바꾼 자리만 PBR이 꺼져 따로 묶인다) */
+  pbr: string[];
+  /** 0.51.0 pbr.join()(묶음마다 한 번 — 자리마다 견줄 때 다시 잇지 않는다) */
+  pk: string;
+  list: MeshRec[];
+}
+
+/**
+ * 0.68.0 인스턴싱 뼈대: 같은 그물 자리를 모은 결과(같은 그물 수·면·외곽선 깊이·윤곽선·숨은 점선 차례의 묶음)를 프레임을 넘어 다시 쓴다.
+ * 0.67.0까지는 프레임마다(가만히도) 보이는 그물마다 같은 그물 수를 글자열 열쇠 Map으로 세고 차례마다 모아 묶음을 나눴다(가짜 WebGL 1만 — 그리기 시간의 ¾).
+ * key = 모으기가 기대는 값(인스턴싱 하한·단면 하나·강조 모음과 크기·모드·테마 색·선 색 선택·숨은 점선·겉모습 판), loose = 만든 그리기에서 묶음 덩이 밖 보이는 그물(each 차례 —
+ * 같은 기록이 같은 차례면 숨김·장면이 같다), cols·colV = 자리 그물 색 객체와 그 값(제자리 고침을 본다). 차례마다 묶음(face·depth·lines·dash)은 그 차례를 처음 그릴 때 채우고,
+ * 든 그물에는 그 차례 표시(MeshRec.ipf·ipz·ipe·ipd = id)를 적는다(다시 쓰는 차례는 표시한 그물을 건너뛴다). volatile = 무늬·PBR·뒷면 그물이 들어 다시 쓰지 않는다
+ */
+interface InstPlan {
+  id: number;
+  key: unknown[];
+  loose: MeshRec[];
+  cols: Rgba[];
+  colV: number[];
+  colSet: Set<Rgba>;
+  geoN: Map<string, number>;
+  edgeN: Map<WebGLBuffer, number> | null;
+  face: MeshBatch[] | null;
+  depth: MeshBatch[] | null;
+  lines: Map<unknown, LineBatch[]> | null;
+  dash: Map<unknown, LineBatch[]> | null;
+  /** 묶음 덩이가 없는 장면(뼈대 MergeOrder 없음)에서 차례마다 묶음에 들지 않은 보이는 그물(장면 차례 — 다시 쓰는 차례는 이것만 훑는다) */
+  rest: { ipf?: MeshRec[]; ipz?: MeshRec[]; ipe?: MeshRec[]; ipd?: MeshRec[] };
+  volatile: boolean;
+}
+
 /** 같은 열쇠의 묶음 가운데 색(같은 객체 또는 같은 값)·굵기·불투명도가 같은 것에 자리를 더한다(없으면 새 묶음) */
 function addLineBatch(map: Map<unknown, LineBatch[]>, key: unknown, r: MeshRec, color: Rgba, width: number, alpha: number, model: ArrayLike<number> | undefined): void {
   let a = map.get(key);
   if (!a) map.set(key, (a = []));
   let b = a.find((x) => x.width === width && x.alpha === alpha && (x.color === color || (x.color[0] === color[0] && x.color[1] === color[1] && x.color[2] === color[2] && x.color[3] === color[3])));
-  if (!b) a.push((b = { color, width, alpha, recs: [], models: [] }));
+  if (!b) a.push((b = { color, width, alpha, recs: [], models: [], sk: '', slot: null }));
   b.recs.push(r);
   b.models.push(model);
 }
@@ -1114,12 +1192,30 @@ export class Renderer3d {
   culling = true;
   /** 0.43.0 흰 1화소 그림(거칠기·금속성 그림이 없는 쪽에 묶는다 — 배율이 곧 값). 문맥을 잃으면 잊는다 */
   private white: WebGLTexture | null = null;
-  /** 0.42.0 자리 자료 그림(RGBA32F, 폭 INST_W)과 높이(줄). 문맥을 잃으면 잊는다 */
+  /**
+   * 0.42.0 자리 자료 그림(RGBA32F, 폭 INST_W)과 높이(줄). 문맥을 잃으면 잊는다.
+   * 0.68.0 자리 자료 저장소: 묶음마다 자리(InstSlot — 열쇠 instSlots)를 프레임을 넘어 두고, 판(instSig — 시점·투영 등)과 자리마다 쓴 모형이 같으면 다시 쓰지도 올리지도 않는다
+   * (0.67.0까지는 그리기마다 0번 줄부터 묶음마다 줄 단위로 모두 쓰고 올렸다 — 가만히 있는 프레임도). instBuf = 그림의 CPU 사본(올린 것과 같다), instTop = 다음 빈 텍셀,
+   * instLive = 살아 있는 자리 텍셀 수(버린 자리가 ¼을 넘은 채 그림을 늘려야 하면 처음부터 다시 놓는다 — instEp가 오른다), instBound = 이 그리기에서 그림을 단위에 건 번호
+   */
   private instTex: { tex: WebGLTexture; h: number } | null = null;
-  /** 이번 그리기에서 자리 자료 그림의 다음 빈 줄(그리기마다 0부터 — 앞 그리기 호출이 읽는 줄은 덮지 않는다) */
-  private instRow = 0;
-  /** 자리 자료(CPU 쪽, 텍셀마다 4값 — 줄 단위로 올린다) */
-  private instBuf = new Float32Array(INST_W * 4 * 4);
+  private instBuf = new Float32Array(0);
+  private instTop = 0;
+  private instLive = 0;
+  private instEp = 1;
+  private instBound = 0;
+  private instSlots = new Map<string, InstSlot>();
+  private instSig = new Map<string, { v: number[]; gen: number; at: number }>();
+  private instGenSeq = 0;
+  /** 0.68.0 쓰고 아직 올리지 않은 텍셀 구간 [시작, 끝, …](차례마다 묶음을 모두 쓴 뒤 instFlush가 모아 올린다)과 다음 그리기 처음에 자리를 처음부터 다시 놓을지 */
+  private instDirty: number[] = [];
+  private instCompact = false;
+  /** 0.68.0 인스턴싱 뼈대(맞으면 프레임을 넘어 다시 쓴다)와 시험용 끄기(true면 0.67.0처럼 프레임마다 모은다 — 같은 그림인지 견줄 때) */
+  private instPlan: InstPlan | null = null;
+  private instPlanSeq = 0;
+  instPlanOff = false;
+  /** 0.68.0 이 그리기에서 찾은 인스턴싱 변종(정의 열쇠 — 묶음마다 정의 배열을 잇고 정렬하지 않는다. 그리기마다 비운다) */
+  private ivm = new Map<string, Prog>();
   private instM3 = new Float32Array(9);
   /** GPU 버퍼 번호(같은 그물 열쇠 MeshRec.geo를 만든다) */
   private bufIds = new WeakMap<WebGLBuffer, number>();
@@ -1306,6 +1402,8 @@ export class Renderer3d {
     this.skyP = null;
     this.shadowMap = null;
     this.instTex = null;
+    this.instBuf = new Float32Array(0);
+    this.instForget();
     this.white = null;
     this.pendingProgs.clear();
     this.emptyVao = null;
@@ -1907,71 +2005,185 @@ export class Renderer3d {
     return n;
   }
 
-  /**
-   * 0.42.0 자리 자료를 instBuf에 쓸 자리(texels개)를 마련한다(줄 단위로 올리므로 줄을 채울 만큼). 자리 자료 그림에 들어가지 않으면 false
-   */
-  private instReserve(texels: number): boolean {
-    const rows = Math.max(1, Math.ceil(texels / INST_W));
-    const maxH = Number(this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE)) || 2048;
-    if (this.instRow + rows > maxH) return false;
-    const need = rows * INST_W * 4;
-    if (this.instBuf.length < need) this.instBuf = new Float32Array(Math.max(need, this.instBuf.length * 2));
-    return true;
+  /** 0.68.0 자리 자료 저장소의 자리를 모두 잊는다(그림은 둔다 — 문맥을 잃거나 닫을 때는 부르는 쪽이 그림도 놓는다). 인스턴싱 뼈대도 */
+  private instForget(): void {
+    this.instEp++;
+    this.instTop = 0;
+    this.instLive = 0;
+    this.instSlots.clear();
+    this.instSig.clear();
+    this.instDirty.length = 0;
+    this.instCompact = false;
+    this.instPlan = null;
   }
 
   /**
-   * 0.42.0 instBuf 앞 texels개의 자리 자료를 자리 자료 그림의 이번 그리기 다음 빈 줄부터 올리고, 그 첫 텍셀 번호(셰이더 u_instBase)를 돌려준다.
-   * 그림이 모자라면 두 배씩 키워 새로 만든다(앞서 부른 그리기 호출은 GL 차례대로 그때 그림을 읽는다). instReserve가 먼저 자리를 마련한다
+   * 0.68.0 종류(면 m + 자리 텍셀 수, 선 l·lf — 안개)의 이 그리기 판: 프레임 값(sig — 시점·투영·시점 투영·그림자 행렬·단면 평면)이 그 종류의 지난 값과 비트까지 같으면
+   * 지난 판, 다르면 새 판(그 종류 자리는 모두 다시 쓴다 — 카메라를 돌린 프레임). 그리기마다 종류마다 한 번 센다
    */
-  private instPut(texels: number): number {
+  private instGen(kind: string, sig: () => number[]): number {
+    const o = this.instSig.get(kind);
+    if (o && o.at === this.frameNo) return o.gen;
+    const v = sig();
+    if (o && o.v.length === v.length && v.every((x, i) => Object.is(x, o.v[i]))) {
+      o.at = this.frameNo;
+      return o.gen;
+    }
+    const gen = ++this.instGenSeq;
+    this.instSig.set(kind, { v, gen, at: this.frameNo });
+    return gen;
+  }
+
+  /**
+   * 0.68.0 묶음 h의 자리(n자리 × stride텍셀)를 마련한다: h.slot이 이 판(instEp)의 자리이고 같은 자리 텍셀 수로 들어가면 그대로, 아니면 열쇠 h.sk의 자리, 그것도 모자라거나
+   * 자리 텍셀 수가 바뀌었으면 저장소 끝에 새로(줄을 맞추지 않고 이어서 — 늘리는 자리는 조금 넉넉히). 그림을 늘려야 하는데 버린 자리가 ¼을 넘으면 다음 그리기 처음에 자리를 모두 버리고 처음부터 놓는다
+   * (그리기 안에서는 버리지 않는다 — 한 차례의 묶음을 모두 쓴 뒤 올리고 그리므로 앞 묶음 자리를 덮으면 안 된다). 그림 한도에 들지 않으면 null(그물마다 그린다)
+   */
+  private instSlot(h: InstHolder, n: number, stride: number): InstSlot | null {
+    const need = n * stride;
+    let q = h.slot && h.slot.ep === this.instEp ? h.slot : (this.instSlots.get(h.sk) ?? null);
+    if (q && q.ep !== this.instEp) q = null;
+    if (q && need <= q.cap && q.st === stride) return (h.slot = q);
+    const max = Math.max(1, Number(this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE)) || 2048);
+    // 자리 수가 늘어 다시 놓으면 조금 넉넉히(자리 텍셀 수가 바뀌어 다시 놓으면 꼭 맞게)
+    const cap = q && q.st === stride ? need + Math.max(4 * stride, need >> 3) : need;
+    const base = this.instTop;
+    if (base + cap > (this.instTex?.h ?? 0) * INST_W) {
+      if (4 * (this.instTop - this.instLive + (q ? q.cap : 0)) > base + cap) this.instCompact = true;
+      if (base + cap > max * INST_W) {
+        this.instCompact = true;
+        return null;
+      }
+      this.instGrow(base + cap, max);
+    }
+    if (q) this.instLive -= q.cap;
+    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null };
+    this.instSlots.set(h.sk, s);
+    this.instTop = base + cap;
+    this.instLive += cap;
+    return (h.slot = s);
+  }
+
+  /** 0.68.0 자리 자료 그림을 texels가 들도록 늘린다(16줄부터 두 배씩, GPU 한도까지 — 앞서 쓴 줄은 새 그림에 다시 올린다) */
+  private instGrow(texels: number, max: number): void {
     const gl = this.gl;
-    const rows = Math.max(1, Math.ceil(texels / INST_W));
-    const need = this.instRow + rows;
-    let t = this.instTex;
+    const old = this.instTex;
+    let h = Math.max(16, old ? old.h : 16);
+    while (h * INST_W < texels) h *= 2;
+    h = Math.min(h, max);
+    const buf = new Float32Array(h * INST_W * 4);
+    buf.set(this.instBuf.subarray(0, Math.min(this.instBuf.length, buf.length)));
     gl.activeTexture(gl.TEXTURE0 + INST_UNIT);
-    if (!t || t.h < need) {
-      const maxH = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 2048;
-      let h = Math.max(16, t ? t.h : 16);
-      while (h < need) h *= 2;
-      h = Math.min(h, maxH);
-      if (t) gl.deleteTexture(t.tex);
-      const tex = gl.createTexture()!;
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, INST_W, h, 0, gl.RGBA, gl.FLOAT, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      this.instTex = t = { tex, h };
-    } else gl.bindTexture(gl.TEXTURE_2D, t.tex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.instRow, INST_W, rows, gl.RGBA, gl.FLOAT, this.instBuf, 0);
+    if (old) gl.deleteTexture(old.tex);
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, INST_W, h, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const keep = old ? Math.ceil(Math.min(this.instTop, old.h * INST_W) / INST_W) : 0;
+    if (keep) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, INST_W, keep, gl.RGBA, gl.FLOAT, buf, 0);
     gl.activeTexture(gl.TEXTURE0);
-    const base = this.instRow * INST_W;
-    this.instRow = need;
-    return base;
+    this.instTex = { tex, h };
+    this.instBuf = buf;
+    this.instBound = this.frameNo;
+  }
+
+  /**
+   * 0.68.0 한 차례(면·외곽선 깊이·윤곽선·숨은 점선)의 묶음 자리를 모두 쓴 뒤 그리기 전에: 쓴 텍셀 구간을 모아(한 줄이 안 되는 틈은 함께 — CPU 사본이 그림과 같다)
+   * 구간마다 첫 줄 조각·가운데 온 줄·끝 줄 조각으로 올리고(많아야 세 번), 이 그리기에서 아직 그림을 단위에 걸지 않았으면 건다(이 단위는 자리 자료 그림만 쓴다).
+   * 0.67.0까지는 묶음마다 줄 단위로 올렸다(꼴 200가지면 프레임마다 400번)
+   */
+  private instFlush(): void {
+    const D = this.instDirty, t = this.instTex;
+    if (!t) return;
+    const gl = this.gl;
+    if (!D.length) {
+      if (this.instBound === this.frameNo) return;
+      gl.activeTexture(gl.TEXTURE0 + INST_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, t.tex);
+      gl.activeTexture(gl.TEXTURE0);
+      this.instBound = this.frameNo;
+      return;
+    }
+    const ord = Array.from({ length: D.length / 2 }, (_, j) => j).sort((a, b) => D[a * 2]! - D[b * 2]!);
+    gl.activeTexture(gl.TEXTURE0 + INST_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, t.tex);
+    const sub = (k: number, w: number, rows: number): void => gl.texSubImage2D(gl.TEXTURE_2D, 0, k % INST_W, Math.floor(k / INST_W), w, rows, gl.RGBA, gl.FLOAT, this.instBuf, k * 4);
+    let t0 = -1, t1 = -1;
+    const up = (): void => {
+      if (t0 < 0) return;
+      let a = t0;
+      if (a % INST_W) {
+        const e = Math.min(t1, (Math.floor(a / INST_W) + 1) * INST_W);
+        sub(a, e - a, 1);
+        a = e;
+      }
+      const full = Math.floor((t1 - a) / INST_W);
+      if (full) {
+        sub(a, INST_W, full);
+        a += full * INST_W;
+      }
+      if (a < t1) sub(a, t1 - a, 1);
+    };
+    for (const j of ord) {
+      const a = D[j * 2]!, b = D[j * 2 + 1]!;
+      if (t0 >= 0 && a <= t1 + INST_W) {
+        if (b > t1) t1 = b;
+        continue;
+      }
+      up();
+      t0 = a;
+      t1 = b;
+    }
+    up();
+    gl.activeTexture(gl.TEXTURE0);
+    D.length = 0;
+    this.instBound = this.frameNo;
   }
 
   /**
    * 0.42.0 그물 자리 자료: 자리마다 setMeshMatrix와 같은 double 곱(시점 · 모형, 투영 · 그것, 법선 행렬)을 float32로 instBuf에 11텍셀씩.
    * 0.43.0: shadow(빛 투영·시점)를 주면 setMeshMatrix의 u_shadowM과 같은 식(빛 · 모형을 double로 곱해 [0, 1]로 맞춘 행렬)을 4텍셀(11~14),
    * clip(모형 → 로컬 평면)을 주면 setMeshMatrix의 u_clip과 같은 로컬 평면을 맨 끝 1텍셀에 더 쓴다(자리 텍셀 수 = instStride)
-   * 올린 첫 텍셀 번호(자리 자료 그림이 모자라면 −1 — 그때는 그물마다 그린다)
+   * 올린 첫 텍셀 번호(자리 자료 그림이 모자라면 −1 — 그때는 그물마다 그린다).
+   * 0.68.0 묶음 h의 저장소 자리에: 같은 판이면 앞에서부터 모형(mm)이 지난번과 같은 자리는 다시 쓰지 않고, 다른 첫 자리부터 끝까지 쓰고 그 텍셀 구간을 적어 둔다
+   * (모두 같으면 쓰지 않는다 — 부르는 쪽이 그 차례의 묶음을 모두 쓴 뒤 instFlush로 올리고 그린다)
    */
   private instMeshes(
     f: ViewFrame,
-    models: readonly (ArrayLike<number> | undefined)[],
+    h: InstHolder,
+    list: readonly MeshRec[],
+    mm: (r: MeshRec) => ArrayLike<number> | undefined,
     extra: { shadow?: ArrayLike<number> | null; clip?: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null } = {},
   ): number {
-    const n = models.length;
+    const n = list.length;
     const shadow = extra.shadow ?? null, clip = extra.clip ?? null;
     const stride = Renderer3d.instStride(!!shadow, !!clip);
-    if (!this.instReserve(n * stride)) return -1;
+    const q = this.instSlot(h, n, stride);
+    if (!q) return -1;
+    const kind = `m${stride}`;
+    const gen = this.instGen(kind, () => [...f.view, ...f.proj, ...f.viewProj, ...Array.from(shadow ?? []), ...(clip ? (clip(undefined) ?? NO_CLIP) : [])]);
+    let i0 = 0;
+    if (q.kind === kind && q.gen === gen) {
+      if (q.src === list && q.n === n) return q.base;
+      const e = Math.min(n, q.n);
+      while (i0 < e && q.mdl[i0] === mm(list[i0]!)) i0++;
+    }
+    q.kind = kind;
+    q.gen = gen;
+    q.n = n;
+    q.src = list;
+    q.mdl.length = n;
+    if (i0 === n) return q.base;
     const d = this.instBuf, m3 = this.instM3;
-    for (let i = 0; i < n; i++) {
-      const model = models[i];
+    for (let i = i0; i < n; i++) {
+      const model = mm(list[i]!);
+      q.mdl[i] = model;
       const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
       const mvp = model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj;
-      const o = i * stride * 4;
+      const o = (q.base + i * stride) * 4;
       for (let k = 0; k < 16; k++) {
         d[o + k] = mvp[k]!;
         d[o + 16 + k] = mv[k]!;
@@ -1992,14 +2204,15 @@ export class Renderer3d {
       }
       if (clip) {
         const c = clip(model) ?? NO_CLIP;
-        const q = o + (stride - 1) * 4;
-        d[q] = c[0];
-        d[q + 1] = c[1];
-        d[q + 2] = c[2];
-        d[q + 3] = c[3];
+        const p = o + (stride - 1) * 4;
+        d[p] = c[0];
+        d[p + 1] = c[1];
+        d[p + 2] = c[2];
+        d[p + 3] = c[3];
       }
     }
-    return this.instPut(n * stride);
+    this.instDirty.push(q.base + i0 * stride, q.base + n * stride);
+    return q.base;
   }
 
   /** 0.43.0 그물 자리 하나의 텍셀 수: 11(행렬) + 그림자 행렬 4 + 단면 평면 1 — 셰이더 u_instStride */
@@ -2434,15 +2647,34 @@ export class Renderer3d {
     mergeKit?.bake(this.host, list);
   }
 
-  /** 0.42.0 선 자리 자료: 자리마다 drawLines와 같은 시점·투영 · 모형(그리고 안개면 setLineFog와 같은 시점 · 모형의 z 행)을 5텍셀씩. 올린 첫 텍셀 번호(−1 = 못 올림) */
-  private instLines(f: ViewFrame, models: readonly (ArrayLike<number> | undefined)[], fog: boolean): number {
+  /**
+   * 0.42.0 선 자리 자료: 자리마다 drawLines와 같은 시점·투영 · 모형(그리고 안개면 setLineFog와 같은 시점 · 모형의 z 행)을 5텍셀씩. 올린 첫 텍셀 번호(−1 = 못 올림).
+   * 0.68.0 묶음 h의 저장소 자리에(instMeshes와 같다 — 같은 판·같은 모형인 앞 자리는 다시 쓰지 않고, 쓴 구간은 instFlush가 올린다)
+   */
+  private instLines(f: ViewFrame, h: InstHolder, models: readonly (ArrayLike<number> | undefined)[], fog: boolean): number {
     const n = models.length;
-    if (!this.instReserve(n * INST_LINE)) return -1;
+    const q = this.instSlot(h, n, INST_LINE);
+    if (!q) return -1;
+    const kind = fog ? 'lf' : 'l';
+    const gen = this.instGen(kind, () => (fog ? [...f.viewProj, ...f.view] : [...f.viewProj]));
+    let i0 = 0;
+    if (q.kind === kind && q.gen === gen) {
+      if (q.src === models && q.n === n) return q.base;
+      const e = Math.min(n, q.n);
+      while (i0 < e && q.mdl[i0] === models[i0]) i0++;
+    }
+    q.kind = kind;
+    q.gen = gen;
+    q.n = n;
+    q.src = models;
+    q.mdl.length = n;
+    if (i0 === n) return q.base;
     const d = this.instBuf;
-    for (let i = 0; i < n; i++) {
+    for (let i = i0; i < n; i++) {
       const model = models[i];
+      q.mdl[i] = model;
       const mvp = model ? mat4Mul(f.viewProj, model, this.d4a) : f.viewProj;
-      const o = i * INST_LINE * 4;
+      const o = (q.base + i * INST_LINE) * 4;
       for (let k = 0; k < 16; k++) d[o + k] = mvp[k]!;
       if (fog) {
         const mv = model ? mat4Mul(f.view, model, this.d4b) : f.view;
@@ -2452,35 +2684,56 @@ export class Renderer3d {
         d[o + 19] = mv[14]!;
       } else d.fill(0, o + 16, o + 20);
     }
-    return this.instPut(n * INST_LINE);
+    this.instDirty.push(q.base + i0 * INST_LINE, q.base + n * INST_LINE);
+    return q.base;
   }
 
   /**
    * 0.42.0 같은 선분 기록(그물 윤곽선 — 여러 자리가 함께 쓰는 배열)을 자리 여럿에 그리기 한 번으로. drawLines와 같은 프로그램 고르기·균일 변수(자리 행렬만
    * 자리 자료 그림에서)와 같은 굵은 선·가는 선 판정이다(first = 0, 선분 모두 — 단면 평면 없이). 굵은 선은 선분 속성의 나눔 수를 자리 수로 바꿔 그리고 되돌린다.
-   * wire를 주면 그 VAO·색인으로 삼각형 변(gl.LINES 색인 그리기)을 가는 선으로. 자리 자료 그림이 모자라면 false(그리지 않았다 — 부르는 쪽이 자리마다 그린다)
+   * wire를 주면 그 VAO·색인으로 삼각형 변(gl.LINES 색인 그리기)을 가는 선으로. 자리 자료 그림이 모자라면 null(그리지 않는다 — 부르는 쪽이 자리마다 그린다).
+   * 0.68.0 둘로 나눴다: 여기서는 프로그램을 고르고 자리 자료를 저장소에 쓴다(h = 자리를 드는 묶음, models는 그 묶음에서 화면 밖 자리를 뺀 것일 수 있다).
+   * 부르는 쪽이 그 차례의 묶음을 모두 쓰고 instFlush로 올린 뒤 drawLinesInst로 그린다
    */
-  private drawLinesInst(
+  private linesInstPrep(
     f: ViewFrame,
+    h: InstHolder,
     r: LineRec | null,
     models: readonly (ArrayLike<number> | undefined)[],
-    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; noFog?: boolean; capz?: boolean },
+    o: { width: number; dashed: boolean; noFog?: boolean; capz?: boolean },
     st: RenderState,
-    stats: RenderStats,
     wire?: { vao: WebGLVertexArrayObject; count: number } | null,
-  ): boolean {
-    const gl = this.gl;
-    const n = models.length;
-    if (!r && !wire) return false;
+  ): { p: Prog; base: number; n: number; wide: boolean } | null {
+    if (!r && !wire) return null;
     const fog = !o.noFog && st.fog ? st.fog : null;
     const wDev = o.width * st.dpr;
     const fast = !!r && st.interacting && r.n > FAST_LINES_WHILE_MOVING;
     const wide = !!r && !wire && !fast && (o.dashed || wDev > 1.01);
-    // 변종이 아직 번역 중이면 그리지 않는다(부르는 쪽이 자리마다)
-    const p = this.instVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(fog ? ['FOG'] : [])]);
-    if (!p) return false;
-    const base = this.instLines(f, models, !!fog);
-    if (base < 0) return false;
+    // 변종이 아직 번역 중이면 그리지 않는다(부르는 쪽이 자리마다). 0.68.0 같은 정의의 변종은 이 그리기에서 한 번만 찾는다
+    const vk = `${wide ? 'w' : 't'}${wide && o.capz ? 1 : 0}${fog ? 1 : 0}`;
+    let p = this.ivm.get(vk) ?? null;
+    if (!p) {
+      p = this.instVariant(wide ? 'wide' : 'thin', [...(wide && o.capz ? ['CAPZ'] : []), ...(fog ? ['FOG'] : [])]);
+      if (!p) return null;
+      this.ivm.set(vk, p);
+    }
+    const base = this.instLines(f, h, models, !!fog);
+    return base < 0 ? null : { p, base, n: models.length, wide };
+  }
+
+  /** 0.42.0 모은 선 묶음 그리기(0.68.0 linesInstPrep이 고른 프로그램·자리로 — 자리 자료는 instFlush가 올렸다) */
+  private drawLinesInst(
+    x: { p: Prog; base: number; n: number; wide: boolean },
+    r: LineRec | null,
+    o: { color: Rgba; vcol: boolean; width: number; dashed: boolean; alpha: number; bias?: number; noFog?: boolean; capz?: boolean },
+    st: RenderState,
+    stats: RenderStats,
+    wire?: { vao: WebGLVertexArrayObject; count: number } | null,
+  ): void {
+    const gl = this.gl;
+    const { p, base, n, wide } = x;
+    const fog = !o.noFog && st.fog ? st.fog : null;
+    const wDev = o.width * st.dpr;
     gl.useProgram(p.p);
     if (fog) {
       gl.uniform4f(this.loc(p, 'u_fogCol'), fog.color[0], fog.color[1], fog.color[2], 1);
@@ -2517,7 +2770,6 @@ export class Renderer3d {
     stats.segments += (wire ? wire.count / 2 : r!.n) * n;
     this.instStats.draws++;
     this.instStats.items += n;
-    return true;
   }
 
   /** 배열을 이미 올렸는지(버퍼 표에 그 열쇠가 있는지) */
@@ -3628,6 +3880,8 @@ export class Renderer3d {
     this.restoreQ.clear();
     // 0.52.0 묶음 버퍼·VAO(그물 기록과 따로 만들고 지운다)
     this.mergeClear(false);
+    // 0.68.0 인스턴싱 자리·뼈대도 잊는다(그림은 다음 장면이 다시 쓴다)
+    this.instForget();
     if (!keepTextures) this.dropTextures();
     for (const r of this.meshes) {
       this.dropParts(r);
@@ -3691,6 +3945,8 @@ export class Renderer3d {
     this.dropShadow();
     if (this.instTex) gl.deleteTexture(this.instTex.tex);
     this.instTex = null;
+    this.instBuf = new Float32Array(0);
+    this.instForget();
     if (this.white) gl.deleteTexture(this.white);
     this.white = null;
     for (const q of this.pendingProgs.values()) {
@@ -4265,8 +4521,18 @@ export class Renderer3d {
     const gl = this.gl;
     const stats: RenderStats = { drawCalls: 0, triangles: 0, segments: 0, points: 0, culled: 0 };
     this.stats = stats;
-    this.instRow = 0;
     this.instStats = { draws: 0, items: 0 };
+    const ivm = this.ivm;
+    ivm.clear();
+    // 0.68.0 지난 그리기에서 버린 자리가 쌓였으면 이 그리기 처음에 자리 자료 저장소의 자리를 모두 버린다(쓰는 묶음은 다시 놓고 모두 쓴다)
+    if (this.instCompact) {
+      this.instCompact = false;
+      this.instEp++;
+      this.instTop = 0;
+      this.instLive = 0;
+      this.instSlots.clear();
+    }
+    this.instDirty.length = 0;
     this.mergeStats = { draws: 0, items: 0 };
     this.pollPending();
     // 0.52.0 묶어 그리기를 켰으면 다 올린 뒤 몫 안에서 묶음을 굽는다(그동안 구운 묶음은 묶어서, 나머지는 그물마다)
@@ -4662,25 +4928,14 @@ export class Renderer3d {
     };
 
     // ───── 0.42.0 인스턴싱: 같은 그물(MeshRec.geo) 자리를 모아 그리기 한 번에 ─────
-    /** 자리 묶음 하나: 같은 그물·같은 색·강조·정점 색·무늬 쓰기(균일 변수가 모두 같고 자리 행렬만 다르다) */
-    interface MeshBatch {
-      color: Rgba;
-      tint: number;
-      vcol: boolean;
-      tex: boolean;
-      /** 0.43.0 PBR 변종 정의(같은 그물 열쇠는 PBR 필드도 같다 — 색을 바꾼 자리만 PBR이 꺼져 따로 묶인다) */
-      pbr: string[];
-      /** 0.51.0 pbr.join()(묶음마다 한 번 — 자리마다 견줄 때 다시 잇지 않는다) */
-      pk: string;
-      list: MeshRec[];
-    }
     const vcolOf = (r: MeshRec): boolean => r.hasColors && !(look && lookOf(r.src.id)?.color) && !mono && !flat;
     const NO_DEFS: string[] = [];
     /**
      * 같은 그물 자리들을 균일 변수가 같은 묶음으로 나눈다(색은 같은 객체를 먼저 보고, 다른 객체면 값으로).
-     * 0.51.0: 자리마다 닫힘 함수·빈 배열·글자열 잇기를 만들지 않는다(PBR 필드가 없는 그물은 빈 정의 — 같은 묶음 나누기·차례)
+     * 0.51.0: 자리마다 닫힘 함수·빈 배열·글자열 잇기를 만들지 않는다(PBR 필드가 없는 그물은 빈 정의 — 같은 묶음 나누기·차례).
+     * 0.68.0 sk = 자리 자료 저장소 열쇠 머리(차례 글자·그물 열쇠 — 묶음 차례를 붙인다)
      */
-    const splitBatches = (list: readonly MeshRec[], tintOf: (r: MeshRec) => number): MeshBatch[] => {
+    const splitBatches = (list: readonly MeshRec[], tintOf: (r: MeshRec) => number, sk: string): MeshBatch[] => {
       const out: MeshBatch[] = [];
       const byObj = new Map<Rgba, MeshBatch[]>();
       const byVal = new Map<string, MeshBatch>();
@@ -4700,7 +4955,7 @@ export class Renderer3d {
           const k = `${tint}|${vcol ? 1 : 0}${tex ? 1 : 0}|${color[0]},${color[1]},${color[2]},${color[3]}${pk ? `|${pk}` : ''}`;
           b = byVal.get(k);
           if (!b) {
-            out.push((b = { color, tint, vcol, tex, pbr, pk, list: [] }));
+            out.push((b = { color, tint, vcol, tex, pbr, pk, list: [], sk: `${sk}|${out.length}`, slot: null }));
             byVal.set(k, b);
           }
           const a = byObj.get(color);
@@ -4739,47 +4994,70 @@ export class Renderer3d {
         else gl.disable(gl.CULL_FACE);
       }
     };
-    /**
-     * 모은 자리(같은 그물 열쇠 → 기록들, 장면 차례)를 묶음마다 그리기 한 번으로(불투명 면·외곽선 깊이 그림). 자리 자료 그림이 모자라면 그 묶음은 그물마다(meshDrawParts).
-     * 묶음 안 자리 차례는 장면 차례 그대로다(묶음끼리·그물마다 그리는 것과의 차례만 바뀐다)
-     */
-    const flushMeshes = (pend: Map<string, MeshRec[]>, tintOf: (r: MeshRec) => number, usePbr = true): void => {
-      for (const list of pend.values())
-        for (const b of splitBatches(list, tintOf)) {
-          const r0 = b.list[0]!;
-          const cull = r0.src.doubleSided === false;
-          for (const r of b.list) if (r.parts) this.dropParts(r);
-          // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
-          // 0.43.0 그림자(SHADOW)·단면 하나(CLIP)도 — 자리마다 그림자 행렬·로컬 평면을 자리 자료에 더 쓴다(그물마다 그릴 때의 균일 변수와 같은 값)
-          // 0.51.0 화면 밖으로 잘라낸 자리는 묶음에서 뺀다(묶음 나누기·차례·상태는 빼기 전 그대로 — 남은 자리만 자리 자료에)
-          const list = culledN ? b.list.filter((r) => r.culledAt !== frameNo) : b.list;
-          if (!list.length) continue;
-          const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
-          const p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
-          const base = p ? this.instMeshes(f, list.map(mm), { shadow: shadowVp, clip: sec ? clipOf : null }) : -1;
-          if (!p || base < 0) {
-            for (const r of list) {
-              const q = progFor(r, usePbr);
-              if (q !== cur) meshUse(q);
-              meshDrawParts(r, b.color, 1, b.tint, cull);
-            }
-            continue;
-          }
-          if (p !== cur) meshUse(p);
-          gl.uniform1i(this.loc(p, 'u_instBase'), base);
-          if (p.shadow || p.clip1) gl.uniform1i(this.loc(p, 'u_instStride'), Renderer3d.instStride(!!p.shadow, !!p.clip1));
-          instState(r0, b.color, 1, b.tint, cull, b.vcol);
-          if (p.uv) this.pbrBind(p, r0, pbrOf(r0));
-          gl.bindVertexArray(r0.vao);
-          const n = list.length;
-          if (r0.indexed) gl.drawElementsInstanced(gl.TRIANGLES, r0.count, gl.UNSIGNED_INT, 0, n);
-          else gl.drawArraysInstanced(gl.TRIANGLES, 0, r0.count, n);
-          stats.drawCalls++;
-          stats.triangles += (r0.count / 3) * n;
-          this.instStats.draws++;
-          this.instStats.items += n;
-        }
+    /** 0.68.0 모은 자리(같은 그물 열쇠 → 기록들, 장면 차례)를 그물 열쇠 차례·묶음 차례로 나눈다(pass — 저장소 열쇠의 차례 글자: f 면·z 외곽선 깊이) */
+    const splitAll = (pend: Map<string, MeshRec[]>, tintOf: (r: MeshRec) => number, pass: string): MeshBatch[] => {
+      const out: MeshBatch[] = [];
+      for (const [geo, list] of pend) for (const b of splitBatches(list, tintOf, `${pass}|${geo}`)) out.push(b);
       pend.clear();
+      return out;
+    };
+    /**
+     * 모은 자리 묶음마다 그리기 한 번으로(불투명 면·외곽선 깊이 그림). 자리 자료 그림이 모자라면 그 묶음은 그물마다(meshDrawParts).
+     * 묶음 안 자리 차례는 장면 차례 그대로다(묶음끼리·그물마다 그리는 것과의 차례만 바뀐다). 0.68.0 묶음 나누기(splitAll)와 떼어 둔다 — 인스턴싱 뼈대가 묶음을 다시 쓴다
+     */
+    const flushMeshes = (bs: readonly MeshBatch[], usePbr: boolean, replay: boolean): void => {
+      const shadowVp = shadowOn && this.shadowMap ? this.shadowMap.vp : null;
+      // 0.68.0 묶음마다 변종을 고르고 자리 자료를 저장소에 쓴 뒤(바뀐 자리만) 한 번에 올리고 그린다.
+      // 뼈대를 다시 쓰는 차례(replay)의 그물에는 구간 모음이 없다(구간이 있으면 뼈대를 만들지 않고, 만들 때 이 고리가 지웠다)
+      const prep: { list: MeshRec[]; p: Prog | null; base: number }[] = [];
+      for (const b of bs) {
+        if (!replay) for (const r of b.list) if (r.parts) this.dropParts(r);
+        // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
+        // 0.43.0 그림자(SHADOW)·단면 하나(CLIP)도 — 자리마다 그림자 행렬·로컬 평면을 자리 자료에 더 쓴다(그물마다 그릴 때의 균일 변수와 같은 값)
+        // 0.51.0 화면 밖으로 잘라낸 자리는 묶음에서 뺀다(묶음 나누기·차례·상태는 빼기 전 그대로 — 남은 자리만 자리 자료에)
+        const list = culledN ? b.list.filter((r) => r.culledAt !== frameNo) : b.list;
+        if (!list.length) {
+          prep.push({ list, p: null, base: -1 });
+          continue;
+        }
+        // 0.68.0 같은 정의의 변종은 이 그리기에서 한 번만 찾는다(그 밖 정의는 그리기 안에서 같다)
+        const vk = `m${b.tex ? 1 : 0}${usePbr ? b.pk : ''}`;
+        let p = ivm.get(vk) ?? null;
+        if (!p) {
+          p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(usePbr ? b.pbr : [])]);
+          if (p) ivm.set(vk, p);
+        }
+        prep.push({ list, p, base: p ? this.instMeshes(f, b, list, mm, { shadow: shadowVp, clip: sec ? clipOf : null }) : -1 });
+      }
+      this.instFlush();
+      for (let j = 0; j < bs.length; j++) {
+        const b = bs[j]!;
+        const r0 = b.list[0]!;
+        const cull = r0.src.doubleSided === false;
+        const { list, p, base } = prep[j]!;
+        if (!list.length) continue;
+        if (!p || base < 0) {
+          for (const r of list) {
+            const q = progFor(r, usePbr);
+            if (q !== cur) meshUse(q);
+            meshDrawParts(r, b.color, 1, b.tint, cull);
+          }
+          continue;
+        }
+        if (p !== cur) meshUse(p);
+        gl.uniform1i(this.loc(p, 'u_instBase'), base);
+        if (p.shadow || p.clip1) gl.uniform1i(this.loc(p, 'u_instStride'), Renderer3d.instStride(!!p.shadow, !!p.clip1));
+        instState(r0, b.color, 1, b.tint, cull, b.vcol);
+        if (p.uv) this.pbrBind(p, r0, pbrOf(r0));
+        gl.bindVertexArray(r0.vao);
+        const n = list.length;
+        if (r0.indexed) gl.drawElementsInstanced(gl.TRIANGLES, r0.count, gl.UNSIGNED_INT, 0, n);
+        else gl.drawArraysInstanced(gl.TRIANGLES, 0, r0.count, n);
+        stats.drawCalls++;
+        stats.triangles += (r0.count / 3) * n;
+        this.instStats.draws++;
+        this.instStats.items += n;
+      }
     };
     const addPend = <K>(m: Map<K, MeshRec[]>, k: K, r: MeshRec): void => {
       const a = m.get(k);
@@ -4948,23 +5226,102 @@ export class Renderer3d {
     const instMin = Math.max(2, Math.floor(this.instancing.min) || INSTANCE_MIN);
     let geoN: Map<string, number> | null = null;
     let edgeN: Map<WebGLBuffer, number> | null = null;
+    // 0.68.0 인스턴싱 뼈대(묶음 안 구간이 없고, 겉모습이 있으면 그 판 lookKey를 줄 때): 모으기가 기대는 값(key)과 묶음 덩이 밖 보이는 그물 차례·자리 그물 색이 지난 뼈대와
+    // 같으면 같은 그물 수를 세지 않고 차례마다 모은 묶음을 다시 쓴다(묶음에 든 그물은 그 차례 고리에서 건너뛴다). 다르면 0.67.0처럼 세고 모으며 새 뼈대에 적는다
+    let IP: InstPlan | null = null;
     // 0.43.0: 단면 하나(sec)·그림자일 때도 면은 모은다(자리마다 로컬 평면·그림자 행렬을 자리 자료에). 선(윤곽선·삼각형 변·숨은 점선)은 단면이 있으면 그물마다(0.42.0 그대로)
     if (this.instancing.on && !multi) {
-      geoN = new Map();
-      if (!sec) edgeN = new Map();
-      const G = geoN, E = edgeN;
-      // 0.60.0 묶음에 든 그물은 세지 않는다: 굽기는 배열을 다른 기록과 함께 쓰는 그물을 받지 않아(mergeSrcOf) 그 그물 열쇠는 늘 하나뿐이다 — 모아 그릴 자리가 되지 않는다.
-      // 다 묶은 큰 장면에서 프레임마다 그물 수만큼 글자열 열쇠 Map을 셌다(가짜 WebGL 1만 — 그리기 자기 시간의 약 30%). 뼈대가 있으면 덩이는 통째로 건너뛴다.
-      // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼를 함께 가리키지만 같은 그물 자리가 아니다(세지 않는다 — 묶음 구간으로 그린다)
-      each(
-        (r) => {
-          if (r.mg) return;
-          G.set(r.geo, (G.get(r.geo) ?? 0) + 1);
-          if (E && r.edges) E.set(r.edges.pos, (E.get(r.edges.pos) ?? 0) + 1);
-        },
-        () => true,
-      );
-    }
+      const can = (!look || st.lookKey !== undefined) && !st.parts && !this.instPlanOff;
+      let key: unknown[] | null = null;
+      if (can) {
+        key = [instMin, sec ? 1 : 0, st.highlight, st.highlight.size, mode, st.hiddenEdges ?? null, st.hiddenEdgesShaded ? 1 : 0, look ? st.lookKey : null];
+        for (const c of [hiTint, st.colors.edge, st.colors.line, st.colors.background, st.colors.monochrome, st.edgeColor, st.edgeContrast?.fallback, st.hiddenEdgeColor])
+          if (c) key.push(c[0], c[1], c[2], c[3]);
+          else key.push(null);
+      }
+      const P = this.instPlan;
+      // 같은 기록이 같은 차례(숨김·장면·묶음 덩이가 같다)이고 자리 그물이 묶음 밖·같은 색 객체인지(덩이가 없으면 보이는 목록을 곧바로) — 같으면 같은 그물 수도 같다
+      let same = !!P && !!key;
+      if (same) {
+        const L = P!.loose, id = P!.id;
+        const ok = (r: MeshRec, k: number): boolean => L[k] === r && !(r.ipm === id && (!!r.mg || r.src.color !== r.ipc));
+        if (!O) {
+          same = visibleMeshes.length === L.length;
+          for (let k = 0; same && k < L.length; k++) same = ok(visibleMeshes[k]!, k);
+        } else {
+          let k = 0;
+          each(
+            (r) => {
+              if (same && !ok(r, k++)) same = false;
+            },
+            () => true,
+          );
+          if (k !== L.length) same = false;
+        }
+      }
+      // 모으기가 기대는 값과 자리 그물 색 값까지 같으면 뼈대를 다시 쓴다
+      let live = same && !P!.volatile && P!.key.length === key!.length && key!.every((x, i) => Object.is(x, P!.key[i]));
+      const C = live ? P!.cols : [], V = live ? P!.colV : [];
+      for (let i = 0; live && i < C.length; i++) {
+        const c = C[i]!;
+        if (c[0] !== V[i * 4] || c[1] !== V[i * 4 + 1] || c[2] !== V[i * 4 + 2] || c[3] !== V[i * 4 + 3]) live = false;
+      }
+      if (live) {
+        IP = P;
+        geoN = P!.geoN;
+        edgeN = P!.edgeN;
+      } else if (same && (P!.edgeN === null) === !!sec) {
+        // 보이는 그물·차례가 같고 단면 하나 켜짐도 같으면(강조·모드·색만 바뀜) 같은 그물 수를 다시 세지 않고 새 뼈대에 모은다
+        geoN = P!.geoN;
+        edgeN = P!.edgeN;
+        IP = { id: ++this.instPlanSeq, key: key!, loose: P!.loose, cols: [], colV: [], colSet: new Set(), geoN, edgeN, face: null, depth: null, lines: null, dash: null, rest: {}, volatile: false };
+      } else {
+        const G = (geoN = new Map());
+        const E = (edgeN = sec ? null : new Map<WebGLBuffer, number>());
+        const loose: MeshRec[] | null = key ? [] : null;
+        // 0.60.0 묶음에 든 그물은 세지 않는다: 굽기는 배열을 다른 기록과 함께 쓰는 그물을 받지 않아(mergeSrcOf) 그 그물 열쇠는 늘 하나뿐이다 — 모아 그릴 자리가 되지 않는다.
+        // 다 묶은 큰 장면에서 프레임마다 그물 수만큼 글자열 열쇠 Map을 셌다(가짜 WebGL 1만 — 그리기 자기 시간의 약 30%). 뼈대가 있으면 덩이는 통째로 건너뛴다.
+        // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼를 함께 가리키지만 같은 그물 자리가 아니다(세지 않는다 — 묶음 구간으로 그린다)
+        each(
+          (r) => {
+            loose?.push(r);
+            if (r.mg) return;
+            G.set(r.geo, (G.get(r.geo) ?? 0) + 1);
+            if (E && r.edges) E.set(r.edges.pos, (E.get(r.edges.pos) ?? 0) + 1);
+          },
+          () => true,
+        );
+        IP = key
+          ? { id: ++this.instPlanSeq, key, loose: loose!, cols: [], colV: [], colSet: new Set(), geoN: G, edgeN: E, face: null, depth: null, lines: null, dash: null, rest: {}, volatile: false }
+          : null;
+      }
+      this.instPlan = IP;
+    } else this.instPlan = null;
+    /** 0.68.0 이 그리기의 뼈대 번호(뼈대가 없으면 −1 — 그물 표시와 맞지 않는다) */
+    const pid = IP ? IP.id : -1;
+    /**
+     * 0.68.0 뼈대 차례 묶음에 든 그물: 어느 차례든 든 표시와 그 색 객체(처음 보는 색 객체면 그 값도 뼈대에). 무늬·PBR·뒷면 그물이 들면(무늬가 올라오면 묶음이 바뀐다)
+     * 이 뼈대는 다시 쓰지 않는다
+     */
+    const ipMark = (r: MeshRec): void => {
+      if (r.ipm === pid) return;
+      r.ipm = pid;
+      if (r.tex || r.pbr || r.back) IP!.volatile = true;
+      const c = r.src.color;
+      r.ipc = c;
+      if (IP!.colSet.has(c)) return;
+      IP!.colSet.add(c);
+      IP!.cols.push(c);
+      IP!.colV.push(c[0], c[1], c[2], c[3]);
+    };
+    /**
+     * 0.68.0 차례 고리: 뼈대 묶음을 다시 쓰는 차례(mark — 그 차례 표시)이고 묶음 덩이가 없으면 그 차례 묶음에 들지 않은 그물만(처음 다시 쓸 때 보이는 목록에서 골라
+     * 뼈대에 둔다 — 장면 차례, 뼈대가 맞으면 보이는 목록이 같다), 아니면 each(든 그물은 fn이 건너뛴다)
+     */
+    const eachIn = (mark: 'ipf' | 'ipz' | 'ipe' | 'ipd' | null, fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void => {
+      if (mark && !O) for (const r of (IP!.rest[mark] ??= visibleMeshes.filter((x) => x[mark] !== pid))) fn(r);
+      else each(fn, blk);
+    };
     /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
     const wireGeoN = sec ? null : geoN;
     /** 면을 모아 그릴 자리인지(같은 그물이 하한 이상 보이고, 묶음 안 구간이 없을 때 — 0.43.0부터 단면 하나·그림자도) */
@@ -5032,12 +5389,20 @@ export class Renderer3d {
       meshUse(sceneMeshProg());
       // 0.52.0 묶음 그물은 구간으로(깊이만 — 강조 없이). 0.62.0 강조 깃발은 면 차례와 같게 적는다(같은 자리를 읽는다 — 섞는 몫은 0)
       mops = mOn ? new kit.RunList(0) : null;
-      each(
+      // 0.68.0 뼈대에 이 차례 묶음이 있으면 그 그물은 건너뛰고 묶음을 다시 쓴다
+      const rp = !!IP?.depth;
+      eachIn(
+        rp ? 'ipz' : null,
         (r) => {
+          if (rp && r.ipz === pid) return;
           if (transOf(r)) return;
           // 0.42.0 같은 그물 자리는 모아서(뒷면 변종 그물은 그물마다)
           if (!(r.back && backOf(r)) && meshInst(r)) {
             addPend(pend, r.geo, r);
+            if (IP) {
+              r.ipz = pid;
+              ipMark(r);
+            }
             return;
           }
           if (gone(r)) return;
@@ -5071,7 +5436,12 @@ export class Renderer3d {
         mops = null;
         mergeFaces(ops, (r) => progFor(r, false));
       }
-      if (pend.size) flushMeshes(pend, () => 0, false);
+      if (rp) flushMeshes(IP!.depth!, false, true);
+      else if (pend.size || IP) {
+        const bs = splitAll(pend, () => 0, 'z');
+        if (IP) IP.depth = bs;
+        flushMeshes(bs, false, false);
+      }
       gl.disable(gl.CULL_FACE);
     };
 
@@ -5088,8 +5458,12 @@ export class Renderer3d {
       // 0.62.0 강조는 자리 깃발(구간이 끊기지 않는다 — 섞는 몫 HI_TINT를 구간 균일 변수로)
       const plainP = cur;
       mops = mOn ? new kit.RunList(HI_TINT) : null;
-      each(
+      // 0.68.0 뼈대에 이 차례 묶음이 있으면 그 그물은 건너뛰고 묶음을 다시 쓴다
+      const rpF = !!IP?.face;
+      eachIn(
+        rpF ? 'ipf' : null,
         (r) => {
+          if (rpF && r.ipf === pid) return;
           if (transOf(r)) return;
           if (r.back && backOf(r)) {
             if (!gone(r)) backs = true;
@@ -5097,6 +5471,10 @@ export class Renderer3d {
           }
           if (meshInst(r)) {
             addPend(pend, r.geo, r);
+            if (IP) {
+              r.ipf = pid;
+              ipMark(r);
+            }
             return;
           }
           if (gone(r)) return;
@@ -5143,7 +5521,12 @@ export class Renderer3d {
             meshDrawParts(r, colOf(r), 1, st.highlight.has(r.src.id) ? 0.5 : 0, r.src.doubleSided === false);
         }, noBlock);
       }
-      if (pend.size) flushMeshes(pend, hiOf);
+      if (rpF) flushMeshes(IP!.face!, true, true);
+      else if (pend.size || IP) {
+        const bs = splitAll(pend, hiOf, 'f');
+        if (IP) IP.face = bs;
+        flushMeshes(bs, true, false);
+      }
       if (pbrs)
         each((r) => {
           if (transOf(r) || gone(r) || (r.back && backOf(r)) || meshInst(r) || !pbrDefsOf(r).length) return;
@@ -5305,8 +5688,11 @@ export class Renderer3d {
             wireList(list);
           });
       };
-      // 0.42.0 모아 그릴 윤곽선(열쇠 = 함께 쓰는 윤곽선 버퍼)·삼각형 변(열쇠 = 'w' + 그물 열쇠) 묶음
-      const lineBatches = new Map<unknown, LineBatch[]>();
+      // 0.42.0 모아 그릴 윤곽선(열쇠 = 함께 쓰는 윤곽선 버퍼)·삼각형 변(열쇠 = 'w' + 그물 열쇠) 묶음.
+      // 0.68.0 뼈대에 이 차례 묶음이 있으면 그 그물은 건너뛰고 묶음을 다시 쓴다(없으면 모아 뼈대에 적는다)
+      const rpE = !!IP?.lines;
+      const lineBatches = rpE ? IP!.lines! : new Map<unknown, LineBatch[]>();
+      if (IP) IP.lines = lineBatches;
       // 0.51.0 같은 프로그램·같은 값의 윤곽선을 그물마다 잇달아 그릴 때 고정 균일 변수를 다시 보내지 않는다(다른 길이 끼면 memo.p = null)
       const memo = this.lineMemoOff ? null : lineMemo();
       // 0.52.0 묶음 그물 윤곽선(강조 아닌 1화소)은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에 — 0.60.0 단면 하나에서도)
@@ -5331,8 +5717,10 @@ export class Renderer3d {
           mode === 'xray' ? 0.9 : 1,
           lineOpt ? lineOf : null,
         );
-      each(
+      eachIn(
+        rpE ? 'ipe' : null,
         (r) => {
+        if (rpE && r.ipe === pid) return;
         // 0.51.0 화면 밖 그물: 모으는 길(같은 윤곽선 버퍼·삼각형 변 자리)이 아니면 건너뛴다 — 모으는 길은 묶음·차례를 그대로 두고 그릴 때 뺀다
         if (gone(r)) {
           const solo = st.parts?.(r.src.id);
@@ -5365,6 +5753,10 @@ export class Renderer3d {
           if (!ep && edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin) {
             if (r.edges.parts) this.dropParts(r.edges);
             addLineBatch(lineBatches, r.edges.pos, r, col, hi ? 2 : 1, alphaOf(r.src.id), model);
+            if (IP) {
+              r.ipe = pid;
+              ipMark(r);
+            }
             return;
           }
           const eparts = ep?.edges;
@@ -5402,6 +5794,10 @@ export class Renderer3d {
           if (wireGeoN && (wireGeoN.get(r.geo) ?? 0) >= instMin && !st.parts?.(r.src.id)) {
             if (r.parts) this.dropParts(r);
             addLineBatch(lineBatches, `w${r.geo}`, r, col, 1, alphaOf(r.src.id), model);
+            if (IP) {
+              r.ipe = pid;
+              ipMark(r);
+            }
             return;
           }
           if (mops) {
@@ -5429,20 +5825,39 @@ export class Renderer3d {
         mops = null;
         mergeLines(ops, { dashed: false, bias: 0, capz: false }, memo);
       }
-      // 0.42.0 모은 윤곽선·삼각형 변을 묶음마다 그리기 한 번으로(삼각형 변 색인은 묶음 첫 그물 것 하나만 만든다). 자리 자료 그림이 모자라면 그물마다
+      // 0.42.0 모은 윤곽선·삼각형 변을 묶음마다 그리기 한 번으로(삼각형 변 색인은 묶음 첫 그물 것 하나만 만든다). 자리 자료 그림이 모자라면 그물마다.
+      // 0.68.0 묶음마다 변종을 고르고 자리 자료를 저장소에 쓴 뒤(바뀐 자리만) 한 번에 올리고 그린다
+      const lineJobs: {
+        b: LineBatch;
+        e: LineRec | null;
+        wire: { vao: WebGLVertexArrayObject; count: number } | null;
+        x: ReturnType<Renderer3d['linesInstPrep']>;
+        o: { color: Rgba; vcol: false; width: number; dashed: false; alpha: number };
+      }[] = [];
       for (const [key, list] of lineBatches)
-        for (const b0 of list) {
+        for (let j = 0; j < list.length; j++) {
+          const b0 = list[j]!;
+          // 0.68.0 자리 자료 저장소 열쇠(차례 e·선 버퍼 번호 또는 삼각형 변 그물 열쇠·묶음 차례)
+          if (!b0.sk) b0.sk = `e|${typeof key === 'string' ? key : this.bufId(key as WebGLBuffer)}|${j}`;
           // 0.51.0 화면 밖 자리는 묶음에서 뺀다(묶음·차례는 그대로, 선 버퍼·삼각형 변 색인은 묶음 첫 자리 것)
           const b = culledN ? cutBatch(b0) : b0;
           if (!b.recs.length) continue;
-          const wire = typeof key === 'string';
-          const o = { color: b.color, vcol: false, width: b.width, dashed: false, alpha: b.alpha };
-          if (wire ? this.drawLinesInst(f, null, b.models, o, st, stats, this.wireOf(b0.recs[0]!)) : this.drawLinesInst(f, b0.recs[0]!.edges!, b.models, o, st, stats)) continue;
-          b.recs.forEach((r, i) => {
-            if (wire) wireDraw(r, b.models[i], b.color);
-            else this.drawLines(f, r.edges!, b.models[i], { ...o, first: 0, count: r.edges!.n }, st, stats);
-          });
+          const wire = typeof key === 'string' ? this.wireOf(b0.recs[0]!) : null;
+          const e = wire ? null : b0.recs[0]!.edges!;
+          const o = { color: b.color, vcol: false as const, width: b.width, dashed: false as const, alpha: b.alpha };
+          lineJobs.push({ b, e, wire, o, x: this.linesInstPrep(f, b0, e, b.models, o, st, wire) });
         }
+      if (lineJobs.length) this.instFlush();
+      for (const { b, e, wire, o, x } of lineJobs) {
+        if (x) {
+          this.drawLinesInst(x, e, o, st, stats, wire);
+          continue;
+        }
+        b.recs.forEach((r, i) => {
+          if (wire) wireDraw(r, b.models[i], b.color);
+          else this.drawLines(f, r.edges!, b.models[i], { ...o, first: 0, count: r.edges!.n }, st, stats);
+        });
+      }
       gl.disable(gl.BLEND);
     }
 
@@ -5472,20 +5887,28 @@ export class Renderer3d {
         }
         for (const hi of [false, true]) this.drawLineList(f, rec, model, this.lineList(rec, c, parts, hi, positions, colors), 0, count, o, st, stats);
       };
-      // 0.42.0 같은 윤곽선 버퍼 자리가 하한 이상이면 묶음마다(점선은 같은 색·같은 불투명도 겹침이라 차례와 상관없다)
-      const dashBatches = new Map<unknown, LineBatch[]>();
+      // 0.42.0 같은 윤곽선 버퍼 자리가 하한 이상이면 묶음마다(점선은 같은 색·같은 불투명도 겹침이라 차례와 상관없다).
+      // 0.68.0 뼈대에 이 차례 묶음이 있으면 그 그물은 건너뛰고 묶음을 다시 쓴다(없으면 모아 뼈대에 적는다)
+      const rpD = !!IP?.dash;
+      const dashBatches = rpD ? IP!.dash! : new Map<unknown, LineBatch[]>();
+      if (IP && backEdges.meshes) IP.dash = dashBatches;
       // 0.51.0 그물마다 잇단 점선은 고정 균일 변수를 다시 보내지 않는다(구간 길이 끼면 memo.p = null)
       const dmemo = this.lineMemoOff ? null : lineMemo();
       // 0.52.0 묶음 그물 윤곽선의 숨은 점선도 구간으로(장면 차례 그대로 — 0.60.0 단면 하나에서도)
       mops = mOnLines && backEdges.meshes ? new kit.RunList() : null;
       const hiddenA = st.hiddenEdges;
       if (backEdges.meshes)
-        each(
+        eachIn(
+          rpD ? 'ipd' : null,
           (r) => {
-            if (!r.edges) return;
+            if (!r.edges || (rpD && r.ipd === pid)) return;
             const ep = st.parts?.(r.src.id);
             if (!ep && edgeN && (edgeN.get(r.edges.pos) ?? 0) >= instMin) {
               addLineBatch(dashBatches, r.edges.pos, r, dashCol, 1, hiddenA * alphaOf(r.src.id), mm(r));
+              if (IP) {
+                r.ipd = pid;
+                ipMark(r);
+              }
               return;
             }
             // 0.51.0 화면 밖 그물은 건너뛴다(모으는 길은 그릴 때 뺀다)
@@ -5522,14 +5945,22 @@ export class Renderer3d {
         mops = null;
         mergeLines(ops, { dashed: true, bias: BACK_EDGE_BIAS, capz: true }, dmemo);
       }
-      for (const list of dashBatches.values())
-        for (const b0 of list) {
+      // 0.68.0 묶음마다 자리 자료를 저장소에 쓴 뒤(바뀐 자리만) 한 번에 올리고 그린다
+      const dashJobs: { b: LineBatch; e: LineRec; o: ReturnType<typeof backEdgeDash>; x: ReturnType<Renderer3d['linesInstPrep']> }[] = [];
+      for (const [key, list] of dashBatches)
+        for (let j = 0; j < list.length; j++) {
+          const b0 = list[j]!;
+          if (!b0.sk) b0.sk = `d|${this.bufId(key as WebGLBuffer)}|${j}`;
           const b = culledN ? cutBatch(b0) : b0;
           if (!b.recs.length) continue;
-          const r0 = b0.recs[0]!;
-          if (this.drawLinesInst(f, r0.edges!, b.models, backEdgeDash(dashCol, b.alpha), st, stats)) continue;
-          b.recs.forEach((r, i) => dashHidden(r.edges!, r.src.id, b.models[i], r.edges!.n, null, 0, r.src.edges!, undefined));
+          const e = b0.recs[0]!.edges!, o = backEdgeDash(dashCol, b.alpha);
+          dashJobs.push({ b, e, o, x: this.linesInstPrep(f, b0, e, b.models, o, st) });
         }
+      if (dashJobs.length) this.instFlush();
+      for (const { b, e, o, x } of dashJobs) {
+        if (x) this.drawLinesInst(x, e, o, st, stats);
+        else b.recs.forEach((r, i) => dashHidden(r.edges!, r.src.id, b.models[i], r.edges!.n, null, 0, r.src.edges!, undefined));
+      }
       for (const r of this.lines) {
         const l = r.src;
         if (!backEdges.lines || l.hiddenEdges !== true || !vis(l.id, l.group)) continue;
