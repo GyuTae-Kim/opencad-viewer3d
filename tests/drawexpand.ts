@@ -45,12 +45,14 @@ const FOG = /^#define FOG$/m;
 const MCLIP = /^#define MCLIP$/m;
 /** 0.62.0 이동뿐 꼴(0~2열은 균일 변수 u_mvp0·u_mv0·u_shadow0, 법선 행렬 u_nmat0 — 자리에는 3열·깃발·색) */
 const MSHIFT = /^#define MSHIFT$/m;
+/** 0.67.0 회전 표 꼴(0~2열·법선 행렬·그림자 0~2열·안개 z 행 앞 세 칸은 자리 앞 표 항목 — 면은 깃발 칸에 4·표 번호, 선은 텍셀 2의 y가 표 번호) */
+const MROT = /^#define MROT$/m;
 
-/** 셰이더 정의(INST·MERGE·MCLIP·MSHIFT — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
+/** 셰이더 정의(INST·MERGE·MCLIP·MSHIFT·MROT — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
 const defsOf = (vs: string): string =>
   [...vs.matchAll(/^#define (\w+)$/gm)]
     .map((m) => m[1]!)
-    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP' && d !== 'MSHIFT')
+    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP' && d !== 'MSHIFT' && d !== 'MROT')
     .sort()
     .join(',');
 
@@ -61,13 +63,35 @@ const cols012 = (U: ReadonlyMap<string, unknown[]>, name: string, c3: number[]):
  * 선 자리 꼴: 그물 하나 텍셀 수·색·단면 평면 텍셀(인스턴싱 5, 묶음 6·7 — 색 5·평면 6, 이동뿐 꼴 2 + 안개 + 단면 — 색 1·평면 끝)과
  * 이동뿐 꼴의 안개 z 행(앞 세 칸 균일 변수 u_mvz0·끝 칸 텍셀 2의 x — 안개가 없으면 null)
  */
-type LineLayout = { n: number; col: number; clip: number; lite: boolean; mvz: (U: ReadonlyMap<string, unknown[]>, at: (j: number) => number[]) => number[] | null };
+type LineLayout = {
+  n: number;
+  col: number;
+  clip: number;
+  lite: boolean;
+  mvz: (U: ReadonlyMap<string, unknown[]>, at: (j: number) => number[]) => number[] | null;
+  /** 0.67.0 회전 표 꼴이면 그 자리의 시점 투영 · 모형(표 0~2열 + 자리 3열)·안개 z 행(표 앞 세 칸 + 자리 끝 칸) */
+  rot: ((at: (j: number) => number[], tab: (k: number) => number[]) => { mvp: number[]; mvz: number[] | null }) | null;
+};
 function lineLayout(vs: string, merge: boolean, mclip: boolean): LineLayout {
+  if (merge && MROT.test(vs)) {
+    const fog = FOG.test(vs) ? 1 : 0;
+    return {
+      n: 3 + (mclip ? 1 : 0),
+      col: 1,
+      clip: 3,
+      lite: false,
+      mvz: () => null,
+      rot: (at, tab) => {
+        const kt = -(at(2)[1]! + 1) * (3 + fog);
+        return { mvp: [...tab(kt), ...tab(kt + 1), ...tab(kt + 2), ...at(0)], mvz: fog ? [...tab(kt + 3).slice(0, 3), at(2)[0]!] : null };
+      },
+    };
+  }
   if (merge && MSHIFT.test(vs)) {
     const fog = FOG.test(vs) ? 1 : 0;
-    return { n: 2 + fog + (mclip ? 1 : 0), col: 1, clip: 2 + fog, lite: true, mvz: (U, at) => (fog ? [...f32(U.get('u_mvz0'))!, at(2)[0]!] : null) };
+    return { n: 2 + fog + (mclip ? 1 : 0), col: 1, clip: 2 + fog, lite: true, mvz: (U, at) => (fog ? [...f32(U.get('u_mvz0'))!, at(2)[0]!] : null), rot: null };
   }
-  return { n: merge ? (mclip ? 7 : 6) : 5, col: 5, clip: 6, lite: false, mvz: () => null };
+  return { n: merge ? (mclip ? 7 : 6) : 5, col: 5, clip: 6, lite: false, mvz: () => null, rot: null };
 }
 
 /** 자리 자료 텍셀 k(4값) */
@@ -109,7 +133,10 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     // (인스턴싱·묶음 변종은 그림자 행렬·로컬 평면도 자리 자료에서 — 묶음은 색 텍셀 뒤 12~15·맨 끝, 인스턴싱은 11~14·맨 끝)
     const shadowOn = /^#define SHADOW$/m.test(vs), clipOn = /^#define CLIP$/m.test(vs);
     const lite = merge && MSHIFT.test(vs);
-    const stride = inst ? ((U.get('u_instStride')?.[0] as number | undefined) ?? (lite ? 3 : merge ? 12 : 11)) : 0;
+    const rot = merge && MROT.test(vs);
+    const stride = inst ? ((U.get('u_instStride')?.[0] as number | undefined) ?? (lite || rot ? 3 : merge ? 12 : 11)) : 0;
+    /** 0.67.0 회전 표 항목 텍셀 수(면 9 + 그림자 3) */
+    const RT = 9 + (shadowOn ? 3 : 0);
     // 정점 색 쓰기(u_vcol)는 묶음 변종에서 자리 자료(법선 행렬 첫 텍셀 w — 이동뿐 꼴은 시점 · 모형 3열 w) — 정점마다 셰이더가 고르는 색(v_col = u_vcol > 0.5 ? a_col : u_color)으로 견준다.
     // 0.62.0 그 깃발에 강조 2를 더한다 — 강조 섞기 몫은 조각 셰이더가 읽는 값(u_tint.a × 강조 깃발)으로 정점마다 견준다(그물마다 그릴 때는 u_tint.a 그대로)
     const flags = JSON.stringify([U.get('u_hasNrm'), U.get('u_alpha'), U.get('u_ortho'), U.get('u_flipFace')]);
@@ -120,11 +147,26 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
       for (const v of vl) {
         const item = merge ? attr(d.attribs.get(5), v, 1)![0]! : n;
         const at = (j: number): number[] => texel(d, base + item * stride + j);
-        const mvp = lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
-        const mv = lite ? cols012(U, 'u_mv0', at(1)) : inst ? [...at(4), ...at(5), ...at(6), ...at(7)] : f32(U.get('u_mv'))!;
-        const nm = lite ? f32(U.get('u_nmat0'))! : inst ? [...at(8).slice(0, 3), ...at(9).slice(0, 3), ...at(10).slice(0, 3)] : f32(U.get('u_nmat'))!;
-        const col = lite ? at(2) : merge ? at(11) : f32(U.get('u_color'));
-        const fl = lite ? at(1)[3]! : merge ? at(8)[3]! : ((U.get('u_vcol')?.[0] as number | undefined) ?? 0);
+        // 0.67.0 회전 표 꼴: 깃발 칸 = 깃발 + 4·표 번호, 항목은 base − (번호 + 1)·RT부터
+        const fv = rot ? at(1)[3]! : 0, rr = Math.floor(fv * 0.25);
+        const tb = (j: number): number[] => texel(d, base - (rr + 1) * RT + j);
+        const mvp = rot
+          ? [...tb(0), ...tb(1), ...tb(2), ...at(0)]
+          : lite
+            ? cols012(U, 'u_mvp0', at(0))
+            : inst
+              ? [...at(0), ...at(1), ...at(2), ...at(3)]
+              : f32(U.get('u_mvp'))!;
+        const mv = rot ? [...tb(3), ...tb(4), ...tb(5), ...at(1)] : lite ? cols012(U, 'u_mv0', at(1)) : inst ? [...at(4), ...at(5), ...at(6), ...at(7)] : f32(U.get('u_mv'))!;
+        const nm = rot
+          ? [...tb(6).slice(0, 3), ...tb(7).slice(0, 3), ...tb(8).slice(0, 3)]
+          : lite
+            ? f32(U.get('u_nmat0'))!
+            : inst
+              ? [...at(8).slice(0, 3), ...at(9).slice(0, 3), ...at(10).slice(0, 3)]
+              : f32(U.get('u_nmat'))!;
+        const col = lite || rot ? at(2) : merge ? at(11) : f32(U.get('u_color'));
+        const fl = rot ? fv - rr * 4 : lite ? at(1)[3]! : merge ? at(8)[3]! : ((U.get('u_vcol')?.[0] as number | undefined) ?? 0);
         const hi = merge && fl > 1.5;
         const vcol = hi ? fl - 2 : fl;
         const tintA = merge ? Math.fround(tint[3]! * (hi ? 1 : 0)) : tint[3]!;
@@ -132,7 +174,15 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const N = attr(d.attribs.get(1), v, 3);
         const C = attr(d.attribs.get(2), v, 4) ?? [0, 0, 0, 1];
         const s0 = merge ? 12 : 11;
-        const sm = !shadowOn ? null : lite ? cols012(U, 'u_shadow0', at(3)) : inst ? [...at(s0), ...at(s0 + 1), ...at(s0 + 2), ...at(s0 + 3)] : f32(U.get('u_shadowM'));
+        const sm = !shadowOn
+          ? null
+          : rot
+            ? [...tb(9), ...tb(10), ...tb(11), ...at(3)]
+            : lite
+              ? cols012(U, 'u_shadow0', at(3))
+              : inst
+                ? [...at(s0), ...at(s0 + 1), ...at(s0 + 2), ...at(s0 + 3)]
+                : f32(U.get('u_shadowM'));
         const cp = !clipOn ? null : inst ? at(stride - 1) : f32(U.get('u_clip'));
         const extra = [sm ? mul4(sm, P[0]!, P[1]!, P[2]!) : null, cp ? cp[0]! * P[0]! + cp[1]! * P[1]! + cp[2]! * P[2]! + cp[3]! : null];
         tri.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), mul4(mv, P[0]!, P[1]!, P[2]!).slice(0, 3), N ? mul3(nm, N[0]!, N[1]!, N[2]!) : null, vcol > 0.5 ? C : col, ...extra, [...tint.slice(0, 3), tintA]]));
@@ -158,9 +208,10 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
       const item = merge ? attr(d.attribs.get(5), Math.floor(n / div(d.attribs.get(5))), 1)![0]! : inst ? n % instN : 0;
       const at = (j: number): number[] => texel(d, base + item * L.n + j);
       const fixed = mclip ? fixedOf(at(L.clip)) : fixed0;
-      const mvp = L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
+      const R = L.rot ? L.rot(at, (k) => texel(d, base + k)) : null;
+      const mvp = R ? R.mvp : L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
       const col = merge ? at(L.col) : f32(U.get('u_color'));
-      const mvz = L.lite ? L.mvz(U, at) : inst ? at(4) : f32(U.get('u_mvz'));
+      const mvz = R ? R.mvz : L.lite ? L.mvz(U, at) : inst ? at(4) : f32(U.get('u_mvz'));
       const p0 = attr(a1, Math.floor(n / div(a1)), 3)!, p1 = attr(a2, Math.floor(n / div(a2)), 3)!;
       out.push(`wide|${mode}|${state}|${fixed}|${JSON.stringify([mul4(mvp, p0[0]!, p0[1]!, p0[2]!), mul4(mvp, p1[0]!, p1[1]!, p1[2]!), col, FOG.test(vs) ? mvz : null])}`);
     }
@@ -180,9 +231,10 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const item = merge ? attr(d.attribs.get(5), v, 1)![0]! : inst ? n % instN : 0;
         const at = (j: number): number[] => texel(d, base + item * L.n + j);
         if (mclip) fixed = fixedOf(at(L.clip));
-        const mvp = L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
+        const R = L.rot ? L.rot(at, (k) => texel(d, base + k)) : null;
+        const mvp = R ? R.mvp : L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
         const col = merge ? at(L.col) : f32(U.get('u_color'));
-        const mvz = L.lite ? L.mvz(U, at) : inst ? at(4) : f32(U.get('u_mvz'));
+        const mvz = R ? R.mvz : L.lite ? L.mvz(U, at) : inst ? at(4) : f32(U.get('u_mvz'));
         const P = attr(d.attribs.get(0), v, 3)!;
         seg.push(JSON.stringify([mul4(mvp, P[0]!, P[1]!, P[2]!), col, attr(d.attribs.get(1), v, 4), FOG.test(vs) ? mvz : null]));
         if (seg.length === 2) {

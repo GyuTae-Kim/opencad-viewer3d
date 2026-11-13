@@ -132,7 +132,8 @@ describe('0.63.0 같은 꼴 그물 바꾸기 — 묶음 자리에서 갈아 쓰�
       }
     });
     expect(t2).toBeGreaterThan(0);
-    expect(t2).toBeLessThanOrEqual(3 * (12 + 6));
+    // 0.67.0 돌린 행렬이 섞인 묶음은 회전 표 꼴(면 3·윤곽선 3텍셀)이라 자리가 촘촘해, 한 줄이 안 되는 틈으로 이어진 바꾼 자리는 그 사이도 함께 올린다(종류마다 틈 둘까지)
+    expect(t2).toBeLessThanOrEqual(3 * (12 + 6) + 4 * 1024);
     expect(d2).toBe(draws0);
     expect(step(on, off, 'still2', () => undefined)[0]).toBe(0);
     // 같은 장면을 새로 구운 뷰어와 묶음 버퍼 바이트가 같다
