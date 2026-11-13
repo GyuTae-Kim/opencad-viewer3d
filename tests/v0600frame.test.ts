@@ -407,8 +407,9 @@ describe('0.60.0 그물마다 훑지 않는다', () => {
     const M = [rec(g1, 0), rec(g1, 1), rec(null, 2), rec(g1, 3), rec(g2, 4), rec(g2, 5), rec(g1, 6)];
     const h = { meshes: M } as never;
     const o = orderBuild(h);
-    expect(o.items.map((x) => ('src' in x ? 'r' : `${x.g === g1 ? 1 : 2}[${x.a},${x.b})@${x.at}`))).toEqual(['1[0,2)@0', 'r', '1[2,3)@3', '2[0,2)@4', '1[3,4)@6']);
-    expect(o.loose).toEqual([M[2]]);
+    // 0.65.0 덩이 첫 자리는 뼈대 at으로(덩이마다 두던 같은 값·쓰지 않던 묶음 밖 그물 목록 loose는 뺐다)
+    expect(o.items.map((x, t) => ('src' in x ? 'r' : `${x.g === g1 ? 1 : 2}[${x.a},${x.b})@${o.at[t]}`))).toEqual(['1[0,2)@0', 'r', '1[2,3)@3', '2[0,2)@4', '1[3,4)@6']);
+    expect(o.items.filter((x) => 'src' in x)).toEqual([M[2]]);
     expect(M.map((r) => r.bk)).toEqual([0, 0, -1, 1, 2, 2, 3]);
     expect(o.blocks[2]!.edges).toBe(false);
     expect(orderValid(h, o)).toBe(true);

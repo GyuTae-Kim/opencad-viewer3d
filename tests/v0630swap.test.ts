@@ -222,7 +222,8 @@ describe('0.63.0 같은 꼴 그물 바꾸기 — 묶음 자리에서 갈아 쓰�
     expect(ord()).toBe(o1);
     on.v.removeMesh('b77');
     on.v.renderNow();
-    expect(ord()).not.toBe(o1);
+    // 0.65.0 그물을 빼도 뼈대를 다시 만들지 않고 고쳐 쓴다(0.63.0~0.64.0은 다시 만들었다 — 고친 뼈대가 다시 만든 뼈대와 같은지는 v0650order 시험)
+    expect(ord()).toBe(o1);
     // 정점 색이 없는 묶음에 정점 색 그물: 그 묶음에는 색 버퍼가 없다 — 빠진다
     const plain = view({ name: 'p', units: 'mm', meshes: Array.from({ length: 300 }, (_, i) => ({ ...box(i * 3 + 1), group: undefined })), lines: [] }, true);
     const plainOff = view({ name: 'p', units: 'mm', meshes: Array.from({ length: 300 }, (_, i) => ({ ...box(i * 3 + 1), group: undefined })), lines: [] }, false);

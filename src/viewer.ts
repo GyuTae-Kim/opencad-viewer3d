@@ -2544,7 +2544,8 @@ export class Viewer3d {
     const inc = opts.incremental;
     if (inc) this.meshBudget = Math.max(1, (typeof inc === 'object' ? inc.budgetMs : undefined) ?? 8);
     if (this.gpu) {
-      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc, at: uniq && (k >= 0 || !prev) ? k : undefined });
+      // 0.65.0 그 그물이 지금 보이는지(렌더러가 보이는 목록에 그 기록만 넣는다)
+      const skipped = this.renderer.setMesh(mesh, scene, { vertices: ranges, incremental: !!inc, at: uniq && (k >= 0 || !prev) ? k : undefined, vis: this.visible(mesh.id, mesh.group) });
       if (skipped.length) console.warn(`opencad-viewer3d: setMesh('${mesh.id}')의 vertices 구간은 놓은 ${skipped.join('·')}에 올리지 않았습니다(올려 둔 것을 그대로 씁니다 — 바뀌었으면 그 배열을 통째로 주세요)`);
     }
     this.sceneEdited(prev ?? null, mesh);

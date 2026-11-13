@@ -572,6 +572,8 @@ const RUN_LIMIT = 24;
 
 /** 0.51.0 화면 밖 잘라내기 덩어리 하나의 그물 수(장면 차례 — 감싸는 상자가 확실히 안·바깥이면 그물마다 보지 않는다) */
 const CULL_CHUNK = 64;
+/** 0.51.0 잘라내기 덩어리 기록(Renderer3d.cullChunks — 0.65.0 cullScan이 받는 꼴로 이름을 붙였다) */
+type CullChunks = { recs: (MeshRec | undefined)[]; n: number[]; box: (CullBox | null)[]; ord?: MergeOrder | null };
 
 export interface MeshRec {
   lookM?: LookCache;
@@ -607,6 +609,8 @@ export interface MeshRec {
   culledAt?: number;
   /** 0.51.0 이 그리기 번호에서 보이는 그물이면 그 번호(덩어리 잘라내기가 보이는 그물만 센다). 0.60.0 보이는 목록을 만든 번호(Renderer3d.visSeq — 숨김이 그대로면 프레임을 넘어 같다) */
   visAt?: number;
+  /** 0.65.0 보이는 목록을 만든 번호에서 숨은 그물이면 그 번호(visAt과 함께 — 숨김 판이 같은 채 뼈대만 다시 만들 때 이미 물은 기록은 다시 묻지 않는다) */
+  visNo?: number;
   /** 0.60.0 그리기 뼈대(MergeOrder)에서 든 덩이 번호(묶음 밖 −1 — 뼈대를 만들 때 meshes의 모든 기록에 적는다) */
   bk?: number;
   /** 0.63.0 뼈대의 장면 차례 번호(MergeOrder.si를 만들 때 적는다 — 보이는 목록에 넣고 뺄 자리) */
@@ -742,14 +746,14 @@ export interface MergeRun {
 }
 
 /**
- * 0.60.0 그리기 뼈대의 덩이: 장면 차례(meshes)에서 같은 묶음의 잇단 번호 [a, b)(at = meshes 안 첫 자리). ok(반투명·뒷면·PBR·무늬 없음)·edges(그물마다 윤곽선)는
- * 만들 때 정한다(굽기가 받는 그물이라 늘 참 — 틀어지면 그 덩이는 그물마다). cut·hi·np는 그리기마다 쓰는 표시(이 그리기에 잘라낸 그물이 있음·강조 판·윤곽선 구간 모음이 없음)
+ * 0.60.0 그리기 뼈대의 덩이: 장면 차례(meshes)에서 같은 묶음의 잇단 번호 [a, b)(meshes 안 첫 자리는 뼈대 at — 0.65.0 덩이마다 두던 같은 값은 뺐다). ok(반투명·뒷면·PBR·무늬 없음)·
+ * edges(그물마다 윤곽선)는 만들 때 정한다(굽기가 받는 그물이라 늘 참 — 틀어지면 그 덩이는 그물마다). cut·hi·np는 그리기마다 쓰는 표시(이 그리기에 잘라낸 그물이 있음·강조 판·
+ * 윤곽선 구간 모음이 없음). 0.65.0 뼈대 고치기(조각 orderEdit)가 덩이를 가르거나 비울 수 있다(빈 덩이는 뼈대 항목에 없다)
  */
 export interface MergeBlock {
   g: MergeGroup;
   a: number;
   b: number;
-  at: number;
   ok: boolean;
   edges: boolean;
   cut: number;
@@ -774,13 +778,15 @@ export interface MergeBlock {
   ncg?: boolean;
 }
 
-/** 0.60.0 그리기 뼈대: 장면 차례의 덩이·묶음 밖 그물(items), 묶음 밖 그물만(loose), 그물 수(n) — 장면·묶음이 바뀌면 다시 만든다(mergegl orderValid) */
+/**
+ * 0.60.0 그리기 뼈대: 장면 차례의 덩이·묶음 밖 그물(items)과 그 meshes 안 첫 자리(at), 그물 수(n) — 장면·묶음이 바뀌면 다시 만든다(mergegl orderValid).
+ * 0.65.0 그물 기록 하나를 바꾸거나 빼거나 끝에 더하면 다시 만들지 않고 고친다(조각 orderEdit). 쓰지 않던 묶음 밖 그물 목록(loose)은 뺐다
+ */
 export interface MergeOrder {
   n: number;
   items: (MergeBlock | MeshRec)[];
   at: Int32Array;
   blocks: MergeBlock[];
-  loose: MeshRec[];
   /** 강조 id → 덩이 번호 · 65536 + 묶음 그물 번호(처음 쓸 때 — 같은 id가 여럿이면 목록) */
   ids?: Map<string, number | number[]>;
   /** 0.63.0 id → 장면 차례 번호(meshes — 숨김을 고칠 때 처음 쓸 때 만들고 기록마다 MeshRec.si를 적는다. 같은 id가 여럿이면 목록) */
@@ -1111,7 +1117,7 @@ export class Renderer3d {
    * 0.51.0 잘라내기 덩어리(this.meshes 차례로 CULL_CHUNK개씩): 그때의 그물 기록(같은 자리의 기록이 바뀌면 그 덩어리를 다시 셈한다)·덩어리 그물 수·감싸는 자료
    * (null이면 덩어리째 판단하지 않는다). 그물마다 판단하는 것과 같은 결과를 덩어리 하나의 셈으로(맞춘 화면이면 거의 모든 덩어리가 확실히 안)
    */
-  private cullChunks: { recs: (MeshRec | undefined)[]; n: number[]; box: (CullBox | null)[]; ord?: MergeOrder | null } = { recs: [], n: [], box: [] };
+  private cullChunks: CullChunks = { recs: [], n: [], box: [] };
   /** 0.51.0 시험용: true면 선 상태 기억(LineMemo)을 쓰지 않고 그물마다 모두 보낸다(0.50.0 GL 호출 — 기억과 그리기 기록이 같은지 견줄 때) */
   lineMemoOff = false;
   /** 0.60.0 그리기 뼈대(다 올린 뒤 묶음이 있는 장면 — 장면 차례가 그대로인 동안 다시 쓴다)와 시험용 끄기(true면 0.59.0처럼 그물마다 훑는다 — 같은 그림인지 견줄 때) */
@@ -1120,6 +1126,8 @@ export class Renderer3d {
   /** 0.60.0 보이는 목록: 만든 번호(MeshRec.visAt)와, 숨김 판(RenderState.visKey)·뼈대가 같으면 프레임을 넘어 다시 쓰는 목록 */
   private visSeq = 0;
   private visMemo: { ord: MergeOrder; key: number; seq: number; list: MeshRec[] } | null = null;
+  /** 0.65.0 마지막 보이는 목록의 숨김 판·번호(뼈대를 다시 만들어도 남는다 — 판이 같으면 그 번호를 이어 쓰고 새 기록만 묻는다) */
+  private visLast: { key: number; seq: number } | null = null;
   /** 0.60.0 강조 모음이 든 덩이 표시(같은 모음·크기·뼈대면 다시 쓴다) */
   private hiSeq = 0;
   private hiMemo: { set: ReadonlySet<string>; size: number; ord: MergeOrder; stamp: number } | null = null;
@@ -2351,6 +2359,8 @@ export class Renderer3d {
     this.mgQueue = [];
     this.mgWait = [];
     this.mgWaitVerts = 0;
+    // 0.65.0 뼈대를 먼저 잊는다(그물마다 고치지 않는다 — installMesh)
+    this.forgetOrder();
     for (let k = 0; k < this.meshes.length; k++) if (this.meshes[k]!.mg) this.installMesh(this.meshes[k]!.src, k);
     this.gl.bindVertexArray(null);
   }
@@ -2870,8 +2880,9 @@ export class Renderer3d {
    * - 0.25.0 코어가 배열을 지운(놓은) 그물: 새 그물이 그 배열을 주면 통째로 올리고(vertices 구간은 그 배열에 쓰지 않는다),
    *   주지 않으면 정점 수가 같고 위치 배열이 같거나 vertices를 주었을 때 앞 기록의 버퍼를 그대로 물려받는다(구간 밖이 같다는 약속).
    *   돌려주는 값: vertices를 주었는데 놓은 배열이라 그 구간을 올리지 못한 속성 이름('normals'·'uvs'·'backUvs') — 없으면 빈 목록
+   * - 0.65.0 vis: 그 그물이 지금 보이는지(뷰어 — 그리기 뼈대를 고칠 때 보이는 목록에 그 기록만 넣는다. 없으면 보이는 목록을 다시 만든다)
    */
-  setMesh(m: Mesh3d, scene: Scene3d, o: { vertices?: readonly IndexRange[] | null; incremental?: boolean; at?: number } = {}): string[] {
+  setMesh(m: Mesh3d, scene: Scene3d, o: { vertices?: readonly IndexRange[] | null; incremental?: boolean; at?: number; vis?: boolean } = {}): string[] {
     this.syncTextures(scene);
     this.gl.bindVertexArray(null);
     const ranges = o.vertices?.length ? o.vertices : null;
@@ -2918,7 +2929,7 @@ export class Renderer3d {
       }
     }
     if (old) this.recycle(old, m, ranges);
-    this.installMesh(m, i, { keep: !!ranges });
+    this.installMesh(m, i, { keep: !!ranges, vis: o.vis });
     if (old && ranges) this.refreshSharing(old.src, m);
     return skipped;
   }
@@ -2947,8 +2958,16 @@ export class Renderer3d {
       return false;
     }
     this.meshes[i] = r;
-    // 뼈대(덩이 범위·잘라내기 덩어리 견주기)를 다시 만든다
-    this.forgetOrder();
+    // 0.65.0 뼈대는 그대로 쓰고 갈아 쓴 기록만 옮긴다(swapOrder). 옮기지 못하면 0.64.0처럼 뼈대(덩이 범위·잘라내기 덩어리 견주기)를 다시 만든다
+    if (!this.swapOrder(old, r)) this.forgetOrder();
+    return true;
+  }
+
+  /** 0.65.0 같은 꼴 바꾸기 뒤 그리기 뼈대를 그대로 쓴다(조각 orderSwap — 갈아 쓴 기록에 자리를 옮긴다). 잘라내기 덩어리는 다음 그리기가 견줘 그 덩어리만 다시 센다 */
+  private swapOrder(old: MeshRec, r: MeshRec): boolean {
+    const O = this.mgOrder;
+    if (!O || !mergeKit!.orderSwap(O, this.visMemo, old, r)) return false;
+    this.cullChunks.ord = null;
     return true;
   }
 
@@ -3006,6 +3025,7 @@ export class Renderer3d {
     this.meshes.splice(i, 1);
     this.dropMeshRec(r, false);
     this.release(r.slots);
+    this.editOrder(i, r, null);
   }
 
   /** 나눠 올리던 그물 바꾸기를 그만둔다(잡은 버퍼 가운데 쓰지 않는 것은 지운다) */
@@ -3021,7 +3041,7 @@ export class Renderer3d {
    * 색인이 같으면 삼각형 변 그리기(wire)를 넘겨 쓴다(큰 그물의 와이어프레임 색인을 다시 만들지 않게).
    * 0.25.0: 앞 기록이 놓은 배열은 meshRec의 from·keep 규칙으로 물려받고, give는 앱이 다시 준 배열(restoreMeshArrays)
    */
-  private installMesh(m: Mesh3d, i: number, o: { keep?: boolean; give?: MeshArrays | null } = {}): void {
+  private installMesh(m: Mesh3d, i: number, o: { keep?: boolean; give?: MeshArrays | null; vis?: boolean } = {}): void {
     const old = i >= 0 ? this.meshes[i]! : null;
     const rec = this.sceneMeshRec(m, { from: old, keep: o.keep, give: o.give });
     if (old) {
@@ -3039,6 +3059,22 @@ export class Renderer3d {
       this.meshes[i] = rec;
     } else this.meshes.push(rec);
     this.gl.bindVertexArray(null);
+    this.editOrder(old ? i : this.meshes.length - 1, old, rec, o.vis);
+  }
+
+  /**
+   * 0.65.0 그물 기록 하나를 바꾸거나(old → rec) 빼거나(rec null) 끝에 더한(old null) 뒤: 그리기 뼈대가 있으면 다시 만들지 않고 고치고(조각 orderEdit), 보이는 목록·숨김 표시도
+   * 그 기록만 옮긴다 — 새 기록이 보이는지는 묶음 이름이 같으면 앞 기록 것, 아니면 뷰어가 준 값(vis — setMesh). 둘 다 모르거나 보이는 목록 안 자리를 모르면 보이는 목록만
+   * 다시 만든다(숨김 판이 같으면 새 기록만 묻는다 — visBuild). 잘라내기 덩어리는 다음 그리기가 기록을 견줘 바뀐 덩어리만 다시 세고, 강조 표시는 다시 적는다.
+   * 고치지 못하면 뼈대를 잊는다(0.64.0 길 — 뼈대·보이는 목록·덩이 숨긴 번호를 다시 만든다)
+   */
+  private editOrder(j: number, old: MeshRec | null, rec: MeshRec | null, vis?: boolean): void {
+    const O = this.mgOrder;
+    if (!O) return;
+    if (!mergeKit?.orderEdit(this.host, O, j, old, rec)) return this.forgetOrder();
+    this.cullChunks.ord = null;
+    this.hiMemo = null;
+    if (!mergeKit.orderVis(O, this.visMemo, this.visLast?.seq, old, rec, vis)) this.visMemo = null;
   }
 
   /** 그물 기록의 VAO·구간 캐시·윤곽선 기록(keepWire가 아니면 삼각형 변 색인도)을 지운다. 배열 버퍼는 release가 지운다 */
@@ -4728,17 +4764,17 @@ export class Renderer3d {
       visibleMeshes = VM.list;
       visSeq = VM.seq;
     } else {
-      visSeq = ++this.visSeq;
-      visibleMeshes = [];
-      for (const r of this.meshes)
-        if (vis(r.src.id, r.src.group)) {
-          r.visAt = visSeq;
-          visibleMeshes.push(r);
-        }
+      // 0.65.0 숨김 판이 지난 목록과 같으면(그물을 바꾸거나 빼거나 더해 뼈대만 다시 만든 그리기 — 묶음이 없는 장면은 프레임마다) 그 번호를 이어 쓰고
+      // 이미 물은 기록(visAt·visNo가 그 번호)은 다시 묻지 않는다(0.64.0은 그물마다 다시 물었다 — 가짜 WebGL 8만 약 20 ms)
+      const L = this.visLast;
+      const keep = st.visKey !== undefined && !!L && L.key === st.visKey;
+      visSeq = keep ? L!.seq : ++this.visSeq;
+      visibleMeshes = visBuild(this.meshes, vis, visSeq, keep);
       // 덩이마다 숨긴 그물 번호(0.61.0 조각 blockHid — 0.60.0은 여기)
       if (O) mergeKit!.blockHid(O, visSeq);
       this.visMemo = O && st.visKey !== undefined ? { ord: O, key: st.visKey, seq: visSeq, list: visibleMeshes } : null;
     }
+    this.visLast = st.visKey !== undefined ? { key: st.visKey, seq: visSeq } : null;
     // 강조한 그물이 든 덩이(강조 모음·크기·뼈대가 같으면 지난 표시 그대로 — 모음이 비면 0)
     let hiStamp = 0;
     if (O && st.highlight.size) {
@@ -4767,7 +4803,6 @@ export class Renderer3d {
       const vh = Math.min(devH, st.viewport ? st.viewport[1] : devH, gl.drawingBufferHeight || devH);
       const px = 4 * st.dpr + 4;
       const P = cullPlanes(f.viewProj, (2 * px) / Math.max(1, vw), (2 * px) / Math.max(1, vh));
-      const cullOf = (r: MeshRec): CullBox | null => (r.cull === undefined ? (r.cull = cullBox(r.local, r.model)) : r.cull);
       // 0.60.0 잘라낸 그물을 그 덩이의 이 그리기 예외로 적는다(장면 차례로 훑으므로 번호가 오름차순)
       const cut = (r: MeshRec): void => {
         r.culledAt = frameNo;
@@ -4788,41 +4823,7 @@ export class Renderer3d {
           const d = lk ? cullBox(r.local, this.lookModel(r, lk, r.model).model) : cullOf(r);
           if (d && cullOut(P, d)) cut(r);
         }
-      } else {
-        // 장면 차례 CULL_CHUNK개 덩어리: 감싸는 상자가 확실히 안이면 건너뛰고, 확실히 바깥이면 통째로, 걸치면 그물마다(같은 판단 — cullUnion).
-        // 0.60.0 뼈대가 맞고 덩어리를 그 뼈대로 셌으면 장면 차례가 그대로라 덩어리 기록을 다시 견주지 않는다
-        const M = this.meshes, C = this.cullChunks;
-        if (C.recs.length > M.length) C.recs.length = M.length;
-        const same = !!O && C.ord === O;
-        for (let s = 0, k = 0; s < M.length; s += CULL_CHUNK, k++) {
-          const e = Math.min(M.length, s + CULL_CHUNK);
-          let ok = same || C.n[k] === e - s;
-          if (!same) for (let i = s; ok && i < e; i++) if (C.recs[i] !== M[i]) ok = false;
-          if (!ok) {
-            const list: (CullBox | null)[] = [];
-            for (let i = s; i < e; i++) {
-              C.recs[i] = M[i];
-              list.push(cullOf(M[i]!));
-            }
-            C.box[k] = cullUnion(list);
-            C.n[k] = e - s;
-          }
-          const box = C.box[k];
-          const side = box ? cullSide(P, box) : 0;
-          if (side === 1) continue;
-          for (let i = s; i < e; i++) {
-            const r = M[i]!;
-            if (r.visAt !== visSeq) continue;
-            let out = side === -1;
-            if (!out) {
-              const d = cullOf(r);
-              out = !!d && cullOut(P, d);
-            }
-            if (out) cut(r);
-          }
-        }
-        C.ord = O;
-      }
+      } else cullScan(this.meshes, this.cullChunks, O, P, visSeq, cut);
       stats.culled = culledN;
     }
     /** 이 그리기에서 화면 밖으로 잘라낸 그물인지 */
@@ -6100,6 +6101,72 @@ export class Renderer3d {
     stats.drawCalls++;
     stats.segments += o.count;
   }
+}
+
+/** 그물 기록의 잘라내기 자료(처음 쓸 때 만든다 — 모형 행렬로 옮긴 로컬 범위) */
+function cullOf(r: MeshRec): CullBox | null {
+  return r.cull === undefined ? (r.cull = cullBox(r.local, r.model)) : r.cull;
+}
+
+/**
+ * 화면 밖 잘라내기(겉모습이 없을 때): 장면 차례 CULL_CHUNK개 덩어리 — 감싸는 상자가 확실히 안이면 건너뛰고, 확실히 바깥이면 통째로, 걸치면 그물마다(같은 판단 — cullUnion).
+ * 0.60.0 뼈대가 맞고 덩어리를 그 뼈대로 셌으면 장면 차례가 그대로라 덩어리 기록을 다시 견주지 않는다. 0.65.0 render() 안 고리를 떼었다(셈·차례는 같다 —
+ * render()는 바이트코드가 커 최적화 컴파일러가 받지 않는다. 뼈대를 다시 만든 그리기의 덩어리 기록 견주기가 가짜 WebGL 8만에서 수 ms였다)
+ */
+function cullScan(M: readonly MeshRec[], C: CullChunks, O: MergeOrder | null, P: ReturnType<typeof cullPlanes>, visSeq: number, cut: (r: MeshRec) => void): void {
+  if (C.recs.length > M.length) C.recs.length = M.length;
+  const same = !!O && C.ord === O;
+  for (let s = 0, k = 0; s < M.length; s += CULL_CHUNK, k++) {
+    const e = Math.min(M.length, s + CULL_CHUNK);
+    let ok = same || C.n[k] === e - s;
+    if (!same) for (let i = s; ok && i < e; i++) if (C.recs[i] !== M[i]) ok = false;
+    if (!ok) {
+      const list: (CullBox | null)[] = [];
+      for (let i = s; i < e; i++) {
+        C.recs[i] = M[i];
+        list.push(cullOf(M[i]!));
+      }
+      C.box[k] = cullUnion(list);
+      C.n[k] = e - s;
+    }
+    const box = C.box[k];
+    const side = box ? cullSide(P, box) : 0;
+    if (side === 1) continue;
+    for (let i = s; i < e; i++) {
+      const r = M[i]!;
+      if (r.visAt !== visSeq) continue;
+      let out = side === -1;
+      if (!out) {
+        const d = cullOf(r);
+        out = !!d && cullOut(P, d);
+      }
+      if (out) cut(r);
+    }
+  }
+  C.ord = O;
+}
+
+/**
+ * 0.65.0 보이는 그물 목록(장면 차례 — 보이는 기록에 visAt = seq, 숨은 기록에 visNo = seq). keep이면 seq는 같은 숨김 판의 지난 번호라 visAt·visNo가 그 번호인
+ * 기록은 묻지 않고 그 값을 쓴다(새 기록만 묻는다 — 판이 같으면 같은 답이다). render() 안 고리였다(0.64.0 — 그물마다 물었다): render()는 바이트코드가 커
+ * 최적화 컴파일러(TurboFan)가 받지 않아 작은 함수로 뗐다
+ */
+function visBuild(M: readonly MeshRec[], vis: (id: string, g: string | undefined) => boolean, seq: number, keep: boolean): MeshRec[] {
+  const out: MeshRec[] = [];
+  for (const r of M) {
+    if (keep) {
+      if (r.visAt === seq) {
+        out.push(r);
+        continue;
+      }
+      if (r.visNo === seq) continue;
+    }
+    if (vis(r.src.id, r.src.group)) {
+      r.visAt = seq;
+      out.push(r);
+    } else r.visNo = seq;
+  }
+  return out;
 }
 
 /**
