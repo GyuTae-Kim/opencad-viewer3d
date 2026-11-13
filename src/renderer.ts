@@ -2871,7 +2871,7 @@ export class Renderer3d {
    *   주지 않으면 정점 수가 같고 위치 배열이 같거나 vertices를 주었을 때 앞 기록의 버퍼를 그대로 물려받는다(구간 밖이 같다는 약속).
    *   돌려주는 값: vertices를 주었는데 놓은 배열이라 그 구간을 올리지 못한 속성 이름('normals'·'uvs'·'backUvs') — 없으면 빈 목록
    */
-  setMesh(m: Mesh3d, scene: Scene3d, o: { vertices?: readonly IndexRange[] | null; incremental?: boolean } = {}): string[] {
+  setMesh(m: Mesh3d, scene: Scene3d, o: { vertices?: readonly IndexRange[] | null; incremental?: boolean; at?: number } = {}): string[] {
     this.syncTextures(scene);
     this.gl.bindVertexArray(null);
     const ranges = o.vertices?.length ? o.vertices : null;
@@ -2900,7 +2900,7 @@ export class Renderer3d {
     }
     this.dropJob(m.id);
     this.restoreQ.delete(m.id);
-    const i = this.meshes.findIndex((r) => r.src.id === m.id);
+    const i = this.meshAt(m.id, o.at);
     const old = i >= 0 ? this.meshes[i]! : null;
     // 0.63.0 묶음에 든 그물을 같은 꼴 그물로 바꾸면 묶음 자리에 그대로 갈아 쓴다(그물마다 버퍼를 만들지 않고 다시 살필 것도 없다)
     if (old?.mg && this.mergeSwap(old, m, i)) return [];
@@ -2921,6 +2921,17 @@ export class Renderer3d {
     this.installMesh(m, i, { keep: !!ranges });
     if (old && ranges) this.refreshSharing(old.src, m);
     return skipped;
+  }
+
+  /**
+   * 0.64.0 그물 id의 기록 자리 — meshes.findIndex((r) => r.src.id === id)와 같다. 뷰어는 장면 id가 모두 다를 때(Viewer3d.idsUnique — 그때 기록은 장면 그물마다 많아야
+   * 하나다) 그 그물의 장면 자리 at을 준다(더하는 그물이면 −1 — 그 id의 기록이 없다): 그 자리의 기록 id가 같으면 그 자리, 아니면(나눠 올리는 중 등) 처음부터 찾는다.
+   * 0.63.0은 바꾸기·빼기·더하기마다 처음부터 찾았다(가짜 WebGL 8만 — 호출마다 평균 약 3.4 ms, 없는 id는 약 6.5 ms)
+   */
+  private meshAt(id: string, at?: number): number {
+    if (at === -1) return -1;
+    if (at !== undefined && at >= 0 && this.meshes[at]?.src.id === id) return at;
+    return this.meshes.findIndex((r) => r.src.id === id);
   }
 
   /**
@@ -2969,8 +2980,11 @@ export class Renderer3d {
     }
   }
 
-  /** 그물 하나 빼기(0.11.0 — Viewer3d.removeMesh). scene은 뺀 뒤의 장면. 아무도 쓰지 않게 된 배열의 버퍼를 지운다 */
-  removeMesh(id: string, scene: Scene3d): void {
+  /**
+   * 그물 하나 빼기(0.11.0 — Viewer3d.removeMesh). scene은 뺀 뒤의 장면. 아무도 쓰지 않게 된 배열의 버퍼를 지운다.
+   * at: 0.64.0 뷰어가 장면 id가 모두 다를 때 준 뺀 그물의 장면 자리(meshAt)
+   */
+  removeMesh(id: string, scene: Scene3d, at?: number): void {
     this.syncTextures(scene);
     const p = this.pending;
     if (p) {
@@ -2986,7 +3000,7 @@ export class Renderer3d {
     }
     this.dropJob(id);
     this.restoreQ.delete(id);
-    const i = this.meshes.findIndex((r) => r.src.id === id);
+    const i = this.meshAt(id, at);
     if (i < 0) return;
     const r = this.meshes[i]!;
     this.meshes.splice(i, 1);
