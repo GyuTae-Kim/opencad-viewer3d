@@ -9070,8 +9070,8 @@ export class Viewer3d {
       parts: this.secRanged ? (id) => this.renderParts(id) : this.rangeSel.size ? (id) => this.rangeSel.get(id)?.parts ?? undefined : undefined,
       annotations: this.annos ? { width: this.annos.width, hidden: this.annos.hidden } : null,
       look: this.bbList.length ? this.billboardLook() : this.looks.size ? (id) => this.looks.get(id) : null,
-      // 0.68.0 겉모습 판(마주 보는 그물의 겉모습은 카메라마다 바뀌어 주지 않는다)
-      ...(this.bbList.length ? {} : { lookKey: this.lookVer }),
+      // 0.68.0 겉모습 판(마주 보는 그물의 겉모습은 카메라마다 바뀌어 주지 않는다). 0.70.0 행렬을 건 겉모습이 없으면 알린다(렌더러가 잘라내기를 덩어리로)
+      ...(this.bbList.length ? {} : { lookKey: this.lookVer, lookMoved: this.lookMoved.size > 0 }),
       hiddenEdges: this.renderOpts.hiddenEdges,
       profiles: this.renderOpts.profiles
         ? {
