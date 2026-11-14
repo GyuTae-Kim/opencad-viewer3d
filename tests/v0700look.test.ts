@@ -264,4 +264,50 @@ describe('0.70.0 겉모습을 건 인스턴싱 묶음', () => {
     }
     expect(ws[0]!.v.stats.culled).toBeGreaterThan(0);
   });
+
+  it('화면 밖으로 잘라낸 그물이 있어도 가만히 프레임은 회전 표를 다시 세지 않고, 새로 모은 뼈대의 묶음은 같은 자리 묶음의 지난 표를 다시 쓴다(STEP 83차)', () => {
+    const sc = scene();
+    const ws = [view(sc, 'rot'), view(sc, 'full'), view(sc, 'noplan')];
+    const on = ws[0]!;
+    type B = { rt?: unknown; list?: unknown[] };
+    const rts = (w: W): unknown[] => {
+      const P = w.r.instPlan as { face: B[] | null; lines: Map<unknown, B[]> | null };
+      return [...(P.face ?? []), ...[...(P.lines?.values() ?? [])].flat()].map((b) => b.rt);
+    };
+    // 잘라낸 그물이 있는 확대(0.69.0은 잘라낸 그물이 장면에 하나라도 있으면 묶음마다 프레임마다 새 목록이라 회전 표를 다시 셌다)
+    step(ws, 'zoom', (w) => w.v.zoomBy(0.3));
+    expect(on.v.stats.culled).toBeGreaterThan(0);
+    for (const name of ['still', 'still-2', 'still-3']) {
+      const seq = on.r.rotSeq as number, before = rts(on);
+      expect(step(ws, name, () => undefined)[0], name).toBe(0);
+      expect(on.r.rotSeq, name).toBe(seq);
+      expect(rts(on), name).toEqual(before);
+      expect(rts(on).every((x, i) => x === before[i]), name).toBe(true);
+    }
+    // 화면 밖이 바뀌면(돌림) 그 묶음만 다시 센다 — 그린 도형은 0.68.0 꼴·뼈대 없는 뷰어와 같다
+    step(ws, 'zoom-orbit', (w) => w.v.orbitBy(0.05, 0.02));
+    step(ws, 'zoom-hide', (w) => w.v.setItemVisible('a4', false));
+    step(ws, 'zoom-out', (w) => (w.v.setItemVisible('a4', true), w.v.zoomBy(1 / 0.3)));
+    expect(on.v.stats.culled).toBe(0);
+
+    // 뼈대 고치기를 끈 뷰어(숨김·강조를 바꾼 그리기마다 뼈대를 새로 모은다): 새 묶음 객체도 같은 저장소 열쇠 자리의 지난 표를 쓰고, 목록이 바뀐 묶음만 다시 센다
+    const fx = [view(sc, 'rot'), view(sc, 'full'), view(sc, 'noplan')];
+    for (const w of fx) w.r.instFixOff = true;
+    step(fx, 'fix-off-still', () => undefined);
+    const nb = rts(fx[0]!).length;
+    expect(nb).toBeGreaterThan(8);
+    for (const [name, fn] of [
+      ['hide', (w: W) => w.v.setItemVisible('a4', false)],
+      ['hide-more', (w: W) => w.v.setItemVisible('b9', false)],
+      ['hi', (w: W) => w.v.highlight(['d3'])],
+      ['show', (w: W) => (w.v.setItemVisible('a4', true), w.v.setItemVisible('b9', true), w.v.highlight(null))],
+    ] as const) {
+      const seq = fx[0]!.r.rotSeq as number;
+      step(fx, name, fn);
+      // 표를 센 묶음마다 rotSeq가 둘 는다 — 바뀐 묶음(면·윤곽선 한두 개)만
+      const counted = ((fx[0]!.r.rotSeq as number) - seq) / 2;
+      expect(counted, name).toBeGreaterThan(0);
+      expect(counted, name).toBeLessThan(nb / 2);
+    }
+  });
 });

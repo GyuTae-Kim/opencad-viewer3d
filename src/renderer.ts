@@ -586,9 +586,10 @@ const RUN_LIMIT = 24;
 const CULL_CHUNK = 64;
 /**
  * 0.51.0 잘라내기 덩어리 기록(Renderer3d.cullChunks — 0.65.0 cullScan이 받는 꼴로 이름을 붙였다). 0.66.0 덩어리마다 그때의 그물 기록 목록(장면 차례로 잇단다 — 덩어리 그물 수는
- * 그 길이)과 감싸는 자료(CULL_REDO면 다음 그리기가 다시 센다, null이면 덩어리째 판단하지 않는다), 덩어리가 장면 차례와 맞는지(sync — 거짓이면 다음 그리기가 기록을 견준다)
+ * 그 길이)과 감싸는 자료(CULL_REDO면 다음 그리기가 다시 센다, null이면 덩어리째 판단하지 않는다), 덩어리가 장면 차례와 맞는지(sync — 거짓이면 다음 그리기가 기록을 견준다).
+ * 0.70.0 lk = 감싸는 자료를 센 겉모습 판(겉모습 행렬로 옮긴 그물이 있으면 그 판, 없으면 −1 — 다르면 다음 그리기가 모두 다시 센다)
  */
-type CullChunks = { recs: MeshRec[][]; box: (CullBox | null)[]; sync?: boolean };
+type CullChunks = { recs: MeshRec[][]; box: (CullBox | null)[]; sync?: boolean; lk?: number };
 /** 0.66.0 다시 셀 덩어리 표시(감싸는 자료 자리 — 배열 값 꼴을 하나로 두려고 undefined 대신) */
 const CULL_REDO: CullBox = new Float64Array(0);
 
@@ -1021,6 +1022,8 @@ interface InstSlot {
   src: object | null;
   /** 0.69.0 회전 표 꼴(종류 r·rl)로 쓴 표 항목 열쇠(InstRot.tk — 같은 판·같은 열쇠면 표를 다시 쓰지 않는다. 표는 자리 첫 텍셀부터, 그물 자리는 그 뒤) */
   tk: readonly number[] | null;
+  /** 0.70.0 이 자리에 쓴 회전 표(새로 모은 뼈대의 새 묶음 객체가 같은 저장소 열쇠면 이 표를 다시 쓴다 — instRot) */
+  rt: InstRot | null;
 }
 
 /** 0.68.0 자리를 드는 묶음(저장소 열쇠 sk — 차례·그물 열쇠·그 열쇠 안 묶음 차례, 지난번 자리 slot — 같은 묶음 객체면 열쇠를 찾지 않는다). 0.69.0 rt = 회전 표 */
@@ -1054,6 +1057,8 @@ interface LineBatch extends InstHolder {
   alpha: number;
   recs: MeshRec[];
   models: (ArrayLike<number> | undefined)[];
+  /** 0.70.0 화면 밖 자리를 뺀 묶음(src = 그때 recs — 뺀 자리가 지난 그리기와 같으면 그 묶음을 다시 쓴다) */
+  live?: { src: MeshRec[]; b: LineBatch };
 }
 
 /**
@@ -1069,6 +1074,8 @@ interface MeshBatch extends InstHolder {
   /** 0.51.0 pbr.join()(묶음마다 한 번 — 자리마다 견줄 때 다시 잇지 않는다) */
   pk: string;
   list: MeshRec[];
+  /** 0.70.0 화면 밖 자리를 뺀 목록(src = 그때 list — 뺀 자리가 지난 그리기와 같으면 그 배열을 다시 쓴다) */
+  live?: { src: MeshRec[]; list: MeshRec[] };
 }
 
 /**
@@ -1286,6 +1293,8 @@ export class Renderer3d {
   private rotAt = new Int32Array(64);
   private rotIx = new Int32Array(64);
   private rotSeq = 0;
+  /** 0.70.0 instRot의 자리 열쇠 자리(그리기 안에서만 — 묶음마다 새 배열을 만들지 않는다) */
+  private rotKeys = new Int32Array(64);
   private rotM = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
   instRotOff = false;
   /** 0.70.0 겉모습 판: 그리기 상태의 lookKey가 지난 값과 다르면 lookEp를 올린다(MeshRec.lkv와 견준다 — 판이 없는 그리기 뒤에는 NaN이라 다음 판은 늘 새 판) */
@@ -2138,7 +2147,10 @@ export class Renderer3d {
    * 셈은 K가 n이면 0.68.0 꼴보다 3열 몫만큼 많다. 묶음마다 꼴을 가르면 회전이 다른 묶음 사이에 프로그램을 바꿔 GL 호출이 늘어(가짜 WebGL 강조 가만히 — useProgram 48 → 89)
    * 겉모습이 없으면 모든 묶음을 이 꼴로 그린다. 같은 목록 배열·같은 등록부 판이면 지난 표(가만히 프레임은 세지 않는다). 등록부가 한도면 null(0.68.0 꼴).
    * 0.70.0 겉모습이 있어도 그 판(lookKey)이 있으면 부른다(lk = 겉모습 판 Renderer3d.lookEp, 없으면 −1): 그물 묶음은 mdl(겉모습 행렬을 곱한 모형 — 0.68.0 꼴이 쓰는 값)로 세고,
-   * 같은 목록·같은 등록부 판·같은 겉모습 판이면 지난 표. 판이 없는 겉모습(마주 보는 그물 — 카메라마다 회전이 바뀐다)은 부르지 않는다
+   * 같은 목록·같은 등록부 판·같은 겉모습 판이면 지난 표. 판이 없는 겉모습(마주 보는 그물 — 카메라마다 회전이 바뀐다)은 부르지 않는다.
+   * 0.70.0 묶음에 표가 없으면(새로 모은 뼈대의 새 묶음 객체) 같은 저장소 열쇠 자리의 지난 표(InstSlot.rt)를 보고, 목록 배열이 달라도 원소까지 같으면(새로 모은 같은 묶음·
+   * 화면 밖 자리를 뺀 목록) 지난 표를 그대로 쓴다 — 0.69.0은 새 배열이면 회전 열쇠를 다시 셌다(STEP 83차: 잘라낸 그물이 있는 꼴 200 단면 가만히 +1.5~2.3 ms,
+   * 뼈대를 새로 모으는 고르기·숨김 프레임). 다른 목록이면 그 표의 차례를 지켜 다시 센다
    */
   private instRot(
     h: InstHolder,
@@ -2148,10 +2160,31 @@ export class Renderer3d {
     lk = -1,
   ): InstRot | null {
     const src = models ?? list;
-    const c = h.rt;
-    if (c && c.src === src && c.ep === this.rotEp && c.lk === lk) return c.ok ? c : null;
+    let c = h.rt;
+    if (!c) {
+      const q = this.instSlots.get(h.sk);
+      if (q && q.ep === this.instEp && q.rt) c = q.rt;
+    }
+    if (c && c.ep === this.rotEp && c.lk === lk) {
+      let same = c.src === src;
+      if (!same) {
+        const o = c.src as readonly unknown[];
+        if (o.length === src.length) {
+          let i = 0;
+          while (i < src.length && o[i] === src[i]) i++;
+          same = i === src.length;
+        }
+      }
+      if (same) {
+        c.src = src;
+        h.rt = c;
+        return c.ok ? c : null;
+      }
+    }
     const n = list.length;
-    const rid = new Int32Array(n), key = new Int32Array(n), tk: number[] = [];
+    // 0.70.0 자리 열쇠는 그리기 안에서만 쓰므로 나눠 쓰는 자리에(묶음마다 새 배열을 만들지 않는다)
+    if (this.rotKeys.length < n) this.rotKeys = new Int32Array(Math.max(n, this.rotKeys.length * 2));
+    const rid = new Int32Array(n), key = this.rotKeys, tk: number[] = [];
     // 자리마다 열쇠(모형 없음 −1)와 든 열쇠 표시(s)
     const s = ++this.rotSeq;
     let ok = n >= 1, hasNom = false;
@@ -2254,7 +2287,8 @@ export class Renderer3d {
       this.instGrow(base + cap, max);
     }
     if (q) this.instLive -= q.cap;
-    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null, tk: null };
+    // 0.70.0 다시 놓은 자리도 그 열쇠의 지난 회전 표는 이어 받는다(표 항목 차례를 지킨다 — 칸은 새로 쓴다)
+    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null, tk: null, rt: q ? q.rt : null };
     this.instSlots.set(h.sk, s);
     this.instTop = base + cap;
     this.instLive += cap;
@@ -2434,6 +2468,7 @@ export class Renderer3d {
     const stride = 2 + (shadow ? 1 : 0) + (clip ? 1 : 0), T = 9 + (shadow ? 3 : 0), tk = rt.tk, tn = tk.length;
     const q = this.instSlot(h, n, stride, tn * T);
     if (!q) return -1;
+    q.rt = rt;
     const kind = `r${stride}`;
     // 판은 0.68.0 꼴 면 종류와 같은 프레임 값(시점·투영·시점 투영·그림자 행렬·단면 평면)
     const gen = this.instGen(`m${Renderer3d.instStride(!!shadow, !!clip)}`, () => [...f.view, ...f.proj, ...f.viewProj, ...Array.from(shadow ?? []), ...(clip ? (clip(undefined) ?? NO_CLIP) : [])]);
@@ -2561,6 +2596,7 @@ export class Renderer3d {
     const n = models.length, T = fog ? 4 : 3, tk = rt.tk, tn = tk.length;
     const q = this.instSlot(h, n, 2, tn * T);
     if (!q) return -1;
+    q.rt = rt;
     const kind = fog ? 'rlf' : 'rl';
     const gen = this.instGen(fog ? 'lf' : 'l', () => (fog ? [...f.viewProj, ...f.view] : [...f.viewProj]));
     const ib = q.base + tn * T;
@@ -5532,7 +5568,7 @@ export class Renderer3d {
         // 인스턴싱 변종이 아직 번역 중이거나 자리 자료 그림이 모자라면 그물마다(같은 그림).
         // 0.43.0 그림자(SHADOW)·단면 하나(CLIP)도 — 자리마다 그림자 행렬·로컬 평면을 자리 자료에 더 쓴다(그물마다 그릴 때의 균일 변수와 같은 값)
         // 0.51.0 화면 밖으로 잘라낸 자리는 묶음에서 뺀다(묶음 나누기·차례·상태는 빼기 전 그대로 — 남은 자리만 자리 자료에)
-        const list = culledN ? b.list.filter((r) => r.culledAt !== frameNo) : b.list;
+        const list = culledN ? liveList(b) : b.list;
         if (!list.length) {
           prep.push({ list, p: null, base: -1, rot: false });
           continue;
@@ -5660,23 +5696,50 @@ export class Renderer3d {
             moved = true;
             break;
           }
-      // 겉모습 행렬을 건 그물은 덩어리 판단(장면 범위) 대신 옮긴 자리로 판단한다 — 0.70.0 덩어리 잘라내기 안에서 그 그물만 따로(잘라내기 자료는 겉모습 모형 캐시에).
+      // 겉모습 행렬을 건 그물이 있으면 덩어리 감싸는 자료도 옮긴 자리 잘라내기 자료(겉모습 모형 캐시)로 센다 — 0.70.0 그 겉모습 판마다(판이 없는 겉모습은 그리기마다 다시).
       // 0.69.0은 행렬 겉모습이 하나라도 있으면 보이는 그물 모두를 그물마다 판단하고 옮긴 그물의 자료를 그리기마다 새로 셌다
-      const lb = moved
-        ? (r: MeshRec): CullBox | null | undefined => {
+      const bx = moved
+        ? (r: MeshRec): CullBox | null => {
             const lk = lookR(r)?.matrix;
-            if (!lk) return undefined;
+            if (!lk) return cullOf(r);
             const c = this.lookModel(r, lk, r.model);
             return c.cull !== undefined ? c.cull : (c.cull = cullBox(r.local, c.model));
           }
         : null;
-      cullScan(this.meshes, this.cullChunks, P, visSeq, cut, lb);
+      cullScan(this.meshes, this.cullChunks, P, visSeq, cut, bx, moved ? (lkOn ? lep : NaN) : -1);
       stats.culled = culledN;
     }
     /** 이 그리기에서 화면 밖으로 잘라낸 그물인지 */
     const gone = (r: MeshRec): boolean => culledN > 0 && r.culledAt === frameNo;
-    /** 모은 선 묶음에서 화면 밖 자리를 뺀 것(색·굵기·불투명도는 그대로) */
+    /**
+     * 0.70.0 자리 목록 L에서 화면 밖 자리를 뺀 목록이 지난 그리기의 것(prev)과 같은지(뺀 수 cut — 같으면 그 배열·묶음을 다시 쓴다: 회전 표·자리 자료가 같은 목록으로 본다.
+     * 0.69.0은 잘라낸 그물이 장면에 하나라도 있으면 묶음마다 프레임마다 새 배열이라 회전 표를 다시 셌다 — STEP 83차 꼴 200 단면 가만히 +1.5~2.3 ms)
+     */
+    const sameLive = (L: readonly MeshRec[], cut: number, prev: readonly MeshRec[]): boolean => {
+      if (prev.length !== L.length - cut) return false;
+      let j = 0;
+      for (const r of L) if (r.culledAt !== frameNo && prev[j++] !== r) return false;
+      return true;
+    };
+    /** 0.70.0 그물 묶음에서 화면 밖 자리를 뺀 목록(뺀 자리가 없으면 묶음 목록 그대로, 지난 그리기와 같으면 그때 배열) */
+    const liveList = (b: MeshBatch): MeshRec[] => {
+      const L = b.list;
+      let cut = 0;
+      for (const r of L) if (r.culledAt === frameNo) cut++;
+      if (!cut) return L;
+      const c = b.live;
+      if (c && c.src === L && sameLive(L, cut, c.list)) return c.list;
+      const list = L.filter((r) => r.culledAt !== frameNo);
+      b.live = { src: L, list };
+      return list;
+    };
+    /** 모은 선 묶음에서 화면 밖 자리를 뺀 것(색·굵기·불투명도는 그대로). 0.70.0 뺀 자리가 없으면 그 묶음, 지난 그리기와 같으면 그때 묶음 */
     const cutBatch = (b: LineBatch): LineBatch => {
+      let cut = 0;
+      for (const r of b.recs) if (r.culledAt === frameNo) cut++;
+      if (!cut) return b;
+      const c = b.live;
+      if (c && c.src === b.recs && sameLive(b.recs, cut, c.b.recs)) return c.b;
       const recs: MeshRec[] = [], models: (ArrayLike<number> | undefined)[] = [];
       b.recs.forEach((r, i) => {
         if (r.culledAt !== frameNo) {
@@ -5684,7 +5747,9 @@ export class Renderer3d {
           models.push(b.models[i]);
         }
       });
-      return { ...b, recs, models };
+      const out: LineBatch = { ...b, recs, models, live: undefined };
+      b.live = { src: b.recs, b: out };
+      return out;
     };
 
     // 1a) 해 그림자 깊이 그림(판이 바뀌었을 때만 다시): 불투명 그물을 해 쪽 평행 투영으로
@@ -7357,8 +7422,8 @@ function cullOf(r: MeshRec): CullBox | null {
  * CULL_CHUNK개까지 채운 뒤 새 덩어리로. 덩어리째 판단은 그물마다 판단한 것과 같으므로(위) 덩어리를 어떻게 나눠도 잘라내는 그물은 같다.
  * 장면 차례(meshes)는 끝에 더하기·통째 비우기(덩어리도 비운다)와 바꾸기·빼기(렌더러 cullFix — 그 덩어리를 고친다)로만 바뀌므로, 고치지 못한 편집이 없으면(sync)
  * 뼈대가 없는 장면도 기록을 견주지 않는다(0.60.0~0.65.0은 뼈대가 바뀌거나 없으면 그물마다 견줬다 — 가짜 WebGL 8만 약 1~2 ms).
- * 0.70.0 lb(겉모습 행렬을 건 그물이 있을 때): 그물마다 겉모습 행렬로 옮긴 잘라내기 자료(행렬이 없는 그물은 undefined) — 그 그물은 덩어리 판단 대신 그 자료로 판단한다
- * (덩어리 상자는 장면 범위라 옮긴 그물을 덮지 않는다). 다른 그물은 겉모습이 없을 때와 같다
+ * 0.70.0 bx(겉모습 행렬을 건 그물이 있을 때): 그물마다 잘라내기 자료(겉모습 행렬로 옮긴 자리 — 행렬이 없는 그물은 cullOf)로 덩어리 감싸는 자료와 그물마다 판단을 센다.
+ * lk = 그 자료의 겉모습 판(행렬 겉모습이 없으면 −1, 판이 없는 겉모습은 NaN — 늘 다시): 덩어리 기록의 판(C.lk)과 다르면 감싸는 자료를 모두 다시 센다
  */
 function cullScan(
   M: readonly MeshRec[],
@@ -7366,10 +7431,14 @@ function cullScan(
   P: ReturnType<typeof cullPlanes>,
   visSeq: number,
   cut: (r: MeshRec) => void,
-  lb: ((r: MeshRec) => CullBox | null | undefined) | null = null,
+  bx: ((r: MeshRec) => CullBox | null) | null = null,
+  lk = -1,
 ): void {
   const same = C.sync;
   const RS = C.recs, B = C.box;
+  const boxOf = bx ?? cullOf;
+  const redo = !Object.is(C.lk ?? -1, lk) || lk !== lk;
+  C.lk = lk;
   let k = 0;
   for (let s = 0, e = 0; s < M.length; s = e, k++) {
     let R = RS[k];
@@ -7387,6 +7456,7 @@ function cullScan(
       e = M.length;
       B[k] = CULL_REDO;
     }
+    if (redo) B[k] = CULL_REDO;
     if (B[k] !== CULL_REDO && !same)
       for (let i = s; i < e; i++)
         if (R[i - s] !== M[i]) {
@@ -7395,25 +7465,19 @@ function cullScan(
         }
     if (B[k] === CULL_REDO) {
       const list: (CullBox | null)[] = [];
-      for (let i = s; i < e; i++) list.push(cullOf((R[i - s] = M[i]!)));
+      for (let i = s; i < e; i++) list.push(boxOf((R[i - s] = M[i]!)));
       B[k] = cullUnion(list);
     }
     const box = B[k];
     const side = box ? cullSide(P, box) : 0;
-    if (side === 1 && !lb) continue;
+    if (side === 1) continue;
     for (let i = s; i < e; i++) {
       const r = M[i]!;
       if (r.visAt !== visSeq) continue;
-      const x = lb ? lb(r) : undefined;
-      let out: boolean;
-      if (x !== undefined) out = !!x && cullOut(P, x);
-      else {
-        if (side === 1) continue;
-        out = side === -1;
-        if (!out) {
-          const d = cullOf(r);
-          out = !!d && cullOut(P, d);
-        }
+      let out = side === -1;
+      if (!out) {
+        const d = boxOf(r);
+        out = !!d && cullOut(P, d);
       }
       if (out) cut(r);
     }
