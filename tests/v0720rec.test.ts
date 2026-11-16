@@ -203,7 +203,7 @@ describe('0.72.0 그물 기록 칸·단면 끌기 채우기 단위', () => {
     expect(step(on, off, 'hi-drag', z(1.5)), 'hi-drag').toEqual([1, 0, 1]);
     expect(step(on, off, 'mono', (w) => (w.v.highlight(null), w.v.setRenderMode('monochrome'))), 'mono').toEqual([0, 0, 0]);
     expect(step(on, off, 'mono-drag', z(1.2)), 'mono-drag').toEqual([1, 0, 1]);
-    // 평면 법선을 바꿔도(축 x — 세계 x = 2는 u0과 돌리지 않은 첫 줄 부품, 12.5는 u1과 둘째 줄 부품을 가로지른다) 같은 몫(법선 곱만 다시)
+    // 평면 법선을 바꿔도(축 x — 세계 x = 2는 u0과 돌리지 않은 첫 줄 부품, 12.5는 u1을 가로지른다 — capGroup 묶음 cg) 같은 몫(법선 곱만 다시)
     expect(step(on, off, 'axis-x', (w) => sec(w, 'x', 2)), 'axis-x').toEqual([1, 0, 1]);
     expect(on.units, 'axis-x 단위').toBeGreaterThan(0);
     expect(step(on, off, 'axis-x-drag', (w) => w.v.setSectionPosition(12.5, { world: true })), 'axis-x-drag').toEqual([1, 0, 1]);
