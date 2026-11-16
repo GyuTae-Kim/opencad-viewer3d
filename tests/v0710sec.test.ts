@@ -146,6 +146,29 @@ describe('0.71.0 단면 하나 가만히 프레임', () => {
     expect(step(on, off, 'sec-again', (w) => sec(w, 0.42)), 'sec-again').toBe(1);
   });
 
+  it('그물 기록은 회전 표 열쇠 칸(rk·rkm·rke)을 처음부터 같은 차례로 가진다 — 회전 표를 센 묶음 그물·그물마다 그리는 그물·바꾼 그물 모두', () => {
+    const on = view(scene(), null);
+    (on.v as unknown as Sec).setSectionAxis('z', 0.5, { world: true });
+    on.v.renderNow();
+    on.v.setItemVisible('a3', false);
+    on.v.renderNow();
+    const m = on.v.scene!.meshes.find((x) => x.id === 'c4')!;
+    on.v.setMesh({ ...m, color: [0.2, 0.9, 0.2, 1] });
+    on.v.renderNow();
+    const recs = (on.r as unknown as { meshes: Record<string, unknown>[] }).meshes;
+    // 글자 객체 칸(늦게 더하는 칸 앞까지)이 모든 기록에서 같은 차례 — 0.69.0·0.70.0은 rotKey가 묶음 그물에만 rk·rkm·rke를 늦게 더했다(제 배열 그물에는 없다)
+    const head = (r: Record<string, unknown>): string => {
+      const ks = Object.keys(r);
+      return ks.slice(0, ks.indexOf('rke') + 1).join(',');
+    };
+    const h0 = head(recs[0]!);
+    expect(h0.endsWith('lkv,lko,rk,rkm,rke'), h0).toBe(true);
+    for (const r of recs) expect(head(r), String((r.src as { id: string }).id)).toBe(h0);
+    // 회전 표를 센 묶음 그물과 그물마다 그리는 제 배열 그물이 함께 있다
+    expect(recs.some((r) => typeof r.rkm === 'object')).toBe(true);
+    expect(recs.some((r) => (r.src as { id: string }).id === 'u0' && r.rkm === undefined)).toBe(true);
+  });
+
   it('숨겼다 다시 보인 그물을 묶음에 모은 뒤 뼈대 rest에 남기지 않는다 — 그린 도형은 뼈대 없이 모으는 뷰어와 같다', () => {
     for (const mode of ['shadedEdges', 'hiddenLine'] as const) {
       const on = view(scene(), null, mode), off = view(scene(), 'plan', mode);
