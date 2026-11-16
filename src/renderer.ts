@@ -4135,7 +4135,7 @@ export class Renderer3d {
           break;
         }
     }
-    const edges = !hasMeshEdges(m) ? null : light ? { id: m.id, group: m.group, n: Math.floor(m.edges!.length / 6), pos: NO_GL, col: null, wide: NO_GL, thin: NO_GL } : this.lineRec(m.id, m.group, m.edges!, undefined, 'edges');
+    const edges = !hasMeshEdges(m) ? null : light ? { id: m.id, group: m.group, n: Math.floor(m.edges!.length / 6), pos: NO_GL, col: null, wide: NO_GL, thin: NO_GL, first: 0 } : this.lineRec(m.id, m.group, m.edges!, undefined, 'edges');
     // 0.50.0: 윤곽선 버퍼는 깨진 끝점 선분을 NaN으로 바꾼 사본일 수 있다(lineRec — segmentFix)
     if (edges) slots[6] = { key: this.keyOf(segmentFix(m.edges!).fix ?? m.edges!), target: 'array', stride: 0 };
     const box = meshBounds(m);
@@ -4194,6 +4194,25 @@ export class Renderer3d {
       rk: -1,
       rkm: undefined,
       rke: 0,
+      visAt: 0,
+      visNo: 0,
+      culledAt: 0,
+      cull: undefined,
+      bk: undefined,
+      si: undefined,
+      ipf: 0,
+      ipz: 0,
+      ipe: 0,
+      ipd: 0,
+      ipm: 0,
+      ipc: undefined,
+      lookM: undefined,
+      parts: undefined,
+      mg: undefined,
+      mi: undefined,
+      first: 0,
+      vbase: 0,
+      dropped: false,
     };
   }
 
@@ -4219,7 +4238,7 @@ export class Renderer3d {
       gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 16, 0);
     }
     gl.bindVertexArray(null);
-    return { id, group, n, pos, col, wide, thin };
+    return { id, group, n, pos, col, wide, thin, first: 0 };
   }
 
   /** 굵은 선 VAO(이미 묶여 있어야 함)의 인스턴스 속성을 first번째 선분부터로 건다 */
