@@ -153,6 +153,7 @@ export function segmentKeptRange(p: Readonly<Plane4>, ax: number, ay: number, az
 /**
  * 삼각형 그물과 평면의 교선 = 단면 테두리(선분 쌍 xyz,xyz…, positions와 같은 로컬 좌표).
  * 평면도 같은 로컬 좌표로 준다(planeToLocal). bvh가 있으면 평면을 걸치는 마디만 훑는다. skip(삼각형 번호)이 true면 건너뛴다(숨긴 구간).
+ * 선분은 삼각형 번호 차례다(0.73.0 — bvh가 있어도 없을 때와 같은 차례)
  */
 export function sectionSegments(positions: Float32Array, indices: Uint32Array | undefined, p: Readonly<Plane4>, bvh?: Bvh | null, skip?: ((tri: number) => boolean) | null): Float32Array {
   const P = positions;
@@ -206,6 +207,9 @@ export function sectionSegments(positions: Float32Array, indices: Uint32Array | 
   if (bvh && (bvh.prims ?? bvh.count) === count && bvh.kind === 'triangle') {
     const { box, node, order } = bvh;
     const stack: number[] = [0];
+    // 0.73.0 걸친 잎의 삼각형 번호를 모아 오름차순으로 자른다 — 나무 없이 훑을 때와 같은 차례(선분 차례가 그 배열에 나무가 이미 있었는지에 기대지 않는다).
+    // 0.72.0까지는 나무 차례라, 뷰어가 쉬는 틈에 만드는 나무가 단면을 처음 자를 때 있었는지에 따라 같은 테두리의 선분 차례가 달랐다(STEP 86차 — 그린 선분 모음은 같다)
+    const hit: number[] = [];
     while (stack.length) {
       const ni = stack.pop()!;
       const o = ni * 6;
@@ -218,9 +222,11 @@ export function sectionSegments(positions: Float32Array, indices: Uint32Array | 
       }
       if (!(lo <= 0 && hi > 0)) continue;
       const first = node[ni * 2]!, k = node[ni * 2 + 1]!;
-      if (k > 0) for (let j = first; j < first + k; j++) tri(order[j]!);
+      if (k > 0) for (let j = first; j < first + k; j++) hit.push(order[j]!);
       else if (first !== 0xffffffff) stack.push(first, first + 1);
     }
+    const T = Uint32Array.from(hit).sort();
+    for (let i = 0; i < T.length; i++) tri(T[i]!);
   } else for (let t = 0; t < count; t++) if (good(t)) tri(t);
   return out.slice(0, n - (n % 6));
 }

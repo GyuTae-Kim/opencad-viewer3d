@@ -593,7 +593,10 @@ type CullChunks = { recs: MeshRec[][]; box: (CullBox | null)[]; sync?: boolean; 
 /** 0.66.0 다시 셀 덩어리 표시(감싸는 자료 자리 — 배열 값 꼴을 하나로 두려고 undefined 대신) */
 const CULL_REDO: CullBox = new Float64Array(0);
 
-/** 렌더러 그물 기록. 0.72.0 물음표 칸까지 모든 칸을 meshRec 글자 객체에 처음부터 둔다(늦게 더하는 칸이 없다 — 흐름을 지나도 기록 꼴 하나) */
+/**
+ * 렌더러 그물 기록. 0.72.0 물음표 칸까지 모든 칸을 meshRec 글자 객체에 처음부터 둔다(늦게 더하는 칸이 없다 — 흐름을 지나도 기록 꼴 하나).
+ * 0.73.0 글자 객체 칸 차례는 그리기마다 그물마다 읽는 칸이 앞이다(meshRec — 이 선언 차례와 다르다)
+ */
 export interface MeshRec {
   lookM?: LookCache;
   src: Mesh3d;
@@ -4178,12 +4181,44 @@ export class Renderer3d {
     // 0.57.0 빛 기록은 버퍼 번호가 없어 저마다 다른 열쇠(구우면 그물 저장소가 묶음으로 바뀌어 이 열쇠로 모아 그리지 않는다 — 그물마다 그리는 길로 떨어지면 mergeSolid가 고친다)
     let geo = light ? `L${++this.bufSeq}` : `${this.bufId(attrs.pos)}|${this.bufId(attrs.nrm)}${fmt(attrs.nrmF)}|${this.bufId(attrs.col)}|${this.bufId(attrs.uv)}${fmt(attrs.uvF)}:${uv}|${this.bufId(elem)}|${count}|${uv ? m.texture : ''}|${uvT0 ? uvT0.join() : ''}|${texAlpha ? 1 : 0}|${m.doubleSided === false ? 1 : 0}`;
     if (pbr) geo += `|pbr:${attrs.uvN}:${JSON.stringify(pbr)}`;
+    // 0.72.0 그리기·묶어 그리기·인스턴싱 뼈대·잘라내기·겉모습이 나중에 적던 칸도 모두 처음부터 둔다(보이는 목록 visAt·visNo, 잘라내기 culledAt·cull, 그리기 뼈대 bk·si,
+    // 인스턴싱 뼈대 표시 ipf…ipc, 겉모습 모형 lookM, 구간 캐시 parts, 묶어 그리기 mg·mi·first·vbase·dropped). 처음 값은 읽는 곳의 뜻 그대로다 — 번호 칸은 0(그리기·보이는 목록·
+    // 뼈대 번호는 1부터), first·vbase는 0(읽는 곳이 ?? 0), 나머지 undefined·false. 0.71.0은 흐름마다 다른 차례로 늦게 더해 숨김·확대 잘라내기·숨은 선·외곽선·분해·
+    // 빼기와 더하기를 지나면 기록의 숨은 꼴이 2개에서 7개(거대형)까지 갈려 그물마다 도는 고리의 칸 읽기가 느려졌다(가짜 WebGL 1만 꼴 24 묶음 섞음 — 꼴이 쌓인 뒤 가만히 CPU 약 −1.8 ms).
+    // 0.73.0 칸 차례: 그리기마다 그물마다 읽는 칸을 글자 객체 앞에 모은다(보이는 목록 visAt·visNo, 인스턴싱 뼈대 견주기·고치기 ipm·ipc·mg·ipe·ipf·ipz·ipd·ipx, 잘라내기 culledAt,
+    // 윤곽선·면 차례 model·edges·geo·lkv·lko·transparent·back, 잘라내기 자료 cull, 묶음 번호 mi·bk — V8은 글자 객체 칸을 이 차례로 객체 안에 둔다). 칸 모음·처음 값·꼴 하나는
+    // 0.72.0과 같다. 0.72.0은 그 칸 19개를 끝에 더해 그물마다 도는 고리(보이는 목록·뼈대 견주기·윤곽선 차례)가 읽는 칸이 기록 뒤쪽까지 흩어졌고(Node 포인터 압축 없음 —
+    // 432 B 기록의 offset 280~392), 기록마다 건드리는 기억 줄이 늘어 STEP 86차 반복 부품 1만 꼴 24 단면 가만히가 0.71.0보다 +0.8 ms 무거웠다. 같은 코드·같은 크기에서 차례만
+    // 바꾼 이 꼴은 0.72.0보다 그물마다 도는 줄이 모두 가볍고 단면 가만히는 조용할 때 0.71.0 수준이다(같은 칸 19개를 0.71.0 기록 끝에 읽지 않는 칸으로만 더한 측정 변종은 묶음마다
+    // 0.71.0과 같거나 조금 무거웠다 — 크기 몫도 조금. 73차 README)
     return {
+      src: m,
+      visAt: 0,
+      visNo: 0,
+      ipm: 0,
+      ipc: undefined,
+      mg: undefined,
+      ipe: 0,
+      ipf: 0,
+      ipz: 0,
+      ipd: 0,
+      // 0.69.0 뼈대 고치기가 보이는 그물에만 적는 칸은 처음부터 둔다(그리기마다 그물을 훑는 고리가 숨은 꼴이 갈린 기록을 만나지 않게 —
+      // 늦게 더하면 숨겨 둔 그물만 이 칸이 없는 동안 같은 그물 견주기·잘라내기 고리가 느려졌다: 가짜 WebGL 2만 겉모습 가만히 4.2 → 5.2 ms)
+      ipx: -1,
+      culledAt: 0,
+      model: modelMatrix(m.matrix, m.origin),
+      edges,
+      geo,
+      lkv: 0,
+      lko: undefined,
+      transparent,
+      back,
+      cull: undefined,
+      mi: undefined,
+      bk: undefined,
+      // 여기부터는 그물마다 도는 고리가 드물게 읽는 칸(만들 때·그물을 바꿀 때·그물마다 그리는 길·묶어 그리기 조각)
       light,
       pbr,
-      geo,
-      back,
-      src: m,
       vao,
       count,
       indexed,
@@ -4194,48 +4229,23 @@ export class Renderer3d {
       tex: uv ? m.texture! : null,
       texAlpha,
       uvT: uvT0,
-      transparent,
-      model: modelMatrix(m.matrix, m.origin),
       box,
       center: boxCenter(box),
       // 0.51.0 잘라내기 로컬 범위: 삼각형 정점(meshBounds가 이미 훑은 같은 기억)과 윤곽선 끝점(윤곽선이 그물 밖으로 나가도 덮게)
       local: edges ? unionBox(positionsBox(m.positions), segmentsBox(m.edges!)) : positionsBox(m.positions),
-      edges,
       wire: null,
       attrs,
       slots,
       lay,
       miss,
-      // 0.69.0 뼈대 고치기가 보이는 그물에만 적는 칸은 처음부터 둔다(그리기마다 그물을 훑는 고리가 숨은 꼴이 갈린 기록을 만나지 않게 —
-      // 늦게 더하면 숨겨 둔 그물만 이 칸이 없는 동안 같은 그물 견주기·잘라내기 고리가 느려졌다: 가짜 WebGL 2만 겉모습 가만히 4.2 → 5.2 ms)
-      ipx: -1,
-      lkv: 0,
-      lko: undefined,
       // 0.71.0 회전 표 열쇠 칸(rotKey)도 처음부터. 0.69.0·0.70.0은 회전 표를 센 묶음 그물에만 늦게(뼈대 표시 칸 사이에) 더해 기록의 숨은 꼴이 갈렸고, 단면 하나면
       // 보이는 그물마다 도는 윤곽선 차례가 그만큼 느렸다(STEP 84차 반복 부품 1만 꼴 200 단면 가만히 +1.6~2.3 ms — 같은 일·같은 GL 호출, 이 칸만 처음부터 두면 0.68.0과 같다)
       rk: -1,
       rkm: undefined,
       rke: 0,
-      // 0.72.0 그리기·묶어 그리기·인스턴싱 뼈대·잘라내기·겉모습이 나중에 적던 칸도 모두 처음부터(보이는 목록 visAt·visNo, 잘라내기 culledAt·cull, 그리기 뼈대 bk·si,
-      // 인스턴싱 뼈대 표시 ipf…ipc, 겉모습 모형 lookM, 구간 캐시 parts, 묶어 그리기 mg·mi·first·vbase·dropped). 처음 값은 읽는 곳의 뜻 그대로다 — 번호 칸은 0(그리기·보이는 목록·
-      // 뼈대 번호는 1부터), first·vbase는 0(읽는 곳이 ?? 0), 나머지 undefined·false. 0.71.0은 흐름마다 다른 차례로 늦게 더해 숨김·확대 잘라내기·숨은 선·외곽선·분해·
-      // 빼기와 더하기를 지나면 기록의 숨은 꼴이 2개에서 7개(거대형)까지 갈려 그물마다 도는 고리의 칸 읽기가 느려졌다(가짜 WebGL 1만 꼴 24 묶음 섞음 — 꼴이 쌓인 뒤 가만히 CPU 약 −1.8 ms)
-      visAt: 0,
-      visNo: 0,
-      culledAt: 0,
-      cull: undefined,
-      bk: undefined,
       si: undefined,
-      ipf: 0,
-      ipz: 0,
-      ipe: 0,
-      ipd: 0,
-      ipm: 0,
-      ipc: undefined,
       lookM: undefined,
       parts: undefined,
-      mg: undefined,
-      mi: undefined,
       first: 0,
       vbase: 0,
       dropped: false,
