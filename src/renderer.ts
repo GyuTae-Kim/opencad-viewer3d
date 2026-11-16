@@ -1049,6 +1049,8 @@ interface InstSlot {
   tk: readonly number[] | null;
   /** 0.70.0 이 자리에 쓴 회전 표(새로 모은 뼈대의 새 묶음 객체가 같은 저장소 열쇠면 이 표를 다시 쓴다 — instRot) */
   rt: InstRot | null;
+  /** 0.74.0 회전 표 꼴 면(종류 r)으로 자리마다 로컬 평면을 쓴 세계 단면 평면(없으면 null — 판 gen에는 평면이 들지 않는다. 평면만 바뀌면 평면 텍셀만 다시 쓴다) */
+  cp: Plane4 | null;
 }
 
 /** 0.68.0 자리를 드는 묶음(저장소 열쇠 sk — 차례·그물 열쇠·그 열쇠 안 묶음 차례, 지난번 자리 slot — 같은 묶음 객체면 열쇠를 찾지 않는다). 0.69.0 rt = 회전 표 */
@@ -2324,7 +2326,7 @@ export class Renderer3d {
     }
     if (q) this.instLive -= q.cap;
     // 0.70.0 다시 놓은 자리도 그 열쇠의 지난 회전 표는 이어 받는다(표 항목 차례를 지킨다 — 칸은 새로 쓴다)
-    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null, tk: null, rt: q ? q.rt : null };
+    const s: InstSlot = { ep: this.instEp, base, cap, st: stride, kind: '', gen: 0, n: 0, mdl: [], src: null, tk: null, rt: q ? q.rt : null, cp: null };
     this.instSlots.set(h.sk, s);
     this.instTop = base + cap;
     this.instLive += cap;
@@ -2489,14 +2491,17 @@ export class Renderer3d {
    * (그림자 행렬 0~2열도 같은 맞춤), 자리에는 3열만 instMeshes와 같은 셈·같은 차례로 쓴다 — 텍셀 0 = 시점 투영 · 모형 3열, 1 = 시점 · 모형 3열 xyz와 w = 표 번호,
    * 그다음 그림자 행렬 3열(그림자)·로컬 평면(단면). 모형이 없는 자리는 표 열쇠 −1(시점 투영·시점 행렬 그대로 — 0.68.0과 같다). 칸의 float32 값이 비트까지 같다.
    * 같은 판·같은 표 열쇠면 표는 다시 쓰지 않고 자리는 instMeshes처럼 모형이 지난번과 다른 첫 자리부터. 자리 첫 텍셀(u_instBase) 또는 −1.
-   * 0.70.0 mdl을 주면(겉모습이 있을 때 — instMeshes의 mm) 자리 모형을 그것으로 읽는다(겉모습 행렬을 곱한 모형 — 표·3열 셈은 같다)
+   * 0.70.0 mdl을 주면(겉모습이 있을 때 — instMeshes의 mm) 자리 모형을 그것으로 읽는다(겉모습 행렬을 곱한 모형 — 표·3열 셈은 같다).
+   * 0.74.0 clip은 세계 단면 평면(단면 하나 — 없으면 null): 자리마다 로컬 평면을 planeToLocal과 같은 셈·차례로 바로 쓴다(0.73.0은 자리마다 함수를 불러 새 배열을 받았다).
+   * 판에는 단면 평면을 넣지 않고 자리에 쓴 평면(q.cp)과 따로 견준다 — 평면만 바뀐 그리기(단면 끌기)는 표·3열을 다시 쓰지 않고 자리마다 평면 텍셀만 다시 쓴다
+   * (0.73.0은 평면이 판에 들어 표와 자리를 모두 다시 썼다 — STEP 꼴 1만 단면 끌기 프레임마다 약 2 ms). 칸 값·올리는 텍셀 구간·GL 호출은 0.73.0과 같다
    */
   private instMeshesRot(
     f: ViewFrame,
     h: InstHolder,
     list: readonly MeshRec[],
     rt: InstRot,
-    extra: { shadow?: ArrayLike<number> | null; clip?: ((model: ArrayLike<number> | undefined) => Readonly<Plane4> | null) | null } = {},
+    extra: { shadow?: ArrayLike<number> | null; clip?: Readonly<Plane4> | null } = {},
     mdl: ((r: MeshRec) => ArrayLike<number> | undefined) | null = null,
   ): number {
     const n = list.length;
@@ -2506,15 +2511,22 @@ export class Renderer3d {
     if (!q) return -1;
     q.rt = rt;
     const kind = `r${stride}`;
-    // 판은 0.68.0 꼴 면 종류와 같은 프레임 값(시점·투영·시점 투영·그림자 행렬·단면 평면)
-    const gen = this.instGen(`m${Renderer3d.instStride(!!shadow, !!clip)}`, () => [...f.view, ...f.proj, ...f.viewProj, ...Array.from(shadow ?? []), ...(clip ? (clip(undefined) ?? NO_CLIP) : [])]);
+    // 판은 시점·투영·시점 투영·그림자 행렬(0.74.0 — 단면 평면은 q.cp로 따로)
+    const gen = this.instGen(`rv${shadow ? 1 : 0}`, () => [...f.view, ...f.proj, ...f.viewProj, ...Array.from(shadow ?? [])]);
     const ib = q.base + tn * T;
-    let i0 = 0, tab = true;
+    // i0 = 3열(모형)부터 다시 쓸 첫 자리, c0 = 평면 텍셀부터 다시 쓸 첫 자리(c0 ≤ i0), cpNew = 표는 그대로인데 평면만 바뀜
+    let i0 = 0, c0 = 0, tab = true, cpNew = false;
     if (q.kind === kind && q.gen === gen && q.tk !== null && q.tk.length === tn && q.tk.every((x, j) => x === tk[j])) {
       tab = false;
-      if (q.src === list && q.n === n) return ib;
-      const e = Math.min(n, q.n);
-      while (i0 < e && q.mdl[i0] === (mdl ? mdl(list[i0]!) : list[i0]!.model)) i0++;
+      cpNew = !!clip && (q.cp === null || !Object.is(q.cp[0], clip[0]) || !Object.is(q.cp[1], clip[1]) || !Object.is(q.cp[2], clip[2]) || !Object.is(q.cp[3], clip[3]));
+      if (q.src === list && q.n === n) {
+        if (!cpNew) return ib;
+        i0 = n;
+      } else {
+        const e = Math.min(n, q.n);
+        while (i0 < e && q.mdl[i0] === (mdl ? mdl(list[i0]!) : list[i0]!.model)) i0++;
+      }
+      c0 = cpNew ? 0 : i0;
     }
     q.kind = kind;
     q.gen = gen;
@@ -2522,6 +2534,7 @@ export class Renderer3d {
     q.src = list;
     q.mdl.length = n;
     q.tk = tk;
+    q.cp = clip ? [clip[0], clip[1], clip[2], clip[3]] : null;
     const d = this.instBuf, m3 = this.instM3, V = f.view, P = f.proj, Q = f.viewProj, L = shadow;
     if (tab) {
       const M = this.rotM, R = this.rotV;
@@ -2554,7 +2567,28 @@ export class Renderer3d {
       }
       this.instDirty.push(q.base, ib);
     }
-    if (i0 === n) return ib;
+    // 평면만 바뀌었으면 표는 다시 쓰지 않았어도 그 구간을 올린다(값은 같다 — 0.73.0과 같은 올릴 구간·GL 호출)
+    else if (cpNew) this.instDirty.push(q.base, ib);
+    if (c0 === n) return ib;
+    // 0.74.0 자리마다 로컬 평면 = planeToLocal(clip, 모형)과 같은 셈·차례(모형이 없으면 세계 평면 그대로). 자리 안 평면 텍셀 자리 = 3열 둘 + 그림자 1
+    const ca = clip ? clip[0] : 0, cb = clip ? clip[1] : 0, cc = clip ? clip[2] : 0, cw = clip ? clip[3] : 0, ce = L ? 12 : 8;
+    // 평면만 바뀐 앞 자리(모형이 지난번에 쓴 모형 q.mdl과 같다 — 표·3열·그림자 칸은 그대로)
+    const qm = q.mdl;
+    for (let i = c0; i < i0; i++) {
+      const m = qm[i];
+      const e = (ib + i * stride) * 4 + ce;
+      if (!m) {
+        d[e] = ca;
+        d[e + 1] = cb;
+        d[e + 2] = cc;
+        d[e + 3] = cw;
+      } else {
+        d[e] = m[0]! * ca + m[1]! * cb + m[2]! * cc + m[3]! * cw;
+        d[e + 1] = m[4]! * ca + m[5]! * cb + m[6]! * cc + m[7]! * cw;
+        d[e + 2] = m[8]! * ca + m[9]! * cb + m[10]! * cc + m[11]! * cw;
+        d[e + 3] = m[12]! * ca + m[13]! * cb + m[14]! * cc + m[15]! * cw;
+      }
+    }
     const v0 = V[0]!, v1 = V[1]!, v2 = V[2]!, v3 = V[3]!, v4 = V[4]!, v5 = V[5]!, v6 = V[6]!, v7 = V[7]!;
     const v8 = V[8]!, v9 = V[9]!, v10 = V[10]!, v11 = V[11]!, v12 = V[12]!, v13 = V[13]!, v14 = V[14]!, v15 = V[15]!;
     const p0 = P[0]!, p1 = P[1]!, p2 = P[2]!, p3 = P[3]!, p4 = P[4]!, p5 = P[5]!, p6 = P[6]!, p7 = P[7]!;
@@ -2613,14 +2647,20 @@ export class Renderer3d {
         e += 4;
       }
       if (clip) {
-        const c = clip(m) ?? NO_CLIP;
-        d[e] = c[0];
-        d[e + 1] = c[1];
-        d[e + 2] = c[2];
-        d[e + 3] = c[3];
+        if (!m) {
+          d[e] = ca;
+          d[e + 1] = cb;
+          d[e + 2] = cc;
+          d[e + 3] = cw;
+        } else {
+          d[e] = m[0]! * ca + m[1]! * cb + m[2]! * cc + m[3]! * cw;
+          d[e + 1] = m[4]! * ca + m[5]! * cb + m[6]! * cc + m[7]! * cw;
+          d[e + 2] = m[8]! * ca + m[9]! * cb + m[10]! * cc + m[11]! * cw;
+          d[e + 3] = m[12]! * ca + m[13]! * cb + m[14]! * cc + m[15]! * cw;
+        }
       }
     }
-    this.instDirty.push(ib + i0 * stride, ib + n * stride);
+    this.instDirty.push(ib + c0 * stride, ib + n * stride);
     return ib;
   }
 
@@ -5654,8 +5694,9 @@ export class Renderer3d {
           p = this.instVariant('mesh', [...meshExtra, ...(shadowVp ? ['SHADOW'] : []), ...(sec ? ['CLIP'] : []), ...(b.tex ? ['TEX'] : []), ...(rt ? ['IROT'] : []), ...(usePbr ? b.pbr : [])]);
           if (p) ivm.set(vk, p);
         }
-        const extra = { shadow: shadowVp, clip: sec ? clipOf : null };
-        prep.push({ list, p, base: !p ? -1 : rt ? this.instMeshesRot(f, b, list, rt, extra, look ? mm : null) : this.instMeshes(f, b, list, mm, extra), rot: !!rt });
+        // 0.74.0 회전 표 꼴은 세계 단면 평면을 받아 자리마다 로컬 평면을 바로 쓴다(clipOf와 같은 값)
+        const base = !p ? -1 : rt ? this.instMeshesRot(f, b, list, rt, { shadow: shadowVp, clip: sec ? sec.plane : null }, look ? mm : null) : this.instMeshes(f, b, list, mm, { shadow: shadowVp, clip: sec ? clipOf : null });
+        prep.push({ list, p, base, rot: !!rt });
       }
       this.instFlush();
       for (let j = 0; j < bs.length; j++) {

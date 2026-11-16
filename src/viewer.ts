@@ -1726,6 +1726,19 @@ interface VisChunks {
   /** 0.66.0 덩어리에 그물이 아닌 묶음(선분·점)이 드는지(그림자 범위는 그 덩어리만 묶음마다) */
   other: boolean[];
 }
+/**
+ * 0.74.0 단면 하나 테두리의 걸침 몫(Viewer3d.cutSpanOf): 묶음 표 차례의 그물(범위가 빈 것은 뺀다 — 걸치지 않는다)과 그물마다 평면 법선 nrm에 대한 축마다 범위 끝 곱
+ * (boxStraddles와 같은 곱)의 작은 값 셋·큰 값 셋(t — 그물 i는 6i부터). 묶음 표·범위 캐시·판(visChunks와 같은 열쇠)과 법선이 같은 동안 그대로다
+ */
+interface CutSpan {
+  items: Map<string, Item>;
+  boxes: WeakMap<AnyItem, Box3>;
+  ver: number;
+  size: number;
+  nrm: readonly [number, number, number];
+  meshes: Mesh3d[];
+  t: Float64Array;
+}
 const cubeSize = (px: number): number => Math.min(160, Math.max(64, Math.round(px) || CUBE_CSS));
 /** 0.44.0 손가락 뷰 큐브 선택 정리(false = 끔, 아니면 편 한 변 64~480·띠 0.1~0.4) */
 function cubeTouchOpts(t: boolean | ViewCubeTouchOptions | undefined): false | Required<ViewCubeTouchOptions> {
@@ -1880,6 +1893,8 @@ export class Viewer3d {
   private hiddenOn = false;
   /** 그물마다 단면 교선(로컬 좌표) — 평면·숨긴 구간이 같으면 다시 쓴다(0.11.0: 그물 하나를 바꿔도 다른 그물은 다시 자르지 않는다) */
   private cutCache = new WeakMap<Mesh3d, { plane: Plane4; test: ((i: number) => boolean) | null | undefined; segs: Float32Array }[]>();
+  /** 0.74.0 단면 하나 테두리의 걸침 몫(cutSpanOf — 단면을 끄거나 테두리를 끄거나 여러 단면이면 놓는다) */
+  private cutSpan: CutSpan | null = null;
   /** 그물 바꾸기 나눠 올리기의 프레임 몫(ms, setMesh의 incremental.budgetMs) */
   private meshBudget = 8;
 
@@ -4344,20 +4359,28 @@ export class Viewer3d {
   /** 단면 테두리(보이는 그물과 평면의 교선)를 다시 모아 올린다. 장면 가운데 기준 좌표로 모아 큰 좌표에서도 정밀하게 */
   private updateCut(): void {
     this.cutDirty = false;
-    if (this.multiSection) return this.updateCutMulti();
+    if (this.multiSection) {
+      this.cutSpan = null;
+      return this.updateCutMulti();
+    }
     const s = this.sceneRef;
     const plane = this.sectionPlane();
     if (!s || !plane || !this.sec!.outline) {
+      this.cutSpan = null;
       if (this.gpu) this.renderer.setSectionLines(null);
       return;
     }
     const origin: V3 = boxIsEmpty(this.allBox) ? [0, 0, 0] : boxCenter(this.allBox);
     const parts: Float32Array[] = [];
     let total = 0;
-    for (const it of this.items.values()) {
-      if (it.kind !== 'mesh') continue;
-      const m = it.item;
-      if (!this.visible(m.id, m.group) || !boxStraddles(this.boundsOf(m), plane)) continue;
+    // 0.74.0 걸친 그물은 걸침 몫으로 고른다: 묶음 표 차례 그대로, 걸침은 w에 범위 끝 곱을 boxStraddles와 같은 차례로 더해(같은 판정 — 0.73.0과 같은 그물·같은 차례),
+    // 보이는지는 걸친 그물만 묻는다. 0.73.0은 프레임마다 묶음마다 보이는지·범위(boundsOf)·걸침을 다시 물었다(STEP 꼴 1만 단면 끌기 — 걸친 그물이 없어도 프레임마다 약 2 ms)
+    const C = this.cutSpanOf(plane), T = C.t, w = plane[3];
+    for (let i = 0; i < C.meshes.length; i++) {
+      const o = i * 6;
+      if (!(w + T[o]! + T[o + 1]! + T[o + 2]! <= 0 && w + T[o + 3]! + T[o + 4]! + T[o + 5]! > 0)) continue;
+      const m = C.meshes[i]!;
+      if (!this.visible(m.id, m.group)) continue;
       const model = this.modelOf(m);
       const segs = this.meshCut(m, planeToLocal(plane, model));
       if (!segs.length) continue;
@@ -4391,6 +4414,32 @@ export class Viewer3d {
       }
     }
     if (this.gpu) this.renderer.setSectionLines(all, origin);
+  }
+
+  /**
+   * 0.74.0 단면 하나 테두리의 걸침 몫(CutSpan): 지난 몫의 묶음 표·범위 캐시·판·법선(비트까지)이 지금과 같으면 그대로, 아니면 묶음 표를 한 번 훑어 새로 만든다.
+   * 평면을 옮기기만 한 프레임(단면 끌기)은 다시 쓰고, 법선을 바꾼 프레임(축 바꾸기·평면 돌리기)은 0.73.0처럼 묶음마다 범위를 묻는다(곱 배열을 더 만든다)
+   */
+  private cutSpanOf(p: Readonly<Plane4>): CutSpan {
+    const C = this.cutSpan;
+    if (C && C.items === this.items && C.boxes === this.boxes && C.ver === this.boundsVer && C.size === this.items.size && Object.is(C.nrm[0], p[0]) && Object.is(C.nrm[1], p[1]) && Object.is(C.nrm[2], p[2]))
+      return C;
+    const meshes: Mesh3d[] = [];
+    const t = new Float64Array(6 * this.items.size);
+    let o = 0;
+    for (const it of this.items.values()) {
+      if (it.kind !== 'mesh') continue;
+      const b = this.boundsOf(it.item);
+      if (boxIsEmpty(b)) continue;
+      meshes.push(it.item);
+      for (let k = 0; k < 3; k++) {
+        const x = p[k]! * b.min[k]!, y = p[k]! * b.max[k]!;
+        t[o + k] = Math.min(x, y);
+        t[o + 3 + k] = Math.max(x, y);
+      }
+      o += 6;
+    }
+    return (this.cutSpan = { items: this.items, boxes: this.boxes, ver: this.boundsVer, size: this.items.size, nrm: [p[0], p[1], p[2]], meshes, t });
   }
 
   /**
@@ -5990,6 +6039,7 @@ export class Viewer3d {
         if (this.sec) this.updateCut();
         else {
           this.cutDirty = false;
+          this.cutSpan = null;
           this.renderer.setSectionLines(null);
         }
       }
@@ -8994,6 +9044,7 @@ export class Viewer3d {
       if (this.sec) this.updateCut();
       else {
         this.cutDirty = false;
+        this.cutSpan = null;
         this.renderer.setSectionLines(null);
       }
     }
