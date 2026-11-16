@@ -2572,9 +2572,10 @@ export class Renderer3d {
     if (c0 === n) return ib;
     // 0.74.0 자리마다 로컬 평면 = planeToLocal(clip, 모형)과 같은 셈·차례(모형이 없으면 세계 평면 그대로). 자리 안 평면 텍셀 자리 = 3열 둘 + 그림자 1
     const ca = clip ? clip[0] : 0, cb = clip ? clip[1] : 0, cc = clip ? clip[2] : 0, cw = clip ? clip[3] : 0, ce = L ? 12 : 8;
-    // 평면만 바뀐 앞 자리(모형이 지난번과 같다 — 표·3열·그림자 칸은 그대로)
+    // 평면만 바뀐 앞 자리(모형이 지난번에 쓴 모형 q.mdl과 같다 — 표·3열·그림자 칸은 그대로)
+    const qm = q.mdl;
     for (let i = c0; i < i0; i++) {
-      const m = mdl ? mdl(list[i]!) : list[i]!.model;
+      const m = qm[i];
       const e = (ib + i * stride) * 4 + ce;
       if (!m) {
         d[e] = ca;
