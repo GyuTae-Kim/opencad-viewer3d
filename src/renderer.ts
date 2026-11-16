@@ -890,6 +890,24 @@ interface CapUnit {
 }
 
 /**
+ * 0.72.0 단면 하나 채우기 단위의 평면에 기대지 않는 몫(Renderer3d.capPrep — 평면이나 숨김만 바뀌는 그리기에서 다시 쓴다): 만들 때 장면 그물 기록 목록 사본(all — 숨긴 그물까지)·
+ * 겉모습 판(tok)·숨은 선 모드·채우기, 채우기 후보(장면 차례)와 그 세계 범위·capGroup, 평면 법선(nrm — 비트, 처음엔 null)에 대한 축마다 범위 끝 곱의 작은 값·큰 값
+ * (lo·hi — 후보 i의 축 k는 3i + k. boxStraddles와 같은 곱·같은 더하기 차례라 평면 w만 그리기마다 더해 같은 판단이다)
+ */
+interface CapPrep {
+  all: MeshRec[];
+  tok: number;
+  flat: boolean;
+  caps: SectionDraw['caps'];
+  recs: MeshRec[];
+  box: Box3[];
+  grp: (string | undefined)[];
+  nrm: [number, number, number] | null;
+  lo: Float64Array;
+  hi: Float64Array;
+}
+
+/**
  * 0.42.0 인스턴싱 기본: 보이는 같은 그물(MeshRec.geo가 같은) 자리가 이만큼 이상이면 자리마다 그리지 않고 그리기 한 번에 그린다
  * (Viewer3d.setRenderOptions({ instancing })로 바꾼다). 몇 자리뿐인 장면은 0.41.0과 같은 길·같은 차례로 그린다
  */
@@ -1305,10 +1323,12 @@ export class Renderer3d {
   private lookEp = 0;
   /**
    * 0.71.0 단면 하나 잘린 면 채우기 단위(capUnits)의 지난 결과와 그때 입력(그물 기록 목록 사본·평면 값·채우기·겉모습 판 표·숨은 선 모드) — 같으면 그 단위를 다시 쓴다
-   * (단위 색만 그리기마다 다시 센다). 시험용 끄기(true면 0.70.0처럼 그리기마다 센다 — 같은 그림인지 견줄 때)
+   * (단위 색만 그리기마다 다시 센다). 시험용 끄기(true면 0.70.0처럼 그리기마다 센다 — 같은 그림인지 견줄 때. 0.72.0 capPrep도 끈다)
    */
   private capMemo: { list: MeshRec[]; plane: Plane4; caps: SectionDraw['caps']; tok: number; flat: boolean; units: CapUnit[] } | null = null;
   capMemoOff = false;
+  /** 0.72.0 단면 하나 채우기 단위의 평면에 기대지 않는 몫(평면·숨김만 바뀌는 그리기 — 단면 끌기에서 다시 쓴다. 단면을 끄거나 장면을 비우면 놓는다) */
+  private capPrep: CapPrep | null = null;
   /** 0.68.0 이 그리기에서 찾은 인스턴싱 변종(정의 열쇠 — 묶음마다 정의 배열을 잇고 정렬하지 않는다. 그리기마다 비운다) */
   private ivm = new Map<string, Prog>();
   private instM3 = new Float32Array(9);
@@ -2115,8 +2135,9 @@ export class Renderer3d {
     this.rotV = [];
     this.rotH.clear();
     this.rotEp++;
-    // 0.71.0 단면 채우기 단위 캐시도(지난 장면의 그물 기록을 쥐지 않게)
+    // 0.71.0 단면 채우기 단위 캐시도(지난 장면의 그물 기록을 쥐지 않게). 0.72.0 평면에 기대지 않는 몫도
     this.capMemo = null;
+    this.capPrep = null;
   }
 
   /**
@@ -6452,7 +6473,17 @@ export class Renderer3d {
           units = CM.units;
           for (const u of units) u.color = colOf(u.meshes[0]!);
         } else {
-          units = this.capUnits(capMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox });
+          // 0.72.0 평면·숨김만 바뀐 그리기(단면 끌기, 단면을 켠 채 숨기기·보이기): 겉모습 판·숨은 선 모드·채우기가 지난 단위와 같으면 평면에 기대지 않는 몫(capPrep — 장면
+          // 그물 기록 모두의 채우기 후보·범위·capGroup, 장면 그물 기록·판·모드·채우기가 같은 동안 그대로)을 만들어 다시 쓰고 capUnits는 보이는지·평면 걸침만 센다.
+          // 0.71.0은 평면을 옮길 때마다 보이는 그물 모두의 반투명·범위·걸침을 다시 셌다(STEP 흐름 반복 부품 1만 꼴 200 단면 끌기 — 가짜 WebGL 프로파일 capUnits 약 6 ms/프레임)
+          let P: CapPrep | null = null;
+          if (tok === tok && sec!.caps !== 'none') {
+            const Q = this.capPrep;
+            if (Q && Q.tok === tok && Q.flat === flat && Q.caps === sec!.caps && sameRecs(Q.all, this.meshes)) P = Q;
+            else if (CM && CM.tok === tok && CM.flat === flat && CM.caps === sec!.caps) P = this.capPrepare(this.meshes, sec!.caps, tok, flat, transOf, boxOf);
+          }
+          this.capPrep = P;
+          units = this.capUnits(capMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox }, P ? { prep: P, vis: visSeq } : undefined);
           const p = sec?.plane;
           this.capMemo = tok === tok && p ? { list: capMeshes.slice(), plane: [p[0], p[1], p[2], p[3]], caps: sec!.caps, tok, flat, units } : null;
         }
@@ -6463,7 +6494,10 @@ export class Renderer3d {
           return k ? [k.n, k.h] : [];
         };
         if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, capLists, (pl) => (capPlane = pl), mm, plain);
-      } else this.capMemo = null;
+      } else {
+        this.capMemo = null;
+        this.capPrep = null;
+      }
     }
 
     // 1d) 0.49.0 주변 가림: 불투명 그물 깊이(외곽선과 같은 깊이 그림 — 아래 2c가 다시 쓴다)에서 셈해 지금 그림에 곱한다.
@@ -7202,6 +7236,7 @@ export class Renderer3d {
    * 잘린 면을 채울 단위: 그물 하나(Mesh3d.closed 또는 caps 'all'), 또는 같은 capGroup의 불투명 그물들(재질별로 나뉜 닫힌 입체).
    * 평면 하나(section)면 그 평면, 여러 평면(sections)이면 평면마다 그 평면이 자르는 그물로 만들고, 다른 평면들은 채운 면을 자르는 데 쓴다.
    * capGroup이 없는 장면은 예전과 같은 차례·같은 그물이다.
+   * 0.72.0 pre(단면 하나 — 평면에 기대지 않는 몫과 보이는 목록 번호)를 주면 몫의 후보에서 보이는 것(visAt)·평면 걸침만 센다(capSlice — meshes로 센 것과 같은 단위·같은 차례)
    */
   private capUnits(
     meshes: readonly MeshRec[],
@@ -7215,11 +7250,13 @@ export class Renderer3d {
       cuts?: (r: MeshRec) => readonly number[] | null;
       cutBox?: (r: MeshRec, cut: number) => Box3;
     } | null,
+    pre?: { prep: CapPrep; vis: number },
   ): CapUnit[] {
     const out: CapUnit[] = [];
     const trans = (r: MeshRec): boolean => (lk ? lk.trans(r) : r.transparent);
     const boxOf = (r: MeshRec): Box3 => (lk ? lk.box(r) : r.box);
     const colOf = (r: MeshRec): Rgba => (lk ? lk.color(r) : r.src.color);
+    if (pre && sec && !multi) return capSlice(pre.prep, sec.plane, pre.vis, colOf);
     const cutsOf = multi ? (lk?.cuts ?? null) : null;
     const build = (plane: Plane4, caps: 'closed' | 'all' | 'none', inScope: (r: MeshRec) => boolean, others: (r: MeshRec) => Plane4[], k = -1): void => {
       if (caps === 'none') return;
@@ -7288,6 +7325,27 @@ export class Renderer3d {
       );
     else if (sec) build(sec.plane, sec.caps, () => true, () => []);
     return out;
+  }
+
+  /**
+   * 0.72.0 단면 하나 채우기 단위의 평면에 기대지 않는 몫(CapPrep): 장면 그물 기록 all(숨긴 그물까지 — 보이는지는 capSlice가 그리기마다) 가운데 채우기 후보를 장면 차례로
+   * (capUnits와 같은 판단: 반투명이 아니고 capGroup이 있거나 채우기 'all'이거나 닫힌 그물, 그물 하나 단위는 범위가 비지 않은 것). trans·box는 그 그리기의 겉모습·모드를 반영한 값
+   */
+  private capPrepare(all: readonly MeshRec[], caps: SectionDraw['caps'], tok: number, flat: boolean, trans: (r: MeshRec) => boolean, boxOf: (r: MeshRec) => Box3): CapPrep {
+    const recs: MeshRec[] = [], box: Box3[] = [], grp: (string | undefined)[] = [];
+    for (const r of all) {
+      if (trans(r)) continue;
+      const g = r.src.capGroup;
+      if (g === undefined && caps !== 'all' && r.src.closed !== true) continue;
+      const b = boxOf(r);
+      // 그물 하나 단위는 빈 범위면 평면을 걸치지 않는다(boxStraddles). capGroup 그물은 빈 범위여도 묶음에 든다(capUnits와 같다 — 묶음 범위를 합친다)
+      if (g === undefined && boxIsEmpty(b)) continue;
+      recs.push(r);
+      box.push(b);
+      grp.push(g);
+    }
+    const n = recs.length;
+    return { all: all.slice(), tok, flat, caps, recs, box, grp, nrm: null, lo: new Float64Array(3 * n), hi: new Float64Array(3 * n) };
   }
 
   /**
@@ -7483,6 +7541,60 @@ export function sameRecs<T>(a: readonly T[], b: readonly T[]): boolean {
 /** 0.71.0 두 평면 값이 비트까지 같은지(−0과 0은 다르다) */
 export function samePlane(a: Readonly<Plane4>, b: Readonly<Plane4>): boolean {
   return Object.is(a[0], b[0]) && Object.is(a[1], b[1]) && Object.is(a[2], b[2]) && Object.is(a[3], b[3]);
+}
+
+/**
+ * 0.72.0 평면에 기대지 않는 몫 P에서 평면 plane(단면 하나)의 채우기 단위 — capUnits와 같은 단위·같은 차례: 보이는(visAt === vis) 후보만 장면 차례로, 그물 하나 단위는
+ * 평면 걸침(법선 곱은 법선이 바뀔 때만 capTerms — 평면 w만 boxStraddles와 같은 차례로 더한다), capGroup 묶음은 합친 범위가 평면을 걸칠 때만. 단위 색은 color(첫 그물)
+ */
+function capSlice(P: CapPrep, plane: Plane4, vis: number, color: (r: MeshRec) => Rgba): CapUnit[] {
+  const n = P.nrm;
+  if (!n || !Object.is(n[0], plane[0]) || !Object.is(n[1], plane[1]) || !Object.is(n[2], plane[2])) capTerms(P, plane);
+  const out: CapUnit[] = [];
+  const R = P.recs, B = P.box, G = P.grp, lo = P.lo, hi = P.hi, w = plane[3];
+  let groups: Map<string, CapUnit> | null = null;
+  for (let i = 0; i < R.length; i++) {
+    const r = R[i]!;
+    if (r.visAt !== vis) continue;
+    const g = G[i];
+    if (g !== undefined) {
+      const u = (groups ??= new Map()).get(g);
+      if (u) {
+        u.meshes.push(r);
+        u.box = unionBox(u.box, B[i]!);
+      } else {
+        const nu: CapUnit = { meshes: [r], box: B[i]!, plane, others: [], color: color(r), group: true };
+        groups.set(g, nu);
+        out.push(nu);
+      }
+      continue;
+    }
+    const j = 3 * i;
+    let a = w, b = w;
+    a += lo[j]!;
+    b += hi[j]!;
+    a += lo[j + 1]!;
+    b += hi[j + 1]!;
+    a += lo[j + 2]!;
+    b += hi[j + 2]!;
+    if (a <= 0 && b > 0) out.push({ meshes: [r], box: B[i]!, plane, others: [], color: color(r), group: false });
+  }
+  if (groups) for (let i = out.length - 1; i >= 0; i--) if (out[i]!.group && !boxStraddles(out[i]!.box, plane)) out.splice(i, 1);
+  return out;
+}
+
+/** 0.72.0 몫 P의 후보마다 평면 법선 곱(boxStraddles의 축마다 Math.min·Math.max 몫 — 같은 곱이라 같은 값) */
+function capTerms(P: CapPrep, plane: Readonly<Plane4>): void {
+  const B = P.box, lo = P.lo, hi = P.hi;
+  P.nrm = [plane[0], plane[1], plane[2]];
+  for (let i = 0; i < B.length; i++) {
+    const b = B[i]!;
+    for (let k = 0; k < 3; k++) {
+      const a = plane[k]! * b.min[k]!, c = plane[k]! * b.max[k]!;
+      lo[3 * i + k] = Math.min(a, c);
+      hi[3 * i + k] = Math.max(a, c);
+    }
+  }
 }
 
 /** 그물 기록의 잘라내기 자료(처음 쓸 때 만든다 — 모형 행렬로 옮긴 로컬 범위) */
