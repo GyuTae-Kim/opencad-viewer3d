@@ -1300,6 +1300,12 @@ export class Renderer3d {
   /** 0.70.0 겉모습 판: 그리기 상태의 lookKey가 지난 값과 다르면 lookEp를 올린다(MeshRec.lkv와 견준다 — 판이 없는 그리기 뒤에는 NaN이라 다음 판은 늘 새 판) */
   private lookLast = NaN;
   private lookEp = 0;
+  /**
+   * 0.71.0 단면 하나 잘린 면 채우기 단위(capUnits)의 지난 결과와 그때 입력(그물 기록 목록 사본·평면 값·채우기·겉모습 판 표·숨은 선 모드) — 같으면 그 단위를 다시 쓴다
+   * (단위 색만 그리기마다 다시 센다). 시험용 끄기(true면 0.70.0처럼 그리기마다 센다 — 같은 그림인지 견줄 때)
+   */
+  private capMemo: { list: MeshRec[]; plane: Plane4; caps: SectionDraw['caps']; tok: number; flat: boolean; units: CapUnit[] } | null = null;
+  capMemoOff = false;
   /** 0.68.0 이 그리기에서 찾은 인스턴싱 변종(정의 열쇠 — 묶음마다 정의 배열을 잇고 정렬하지 않는다. 그리기마다 비운다) */
   private ivm = new Map<string, Prog>();
   private instM3 = new Float32Array(9);
@@ -2106,6 +2112,8 @@ export class Renderer3d {
     this.rotV = [];
     this.rotH.clear();
     this.rotEp++;
+    // 0.71.0 단면 채우기 단위 캐시도(지난 장면의 그물 기록을 쥐지 않게)
+    this.capMemo = null;
   }
 
   /**
@@ -5663,7 +5671,7 @@ export class Renderer3d {
      */
     const each = (fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void => {
       if (O) mergeKit!.eachItem(O, visSeq, fn, blk);
-      else for (let i = 0; i < visibleMeshes.length; i++) fn(visibleMeshes[i]!);
+      else for (const r of visibleMeshes) fn(r);
     };
     // 0.51.0 화면 밖 잘라내기(src/cull.ts): 시야 사각뿔 옆 네 평면 가운데 하나의 확실히 바깥인 그물에 이 그리기 번호를 적고 면·윤곽선·삼각형 변·숨은 점선·
     // 외곽선·주변 가림 깊이·반투명 면에서 뺀다 — 화면에 화소를 내지 않는 그물이라 그림은 같다. 여백은 굵은 선 반폭·끝 마개(장치 화소 4 × 화소 비율 + 4).
@@ -6132,10 +6140,17 @@ export class Renderer3d {
      * 뼈대에 둔다 — 장면 차례, 뼈대가 맞으면 보이는 목록이 같다), 아니면 each(든 그물은 fn이 건너뛴다)
      */
     const eachIn = (mark: 'ipf' | 'ipz' | 'ipe' | 'ipd' | null, fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void => {
-      if (mark && !O) {
-        const L = (IP!.rest[mark] ??= visibleMeshes.filter((x) => x[mark] !== pid));
-        for (let i = 0; i < L.length; i++) fn(L[i]!);
-      } else each(fn, blk);
+      if (mark && !O) for (const r of (IP!.rest[mark] ??= visibleMeshes.filter((x) => x[mark] !== pid))) fn(r);
+      else each(fn, blk);
+    };
+    /**
+     * 0.71.0 다시 쓰는 차례가 rest의 그물을 새로 모았으면(그 차례 표시가 이 뼈대 — 차례 고리는 첫 줄에서 건너뛴다) rest에서 뺀다(장면 차례 그대로). 0.69.0·0.70.0은
+     * 뼈대를 고쳐 rest에 넣은 그물(다시 보인 그물·강조가 바뀐 그물·다 올리는 동안 든 그물)을 모은 뒤에도 남겨 가만히 프레임마다 다시 훑었다(STEP 84차 반복 부품 1만 —
+     * 면·윤곽선 차례 rest 8,349개씩)
+     */
+    const restDrop = (mark: 'ipf' | 'ipz' | 'ipe' | 'ipd'): void => {
+      const L = IP?.rest[mark];
+      if (L) IP!.rest[mark] = L.filter((x) => x[mark] !== pid);
     };
     /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
     const wireGeoN = sec ? null : geoN;
@@ -6254,6 +6269,7 @@ export class Renderer3d {
       if (rp) {
         // 0.69.0 고친 뼈대: 새로 모은 자리를 묶음에 넣고 묶음 차례를 맞춘다
         if (pend.size || IP!.re.z) {
+          if (pend.size) restDrop('ipz');
           IP!.depth = planMerge(IP!.depth!, () => 0, 'z');
           IP!.re.z = false;
         }
@@ -6345,6 +6361,7 @@ export class Renderer3d {
       if (rpF) {
         // 0.69.0 고친 뼈대: 새로 모은 자리를 묶음에 넣고 묶음 차례를 맞춘다
         if (pend.size || IP!.re.f) {
+          if (pend.size) restDrop('ipf');
           IP!.face = planMerge(IP!.face!, hiOf, 'f');
           IP!.re.f = false;
         }
@@ -6398,7 +6415,20 @@ export class Renderer3d {
           each(push, (k) => kit.capBlock(k, sec.plane, visSeq, push));
           capMeshes = list;
         }
-        const units = this.capUnits(capMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox });
+        // 0.71.0 단면 하나: 그물 기록 목록(원소까지)·평면 값·채우기·겉모습 판(겉모습이 없으면 0)·숨은 선 모드가 지난 그리기와 같으면 채우기 단위를 다시 쓴다(단위 색은
+        // 그리기마다 colOf로 — 단색 모드 색은 그리기마다 새로 만든다). 기록의 반투명·범위·평면 걸침은 기록·겉모습 판이 같으면 같다. 0.70.0까지는 가만히 프레임마다 보이는 그물
+        // 모두의 반투명·범위·걸침을 다시 셌다(STEP 84차 반복 부품 1만 꼴 200 단면 가만히 — 가짜 WebGL 프로파일 약 3 ms). 판을 주지 않는 겉모습·여러 단면은 그리기마다
+        const tok = multi || !sec || this.capMemoOff ? NaN : !look ? 0 : lkOn ? lep : NaN;
+        const CM = this.capMemo;
+        let units: CapUnit[];
+        if (tok === tok && CM && CM.tok === tok && CM.flat === flat && CM.caps === sec!.caps && samePlane(CM.plane, sec!.plane) && sameRecs(CM.list, capMeshes)) {
+          units = CM.units;
+          for (const u of units) u.color = colOf(u.meshes[0]!);
+        } else {
+          units = this.capUnits(capMeshes, sec, multi, { trans: transOf, box: boxOf, color: colOf, cuts: (r) => meshCuts(r)?.map((k) => k.cut) ?? null, cutBox });
+          const p = sec?.plane;
+          this.capMemo = tok === tok && p ? { list: capMeshes.slice(), plane: [p[0], p[1], p[2], p[3]], caps: sec!.caps, tok, flat, units } : null;
+        }
         const plain = meshExtra.length ? this.variant('mesh', [...meshExtra, ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('mesh', ['CLIPN']) : this.mesh;
         const capLists = (r: MeshRec, cut: number | undefined): DrawList[] | null => {
           if (cut === undefined) return meshLists(r);
@@ -6406,7 +6436,7 @@ export class Renderer3d {
           return k ? [k.n, k.h] : [];
         };
         if (units.length) this.drawCaps(f, devW, devH, units, multi, st, stats, meshUse, meshDraw, () => cur, capLists, (pl) => (capPlane = pl), mm, plain);
-      }
+      } else this.capMemo = null;
     }
 
     // 1d) 0.49.0 주변 가림: 불투명 그물 깊이(외곽선과 같은 깊이 그림 — 아래 2c가 다시 쓴다)에서 셈해 지금 그림에 곱한다.
@@ -6589,17 +6619,19 @@ export class Renderer3d {
             return;
           }
           const eparts = ep?.edges;
-          const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaR(r), clip: clipOf(model), clips: clipsOf(r.src.id, model) };
           if (!ep || !eparts) {
-            if (r.edges.parts) this.dropParts(r.edges);
+            // 0.71.0 그물마다 그리기 선택은 객체 하나로(같은 값·같은 칸 차례 — 0.70.0은 선택을 만든 뒤 펼쳐 하나 더 만들었다: 단면 하나면 보이는 그물마다 둘)
+            const rec = r.edges;
+            const lo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaR(r), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n };
+            if (rec.parts) this.dropParts(rec);
             if (mops) {
-              const rec = r.edges;
-              mops.draw(() => this.drawLines(f, rec, model, { ...eo, first: 0, count: rec.n }, st, stats, memo));
+              mops.draw(() => this.drawLines(f, rec, model, lo, st, stats, memo));
               return;
             }
-            this.drawLines(f, r.edges, model, { ...eo, first: 0, count: r.edges.n }, st, stats, memo);
+            this.drawLines(f, rec, model, lo, st, stats, memo);
           } else {
             // 윤곽선 구간(숨김·강조)
+            const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaR(r), clip: clipOf(model), clips: clipsOf(r.src.id, model) };
             const rec = r.edges;
             const partsDraw = (): void => {
               if (memo) memo.p = null;
@@ -6656,6 +6688,7 @@ export class Renderer3d {
       }
       // 0.69.0 고친 뼈대: 새로 모은 묶음을 뼈대 묶음에 넣고 묶음 차례를 맞춘다
       if (rpE && (lineAdd.size || IP!.re.e)) {
+        if (lineAdd.size) restDrop('ipe');
         lineMerge(lineBatches, lineAdd, 'e');
         IP!.re.e = false;
       }
@@ -6783,6 +6816,7 @@ export class Renderer3d {
       }
       // 0.69.0 고친 뼈대: 새로 모은 묶음을 뼈대 묶음에 넣고 묶음 차례를 맞춘다
       if (rpD && (dashAdd.size || IP!.re.d)) {
+        if (dashAdd.size) restDrop('ipd');
         lineMerge(dashBatches, dashAdd, 'd');
         IP!.re.d = false;
       }
@@ -7409,6 +7443,19 @@ export class Renderer3d {
     stats.drawCalls++;
     stats.segments += o.count;
   }
+}
+
+/** 0.71.0 두 그물 기록 목록이 원소까지 같은지(같은 기록 객체가 같은 차례) */
+export function sameRecs<T>(a: readonly T[], b: readonly T[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** 0.71.0 두 평면 값이 비트까지 같은지(−0과 0은 다르다) */
+export function samePlane(a: Readonly<Plane4>, b: Readonly<Plane4>): boolean {
+  return Object.is(a[0], b[0]) && Object.is(a[1], b[1]) && Object.is(a[2], b[2]) && Object.is(a[3], b[3]);
 }
 
 /** 그물 기록의 잘라내기 자료(처음 쓸 때 만든다 — 모형 행렬로 옮긴 로컬 범위) */
