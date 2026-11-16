@@ -5663,7 +5663,7 @@ export class Renderer3d {
      */
     const each = (fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void => {
       if (O) mergeKit!.eachItem(O, visSeq, fn, blk);
-      else for (const r of visibleMeshes) fn(r);
+      else for (let i = 0; i < visibleMeshes.length; i++) fn(visibleMeshes[i]!);
     };
     // 0.51.0 화면 밖 잘라내기(src/cull.ts): 시야 사각뿔 옆 네 평면 가운데 하나의 확실히 바깥인 그물에 이 그리기 번호를 적고 면·윤곽선·삼각형 변·숨은 점선·
     // 외곽선·주변 가림 깊이·반투명 면에서 뺀다 — 화면에 화소를 내지 않는 그물이라 그림은 같다. 여백은 굵은 선 반폭·끝 마개(장치 화소 4 × 화소 비율 + 4).
@@ -6132,8 +6132,10 @@ export class Renderer3d {
      * 뼈대에 둔다 — 장면 차례, 뼈대가 맞으면 보이는 목록이 같다), 아니면 each(든 그물은 fn이 건너뛴다)
      */
     const eachIn = (mark: 'ipf' | 'ipz' | 'ipe' | 'ipd' | null, fn: (r: MeshRec) => void, blk: ((k: MergeBlock, fn: (r: MeshRec) => void) => boolean) | null): void => {
-      if (mark && !O) for (const r of (IP!.rest[mark] ??= visibleMeshes.filter((x) => x[mark] !== pid))) fn(r);
-      else each(fn, blk);
+      if (mark && !O) {
+        const L = (IP!.rest[mark] ??= visibleMeshes.filter((x) => x[mark] !== pid));
+        for (let i = 0; i < L.length; i++) fn(L[i]!);
+      } else each(fn, blk);
     };
     /** 삼각형 변(와이어프레임·숨은 선) 모으기용 같은 그물 수(단면이 있으면 null — 선은 그물마다) */
     const wireGeoN = sec ? null : geoN;
