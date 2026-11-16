@@ -164,7 +164,8 @@ describe('0.71.0 단면 하나 가만히 프레임', () => {
       return ks.slice(0, ks.indexOf('rke') + 1).join(',');
     };
     const h0 = head(recs[0]!);
-    expect(h0.endsWith('lkv,lko,rk,rkm,rke'), h0).toBe(true);
+    // (0.73.0 글자 객체 차례 — lkv·lko는 그리기마다 읽는 칸 묶음 앞쪽, rk·rkm·rke는 뒤쪽. 0.71.0~0.72.0은 'lkv,lko,rk,rkm,rke'가 잇달았다)
+    expect(h0.endsWith('rk,rkm,rke') && h0.split(',').includes('lkv') && h0.split(',').includes('lko'), h0).toBe(true);
     for (const r of recs) expect(head(r), String((r.src as { id: string }).id)).toBe(h0);
     // 회전 표를 센 묶음 그물과 그물마다 그리는 제 배열 그물이 함께 있다
     expect(recs.some((r) => typeof r.rkm === 'object')).toBe(true);
