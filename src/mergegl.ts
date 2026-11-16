@@ -1469,9 +1469,13 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
         if (rotr.length) rotLineFill(h, c, rotr, !!lineFog, texelsR, T, kind, fresh);
       },
     );
-  /** 지금 쓰는 프로그램(사이에 그물마다 그리기가 끼면 null)·이 차례에서 고정 균일 변수를 보낸 프로그램과 그 굵기 */
+  /**
+   * 지금 쓰는 프로그램(사이에 그물마다 그리기가 끼면 null)·이 차례에서 고정 균일 변수를 보낸 프로그램과 그 굵기.
+   * 0.75.0 프로그램마다 마지막으로 보낸 굵기·자리 시작(u_instBase)·불투명도(u_alpha)를 들고 같으면 다시 보내지 않는다(묶음 변종 프로그램의 균일 변수는 이 고리만 쓴다 —
+   * 사이에 끼는 그물마다 그리기는 묶음 변종이 아닌 선 프로그램을 쓴다). 0.74.0까지는 구간마다 두 값을 보냈다(같은 묶음의 구간은 자리 시작이 같다)
+   */
   let P: Prog | null = null;
-  const done = new Map<Prog, number>();
+  const done = new Map<Prog, Float64Array>();
   let common: LiteLine | null = null;
   for (const op of ops) {
     if (typeof op === 'function') {
@@ -1497,7 +1501,7 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       gl.useProgram(Q.p);
       if (!done.has(Q)) {
         // drawLines와 같은 고정 균일 변수(선 색은 자리 자료 — 안개 깊이 행도)
-        done.set(Q, -1);
+        done.set(Q, Float64Array.of(-1, NaN, NaN));
         gl.uniform1i(h.loc(Q, 'u_inst'), STORE_UNIT);
         gl.uniform1f(h.loc(Q, 'u_vcol'), 0);
         gl.uniform4f(h.loc(Q, 'u_override'), 0, 0, 0, 0);
@@ -1521,13 +1525,20 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
         }
       }
     }
-    // 굵은 선 굵기(장치 화소 — drawLines의 wDev)
-    if (wide && done.get(Q) !== op.w * st.dpr) {
-      done.set(Q, op.w * st.dpr);
+    // 굵은 선 굵기(장치 화소 — drawLines의 wDev)·0.75.0 자리 시작·불투명도는 그 프로그램에 마지막으로 보낸 값과 다를 때만
+    const dq = done.get(Q)!;
+    if (wide && dq[0] !== op.w * st.dpr) {
+      dq[0] = op.w * st.dpr;
       gl.uniform1f(h.loc(Q, 'u_width'), op.w * st.dpr);
     }
-    gl.uniform1i(h.loc(Q, 'u_instBase'), op.base);
-    gl.uniform1f(h.loc(Q, 'u_alpha'), op.alpha);
+    if (dq[1] !== op.base) {
+      dq[1] = op.base;
+      gl.uniform1i(h.loc(Q, 'u_instBase'), op.base);
+    }
+    if (dq[2] !== op.alpha) {
+      dq[2] = op.alpha;
+      gl.uniform1f(h.loc(Q, 'u_alpha'), op.alpha);
+    }
     const g = op.g;
     const s0 = g.seg[op.a]!, s1 = g.seg[op.b]!;
     if (wide) {
@@ -1538,6 +1549,7 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       gl.bindVertexArray(g.thin);
       gl.drawArrays(gl.LINES, s0 * 2, (s1 - s0) * 2);
     }
+    // 묶인 프로그램이 바뀌었다(0.75.0 선 프로그램에 보낸 값은 그 프로그램에 남아 기억도 둔다 — 다음 그물마다 그리기는 useProgram만)
     if (memo) memo.p = null;
     stats.drawCalls++;
     stats.segments += s1 - s0;

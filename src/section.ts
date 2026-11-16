@@ -48,6 +48,27 @@ export function planeToLocal(p: Readonly<Plane4>, model?: ArrayLike<number> | nu
   ];
 }
 
+/**
+ * 0.75.0 planeToLocal과 같은 셈·같은 차례(비트까지 같은 값)를 새 배열 대신 out에 쓰고 out을 돌려준다(그물마다 윤곽선이 그리기마다 배열을 만들지 않게).
+ * out을 p와 같은 배열로 주지 않는다
+ */
+export function planeToLocalTo(p: Readonly<Plane4>, model: ArrayLike<number> | null | undefined, out: Plane4): Plane4 {
+  const a = p[0], b = p[1], c = p[2], w = p[3];
+  if (!model) {
+    out[0] = a;
+    out[1] = b;
+    out[2] = c;
+    out[3] = w;
+    return out;
+  }
+  const m = model;
+  out[0] = m[0]! * a + m[1]! * b + m[2]! * c + m[3]! * w;
+  out[1] = m[4]! * a + m[5]! * b + m[6]! * c + m[7]! * w;
+  out[2] = m[8]! * a + m[9]! * b + m[10]! * c + m[11]! * w;
+  out[3] = m[12]! * a + m[13]! * b + m[14]! * c + m[15]! * w;
+  return out;
+}
+
 /** 원점 o만큼 옮긴 로컬(세계 = o + 로컬) 평면 */
 export function planeShift(p: Readonly<Plane4>, o: readonly number[] | undefined | null): Plane4 {
   if (!o) return [p[0], p[1], p[2], p[3]];
