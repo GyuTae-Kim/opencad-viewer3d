@@ -4186,6 +4186,10 @@ export class Renderer3d {
       ipx: -1,
       lkv: 0,
       lko: undefined,
+      // 0.71.0 회전 표 열쇠 칸(rotKey)도 처음부터(0.69.0·0.70.0은 회전 표를 센 묶음 그물에만 늦게 더해 기록의 숨은 꼴이 갈렸다)
+      rk: -1,
+      rkm: undefined,
+      rke: 0,
     };
   }
 
