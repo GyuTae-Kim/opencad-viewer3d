@@ -94,7 +94,7 @@ import { segmentFix, triangleFix } from './sceneissues';
 import { TEXTURE_BUDGET, TEXTURE_LIMIT, decodeTexture, textureSides, uvComponents } from './texture';
 import { contrastLineColor } from './theme';
 import { type BufferSink, type BufferTarget, CHUNK_BYTES, CHUNK_MIN_BYTES, ChunkedUpload, type UploadArray, newArrays } from './upload';
-import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal } from './section';
+import { MAX_SECTION_PLANES, NO_CLIP, type Plane4, boxStraddles, planeBoxPolygon, planeToLocal, planeToLocalTo } from './section';
 import { type IndexRange, type RangePart, clipRanges, compactStride, compactTriIndices, countBelow, cutBits, partCuts, partsOf, rangesTotal } from './ranges';
 import { type MeshArrays, type MeshLayout, type MeshMiss, type ReleaseFlags, type RestoreNeed, arraysMiss, layoutMiss, takeArrays } from './release';
 import { type PbrSource, type PbrState, pbrDefines, pbrNeedsUv, pbrSource, pbrState, pbrTextureIds } from './pbr';
@@ -6623,7 +6623,8 @@ export class Renderer3d {
               ? this.thinClip()
               : this.thinP;
         const lv = this.lineFix(p, lm, col, 0, alphaR(r), 0, fog);
-        this.m4a.set(model ? mat4Mul(f.viewProj, model, this.d4a) : f.viewProj);
+        if (model) mulF32(f.viewProj, model, this.m4a);
+        else this.m4a.set(f.viewProj);
         gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
         if (clip) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
         if (wclips) this.setClips(p, wclips, lv);
@@ -6684,6 +6685,10 @@ export class Renderer3d {
       // 0.51.0 같은 프로그램·같은 값의 윤곽선을 그물마다 잇달아 그릴 때 고정 균일 변수를 다시 보내지 않는다(0.75.0 다른 프로그램만 쓰는 묶음 구간이 끼면 memo.p = null —
       // 값은 남긴다, 선 프로그램의 균일 변수를 쓰는 길이 끼면 lineForget)
       const memo = this.lineMemoOff ? null : lineMemo();
+      // 0.75.0 바로 그리는 그물마다 윤곽선의 그리기 선택과 로컬 평면은 하나씩 두고 그물마다 값만 바꿔 쓴다(drawLines는 선택을 들고 있지 않는다 — 묶음 구간 목록에
+      // 미루는 그리기는 그물마다 새로). 0.74.0은 그물마다 선택 객체와 평면 배열을 새로 만들었다
+      const loS = { color: edgeCol, vcol: false, width: 1, dashed: false, alpha: 1, clip: null as Plane4 | null, clips: null as Plane4[] | null, first: 0, count: 0 };
+      const clipS: Plane4 = [0, 0, 0, 0];
       // 0.52.0 묶음 그물 윤곽선(강조 아닌 1화소)은 구간으로 모아 그물마다 그리기와 장면 차례 그대로(이 차례 끝에 한 번에 — 0.60.0 단면 하나에서도)
       mops = mOnLines ? new kit.RunList() : null;
       /** 0.60.0 묶음 그물마다 윤곽선 색(조각 edgeCols — 강조·그물마다 선 색이 없을 때 아래 col과 같은 값). 선 색 선택이 있으면 면 색마다 이 값 */
@@ -6752,13 +6757,20 @@ export class Renderer3d {
           if (!ep || !eparts) {
             // 0.71.0 그물마다 그리기 선택은 객체 하나로(같은 값·같은 칸 차례 — 0.70.0은 선택을 만든 뒤 펼쳐 하나 더 만들었다: 단면 하나면 보이는 그물마다 둘)
             const rec = r.edges;
-            const lo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaR(r), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n };
             if (rec.parts) this.dropParts(rec);
             if (mops) {
+              const lo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaR(r), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n };
               mops.draw(() => this.drawLines(f, rec, model, lo, st, stats, memo));
               return;
             }
-            this.drawLines(f, rec, model, lo, st, stats, memo);
+            // 0.75.0 바로 그리면 선택·평면을 다시 쓴다(같은 값 — 평면은 planeToLocal과 같은 셈)
+            loS.color = col;
+            loS.width = hi ? 2 : 1;
+            loS.alpha = alphaR(r);
+            loS.clip = sec ? planeToLocalTo(sec.plane, model, clipS) : null;
+            loS.clips = clipsOf(r.src.id, model);
+            loS.count = rec.n;
+            this.drawLines(f, rec, model, loS, st, stats, memo);
           } else {
             // 윤곽선 구간(숨김·강조)
             const eo = { color: col, vcol: false, width: hi ? 2 : 1, dashed: false, alpha: alphaR(r), clip: clipOf(model), clips: clipsOf(r.src.id, model) };
@@ -6893,6 +6905,9 @@ export class Renderer3d {
       const dashAdd = rpD ? new Map<unknown, LineBatch[]>() : dashBatches;
       // 0.51.0 그물마다 잇단 점선은 고정 균일 변수를 다시 보내지 않는다(0.75.0 구간 점선도 함께 — 묶음 구간이 끼면 memo.p = null)
       const dmemo = this.lineMemoOff ? null : lineMemo();
+      // 0.75.0 바로 그리는 그물마다 숨은 점선의 그리기 선택·로컬 평면(윤곽선 차례 loS와 같은 길 — 0.74.0은 그물마다 새로)
+      const doS = { ...backEdgeDash(dashCol, 1), clip: null as Plane4 | null, clips: null as Plane4[] | null, first: 0, count: 0 };
+      const clipS: Plane4 = [0, 0, 0, 0];
       // 0.52.0 묶음 그물 윤곽선의 숨은 점선도 구간으로(장면 차례 그대로 — 0.60.0 단면 하나에서도)
       mops = mOnLines && backEdges.meshes ? new kit.RunList() : null;
       const hiddenA = st.hiddenEdges;
@@ -6920,7 +6935,12 @@ export class Renderer3d {
                 else mops.draw(() => this.drawLines(f, rec, model, { ...backEdgeDash(dashCol, hiddenA * alphaR(r)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n }, st, stats, dmemo));
                 return;
               }
-              this.drawLines(f, rec, model, { ...backEdgeDash(dashCol, hiddenA * alphaR(r)), clip: clipOf(model), clips: clipsOf(r.src.id, model), first: 0, count: rec.n }, st, stats, dmemo);
+              // 0.75.0 바로 그리면 선택·평면을 다시 쓴다(윤곽선 차례 loS와 같은 길)
+              doS.alpha = hiddenA * alphaR(r);
+              doS.clip = sec ? planeToLocalTo(sec.plane, model, clipS) : null;
+              doS.clips = clipsOf(r.src.id, model);
+              doS.count = rec.n;
+              this.drawLines(f, rec, model, doS, st, stats, dmemo);
               return;
             }
             // 0.75.0 구간 점선도 선 기억을 함께 쓴다(0.74.0은 기억을 지우고 모두 보냈다)
@@ -7534,6 +7554,20 @@ export class Renderer3d {
         memo.pv = v;
       }
     } else gl.useProgram(p.p);
+    // 모두 같으면 바로(그물마다 같은 상태 윤곽선 — 0.51.0 lineSame처럼 견주기 한 번)
+    if (
+      v &&
+      v[0] === c[0] &&
+      v[1] === c[1] &&
+      v[2] === c[2] &&
+      v[3] === c[3] &&
+      v[4] === vcol &&
+      v[5] === alpha &&
+      v[6] === 1 &&
+      v[7] === bias &&
+      (!fog || (v[14] === fog.color[0] && v[15] === fog.color[1] && v[16] === fog.color[2] && v[17] === fog.start && v[18] === fog.end))
+    )
+      return v;
     if (!lineSet(v, 0, 4, c[0], c[1], c[2], c[3])) gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
     if (!lineSet(v, 4, 1, vcol)) gl.uniform1f(this.loc(p, 'u_vcol'), vcol);
     if (!lineSet(v, 5, 1, alpha)) gl.uniform1f(this.loc(p, 'u_alpha'), alpha);
@@ -7560,7 +7594,9 @@ export class Renderer3d {
     if (o.count <= 0) return;
     const clips = o.clips ?? null;
     const mvp = this.m4a;
-    mvp.set(matrix ? mat4Mul(f.viewProj, matrix, this.d4a) : f.viewProj);
+    // 0.75.0 시점 투영 · 모형을 float32 행렬에 바로(mulF32 — 배정밀도로 셈해 옮긴 값과 비트까지 같다)
+    if (matrix) mulF32(f.viewProj, matrix, mvp);
+    else mvp.set(f.viewProj);
     const wDev = o.width * st.dpr;
     const fast = st.interacting && r.n > FAST_LINES_WHILE_MOVING;
     const wide = !fast && (o.dashed || wDev > 1.01);
@@ -7614,6 +7650,23 @@ export class Renderer3d {
     stats.drawCalls++;
     stats.segments += o.count;
   }
+}
+
+/**
+ * 0.75.0 a · b(열 차례 4×4)를 float32 배열 out에 바로 — mat4Mul과 같은 식·같은 차례로 배정밀도 값을 셈해 칸에 넣을 때 한 번 float32로 반올림하므로
+ * mat4Mul 결과를 float32 배열에 옮긴 값(m4a.set)과 비트까지 같다(그물마다 선 그리기가 배정밀도 행렬을 거치지 않게)
+ */
+export function mulF32(a: ArrayLike<number>, b: ArrayLike<number>, out: Float32Array): Float32Array {
+  const a0 = a[0]!, a1 = a[1]!, a2 = a[2]!, a3 = a[3]!, a4 = a[4]!, a5 = a[5]!, a6 = a[6]!, a7 = a[7]!;
+  const a8 = a[8]!, a9 = a[9]!, a10 = a[10]!, a11 = a[11]!, a12 = a[12]!, a13 = a[13]!, a14 = a[14]!, a15 = a[15]!;
+  for (let c = 0; c < 16; c += 4) {
+    const b0 = b[c]!, b1 = b[c + 1]!, b2 = b[c + 2]!, b3 = b[c + 3]!;
+    out[c] = 0 + a0 * b0 + a4 * b1 + a8 * b2 + a12 * b3;
+    out[c + 1] = 0 + a1 * b0 + a5 * b1 + a9 * b2 + a13 * b3;
+    out[c + 2] = 0 + a2 * b0 + a6 * b1 + a10 * b2 + a14 * b3;
+    out[c + 3] = 0 + a3 * b0 + a7 * b1 + a11 * b2 + a15 * b3;
+  }
+  return out;
 }
 
 /** 0.71.0 두 그물 기록 목록이 원소까지 같은지(같은 기록 객체가 같은 차례) */
