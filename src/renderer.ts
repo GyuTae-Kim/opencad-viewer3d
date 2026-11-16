@@ -593,6 +593,7 @@ type CullChunks = { recs: MeshRec[][]; box: (CullBox | null)[]; sync?: boolean; 
 /** 0.66.0 다시 셀 덩어리 표시(감싸는 자료 자리 — 배열 값 꼴을 하나로 두려고 undefined 대신) */
 const CULL_REDO: CullBox = new Float64Array(0);
 
+/** 렌더러 그물 기록. 0.72.0 물음표 칸까지 모든 칸을 meshRec 글자 객체에 처음부터 둔다(늦게 더하는 칸이 없다 — 흐름을 지나도 기록 꼴 하나) */
 export interface MeshRec {
   lookM?: LookCache;
   src: Mesh3d;
@@ -4215,6 +4216,10 @@ export class Renderer3d {
       rk: -1,
       rkm: undefined,
       rke: 0,
+      // 0.72.0 그리기·묶어 그리기·인스턴싱 뼈대·잘라내기·겉모습이 나중에 적던 칸도 모두 처음부터(보이는 목록 visAt·visNo, 잘라내기 culledAt·cull, 그리기 뼈대 bk·si,
+      // 인스턴싱 뼈대 표시 ipf…ipc, 겉모습 모형 lookM, 구간 캐시 parts, 묶어 그리기 mg·mi·first·vbase·dropped). 처음 값은 읽는 곳의 뜻 그대로다 — 번호 칸은 0(그리기·보이는 목록·
+      // 뼈대 번호는 1부터), first·vbase는 0(읽는 곳이 ?? 0), 나머지 undefined·false. 0.71.0은 흐름마다 다른 차례로 늦게 더해 숨김·확대 잘라내기·숨은 선·외곽선·분해·
+      // 빼기와 더하기를 지나면 기록의 숨은 꼴이 2개에서 7개(거대형)까지 갈려 그물마다 도는 고리의 칸 읽기가 느려졌다(가짜 WebGL 1만 꼴 24 묶음 섞음 — 꼴이 쌓인 뒤 가만히 CPU 약 −1.8 ms)
       visAt: 0,
       visNo: 0,
       culledAt: 0,
@@ -4259,6 +4264,7 @@ export class Renderer3d {
       gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 16, 0);
     }
     gl.bindVertexArray(null);
+    // 0.72.0 first(묶음 선분 시작 — 묶어 그리기가 묶음 윤곽선 기록에 둔다)도 처음부터(그물마다 버퍼 윤곽선·빛 기록 윤곽선과 기록 꼴 하나 — 읽는 곳이 ?? 0)
     return { id, group, n, pos, col, wide, thin, first: 0 };
   }
 
