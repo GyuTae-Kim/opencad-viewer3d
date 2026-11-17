@@ -1364,7 +1364,8 @@ export class Renderer3d {
   lineMemoOff = false;
   /**
    * 0.76.0 시험용: true면 그물(면) 프로그램 균일 변수 기억(UniMemo)과 그리기 상태 기억(뒷면 버리기·선분 묶음 차례의 섞기·잘린 면의 면 밀기 값)을 쓰지 않고 모두 보낸다
-   * (기억과 그리기 기록이 같은지 견줄 때). 선분 묶음 차례의 선 기억은 lineMemoOff를 따른다
+   * (기억과 그리기 기록이 같은지 견줄 때). 선분 묶음 차례의 선 기억은 lineMemoOff를 따른다.
+   * 0.77.0 같은 기억을 쓰는 인스턴싱 모서리 선(drawLinesInst — 묶인 프로그램 기억 포함)·점 묶음(점 차례 섞기 상태 포함)·외곽선 색 깊이·해 그림자 깊이 그림도 이것을 따른다
    */
   faceMemoOff = false;
   /** 0.60.0 그리기 뼈대(다 올린 뒤 묶음이 있는 장면 — 장면 차례가 그대로인 동안 다시 쓴다)와 시험용 끄기(true면 0.59.0처럼 그물마다 훑는다 — 같은 그림인지 견줄 때) */
@@ -1580,12 +1581,17 @@ export class Renderer3d {
     return (this.meshT ??= { ...this.program(withDefines(MESH_VS, 'TEX'), withDefines(MESH_FS, 'TEX')), tex: true });
   }
 
-  /** 안개 변종 선·점 프로그램에 안개 색·범위와 눈 깊이 행(시점·모형의 z 행)을 올린다 */
-  private setLineFog(p: Prog, f: ViewFrame, model: ArrayLike<number> | undefined, fog: NonNullable<RenderState['fog']>): void {
-    const gl = this.gl;
-    this.lineMvz(p, f, model);
-    gl.uniform4f(this.loc(p, 'u_fogCol'), fog.color[0], fog.color[1], fog.color[2], 1);
-    gl.uniform2f(this.loc(p, 'u_fog'), fog.start, fog.end);
+  /**
+   * 안개 변종 점 프로그램에 안개 색·범위와 눈 깊이 행(시점·모형의 z 행)을 올린다.
+   * 0.77.0 fm = 균일 변수 기억(점 차례 — 있으면 세 균일 변수 모두 그 프로그램에 마지막으로 보낸 값과 비트까지 같을 때 보내지 않는다)
+   */
+  private setLineFog(p: Prog, f: ViewFrame, model: ArrayLike<number> | undefined, fog: NonNullable<RenderState['fog']>, fm: UniMemo | null = null): void {
+    if (fm) {
+      const mv = model ? mat4Mul(f.view, model, this.d4b) : f.view;
+      this.uf(fm, p, 'u_mvz', 4, mv[2]!, mv[6]!, mv[10]!, mv[14]!);
+    } else this.lineMvz(p, f, model);
+    this.uf(fm, p, 'u_fogCol', 4, fog.color[0], fog.color[1], fog.color[2], 1);
+    this.uf(fm, p, 'u_fog', 2, fog.start, fog.end);
   }
 
   /**
@@ -3306,7 +3312,13 @@ export class Renderer3d {
     return base < 0 ? null : { p, base, n: models.length, wide };
   }
 
-  /** 0.42.0 모은 선 묶음 그리기(0.68.0 linesInstPrep이 고른 프로그램·자리로 — 자리 자료는 instFlush가 올렸다) */
+  /**
+   * 0.42.0 모은 선 묶음 그리기(0.68.0 linesInstPrep이 고른 프로그램·자리로 — 자리 자료는 instFlush가 올렸다).
+   * 0.77.0 fm = 그리기 한 번 동안의 균일 변수 기억(render의 UniMemo — 인스턴싱 선 변종 프로그램의 균일 변수는 이 함수만 쓴다)이면 그 프로그램에 마지막으로 보낸 값과
+   * 비트까지 같은 균일 변수는 보내지 않고, im = 그 차례에서 이 함수가 묶은 프로그램(부르는 쪽이 사이에 다른 프로그램을 쓰면 null로)과 같으면 useProgram도 부르지 않는다.
+   * 0.76.0까지는 묶음마다 프로그램과 고정 균일 변수(u_inst·u_color·u_vcol·u_alpha·u_override·u_bias·안개·굵은 선 값)를 모두 보냈다(STEP 앱 꼴마다 묶음 — 가만히 프레임
+   * 같은 값 다시 부름의 대부분)
+   */
   private drawLinesInst(
     x: { p: Prog; base: number; n: number; wide: boolean },
     r: LineRec | null,
@@ -3314,30 +3326,35 @@ export class Renderer3d {
     st: RenderState,
     stats: RenderStats,
     wire?: { vao: WebGLVertexArrayObject; count: number } | null,
+    fm: UniMemo | null = null,
+    im: InstLineMemo | null = null,
   ): void {
     const gl = this.gl;
     const { p, base, n, wide } = x;
     const fog = !o.noFog && st.fog ? st.fog : null;
     const wDev = o.width * st.dpr;
-    gl.useProgram(p.p);
-    if (fog) {
-      gl.uniform4f(this.loc(p, 'u_fogCol'), fog.color[0], fog.color[1], fog.color[2], 1);
-      gl.uniform2f(this.loc(p, 'u_fog'), fog.start, fog.end);
+    if (!im || im.p !== p) {
+      gl.useProgram(p.p);
+      if (im) im.p = p;
     }
-    gl.uniform1i(this.loc(p, 'u_inst'), INST_UNIT);
-    gl.uniform1i(this.loc(p, 'u_instBase'), base);
-    gl.uniform1i(this.loc(p, 'u_instN'), n);
-    gl.uniform4f(this.loc(p, 'u_color'), o.color[0], o.color[1], o.color[2], o.color[3]);
-    gl.uniform1f(this.loc(p, 'u_vcol'), o.vcol ? 1 : 0);
-    gl.uniform1f(this.loc(p, 'u_alpha'), o.alpha);
-    gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-    gl.uniform1f(this.loc(p, 'u_bias'), o.bias ?? 0);
+    if (fog) {
+      this.uf(fm, p, 'u_fogCol', 4, fog.color[0], fog.color[1], fog.color[2], 1);
+      this.uf(fm, p, 'u_fog', 2, fog.start, fog.end);
+    }
+    this.ui(fm, p, 'u_inst', INST_UNIT);
+    this.ui(fm, p, 'u_instBase', base);
+    this.ui(fm, p, 'u_instN', n);
+    this.uf(fm, p, 'u_color', 4, o.color[0], o.color[1], o.color[2], o.color[3]);
+    this.uf(fm, p, 'u_vcol', 1, o.vcol ? 1 : 0);
+    this.uf(fm, p, 'u_alpha', 1, o.alpha);
+    this.uf(fm, p, 'u_override', 4, 0, 0, 0, 0);
+    this.uf(fm, p, 'u_bias', 1, o.bias ?? 0);
     if (wide && r) {
-      if (st.viewport) gl.uniform2f(this.loc(p, 'u_viewport'), st.viewport[0], st.viewport[1]);
-      else gl.uniform2f(this.loc(p, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
-      gl.uniform1f(this.loc(p, 'u_width'), wDev);
-      gl.uniform2f(this.loc(p, 'u_dash'), o.dashed ? DASH[0] * st.dpr : 0, DASH[1] * st.dpr);
-      gl.uniform4f(this.loc(p, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
+      if (st.viewport) this.uf(fm, p, 'u_viewport', 2, st.viewport[0], st.viewport[1]);
+      else this.uf(fm, p, 'u_viewport', 2, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      this.uf(fm, p, 'u_width', 1, wDev);
+      this.uf(fm, p, 'u_dash', 2, o.dashed ? DASH[0] * st.dpr : 0, DASH[1] * st.dpr);
+      this.uf(fm, p, 'u_clip', 4, NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
       gl.bindVertexArray(r.wide);
       // 인스턴스 = 선분 × 자리: 선분 속성은 자리 수마다 한 칸(셰이더의 자리 = gl_InstanceID % u_instN)
       const at = r.col ? [1, 2, 3, 4] : [1, 2];
@@ -5948,27 +5965,28 @@ export class Renderer3d {
         gl.polygonOffset(2, 4);
         const dp = this.variant('depth', multi ? ['CLIPN'] : sec ? ['CLIP'] : []);
         gl.useProgram(dp.p);
+        // 0.77.0 행렬·평면은 균일 변수 기억(fm)과 견준다 — 같은 모형(행렬 없는 그물)이면 다시 보내지 않는다(0.76.0은 그물마다 모두)
         for (const r of visibleMeshes) {
           if (transOf(r)) continue;
           const model = mm(r);
           const lv = model ? mat4Mul(m.vp, model, this.d4a) : m.vp;
           this.m4a.set(lv);
-          gl.uniformMatrix4fv(this.loc(dp, 'u_mvp'), false, this.m4a);
+          this.um(fm, dp, 'u_mvp', this.m4a);
           if (sec) {
             const c = clipOf(model)!;
-            gl.uniform4f(this.loc(dp, 'u_clip'), c[0], c[1], c[2], c[3]);
+            this.uf(fm, dp, 'u_clip', 4, c[0], c[1], c[2], c[3]);
           }
           // 0.44.0 구간 단면 갈래마다 그 평면들로
           const C = meshCuts(r);
           if (C) {
             for (const k of C) {
-              this.setClips(dp, clipsOfCut(r.src.id, model, k.cut));
+              this.setClips(dp, clipsOfCut(r.src.id, model, k.cut), null, fm);
               this.drawMeshGeometry(r, k.n);
               this.drawMeshGeometry(r, k.h);
             }
             continue;
           }
-          if (multi) this.setClips(dp, clipsOf(r.src.id, model)!);
+          if (multi) this.setClips(dp, clipsOf(r.src.id, model)!, null, fm);
           const L = meshLists(r);
           if (!L) this.drawMeshGeometry(r, null);
           else for (const l of L) this.drawMeshGeometry(r, l);
@@ -6901,11 +6919,14 @@ export class Renderer3d {
           lineJobs.push({ b, e, wire, o, x: this.linesInstPrep(f, b0, e, b.models, o, st, wire, b.recs) });
         }
       if (lineJobs.length) this.instFlush();
+      // 0.77.0 잇단 묶음은 같은 프로그램이면 useProgram 없이, 고정 균일 변수는 그리기 한 번 동안의 균일 변수 기억(fm)과 견준다(그물마다 그리는 묶음이 끼면 묶인 프로그램을 모름으로)
+      const ilm: InstLineMemo | null = fm ? { p: null } : null;
       for (const { b, e, wire, o, x } of lineJobs) {
         if (x) {
-          this.drawLinesInst(x, e, o, st, stats, wire);
+          this.drawLinesInst(x, e, o, st, stats, wire, fm, ilm);
           continue;
         }
+        if (ilm) ilm.p = null;
         b.recs.forEach((r, i) => {
           if (wire) wireDraw(r, b.models[i], b.color);
           else this.drawLines(f, r.edges!, b.models[i], { ...o, first: 0, count: r.edges!.n }, st, stats);
@@ -7027,9 +7048,14 @@ export class Renderer3d {
           dashJobs.push({ b, e, o, x: this.linesInstPrep(f, b0, e, b.models, o, st, null, b.recs) });
         }
       if (dashJobs.length) this.instFlush();
+      // 0.77.0 윤곽선 차례와 같은 길(잇단 묶음 — useProgram·고정 균일 변수는 다를 때만)
+      const dlm: InstLineMemo | null = fm ? { p: null } : null;
       for (const { b, e, o, x } of dashJobs) {
-        if (x) this.drawLinesInst(x, e, o, st, stats);
-        else b.recs.forEach((r, i) => dashHidden(r.edges!, r.src.id, b.models[i], r.edges!.n, null, 0, r.src.edges!, undefined));
+        if (x) this.drawLinesInst(x, e, o, st, stats, null, fm, dlm);
+        else {
+          if (dlm) dlm.p = null;
+          b.recs.forEach((r, i) => dashHidden(r.edges!, r.src.id, b.models[i], r.edges!.n, null, 0, r.src.edges!, undefined));
+        }
       }
       // 0.76.0 모형 모서리 선분 묶음의 숨은 점선도 선 기억을 함께 쓴다(새 기억 — 앞 묶음 점선 그리기가 다른 프로그램을 묶었다. 0.75.0은 묶음마다 모두 보냈다)
       const ldm = this.lineMemoOff ? null : lineMemo();
@@ -7069,25 +7095,26 @@ export class Renderer3d {
           gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
           const dp = this.variant('depth', ['PCOL', ...(multi ? ['CLIPN'] : sec ? ['CLIP'] : [])]);
           gl.useProgram(dp.p);
+          // 0.77.0 행렬·평면·외곽선 색은 균일 변수 기억(fm)과 견준다 — 같은 모형(행렬 없는 그물)·같은 외곽선 색이면 다시 보내지 않는다(0.76.0은 그물마다 모두)
           for (const r of visibleMeshes) {
             if (transOf(r) || gone(r)) continue;
             const model = mm(r);
             const mv = model ? mat4Mul(f.view, model, this.d4a) : f.view;
             this.m4a.set(model ? mat4Mul(f.proj, mv, this.d4b) : f.viewProj);
-            gl.uniformMatrix4fv(this.loc(dp, 'u_mvp'), false, this.m4a);
+            this.um(fm, dp, 'u_mvp', this.m4a);
             if (sec) {
               const k = clipOf(model)!;
-              gl.uniform4f(this.loc(dp, 'u_clip'), k[0], k[1], k[2], k[3]);
+              this.uf(fm, dp, 'u_clip', 4, k[0], k[1], k[2], k[3]);
             }
-            if (multi) this.setClips(dp, clipsOf(r.src.id, model)!);
+            if (multi) this.setClips(dp, clipsOf(r.src.id, model)!, null, fm);
             const ic = lookR(r)?.profileColor ?? pc;
-            gl.uniform4f(this.loc(dp, 'u_pcol'), ic[0], ic[1], ic[2], ic[3]);
+            this.uf(fm, dp, 'u_pcol', 4, ic[0], ic[1], ic[2], ic[3]);
             cullTo(r.src.doubleSided === false);
             // 0.44.0 구간 단면 갈래마다 그 평면들로
             const C = meshCuts(r);
             if (C) {
               for (const k of C) {
-                this.setClips(dp, clipsOfCut(r.src.id, model, k.cut));
+                this.setClips(dp, clipsOfCut(r.src.id, model, k.cut), null, fm);
                 this.drawMeshGeometry(r, k.n);
                 this.drawMeshGeometry(r, k.h);
               }
@@ -7208,11 +7235,15 @@ export class Renderer3d {
     if (this.points.length) {
       const p = fog ? this.variant('point', ['FOG', ...(multi ? ['CLIPN'] : [])]) : multi ? this.variant('point', ['CLIPN']) : this.pointP;
       gl.useProgram(p.p);
-      gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, vpF);
-      gl.uniform2f(this.loc(p, 'u_viewport'), devW, devH);
-      gl.uniform1f(this.loc(p, 'u_bias'), 2e-5);
-      gl.uniform4f(this.loc(p, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
+      // 0.77.0 점 프로그램 균일 변수(행렬·보기 창·치우침·평면·안개·크기·색·테 색)는 균일 변수 기억(fm)과 견준다 — 같은 값이면 점 묶음마다 다시 보내지 않는다(0.76.0은 모두)
+      this.um(fm, p, 'u_mvp', vpF);
+      this.uf(fm, p, 'u_viewport', 2, devW, devH);
+      this.uf(fm, p, 'u_bias', 1, 2e-5);
+      this.uf(fm, p, 'u_clip', 4, NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
       let shifted = false;
+      // 0.77.0 섞기(BLEND) 상태: 처음은 모름(undefined — 0.76.0처럼 첫 불투명 점은 들어온 상태로 그리고 그 뒤 끈다). 반투명 점 앞에서 켜고, 켠 채로 불투명 점을 만나면 끄고,
+      // 차례 끝에 켜져 있으면 끈다 — 점마다 그릴 때의 섞기 상태는 0.76.0(점마다 그린 뒤 끔)과 같다. 기억을 끄면(fm 없음) 0.76.0 그대로
+      let blendOn: boolean | undefined;
       for (const r of this.points) {
         if (!vis(r.src.id, r.src.group) || !r.n) continue;
         const hi = st.highlight.has(r.src.id);
@@ -7222,23 +7253,32 @@ export class Renderer3d {
         const model = lm(r, r.src.id);
         if (model || shifted) {
           this.m4a.set(model ? mat4Mul(f.viewProj, model, this.d4a) : f.viewProj);
-          gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
+          this.um(fm, p, 'u_mvp', this.m4a);
           shifted = !!model;
         }
         if (sec) {
           const k = clipOf(model)!;
-          gl.uniform4f(this.loc(p, 'u_clip'), k[0], k[1], k[2], k[3]);
+          this.uf(fm, p, 'u_clip', 4, k[0], k[1], k[2], k[3]);
         }
-        if (multi) this.setClips(p, clipsOf(r.src.id, model)!);
-        if (fog) this.setLineFog(p, f, model, fog);
+        if (multi) this.setClips(p, clipsOf(r.src.id, model)!, null, fm);
+        if (fog) this.setLineFog(p, f, model, fog, fm);
         const draw = (vao: WebGLVertexArrayObject, n: number, c: Rgba, big: boolean): void => {
-          gl.uniform1f(this.loc(p, 'u_size'), Math.max(1, (r.src.size ?? 4) * st.dpr + (big ? 2 * st.dpr : 0)));
-          gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
-          gl.uniform4f(this.loc(p, 'u_ring'), c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 1);
-          if (c[3] < 1) gl.enable(gl.BLEND);
+          this.uf(fm, p, 'u_size', 1, Math.max(1, (r.src.size ?? 4) * st.dpr + (big ? 2 * st.dpr : 0)));
+          this.uf(fm, p, 'u_color', 4, c[0], c[1], c[2], c[3]);
+          this.uf(fm, p, 'u_ring', 4, c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 1);
+          if (c[3] < 1) {
+            if (!fm || blendOn !== true) gl.enable(gl.BLEND);
+            blendOn = true;
+          } else if (fm && blendOn === true) {
+            gl.disable(gl.BLEND);
+            blendOn = false;
+          }
           gl.bindVertexArray(vao);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
-          gl.disable(gl.BLEND);
+          if (!fm || blendOn === undefined) {
+            gl.disable(gl.BLEND);
+            blendOn = false;
+          }
           stats.drawCalls++;
           stats.points += n;
         };
@@ -7253,7 +7293,7 @@ export class Renderer3d {
           const PC = multi ? cacheCuts(pc, pp.prims) : null;
           if (PC)
             for (const k of PC) {
-              this.setClips(p, clipsOfCut(r.src.id, model, k));
+              this.setClips(p, clipsOfCut(r.src.id, model, k), null, fm);
               const ln = this.pointList(r, pc, pp.prims, false, k), lh = this.pointList(r, pc, pp.prims, true, k);
               if (ln.compact) draw(ln.compact.vao, ln.total, c, hi);
               if (lh.compact) draw(lh.compact.vao, lh.total, hiTint, true);
@@ -7265,6 +7305,7 @@ export class Renderer3d {
           }
         }
       }
+      if (blendOn === true) gl.disable(gl.BLEND);
     }
 
     // 5) 공구 표시(단면으로 자르지 않는다)
@@ -7996,9 +8037,19 @@ function lineSetA(v: Float64Array | null, k: number, a: ArrayLike<number>, n: nu
 
 /**
  * 0.76.0 그물(면) 프로그램 균일 변수 기억: 균일 변수 위치(프로그램 하나의 균일 변수 하나)마다 그 프로그램에 마지막으로 보낸 값. 그리기 한 번(render) 동안만 쓴다 —
- * GL은 균일 변수 값을 프로그램마다 들고 있어 다른 프로그램을 쓴 뒤 돌아와도 남는다. 기억 밖에서 그 균일 변수를 쓰는 길(묶음 구간 그리기의 자리 자료 단위)이 끼면 그 칸을 지운다
+ * GL은 균일 변수 값을 프로그램마다 들고 있어 다른 프로그램을 쓴 뒤 돌아와도 남는다. 기억 밖에서 그 균일 변수를 쓰는 길(묶음 구간 그리기의 자리 자료 단위)이 끼면 그 칸을 지운다.
+ * 0.77.0 인스턴싱 선 변종(drawLinesInst)·점·깊이 그림(해 그림자·외곽선 색 깊이) 프로그램도 같은 기억을 쓴다 — 이 프로그램들의 균일 변수는 그 차례 하나만 쓰고 모두 이 기억을 거친다
+ * (묶음 구간 그리기의 MSHIFT 변종 u_mvp0·u_mv0·u_nmat0·u_shadow0 직접 쓰기는 기억이 들지 않는 이름이라 겹치지 않는다)
  */
 export type UniMemo = Map<WebGLUniformLocation, Float64Array>;
+
+/**
+ * 0.77.0 인스턴싱 모서리 선 차례(윤곽선·삼각형 변 묶음, 숨은 점선 묶음)에서 drawLinesInst가 마지막으로 묶은 프로그램(차례마다 새로 — null이면 다음 묶음은 useProgram부터).
+ * 부르는 쪽이 묶음 사이에 다른 프로그램을 쓰면(자리 자료가 모자라 그물마다 그리는 묶음) null로 돌린다
+ */
+export interface InstLineMemo {
+  p: Prog | null;
+}
 
 /** 0.76.0 두 수가 비트까지 같은지(−0과 +0은 다르게, NaN은 늘 다르게 — 다시 보낸다) */
 function sameNum(x: number, y: number): boolean {
