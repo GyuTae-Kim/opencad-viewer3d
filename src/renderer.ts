@@ -1246,8 +1246,6 @@ export class Renderer3d {
   private m3 = new Float32Array(9);
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
-  /** 0.76.0 안개 선의 눈 깊이 행(lineMvz — 선 기억과 견준다) */
-  private mvzRow = new Float64Array(4);
   /** 0.43.0 자리 자료의 그림자 행렬(빛 · 모형) 셈 자리 */
   private d4c = new Float64Array(16);
   private capData = new Float32Array(CAP_MAX_VERTS * 3);
@@ -1596,12 +1594,15 @@ export class Renderer3d {
    */
   private lineMvz(p: Prog, f: ViewFrame, model: ArrayLike<number> | undefined, v: Float64Array | null = null): void {
     const mv = model ? mat4Mul(f.view, model, this.d4b) : f.view;
-    const z = this.mvzRow;
-    z[0] = mv[2]!;
-    z[1] = mv[6]!;
-    z[2] = mv[10]!;
-    z[3] = mv[14]!;
-    if (!lineSetA(v, 24, z, 4)) this.gl.uniform4f(this.loc(p, 'u_mvz'), z[0], z[1], z[2], z[3]);
+    const z0 = mv[2]!, z1 = mv[6]!, z2 = mv[10]!, z3 = mv[14]!;
+    if (v) {
+      if (sameNum(v[27]!, z3) && sameNum(v[26]!, z2) && sameNum(v[25]!, z1) && sameNum(v[24]!, z0)) return;
+      v[24] = z0;
+      v[25] = z1;
+      v[26] = z2;
+      v[27] = z3;
+    }
+    this.gl.uniform4f(this.loc(p, 'u_mvz'), z0, z1, z2, z3);
   }
 
   /** 해 그림자 깊이 그림(비교 표본 — sampler2DShadow) */
@@ -7982,14 +7983,14 @@ function lineSet(v: Float64Array | null, k: number, n: number, a0: number, a1 = 
 
 /**
  * 0.76.0 선 기억 값 v의 칸 [k, k + n)이 a의 앞 n개와 비트까지 같으면 true(−0과 +0은 다르게, NaN은 늘 다르게 — 다시 보낸다), 아니면 적고 false.
- * v가 없으면(기억 없음) 늘 false. float32 행렬·평면 배열(그리기마다 값이 같을 수 있는 균일 변수)용
+ * v가 없으면(기억 없음) 늘 false. float32 행렬·평면 배열(그리기마다 값이 같을 수 있는 균일 변수)용. 뒤 칸부터 견준다 — 그물마다 다른 행렬·평면은 이동 열·d 칸에서 곧 갈린다
  */
 function lineSetA(v: Float64Array | null, k: number, a: ArrayLike<number>, n: number): boolean {
   if (!v) return false;
-  let i = 0;
-  for (; i < n; i++) if (!sameNum(a[i]!, v[k + i]!)) break;
-  if (i === n) return true;
-  for (; i < n; i++) v[k + i] = a[i]!;
+  let i = n - 1;
+  for (; i >= 0; i--) if (!sameNum(a[i]!, v[k + i]!)) break;
+  if (i < 0) return true;
+  for (; i >= 0; i--) v[k + i] = a[i]!;
   return false;
 }
 
@@ -8022,7 +8023,7 @@ function uniSame(m: UniMemo | null, l: WebGLUniformLocation | null, n: number, a
   return false;
 }
 
-/** 0.76.0 uniSame의 배열 꼴(행렬·평면 배열 — a의 앞 n개) */
+/** 0.76.0 uniSame의 배열 꼴(행렬·평면 배열 — a의 앞 n개, lineSetA처럼 뒤 칸부터 견준다) */
 function uniSameA(m: UniMemo | null, l: WebGLUniformLocation | null, a: ArrayLike<number>, n: number): boolean {
   if (!m || !l) return false;
   let s = m.get(l);
@@ -8031,9 +8032,9 @@ function uniSameA(m: UniMemo | null, l: WebGLUniformLocation | null, a: ArrayLik
     for (let i = 0; i < n; i++) s[i] = a[i]!;
     return false;
   }
-  let i = 0;
-  for (; i < n; i++) if (!sameNum(a[i]!, s[i]!)) break;
-  if (i === n) return true;
-  for (; i < n; i++) s[i] = a[i]!;
+  let i = n - 1;
+  for (; i >= 0; i--) if (!sameNum(a[i]!, s[i]!)) break;
+  if (i < 0) return true;
+  for (; i >= 0; i--) s[i] = a[i]!;
   return false;
 }
