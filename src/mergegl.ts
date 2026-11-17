@@ -168,6 +168,12 @@ export interface MergeDrawCtx {
   cullTo(c: boolean): void;
   drawParts(r: MeshRec, color: Rgba, alpha: number, tint: number, cull: boolean): void;
   dash: readonly [number, number];
+  /**
+   * 0.76.0 그물 프로그램 균일 변수 보내기(render의 균일 변수 기억과 견준다 — 그 프로그램에 마지막으로 보낸 값과 비트까지 같으면 보내지 않는다).
+   * 묶음 구간의 자리 자료 단위·자리 시작·자리 텍셀 수·깃발(0.75.0은 구간마다 — 그물마다 그리기가 끼어 프로그램을 오가면 같은 값을 다시 보냈다)
+   */
+  ui(p: Prog, name: string, v: number): void;
+  uf(p: Prog, name: string, n: 1 | 2 | 3 | 4, a0: number, a1?: number, a2?: number, a3?: number): void;
 }
 
 /**
@@ -1381,7 +1387,7 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
     }
     // 자리 자료는 저장소 그림 단위에서(meshUse가 인스턴싱 단위로 건 것을 바꾼다)
     if (c.use(p) || !set.has(p)) {
-      gl.uniform1i(h.loc(p, 'u_inst'), STORE_UNIT);
+      c.ui(p, 'u_inst', STORE_UNIT);
       if (L && !set.has(p)) {
         const m = (common ??= liteMesh(c));
         gl.uniformMatrix4fv(h.loc(p, 'u_mvp0'), false, m.mvp);
@@ -1391,13 +1397,13 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       }
       set.add(p);
     }
-    gl.uniform1i(h.loc(p, 'u_instBase'), op.base);
-    if (p.shadow || p.clip1) gl.uniform1i(h.loc(p, 'u_instStride'), L || Rt ? strideL : stride);
+    c.ui(p, 'u_instBase', op.base);
+    if (p.shadow || p.clip1) c.ui(p, 'u_instStride', L || Rt ? strideL : stride);
     // 정점 색 쓰기는 자리 자료 깃발이라 균일 변수 u_vcol이 없다(기억에는 false로)
     if (c.flagsNew(false, op.g.hasNormals, op.tint, op.alpha)) {
-      gl.uniform1f(h.loc(p, 'u_hasNrm'), op.g.hasNormals ? 1 : 0);
-      gl.uniform4f(h.loc(p, 'u_tint'), c.hiTint[0], c.hiTint[1], c.hiTint[2], op.tint);
-      gl.uniform1f(h.loc(p, 'u_alpha'), op.alpha);
+      c.uf(p, 'u_hasNrm', 1, op.g.hasNormals ? 1 : 0);
+      c.uf(p, 'u_tint', 4, c.hiTint[0], c.hiTint[1], c.hiTint[2], op.tint);
+      c.uf(p, 'u_alpha', 1, op.alpha);
     }
     c.cullTo(op.g.cull);
     const t0 = op.g.tri[op.a]!, t1 = op.g.tri[op.b]!;
