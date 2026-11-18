@@ -39,6 +39,9 @@
  *   화면 미분(dFdx·dFdy)으로 풀어(∂p/∂u·∂p/∂v) 법선에 맞춰 곧게 펴고, 손잡이는 ∂p/∂v 쪽으로 맞춘다(접선 속성이 늘지 않는다). PBR = 거칠기(u_rough 초록)·금속성(u_metal 파랑)
  *   그림 × 배율(u_pbr — 그림이 없으면 흰 1화소 그림이라 배율이 곧 값, z = 거칠기 뒤집기)로 반사광 지수 2/α² − 2(α = 거칠기²)·정규화 (n + 8)/8·F0 = mix(0.04, 바탕색, 금속성)·n·l,
  *   확산광 (1 − 금속성)배, 금속은 주변광 몫을 바탕색으로 되비춘다(둘레 빛 없는 어림 — 계산 근거는 pbr.ts). 뒷면 색·무늬를 칠하는 쪽(BACK)에는 쓰지 않는다
+ * - 행렬·평면 한 배열(MVPC, 0.78.0 — 인스턴싱이 아닌 굵은 선·가는 선의 단면 하나): 그물마다 그리는 선의 시점 투영 · 모형 u_mvp와 로컬 평면 u_clip을 균일 변수 배열
+ *   u_mvpc[5](열 0~3 = u_mvp, 4 = u_clip)로 한 번에 받아 같은 이름의 지역 변수로 둔다(INST와 같이 아래 식은 그대로 — 같은 float 값에 같은 연산). 그리기 하나의 GL 호출이
+ *   넷(행렬·평면·VAO·그리기)에서 셋으로. 가는 선은 CLIP과 함께만 쓴다. 정의하지 않은 변종의 글은 예전과 전처리 뒤 글자까지 같다
  */
 
 /** 셰이더 원본에 #define들을 넣은 변종 */
@@ -374,7 +377,11 @@ vec4 tabAt(int k) {
 }
 #endif
 #else
+#ifdef MVPC
+uniform vec4 u_mvpc[5];
+#else
 uniform mat4 u_mvp;
+#endif
 #endif
 uniform vec2 u_viewport;
 uniform float u_width;
@@ -383,7 +390,9 @@ uniform float u_vcol;
 uniform float u_alpha;
 uniform vec4 u_override;
 uniform float u_bias;
+#ifndef MVPC
 uniform vec4 u_clip;
+#endif
 out vec4 v_col;
 out float v_alongW;
 out float v_w;
@@ -416,6 +425,10 @@ void main() {
   vec4 u_mvz = instAt(4);
 #endif
 #endif
+#endif
+#ifdef MVPC
+  mat4 u_mvp = mat4(u_mvpc[0], u_mvpc[1], u_mvpc[2], u_mvpc[3]);
+  vec4 u_clip = u_mvpc[4];
 #endif
   vec3 p0 = a_p0;
   vec3 p1 = a_p1;
@@ -534,7 +547,11 @@ vec4 tabAt(int k) {
 }
 #endif
 #else
+#ifdef MVPC
+uniform vec4 u_mvpc[5];
+#else
 uniform mat4 u_mvp;
+#endif
 #endif
 uniform vec4 u_color;
 uniform float u_vcol;
@@ -543,7 +560,9 @@ uniform vec4 u_override;
 uniform float u_bias;
 out vec4 v_col;
 #ifdef CLIP
+#ifndef MVPC
 uniform vec4 u_clip;
+#endif
 out float v_clip;
 #endif
 #ifdef CLIPN
@@ -573,6 +592,12 @@ void main() {
 #ifdef FOG
   vec4 u_mvz = instAt(4);
 #endif
+#endif
+#endif
+#ifdef MVPC
+  mat4 u_mvp = mat4(u_mvpc[0], u_mvpc[1], u_mvpc[2], u_mvpc[3]);
+#ifdef CLIP
+  vec4 u_clip = u_mvpc[4];
 #endif
 #endif
   vec4 c = u_mvp * vec4(a_pos, 1.0);

@@ -49,14 +49,20 @@ const MSHIFT = /^#define MSHIFT$/m;
 const MROT = /^#define MROT$/m;
 /** 0.69.0 인스턴싱 회전 표 꼴(0~2열·법선 행렬·그림자 0~2열·안개 z 행 앞 세 칸은 자리 앞 표 항목 — 면은 텍셀 1의 w, 선은 텍셀 1의 y가 표 번호) */
 const IROT = /^#define IROT$/m;
+/** 0.78.0 선의 행렬·평면 한 배열(u_mvpc[5] — 0~15 u_mvp, 16~19 u_clip) */
+const MVPC = /^#define MVPC$/m;
 
-/** 셰이더 정의(INST·MERGE·MCLIP·MSHIFT·MROT·IROT — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
+/** 셰이더 정의(INST·MERGE·MCLIP·MSHIFT·MROT·IROT·MVPC — 행렬·평면을 어디서 읽는지만 다르다 — 는 뺀다) */
 const defsOf = (vs: string): string =>
   [...vs.matchAll(/^#define (\w+)$/gm)]
     .map((m) => m[1]!)
-    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP' && d !== 'MSHIFT' && d !== 'MROT' && d !== 'IROT')
+    .filter((d) => d !== 'INST' && d !== 'MERGE' && d !== 'MCLIP' && d !== 'MSHIFT' && d !== 'MROT' && d !== 'IROT' && d !== 'MVPC')
     .sort()
     .join(',');
+
+/** 0.78.0 선 프로그램의 행렬(u_mvp)·평면(u_clip): MVPC면 u_mvpc 앞 16칸·뒤 4칸, 아니면 그 균일 변수 */
+const lineMvp = (vs: string, U: ReadonlyMap<string, unknown[]>): number[] => (MVPC.test(vs) ? f32(U.get('u_mvpc'))!.slice(0, 16) : f32(U.get('u_mvp'))!);
+const lineClip = (vs: string, U: ReadonlyMap<string, unknown[]>): number[] | null => (MVPC.test(vs) ? f32(U.get('u_mvpc'))!.slice(16, 20) : f32(U.get('u_clip')));
 
 /** 0.62.0 균일 변수 4×4 행렬의 0~2열과 자리 텍셀 c3(3열) */
 const cols012 = (U: ReadonlyMap<string, unknown[]>, name: string, c3: number[]): number[] => [...f32(U.get(name))!.slice(0, 12), ...c3];
@@ -219,7 +225,7 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
       JSON.stringify([U.get('u_vcol'), U.get('u_alpha'), f32(U.get('u_override')), U.get('u_bias'), U.get('u_width'), U.get('u_viewport'), U.get('u_dash'), clip, f32(U.get('u_fogCol')), U.get('u_fog')]);
     const mclip = merge && MCLIP.test(vs);
     const L = lineLayout(vs, merge, mclip);
-    const fixed0 = fixedOf(f32(U.get('u_clip')));
+    const fixed0 = fixedOf(lineClip(vs, U));
     const instN = (U.get('u_instN')?.[0] as number) ?? 1;
     const div = (a: Attrib | undefined): number => Math.max(1, a?.divisor ?? 1);
     for (let n = 0; n < nInst; n++) {
@@ -228,7 +234,7 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
       const at = (j: number): number[] => texel(d, base + item * L.n + j);
       const fixed = mclip ? fixedOf(at(L.clip)) : fixed0;
       const R = L.rot ? L.rot(at, (k) => texel(d, base + k)) : null;
-      const mvp = R ? R.mvp : L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
+      const mvp = R ? R.mvp : L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : lineMvp(vs, U);
       const col = merge ? at(L.col) : f32(U.get('u_color'));
       const mvz = R ? R.mvz : L.lite ? L.mvz(U, at) : inst ? at(4) : f32(U.get('u_mvz'));
       const p0 = attr(a1, Math.floor(n / div(a1)), 3)!, p1 = attr(a2, Math.floor(n / div(a2)), 3)!;
@@ -241,7 +247,7 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
     const fixedOf = (clip: number[] | null): string => JSON.stringify([U.get('u_vcol'), U.get('u_alpha'), f32(U.get('u_override')), U.get('u_bias'), clip, f32(U.get('u_fogCol')), U.get('u_fog')]);
     const mclip = merge && MCLIP.test(vs);
     const L = lineLayout(vs, merge, mclip);
-    let fixed = fixedOf(f32(U.get('u_clip')));
+    let fixed = fixedOf(lineClip(vs, U));
     const instN = (U.get('u_instN')?.[0] as number) ?? 1;
     const vl = verts();
     for (let n = 0; n < nInst; n++) {
@@ -251,7 +257,7 @@ export function expandDraw(gl: FakeGL, d: LiveDraw, out: string[]): void {
         const at = (j: number): number[] => texel(d, base + item * L.n + j);
         if (mclip) fixed = fixedOf(at(L.clip));
         const R = L.rot ? L.rot(at, (k) => texel(d, base + k)) : null;
-        const mvp = R ? R.mvp : L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : f32(U.get('u_mvp'))!;
+        const mvp = R ? R.mvp : L.lite ? cols012(U, 'u_mvp0', at(0)) : inst ? [...at(0), ...at(1), ...at(2), ...at(3)] : lineMvp(vs, U);
         const col = merge ? at(L.col) : f32(U.get('u_color'));
         const mvz = R ? R.mvz : L.lite ? L.mvz(U, at) : inst ? at(4) : f32(U.get('u_mvz'));
         const P = attr(d.attribs.get(0), v, 3)!;

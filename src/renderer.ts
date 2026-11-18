@@ -1173,6 +1173,9 @@ export class Renderer3d {
   /** 단면 변종(처음 쓸 때 만든다) */
   private meshC: Prog | null = null;
   private thinC: Prog | null = null;
+  /** 0.78.0 행렬·평면 한 배열(MVPC) 단면 하나 변종: 가는 선·굵은 선(처음 쓸 때 variants에서 — variants를 비울 때 함께 비운다) */
+  private thinCM: Prog | null = null;
+  private wideM: Prog | null = null;
   /** 무늬 변종(처음 쓸 때 만든다): 보통·단면 */
   private meshT: Prog | null = null;
   private meshTC: Prog | null = null;
@@ -1243,6 +1246,10 @@ export class Renderer3d {
   /** 균일 변수용 임시 배열(그리기마다 새로 만들지 않는다) */
   private m4a = new Float32Array(16);
   private m4b = new Float32Array(16);
+  /** 0.78.0 행렬·평면 한 배열(MVPC 변종의 u_mvpc — 0~15 시점 투영 · 모형, 16~19 로컬 평면)과 그 두 몫의 보기 */
+  private mvpc = new Float32Array(20);
+  private mvpcM = this.mvpc.subarray(0, 16);
+  private mvpcP = this.mvpc.subarray(16, 20);
   private m3 = new Float32Array(9);
   private d4a = new Float64Array(16);
   private d4b = new Float64Array(16);
@@ -1362,6 +1369,8 @@ export class Renderer3d {
   private cullChunks: CullChunks = { recs: [], box: [] };
   /** 0.51.0 시험용: true면 선 상태 기억(LineMemo)을 쓰지 않고 그물마다 모두 보낸다(0.50.0 GL 호출 — 기억과 그리기 기록이 같은지 견줄 때) */
   lineMemoOff = false;
+  /** 0.78.0 시험용: true면 단면 하나 선 그리기에 행렬·평면 한 배열(MVPC) 변종을 쓰지 않고 0.77.0처럼 u_mvp·u_clip을 따로 보낸다(그린 도형이 같은지 견줄 때) */
+  lineMvpcOff = false;
   /**
    * 0.76.0 시험용: true면 그물(면) 프로그램 균일 변수 기억(UniMemo)과 그리기 상태 기억(뒷면 버리기·선분 묶음 차례의 섞기·잘린 면의 면 밀기 값)을 쓰지 않고 모두 보낸다
    * (기억과 그리기 기록이 같은지 견줄 때). 선분 묶음 차례의 선 기억은 lineMemoOff를 따른다.
@@ -1463,6 +1472,7 @@ export class Renderer3d {
     this.pointP = this.program(POINT_VS, POINT_FS);
     this.meshC = null;
     this.thinC = null;
+    this.thinCM = this.wideM = null;
     this.meshT = null;
     this.meshTC = null;
     this.variants.clear();
@@ -1514,6 +1524,7 @@ export class Renderer3d {
     this.annoSeg = null;
     this.meshC = null;
     this.thinC = null;
+    this.thinCM = this.wideM = null;
     this.meshT = null;
     this.meshTC = null;
     this.variants.clear();
@@ -1573,6 +1584,31 @@ export class Renderer3d {
 
   private thinClip(): Prog {
     return (this.thinC ??= this.program(withClip(THIN_VS), withClip(THIN_FS)));
+  }
+
+  /** 0.78.0 단면 하나 가는 선의 행렬·평면 한 배열 변종(CLIP + MVPC) */
+  private thinClipMvpc(): Prog {
+    return (this.thinCM ??= this.variant('thin', ['CLIP', 'MVPC']));
+  }
+
+  /** 0.78.0 단면 하나 굵은 선의 행렬·평면 한 배열 변종(MVPC — 끝 마개·안개는 variant로) */
+  private wideMvpc(): Prog {
+    return (this.wideM ??= this.variant('wide', ['MVPC']));
+  }
+
+  /**
+   * 0.78.0 MVPC 변종 p에 시점 투영 · 모형(this.mvpcM에 이미 셈한 것)과 로컬 평면 clip을 한 번에(uniform4fv — u_mvpc[5]). 선 기억 v가 있으면 행렬(칸 28~43)·평면(칸 20~23 —
+   * float32로 반올림한 값)이 그 프로그램에 마지막으로 보낸 것과 비트까지 같을 때 보내지 않는다(두 칸 모두 견주고 적는다). 0.77.0은 u_mvp·u_clip을 따로 보냈다(그리기 하나에 GL 둘)
+   */
+  private lineMvpc(p: Prog, clip: Readonly<Plane4>, v: Float64Array | null): void {
+    const P = this.mvpcP;
+    P[0] = clip[0];
+    P[1] = clip[1];
+    P[2] = clip[2];
+    P[3] = clip[3];
+    const sm = lineSetA(v, 28, this.mvpcM, 16);
+    const sp = lineSetA(v, 20, P, 4);
+    if (!sm || !sp) this.gl.uniform4fv(this.loc(p, 'u_mvpc'), this.mvpc);
   }
 
   /** 무늬 그물 프로그램(clip이면 단면 변종) */
@@ -4602,6 +4638,7 @@ export class Renderer3d {
     this.emptyVao = null;
     this.meshC = null;
     this.thinC = null;
+    this.thinCM = this.wideM = null;
     this.meshT = null;
     this.meshTC = null;
   }
@@ -6679,19 +6716,27 @@ export class Renderer3d {
         const w = this.wireOf(r);
         const clip = clipOf(model);
         const wclips = clipsOf(r.src.id, model);
+        // 0.78.0 단면 하나면 drawLines와 같이 행렬·평면 한 배열 변종(MVPC)
+        const mc = !!clip && !wclips && !this.lineMvpcOff;
         const p = fog
-          ? this.variant('thin', ['FOG', ...(wclips ? ['CLIPN'] : clip ? ['CLIP'] : [])])
+          ? this.variant('thin', ['FOG', ...(wclips ? ['CLIPN'] : clip ? (mc ? ['CLIP', 'MVPC'] : ['CLIP']) : [])])
           : wclips
             ? this.variant('thin', ['CLIPN'])
             : clip
-              ? this.thinClip()
+              ? mc
+                ? this.thinClipMvpc()
+                : this.thinClip()
               : this.thinP;
         const lv = this.lineFix(p, lm, col, 0, alphaR(r), 0, fog);
-        if (model) mulF32(f.viewProj, model, this.m4a);
-        else this.m4a.set(f.viewProj);
+        const M = mc ? this.mvpcM : this.m4a;
+        if (model) mulF32(f.viewProj, model, M);
+        else M.set(f.viewProj);
         // 0.76.0 행렬·평면·안개 눈 깊이 행도 선 기억과 견준다(drawLines와 같은 칸)
-        if (!lineSetA(lv, 28, this.m4a, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
-        if (clip && !lineSetA(lv, 20, clip, 4)) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+        if (mc) this.lineMvpc(p, clip!, lv);
+        else {
+          if (!lineSetA(lv, 28, this.m4a, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
+          if (clip && !lineSetA(lv, 20, clip, 4)) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+        }
         if (wclips) this.setClips(p, wclips, lv);
         if (fog) this.lineMvz(p, f, model, lv);
         const wireList = (list: DrawList): void => {
@@ -7689,7 +7734,11 @@ export class Renderer3d {
     return v;
   }
 
-  /** 선분 묶음 그리기(굵기·점선이면 사각형 인스턴스, 아니면 gl.LINES). clip은 묶음 로컬 좌표의 단면 평면 */
+  /**
+   * 선분 묶음 그리기(굵기·점선이면 사각형 인스턴스, 아니면 gl.LINES). clip은 묶음 로컬 좌표의 단면 평면.
+   * 0.78.0 clip이 있고 clips가 없으면(단면 하나 — 그물마다 윤곽선·숨은 점선) 행렬·평면 한 배열 변종(MVPC)으로 u_mvpc 한 번(0.77.0은 u_mvp·u_clip 둘 — 그리기 하나에 GL 넷 → 셋).
+   * 그리는 차례·프로그램 고르기(정의 하나 더)·그리기 때 행렬·평면 float 값은 같다
+   */
   private drawLines(
     f: ViewFrame,
     r: LineRec,
@@ -7702,23 +7751,27 @@ export class Renderer3d {
     const gl = this.gl;
     if (o.count <= 0) return;
     const clips = o.clips ?? null;
-    const mvp = this.m4a;
+    const clip = o.clip ?? null;
+    // 0.78.0 단면 하나(로컬 평면이 있고 여러 단면이 아니면) 행렬·평면 한 배열 변종(MVPC): 행렬을 그 배열 앞 16칸에 바로 셈하고 평면과 함께 한 번에 보낸다
+    const mc = !!clip && !clips && !this.lineMvpcOff;
+    const mvp = mc ? this.mvpcM : this.m4a;
     // 0.75.0 시점 투영 · 모형을 float32 행렬에 바로(mulF32 — 배정밀도로 셈해 옮긴 값과 비트까지 같다)
     if (matrix) mulF32(f.viewProj, matrix, mvp);
     else mvp.set(f.viewProj);
     const wDev = o.width * st.dpr;
     const fast = st.interacting && r.n > FAST_LINES_WHILE_MOVING;
     const wide = !fast && (o.dashed || wDev > 1.01);
-    const clip = o.clip ?? null;
     const fog = !o.noFog && st.fog ? st.fog : null;
     if (wide) {
       const p = o.capz
-        ? this.variant('wide', ['CAPZ', ...(fog ? ['FOG'] : []), ...(clips ? ['CLIPN'] : [])])
+        ? this.variant('wide', ['CAPZ', ...(fog ? ['FOG'] : []), ...(clips ? ['CLIPN'] : []), ...(mc ? ['MVPC'] : [])])
         : fog
-          ? this.variant('wide', ['FOG', ...(clips ? ['CLIPN'] : [])])
+          ? this.variant('wide', ['FOG', ...(clips ? ['CLIPN'] : []), ...(mc ? ['MVPC'] : [])])
           : clips
             ? this.variant('wide', ['CLIPN'])
-            : this.wideP;
+            : mc
+              ? this.wideMvpc()
+              : this.wideP;
       const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
       const dash = o.dashed ? DASH[0] * st.dpr : 0;
       // 0.51.0 앞 그리기와 프로그램·값이 같으면(memo) 프로그램·고정 균일 변수를 다시 보내지 않는다 — 그물마다 바뀌는 행렬·단면 평면·안개 깊이 행만.
@@ -7730,9 +7783,12 @@ export class Renderer3d {
       if (clips) this.setClips(p, clips, v);
       // 0.76.0 시점 투영 · 모형·단면 평면(평면 없음 값 포함)·안개 눈 깊이 행도 그 프로그램에 마지막으로 보낸 값과 비트까지 같으면 다시 보내지 않는다(선분 묶음처럼 모형이 같은 선)
       if (fog) this.lineMvz(p, f, matrix, v);
-      if (!lineSetA(v, 28, mvp, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-      const cp = clip ?? NO_CLIP;
-      if (!lineSetA(v, 20, cp, 4)) gl.uniform4f(this.loc(p, 'u_clip'), cp[0], cp[1], cp[2], cp[3]);
+      if (mc) this.lineMvpc(p, clip!, v);
+      else {
+        if (!lineSetA(v, 28, mvp, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
+        const cp = clip ?? NO_CLIP;
+        if (!lineSetA(v, 20, cp, 4)) gl.uniform4f(this.loc(p, 'u_clip'), cp[0], cp[1], cp[2], cp[3]);
+      }
       gl.bindVertexArray(r.wide);
       // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼 안 그 그물 자리부터(r.first — 아니면 0)
       const f0 = (r.first ?? 0) + o.first;
@@ -7741,17 +7797,22 @@ export class Renderer3d {
       if (f0) this.bindWide(r.pos, r.col, 0);
     } else {
       const p = fog
-        ? this.variant('thin', ['FOG', ...(clips ? ['CLIPN'] : clip ? ['CLIP'] : [])])
+        ? this.variant('thin', ['FOG', ...(clips ? ['CLIPN'] : clip ? (mc ? ['CLIP', 'MVPC'] : ['CLIP']) : [])])
         : clips
           ? this.variant('thin', ['CLIPN'])
           : clip
-            ? this.thinClip()
+            ? mc
+              ? this.thinClipMvpc()
+              : this.thinClip()
             : this.thinP;
       const v = this.lineFix(p, memo, o.color, o.vcol ? 1 : 0, o.alpha, o.bias ?? 0, fog);
       if (clips) this.setClips(p, clips, v);
       if (fog) this.lineMvz(p, f, matrix, v);
-      if (!lineSetA(v, 28, mvp, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-      if (clip && !lineSetA(v, 20, clip, 4)) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+      if (mc) this.lineMvpc(p, clip!, v);
+      else {
+        if (!lineSetA(v, 28, mvp, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
+        if (clip && !lineSetA(v, 20, clip, 4)) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+      }
       gl.bindVertexArray(r.thin);
       gl.drawArrays(gl.LINES, ((r.first ?? 0) + o.first) * 2, o.count * 2);
     }
