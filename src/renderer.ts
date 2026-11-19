@@ -1372,6 +1372,15 @@ export class Renderer3d {
   /** 0.78.0 시험용: true면 단면 하나 선 그리기에 행렬·평면 한 배열(MVPC) 변종을 쓰지 않고 0.77.0처럼 u_mvp·u_clip을 따로 보낸다(그린 도형이 같은지 견줄 때) */
   lineMvpcOff = false;
   /**
+   * 0.79.0 굵은 선 VAO마다 인스턴스 속성이 지금 가리키는 선분 자리(pos — 끝점 위치 1·2와 정점 색 3·4, item — 묶음 그물 번호 5). 없으면 0(만들 때 건 자리).
+   * 묶음 저장소의 굵은 선(구간·그물마다)은 그리기마다 그 자리로 속성을 다시 걸어야 하는데(WebGL2에는 첫 인스턴스 인자가 없다), 0.78.0까지는 켜기·나누개까지 함께
+   * 부르고(구간 하나에 GL 11) 그물마다 그리기는 그린 뒤 0으로 되돌렸다. 이제 자리가 다를 때만 그 속성의 vertexAttribPointer만(켜기·나누개는 VAO에 남은 그대로) 부르고
+   * 되돌리지 않는다 — 그리기 때 VAO 상태는 같다
+   */
+  private wideOff = new WeakMap<object, { pos: number; item: number }>();
+  /** 0.79.0 시험용: true면 굵은 선 자리를 0.78.0처럼 다시 건다(켜기·나누개 함께, 그물마다 그리기는 그린 뒤 0으로 — 그린 도형이 같은지 견줄 때) */
+  wideOffOff = false;
+  /**
    * 0.76.0 시험용: true면 그물(면) 프로그램 균일 변수 기억(UniMemo)과 그리기 상태 기억(뒷면 버리기·선분 묶음 차례의 섞기·잘린 면의 면 밀기 값)을 쓰지 않고 모두 보낸다
    * (기억과 그리기 기록이 같은지 견줄 때). 선분 묶음 차례의 선 기억은 lineMemoOff를 따른다.
    * 0.77.0 같은 기억을 쓰는 인스턴싱 모서리 선(drawLinesInst — 묶인 프로그램 기억 포함)·점 묶음(점 차례 섞기 상태 포함)·외곽선 색 깊이·해 그림자 깊이 그림도 이것을 따른다
@@ -3392,6 +3401,8 @@ export class Renderer3d {
       this.uf(fm, p, 'u_dash', 2, o.dashed ? DASH[0] * st.dpr : 0, DASH[1] * st.dpr);
       this.uf(fm, p, 'u_clip', 4, NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
       gl.bindVertexArray(r.wide);
+      // 0.79.0 그물마다 그리기가 이 VAO 속성을 다른 자리에 두었으면 0으로(0.78.0까지는 그물마다 그리기가 그린 뒤 되돌렸다)
+      if (!this.wideOffOff) this.wideTo(r.wide, r.pos, r.col, 0);
       // 인스턴스 = 선분 × 자리: 선분 속성은 자리 수마다 한 칸(셰이더의 자리 = gl_InstanceID % u_instN)
       const at = r.col ? [1, 2, 3, 4] : [1, 2];
       for (const a of at) gl.vertexAttribDivisor(a, n);
@@ -4444,6 +4455,26 @@ export class Renderer3d {
       gl.vertexAttribPointer(4, 4, gl.FLOAT, false, 32, first * 32 + 16);
       gl.vertexAttribDivisor(4, 1);
     }
+  }
+
+  /**
+   * 0.79.0 굵은 선 VAO vao(묶여 있어야 함)의 끝점 위치(1·2)·정점 색(3·4) 인스턴스 속성을 first번째 선분부터로 — wideOff가 적은 지금 자리와 같으면 부르지 않는다.
+   * 켜기·나누개는 만들 때(bindWide·묶음 굽기) 건 그대로라 vertexAttribPointer만(bindWide는 함께 불렀다). 묶음 그물 번호(5)는 묶음 구간 그리기(조각 wideAt)만 옮긴다
+   */
+  private wideTo(vao: WebGLVertexArrayObject, pos: WebGLBuffer, col: WebGLBuffer | null, first: number): void {
+    const o = vao ? this.wideOff.get(vao) : undefined;
+    if ((o ? o.pos : 0) === first) return;
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, pos);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, first * 24);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 24, first * 24 + 12);
+    if (col) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, col);
+      gl.vertexAttribPointer(3, 4, gl.FLOAT, false, 32, first * 32);
+      gl.vertexAttribPointer(4, 4, gl.FLOAT, false, 32, first * 32 + 16);
+    }
+    if (o) o.pos = first;
+    else if (vao) this.wideOff.set(vao, { pos: first, item: 0 });
   }
 
   private pointRec(p: PointSet3d): PointRec {
@@ -7792,9 +7823,20 @@ export class Renderer3d {
       gl.bindVertexArray(r.wide);
       // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼 안 그 그물 자리부터(r.first — 아니면 0)
       const f0 = (r.first ?? 0) + o.first;
-      if (f0) this.bindWide(r.pos, r.col, f0);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, o.count);
-      if (f0) this.bindWide(r.pos, r.col, 0);
+      if (this.wideOffOff) {
+        if (f0) this.bindWide(r.pos, r.col, f0);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, o.count);
+        if (f0) {
+          this.bindWide(r.pos, r.col, 0);
+          // 적은 자리도 지금 VAO 상태로(시험이 켬·끔을 오가도 맞게)
+          const w = this.wideOff.get(r.wide);
+          if (w) w.pos = 0;
+        }
+      } else {
+        // 0.79.0 그 VAO가 지금 가리키는 자리와 다를 때만 위치(·색) 속성을 다시 걸고 되돌리지 않는다
+        this.wideTo(r.wide, r.pos, r.col, f0);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, o.count);
+      }
     } else {
       const p = fog
         ? this.variant('thin', ['FOG', ...(clips ? ['CLIPN'] : clip ? (mc ? ['CLIP', 'MVPC'] : ['CLIP']) : [])])
