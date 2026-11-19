@@ -68,6 +68,8 @@ function view(sc: Scene3d): W {
   views.push(v);
   const gl = (v.canvas as unknown as FakeElement).gl!;
   const r = (v as unknown as { renderer: Record<string, unknown> & { lineMvpcOff: boolean } }).renderer;
+  // 0.80.0 균일 변수 위치 기억은 끈다 — 이 시험은 MVPC 길과 0.77.0 길의 GL 호출 차만 견준다(두 길은 다른 프로그램이라 위치 기억이 빼는 몫이 프레임 차례에 따라 다르다 — v0800uni)
+  r.uniLastOff = true;
   let c = zero();
   let inDl = 0;
   const dl = (r.drawLines as (...a: unknown[]) => unknown).bind(r);
