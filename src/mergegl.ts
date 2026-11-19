@@ -1134,10 +1134,15 @@ export function leave(h: MergeHost, r: MeshRec): void {
 
 /**
  * 0.79.0 묶음 굵은 선 VAO wide(묶여 있어야 함)의 인스턴스 속성을 first번째 선분부터로 — 끝점 위치(1·2)·그물 번호(5) 가운데 지금 자리(h.wideOff)와 다른 쪽만
- * vertexAttribPointer로 다시 건다(켜기·나누개는 굽기 때 wideInit이 건 그대로). 0.78.0까지는 구간마다 wideInit을 불렀다(GL 11 — 같은 자리여도)
+ * vertexAttribPointer로 다시 건다(켜기·나누개는 굽기 때 wideInit이 건 그대로). 0.78.0까지는 구간마다 wideInit을 불렀다(GL 11 — 같은 자리여도).
+ * VAO가 없으면(문맥을 잃은 뒤 — 잃음 알림 전 — 구운 묶음은 createVertexArray가 null) 적을 열쇠가 없어 0.78.0처럼 모두 건다(약한 표에 null을 넣으면 던진다)
  */
-function wideAt(h: MergeHost, wide: WebGLVertexArrayObject, seg: WebGLBuffer, item: WebGLBuffer, first: number): void {
+export function wideAt(h: MergeHost, wide: WebGLVertexArrayObject | null, seg: WebGLBuffer, item: WebGLBuffer, first: number): void {
   const gl = h.gl;
+  if (!wide) {
+    wideInit(h, seg, item, first);
+    return;
+  }
   let o = h.wideOff.get(wide);
   if (h.wideOffOff) {
     wideInit(h, seg, item, first);
@@ -1580,7 +1585,7 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
     const s0 = g.seg[op.a]!, s1 = g.seg[op.b]!;
     if (wide) {
       gl.bindVertexArray(g.wide);
-      wideAt(h, g.wide!, g.segBuf!, g.segItem!, s0);
+      wideAt(h, g.wide, g.segBuf!, g.segItem!, s0);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, s1 - s0);
     } else {
       gl.bindVertexArray(g.thin);
