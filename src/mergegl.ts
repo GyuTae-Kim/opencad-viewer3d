@@ -87,6 +87,10 @@ export interface MergeHost {
   mgStore: MergeStore | null;
   /** 0.65.0 그리기 뼈대(맞으면 planLoose가 덩이째 센다) */
   readonly mgOrder: MergeOrder | null;
+  /** 0.79.0 굵은 선 VAO마다 인스턴스 속성이 지금 가리키는 선분 자리(pos 끝점 위치 1·2, item 묶음 그물 번호 5 — 없으면 0, 렌더러 wideOff) */
+  readonly wideOff: WeakMap<object, { pos: number; item: number }>;
+  /** 0.79.0 시험용(렌더러 wideOffOff): true면 구간마다 0.78.0처럼 켜기·나누개까지 함께 다시 건다 */
+  readonly wideOffOff: boolean;
 }
 
 /** 0.61.0 자리 자료 저장소 그림 폭(텍셀 — 셰이더 k & 1023·k >> 10과 같다)과 줄을 늘리는 단위 */
@@ -1128,8 +1132,40 @@ export function leave(h: MergeHost, r: MeshRec): void {
   letGo(h, r);
 }
 
-/** 0.52.0 묶음 굵은 선 VAO(묶여 있어야 함)의 인스턴스 속성을 first번째 선분부터로 건다(bindWide와 같은 꼴 + 선분마다 그물 번호 — 위치 5) */
-function wideAt(h: MergeHost, seg: WebGLBuffer, item: WebGLBuffer, first: number): void {
+/**
+ * 0.79.0 묶음 굵은 선 VAO wide(묶여 있어야 함)의 인스턴스 속성을 first번째 선분부터로 — 끝점 위치(1·2)·그물 번호(5) 가운데 지금 자리(h.wideOff)와 다른 쪽만
+ * vertexAttribPointer로 다시 건다(켜기·나누개는 굽기 때 wideInit이 건 그대로). 0.78.0까지는 구간마다 wideInit을 불렀다(GL 11 — 같은 자리여도).
+ * VAO가 없으면(문맥을 잃은 뒤 — 잃음 알림 전 — 구운 묶음은 createVertexArray가 null) 적을 열쇠가 없어 0.78.0처럼 모두 건다(약한 표에 null을 넣으면 던진다)
+ */
+export function wideAt(h: MergeHost, wide: WebGLVertexArrayObject | null, seg: WebGLBuffer, item: WebGLBuffer, first: number): void {
+  const gl = h.gl;
+  if (!wide) {
+    wideInit(h, seg, item, first);
+    return;
+  }
+  let o = h.wideOff.get(wide);
+  if (h.wideOffOff) {
+    wideInit(h, seg, item, first);
+    if (o) o.pos = o.item = first;
+    else h.wideOff.set(wide, { pos: first, item: first });
+    return;
+  }
+  if (!o) h.wideOff.set(wide, (o = { pos: 0, item: 0 }));
+  if (o.pos !== first) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, seg);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, first * 24);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 24, first * 24 + 12);
+    o.pos = first;
+  }
+  if (o.item !== first) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, item);
+    gl.vertexAttribPointer(5, 1, gl.UNSIGNED_SHORT, false, 4, first * 4);
+    o.item = first;
+  }
+}
+
+/** 0.52.0 묶음 굵은 선 VAO(묶여 있어야 함)의 인스턴스 속성을 first번째 선분부터로 건다(bindWide와 같은 꼴 + 선분마다 그물 번호 — 위치 5 — 켜기·나누개 함께). 0.79.0 굽기 때만(그리기는 wideAt) */
+function wideInit(h: MergeHost, seg: WebGLBuffer, item: WebGLBuffer, first: number): void {
   const gl = h.gl;
   gl.bindBuffer(gl.ARRAY_BUFFER, seg);
   gl.enableVertexAttribArray(1);
@@ -1549,7 +1585,7 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
     const s0 = g.seg[op.a]!, s1 = g.seg[op.b]!;
     if (wide) {
       gl.bindVertexArray(g.wide);
-      wideAt(h, g.segBuf!, g.segItem!, s0);
+      wideAt(h, g.wide, g.segBuf!, g.segItem!, s0);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, s1 - s0);
     } else {
       gl.bindVertexArray(g.thin);
@@ -1798,7 +1834,7 @@ export function bake(h: MergeHost, list: readonly MeshRec[]): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, h.quadWide);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
-    wideAt(h, segBuf, segItem, 0);
+    wideInit(h, segBuf, segItem, 0);
   }
   gl.bindVertexArray(null);
   const g: MergeGroup = {
