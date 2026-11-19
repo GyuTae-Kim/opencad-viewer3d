@@ -1355,6 +1355,15 @@ export class Renderer3d {
    */
   private parallel: object | null = null;
   private pendingProgs = new Map<string, { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader; defs: readonly string[] }>();
+  /**
+   * 0.81.0 단면 변종 미리 번역(KHR_parallel_shader_compile가 있을 때만): 단면이 없는 그리기가 쉬는 틈이면 단면을 켠 첫 그리기가 기다려 번역할 변종을 걸어 두고
+   * 처음 쓸 때(variant·meshClip) 끝낸다. 열쇠는 variants와 같고 잘린 면 채우기 프로그램은 'meshC'. 인스턴싱·묶음·PBR 변종은 이미 기다리지 않는 길(asyncVariant)이라 넣지 않는다
+   */
+  private warmProgs = new Map<string, { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader }>();
+  /** 0.81.0 미리 번역을 건 상태 꼴(그물 정의·그림자·숨은 점선·가는 선·안개 — 같은 꼴이면 다시 보지 않는다) */
+  private warmSigs = new Set<string>();
+  /** 0.81.0 시험용: true면 단면 변종을 미리 번역하지 않는다(0.80.0처럼 처음 쓸 때 기다려 번역 — 견줄 때) */
+  secWarmOff = false;
   /** 인스턴싱 변종을 만들지 못했으면 true(그 문맥에서는 끄고 그물마다 그린다) */
   private instBroken = false;
   /** 0.43.0 PBR 변종을 만들지 못했으면 true(그 문맥에서는 PBR 그림 없이 0.42.0 셰이더로 그린다) */
@@ -1496,6 +1505,9 @@ export class Renderer3d {
     this.meshT = null;
     this.meshTC = null;
     this.variants.clear();
+    // 0.81.0 미리 번역 표도 새 문맥에서 다시(문맥을 잃었으면 forget이 이미 비웠다)
+    this.warmProgs.clear();
+    this.warmSigs.clear();
     this.profileP = null;
     this.skyP = null;
     const an = gl.getExtension('EXT_texture_filter_anisotropic');
@@ -1566,6 +1578,8 @@ export class Renderer3d {
     this.instForget();
     this.white = null;
     this.pendingProgs.clear();
+    this.warmProgs.clear();
+    this.warmSigs.clear();
     this.emptyVao = null;
     this.pending = null;
     this.texGen++;
@@ -1601,7 +1615,8 @@ export class Renderer3d {
   }
 
   private meshClip(): Prog {
-    return (this.meshC ??= { ...this.program(withClip(MESH_VS), withClip(MESH_FS)), clip1: true });
+    // 0.81.0 미리 번역해 둔 것이 있으면 그것(같은 글)
+    return (this.meshC ??= { ...(this.warmTake('meshC') ?? this.program(withClip(MESH_VS), withClip(MESH_FS))), clip1: true });
   }
 
   private thinClip(): Prog {
@@ -2002,10 +2017,98 @@ export class Renderer3d {
     const key = `${base}:${[...defs].sort().join(',')}`;
     let p = this.variants.get(key);
     if (p) return p;
-    const [vs, fs] = variantSources(base, defs);
-    p = { ...this.program(vs, fs), ...progFlags(defs) };
+    // 0.81.0 미리 번역해 둔 것이 있으면 그것(같은 글 — 없거나 연결에 실패했으면 0.80.0처럼 곧바로 번역)
+    const w = this.warmTake(key);
+    if (w) p = { ...w, ...progFlags(defs) };
+    else {
+      const [vs, fs] = variantSources(base, defs);
+      p = { ...this.program(vs, fs), ...progFlags(defs) };
+    }
     this.variants.set(key, p);
     return p;
+  }
+
+  /** 번역·연결을 걸기만 한다(상태를 묻지 않는다 — 0.42.0 asyncVariant·0.81.0 미리 번역) */
+  private startLink(vs: string, fs: string): { p: WebGLProgram; vs: WebGLShader; fs: WebGLShader } {
+    const gl = this.gl;
+    const sh = (type: number, text: string): WebGLShader => {
+      const s = gl.createShader(type)!;
+      gl.shaderSource(s, text);
+      gl.compileShader(s);
+      return s;
+    };
+    const a = sh(gl.VERTEX_SHADER, vs);
+    const b = sh(gl.FRAGMENT_SHADER, fs);
+    const p = gl.createProgram()!;
+    gl.attachShader(p, a);
+    gl.attachShader(p, b);
+    gl.linkProgram(p);
+    return { p, vs: a, fs: b };
+  }
+
+  /**
+   * 0.81.0 단면 변종 미리 번역(render 끝 — 단면이 없고 KHR_parallel_shader_compile가 있을 때). 쉬는 틈(나눠 올리기·기다리는 변종 번역·굽기가 없는 그리기)에만
+   * 이 상태에서 단면을 켠 첫 그리기가 곧바로 번역할 변종을 걸어 둔다: 잘린 면 채우기(meshC — 그물 정의가 없으면 단면 그물 프로그램도), 그물 정의(모드·조명·그림자·안개)가 있으면
+   * 그 단면 변종과 잘린 면을 칠하는 정의만의 변종(그림자 없음), 그림자면 단면 깊이 그림 변종, 0.78.0 그물마다 선의 MVPC 굵은 선(강조·점선·화소 비율)·가는 선(화소 비율 1 이하)·
+   * 숨은 점선(CAPZ — 켰을 때). 확장이 없으면 부르지 않는다(0.80.0 그대로)
+   */
+  private warmSection(st: RenderState, extra: readonly string[], shadow: boolean): void {
+    if (this.uploading || this.pendingProgs.size || this.mergeSteps || (!this.meshes.length && !this.lines.length)) return;
+    const be = drawsBackEdges(st.mode, !!st.hiddenEdgesShaded);
+    const back = (be.meshes || be.lines) && !!st.hiddenEdges && st.hiddenEdges > 0;
+    const thin = st.dpr <= 1.01;
+    const sig = `${extra.join()}|${shadow ? 1 : 0}${back ? 1 : 0}${thin ? 1 : 0}${this.lineMvpcOff ? 1 : 0}`;
+    if (this.warmSigs.has(sig)) return;
+    this.warmSigs.add(sig);
+    this.warmStart('meshC', () => [withClip(MESH_VS), withClip(MESH_FS)]);
+    if (extra.length) {
+      this.warmVariant('mesh', [...extra, ...(shadow ? ['SHADOW'] : []), 'CLIP']);
+      this.warmVariant('mesh', extra);
+    }
+    if (shadow) this.warmVariant('depth', ['CLIP']);
+    if (this.lineMvpcOff) return;
+    const fog = extra.includes('FOG') ? ['FOG'] : [];
+    this.warmVariant('wide', [...fog, 'MVPC']);
+    if (thin) this.warmVariant('thin', [...fog, 'CLIP', 'MVPC']);
+    if (back) this.warmVariant('wide', ['CAPZ', ...fog, 'MVPC']);
+  }
+
+  private warmVariant(base: 'mesh' | 'wide' | 'thin' | 'depth', defs: readonly string[]): void {
+    this.warmStart(`${base}:${[...defs].sort().join(',')}`, () => variantSources(base, defs));
+  }
+
+  /** 0.81.0 열쇠 key의 번역을 걸어 둔다(이미 만들었거나 걸었으면 그대로) */
+  private warmStart(key: string, src: () => [string, string]): void {
+    if (this.warmProgs.has(key) || (key === 'meshC' ? this.meshC : this.variants.has(key))) return;
+    let s: [string, string];
+    try {
+      s = src();
+    } catch {
+      return;
+    }
+    this.warmProgs.set(key, this.startLink(s[0], s[1]));
+  }
+
+  /**
+   * 0.81.0 미리 번역해 둔 프로그램을 꺼내 끝낸다(다 되지 않았으면 연결 상태를 묻는 동안 기다린다 — 곧바로 번역하는 것보다 늦지 않다).
+   * 없거나 연결에 실패했으면 null(부르는 쪽이 0.80.0처럼 곧바로 번역한다 — 실패 알림도 그 길이 낸다)
+   */
+  private warmTake(key: string): Prog | null {
+    const w = this.warmProgs.get(key);
+    if (!w) return null;
+    this.warmProgs.delete(key);
+    const gl = this.gl;
+    const ok = !!gl.getProgramParameter(w.p, gl.LINK_STATUS);
+    gl.deleteShader(w.vs);
+    gl.deleteShader(w.fs);
+    if (ok) return { p: w.p, u: new Map() };
+    gl.deleteProgram(w.p);
+    return null;
+  }
+
+  /** 0.81.0 미리 번역해 두고 아직 쓰지 않은 단면 변종 수 */
+  get warmCount(): number {
+    return this.warmProgs.size;
   }
 
   /** 0.42.0 인스턴싱 변종 번역을 기다리는 수(0이 아니면 뷰어가 다음 프레임에 다시 그린다 — 다 되면 모아 그린다) */
@@ -2059,19 +2162,7 @@ export class Renderer3d {
       } catch {
         return false;
       }
-      const sh = (type: number, text: string): WebGLShader => {
-        const s = gl.createShader(type)!;
-        gl.shaderSource(s, text);
-        gl.compileShader(s);
-        return s;
-      };
-      const a = sh(gl.VERTEX_SHADER, src[0]);
-      const b = sh(gl.FRAGMENT_SHADER, src[1]);
-      const p = gl.createProgram()!;
-      gl.attachShader(p, a);
-      gl.attachShader(p, b);
-      gl.linkProgram(p);
-      this.pendingProgs.set(key, { p, vs: a, fs: b, defs: all });
+      this.pendingProgs.set(key, { ...this.startLink(src[0], src[1]), defs: all });
       return null;
     }
     // COMPLETION_STATUS_KHR(0x91B1): 기다리지 않고 묻는다
@@ -4735,12 +4826,13 @@ export class Renderer3d {
     this.instForget();
     if (this.white) gl.deleteTexture(this.white);
     this.white = null;
-    for (const q of this.pendingProgs.values()) {
+    for (const q of [...this.pendingProgs.values(), ...this.warmProgs.values()]) {
       gl.deleteProgram(q.p);
       gl.deleteShader(q.vs);
       gl.deleteShader(q.fs);
     }
     this.pendingProgs.clear();
+    this.warmProgs.clear();
     if (this.emptyVao) gl.deleteVertexArray(this.emptyVao);
     this.emptyVao = null;
     this.meshC = null;
@@ -7571,6 +7663,8 @@ export class Renderer3d {
     }
     gl.bindVertexArray(null);
     this.renderMs = performance.now() - renderT0;
+    // 0.81.0 단면이 없는 그리기 뒤(그린 것은 바꾸지 않는다): 확장이 있으면 쉬는 틈에 단면 변종을 미리 번역
+    if (!sec && !multi && this.parallel && !this.secWarmOff) this.warmSection(st, meshExtra, shadowOn);
   }
 
   /**
