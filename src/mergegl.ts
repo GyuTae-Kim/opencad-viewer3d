@@ -82,6 +82,10 @@ export interface MergeHost {
   freeKey(key: object, target: 'element'): void;
   release(slots: readonly unknown[]): void;
   loc(p: Prog, name: string): WebGLUniformLocation | null;
+  /** 0.80.0 균일 변수 보내기(렌더러 위치 기억 — 위치마다 GL에 마지막으로 보낸 값과 비트까지 같으면 부르지 않는다). 이 조각은 gl.uniform*를 바로 부르지 않는다 */
+  uniF(l: WebGLUniformLocation | null, n: 1 | 2 | 3 | 4, a0: number, a1?: number, a2?: number, a3?: number): void;
+  uniI(l: WebGLUniformLocation | null, a: number): void;
+  uniM(l: WebGLUniformLocation | null, v: Float32Array): void;
   drawLines(f: ViewFrame, r: LineRec, model: ArrayLike<number> | undefined, o: object, st: RenderState, stats: RenderStats, memo: LineMemo | null): void;
   /** 0.61.0 묶음 자리 자료 저장소(처음 묶어 그릴 때 만든다 — 묶음이 모두 없어지면 놓는다) */
   mgStore: MergeStore | null;
@@ -1426,10 +1430,10 @@ export function drawFaces(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       c.ui(p, 'u_inst', STORE_UNIT);
       if (L && !set.has(p)) {
         const m = (common ??= liteMesh(c));
-        gl.uniformMatrix4fv(h.loc(p, 'u_mvp0'), false, m.mvp);
-        gl.uniformMatrix4fv(h.loc(p, 'u_mv0'), false, m.mv);
-        gl.uniformMatrix3fv(h.loc(p, 'u_nmat0'), false, m.nmat);
-        if (m.shadow) gl.uniformMatrix4fv(h.loc(p, 'u_shadow0'), false, m.shadow);
+        h.uniM(h.loc(p, 'u_mvp0'), m.mvp);
+        h.uniM(h.loc(p, 'u_mv0'), m.mv);
+        h.uniM(h.loc(p, 'u_nmat0'), m.nmat);
+        if (m.shadow) h.uniM(h.loc(p, 'u_shadow0'), m.shadow);
       }
       set.add(p);
     }
@@ -1544,26 +1548,26 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
       if (!done.has(Q)) {
         // drawLines와 같은 고정 균일 변수(선 색은 자리 자료 — 안개 깊이 행도)
         done.set(Q, Float64Array.of(-1, NaN, NaN));
-        gl.uniform1i(h.loc(Q, 'u_inst'), STORE_UNIT);
-        gl.uniform1f(h.loc(Q, 'u_vcol'), 0);
-        gl.uniform4f(h.loc(Q, 'u_override'), 0, 0, 0, 0);
-        gl.uniform1f(h.loc(Q, 'u_bias'), o.bias);
+        h.uniI(h.loc(Q, 'u_inst'), STORE_UNIT);
+        h.uniF(h.loc(Q, 'u_vcol'), 1, 0);
+        h.uniF(h.loc(Q, 'u_override'), 4, 0, 0, 0, 0);
+        h.uniF(h.loc(Q, 'u_bias'), 1, o.bias);
         if (wide) {
           const vw = st.viewport ? st.viewport[0] : gl.drawingBufferWidth, vh = st.viewport ? st.viewport[1] : gl.drawingBufferHeight;
-          gl.uniform2f(h.loc(Q, 'u_viewport'), vw, vh);
-          gl.uniform2f(h.loc(Q, 'u_dash'), o.dashed ? c.dash[0] * st.dpr : 0, c.dash[1] * st.dpr);
+          h.uniF(h.loc(Q, 'u_viewport'), 2, vw, vh);
+          h.uniF(h.loc(Q, 'u_dash'), 2, o.dashed ? c.dash[0] * st.dpr : 0, c.dash[1] * st.dpr);
           // 단면이 있으면 평면은 자리 자료(균일 변수가 아니다)
-          if (!clip) gl.uniform4f(h.loc(Q, 'u_clip'), NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
+          if (!clip) h.uniF(h.loc(Q, 'u_clip'), 4, NO_CLIP[0], NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]);
         }
         if (lineFog) {
-          gl.uniform4f(h.loc(Q, 'u_fogCol'), lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
-          gl.uniform2f(h.loc(Q, 'u_fog'), lineFog.start, lineFog.end);
+          h.uniF(h.loc(Q, 'u_fogCol'), 4, lineFog.color[0], lineFog.color[1], lineFog.color[2], 1);
+          h.uniF(h.loc(Q, 'u_fog'), 2, lineFog.start, lineFog.end);
         }
         if (L) {
           // 0.62.0 이동뿐 꼴: 시점 투영 · 모형 0~2열(그물마다 같다)·안개 z 행 앞 세 칸
           const m = (common ??= liteLine(c));
-          gl.uniformMatrix4fv(h.loc(Q, 'u_mvp0'), false, m.mvp);
-          if (lineFog) gl.uniform3f(h.loc(Q, 'u_mvz0'), m.mvz[0]!, m.mvz[1]!, m.mvz[2]!);
+          h.uniM(h.loc(Q, 'u_mvp0'), m.mvp);
+          if (lineFog) h.uniF(h.loc(Q, 'u_mvz0'), 3, m.mvz[0]!, m.mvz[1]!, m.mvz[2]!);
         }
       }
     }
@@ -1571,15 +1575,15 @@ export function drawEdges(h: MergeHost, c: MergeDrawCtx, ops: readonly MergeOp[]
     const dq = done.get(Q)!;
     if (wide && dq[0] !== op.w * st.dpr) {
       dq[0] = op.w * st.dpr;
-      gl.uniform1f(h.loc(Q, 'u_width'), op.w * st.dpr);
+      h.uniF(h.loc(Q, 'u_width'), 1, op.w * st.dpr);
     }
     if (dq[1] !== op.base) {
       dq[1] = op.base;
-      gl.uniform1i(h.loc(Q, 'u_instBase'), op.base);
+      h.uniI(h.loc(Q, 'u_instBase'), op.base);
     }
     if (dq[2] !== op.alpha) {
       dq[2] = op.alpha;
-      gl.uniform1f(h.loc(Q, 'u_alpha'), op.alpha);
+      h.uniF(h.loc(Q, 'u_alpha'), 1, op.alpha);
     }
     const g = op.g;
     const s0 = g.seg[op.a]!, s1 = g.seg[op.b]!;

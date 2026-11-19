@@ -1387,6 +1387,16 @@ export class Renderer3d {
    * 0.77.0 같은 기억을 쓰는 인스턴싱 모서리 선(drawLinesInst — 묶인 프로그램 기억 포함)·점 묶음(점 차례 섞기 상태 포함)·외곽선 색 깊이·해 그림자 깊이 그림도 이것을 따른다
    */
   faceMemoOff = false;
+  /**
+   * 0.80.0 균일 변수 위치 기억: 위치(프로그램 하나의 균일 변수 하나 — loc()가 프로그램·이름마다 하나만 만든다)마다 GL에 마지막으로 보낸 값. 그리기·차례·프레임을 넘어 든다 —
+   * GL은 균일 변수 값을 프로그램마다 들고 있어 다른 프로그램을 쓴 뒤·다음 프레임에도 남고, 앱이 깊이·섞기·묶은 프로그램·VAO 같은 GL 상태를 바꿔도 바뀌지 않는다.
+   * 렌더러·묶어 그리기 조각의 균일 변수 보내기는 모두 uniF·uniI·uniM·uniV를 거쳐(기억이 GL과 늘 같다) 그 값과 비트까지 같으면 부르지 않는다.
+   * 0.76.0 그물 기억·0.75.0 선 기억(그리기 한 번·차례 하나 동안)은 그대로 먼저 견주고, 그 기억이 다르다고 본 것(차례·프레임의 처음 보냄)만 이 기억과 한 번 더 견준다.
+   * 문맥을 잃었다 되찾으면 프로그램을 새로 만들어 위치도 새것이다(forget이 기억도 비운다)
+   */
+  private uniLast = new WeakMap<WebGLUniformLocation, Float64Array>();
+  /** 0.80.0 시험용: true면 위치 기억과 견주지 않고 0.79.0처럼 늘 보낸다(값은 그대로 적는다 — 그린 도형이 같은지 견줄 때). faceMemoOff·lineMemoOff를 켜도 견주지 않는다 */
+  uniLastOff = false;
   /** 0.60.0 그리기 뼈대(다 올린 뒤 묶음이 있는 장면 — 장면 차례가 그대로인 동안 다시 쓴다)와 시험용 끄기(true면 0.59.0처럼 그물마다 훑는다 — 같은 그림인지 견줄 때) */
   private mgOrder: MergeOrder | null = null;
   orderOff = false;
@@ -1511,6 +1521,8 @@ export class Renderer3d {
    */
   forget(): void {
     this.keys = new WeakMap();
+    // 0.80.0 잃은 프로그램의 균일 변수 값도 없다(되찾으면 새 프로그램·위치 — 기억도 새로)
+    this.uniLast = new WeakMap();
     this.arrayBufs.clear();
     this.elemBufs.clear();
     this.refs.clear();
@@ -1618,7 +1630,7 @@ export class Renderer3d {
     P[3] = clip[3];
     const sm = lineSetA(v, 28, this.mvpcM, 16);
     const sp = lineSetA(v, 20, P, 4);
-    if (!sm || !sp) this.gl.uniform4fv(this.loc(p, 'u_mvpc'), this.mvpc);
+    if (!sm || !sp) this.uniV(this.loc(p, 'u_mvpc'), this.mvpc);
   }
 
   /** 무늬 그물 프로그램(clip이면 단면 변종) */
@@ -1654,7 +1666,7 @@ export class Renderer3d {
       v[26] = z2;
       v[27] = z3;
     }
-    this.gl.uniform4f(this.loc(p, 'u_mvz'), z0, z1, z2, z3);
+    this.uniF(this.loc(p, 'u_mvz'), 4, z0, z1, z2, z3);
   }
 
   /** 해 그림자 깊이 그림(비교 표본 — sampler2DShadow) */
@@ -1739,13 +1751,13 @@ export class Renderer3d {
     const p = (this.skyP ??= this.program(FULL_VS, SKY_FS));
     gl.useProgram(p.p);
     const b = f.basis;
-    gl.uniform3f(this.loc(p, 'u_right'), b.right[0], b.right[1], b.right[2]);
-    gl.uniform3f(this.loc(p, 'u_up'), b.up[0], b.up[1], b.up[2]);
-    gl.uniform3f(this.loc(p, 'u_fwd'), -b.back[0], -b.back[1], -b.back[2]);
+    this.uniF(this.loc(p, 'u_right'), 3, b.right[0], b.right[1], b.right[2]);
+    this.uniF(this.loc(p, 'u_up'), 3, b.up[0], b.up[1], b.up[2]);
+    this.uniF(this.loc(p, 'u_fwd'), 3, -b.back[0], -b.back[1], -b.back[2]);
     const tanV = (f.pixelPerDepth * f.height) / 2;
-    gl.uniform2f(this.loc(p, 'u_tan'), tanV * (f.width / f.height), tanV);
-    gl.uniform2f(this.loc(p, 'u_shift'), f.shift?.[0] ?? 0, f.shift?.[1] ?? 0);
-    const c = (n: string, v: Rgba): void => gl.uniform4f(this.loc(p, n), v[0], v[1], v[2], v[3]);
+    this.uniF(this.loc(p, 'u_tan'), 2, tanV * (f.width / f.height), tanV);
+    this.uniF(this.loc(p, 'u_shift'), 2, f.shift?.[0] ?? 0, f.shift?.[1] ?? 0);
+    const c = (n: string, v: Rgba): void => this.uniF(this.loc(p, n), 4, v[0], v[1], v[2], v[3]);
     c('u_sky', sky.sky);
     c('u_skyH', sky.skyHorizon);
     c('u_ground', sky.ground);
@@ -1926,21 +1938,21 @@ export class Renderer3d {
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.a.fb);
     gl.viewport(0, 0, t.w, t.h);
     gl.useProgram(aoP.p);
-    gl.uniform1i(this.loc(aoP, 'u_depth'), 1);
-    gl.uniformMatrix4fv(this.loc(aoP, 'u_invProj'), false, invProj);
-    gl.uniform2f(this.loc(aoP, 'u_texel'), 1 / devW, 1 / devH);
-    gl.uniform1f(this.loc(aoP, 'u_radius'), ao.radius);
-    gl.uniform1f(this.loc(aoP, 'u_pxPerUnit'), (f.proj[5]! * devH) / 2);
-    gl.uniform1f(this.loc(aoP, 'u_ortho'), f.projection === 'orthographic' ? 1 : 0);
-    gl.uniform1f(this.loc(aoP, 'u_intensity'), ao.intensity);
-    gl.uniform1f(this.loc(aoP, 'u_maxPx'), AO_MAX_PIXELS);
+    this.uniI(this.loc(aoP, 'u_depth'), 1);
+    this.uniM(this.loc(aoP, 'u_invProj'), invProj);
+    this.uniF(this.loc(aoP, 'u_texel'), 2, 1 / devW, 1 / devH);
+    this.uniF(this.loc(aoP, 'u_radius'), 1, ao.radius);
+    this.uniF(this.loc(aoP, 'u_pxPerUnit'), 1, (f.proj[5]! * devH) / 2);
+    this.uniF(this.loc(aoP, 'u_ortho'), 1, f.projection === 'orthographic' ? 1 : 0);
+    this.uniF(this.loc(aoP, 'u_intensity'), 1, ao.intensity);
+    this.uniF(this.loc(aoP, 'u_maxPx'), 1, AO_MAX_PIXELS);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     // 가로 흐림(a → b)·세로 흐림(b → a)
     gl.useProgram(blurP.p);
-    gl.uniform1i(this.loc(blurP, 'u_depth'), 1);
-    gl.uniform1i(this.loc(blurP, 'u_ao'), AO_UNIT);
-    gl.uniformMatrix4fv(this.loc(blurP, 'u_invProj'), false, invProj);
-    gl.uniform1f(this.loc(blurP, 'u_radius'), ao.radius);
+    this.uniI(this.loc(blurP, 'u_depth'), 1);
+    this.uniI(this.loc(blurP, 'u_ao'), AO_UNIT);
+    this.uniM(this.loc(blurP, 'u_invProj'), invProj);
+    this.uniF(this.loc(blurP, 'u_radius'), 1, ao.radius);
     gl.activeTexture(gl.TEXTURE0 + AO_UNIT);
     for (const [src, dst, sx, sy] of [
       [t.a, t.b, 1 / t.w, 0],
@@ -1948,7 +1960,7 @@ export class Renderer3d {
     ] as const) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
       gl.bindTexture(gl.TEXTURE_2D, src.tex);
-      gl.uniform2f(this.loc(blurP, 'u_step'), sx, sy);
+      this.uniF(this.loc(blurP, 'u_step'), 2, sx, sy);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     // 곱하기(a → 그림)
@@ -1956,8 +1968,8 @@ export class Renderer3d {
     gl.viewport(0, 0, devW, devH);
     gl.bindTexture(gl.TEXTURE_2D, t.a.tex);
     gl.useProgram(mixP.p);
-    gl.uniform1i(this.loc(mixP, 'u_depth'), 1);
-    gl.uniform1i(this.loc(mixP, 'u_ao'), AO_UNIT);
+    this.uniI(this.loc(mixP, 'u_depth'), 1);
+    this.uniI(this.loc(mixP, 'u_ao'), AO_UNIT);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.enable(gl.BLEND);
@@ -2120,7 +2132,65 @@ export class Renderer3d {
    */
   private uf(fm: UniMemo | null, p: Prog, name: string, n: 1 | 2 | 3 | 4, a0: number, a1 = 0, a2 = 0, a3 = 0): void {
     const l = this.loc(p, name);
-    if (uniSame(fm, l, n, a0, a1, a2, a3)) return;
+    if (!uniSame(fm, l, n, a0, a1, a2, a3)) this.uniF(l, n, a0, a1, a2, a3);
+  }
+
+  /** 0.76.0 uf의 정수 꼴(무늬 단위·자리 시작) */
+  private ui(fm: UniMemo | null, p: Prog, name: string, a: number): void {
+    const l = this.loc(p, name);
+    if (!uniSame(fm, l, 1, a)) this.uniI(l, a);
+  }
+
+  /** 0.76.0 uf의 행렬 꼴(4×4는 16칸, 3×3은 9칸 — float32 배열) */
+  private um(fm: UniMemo | null, p: Prog, name: string, v: Float32Array): void {
+    const l = this.loc(p, name);
+    if (!uniSameA(fm, l, v, v.length)) this.uniM(l, v);
+  }
+
+  /**
+   * 0.80.0 위치 기억(uniLast)의 l 칸이 a0~a3(앞 n개)과 비트까지 같으면 true(보내지 않는다), 아니면 적고 false(−0과 +0은 다르게, NaN은 늘 다르게 — 0.76.0 sameNum).
+   * 시험용 기억 끔(uniLastOff·faceMemoOff·lineMemoOff)이면 견주지 않고 적기만 한다
+   */
+  private uniKept(l: WebGLUniformLocation, n: number, a0: number, a1: number, a2: number, a3: number): boolean {
+    let s = this.uniLast.get(l);
+    if (!s || s.length !== n) this.uniLast.set(l, (s = new Float64Array(n)));
+    else if (
+      !this.uniLastOff &&
+      !this.faceMemoOff &&
+      !this.lineMemoOff &&
+      sameNum(s[0]!, a0) &&
+      (n < 2 || sameNum(s[1]!, a1)) &&
+      (n < 3 || sameNum(s[2]!, a2)) &&
+      (n < 4 || sameNum(s[3]!, a3))
+    )
+      return true;
+    s[0] = a0;
+    if (n > 1) s[1] = a1;
+    if (n > 2) s[2] = a2;
+    if (n > 3) s[3] = a3;
+    return false;
+  }
+
+  /** 0.80.0 uniKept의 배열 꼴(행렬·평면 배열 — a 모두, 0.76.0 uniSameA처럼 뒤 칸부터 견준다) */
+  private uniKeptA(l: WebGLUniformLocation, a: ArrayLike<number>): boolean {
+    const n = a.length;
+    let s = this.uniLast.get(l);
+    let i = n - 1;
+    if (!s || s.length !== n) this.uniLast.set(l, (s = new Float64Array(n)));
+    else if (!this.uniLastOff && !this.faceMemoOff && !this.lineMemoOff) {
+      for (; i >= 0; i--) if (!sameNum(a[i]!, s[i]!)) break;
+      if (i < 0) return true;
+    }
+    for (; i >= 0; i--) s[i] = a[i]!;
+    return false;
+  }
+
+  /**
+   * 0.80.0 uniform1f~4f를 위치 기억과 견주어 다를 때만(같으면 GL에 이미 그 값이 있다). 위치가 없으면(번역기가 지운 균일 변수) 0.79.0처럼 부른다 — GL이 하는 일은 없다.
+   * 렌더러와 묶어 그리기 조각(MergeHost)의 균일 변수 보내기는 모두 이것·uniI·uniM·uniV를 거친다
+   */
+  uniF(l: WebGLUniformLocation | null, n: 1 | 2 | 3 | 4, a0: number, a1 = 0, a2 = 0, a3 = 0): void {
+    if (l && this.uniKept(l, n, a0, a1, a2, a3)) return;
     const gl = this.gl;
     if (n === 1) gl.uniform1f(l, a0);
     else if (n === 2) gl.uniform2f(l, a0, a1);
@@ -2128,18 +2198,23 @@ export class Renderer3d {
     else gl.uniform4f(l, a0, a1, a2, a3);
   }
 
-  /** 0.76.0 uf의 정수 꼴(무늬 단위·자리 시작) */
-  private ui(fm: UniMemo | null, p: Prog, name: string, a: number): void {
-    const l = this.loc(p, name);
-    if (!uniSame(fm, l, 1, a)) this.gl.uniform1i(l, a);
+  /** 0.80.0 uniF의 정수 꼴(uniform1i — 무늬 단위·자리 시작·평면 수) */
+  uniI(l: WebGLUniformLocation | null, a: number): void {
+    if (l && this.uniKept(l, 1, a, 0, 0, 0)) return;
+    this.gl.uniform1i(l, a);
   }
 
-  /** 0.76.0 uf의 행렬 꼴(4×4는 16칸, 3×3은 9칸 — float32 배열) */
-  private um(fm: UniMemo | null, p: Prog, name: string, v: Float32Array): void {
-    const l = this.loc(p, name);
-    if (uniSameA(fm, l, v, v.length)) return;
+  /** 0.80.0 uniF의 행렬 꼴(9칸이면 uniformMatrix3fv, 아니면 uniformMatrix4fv — 전치 없이) */
+  uniM(l: WebGLUniformLocation | null, v: Float32Array): void {
+    if (l && this.uniKeptA(l, v)) return;
     if (v.length === 9) this.gl.uniformMatrix3fv(l, false, v);
     else this.gl.uniformMatrix4fv(l, false, v);
+  }
+
+  /** 0.80.0 uniF의 vec4 배열 꼴(uniform4fv — 평면 배열 u_clips·행렬과 평면 한 배열 u_mvpc) */
+  uniV(l: WebGLUniformLocation | null, v: Float32Array): void {
+    if (l && this.uniKeptA(l, v)) return;
+    this.gl.uniform4fv(l, v);
   }
 
   /**
@@ -2153,9 +2228,9 @@ export class Renderer3d {
     b.fill(0);
     for (let i = 0; i < n; i++) b.set(planes[i]!, i * 4);
     const lc = this.loc(p, 'u_clips');
-    if (!lineSetA(v, 44, b, MAX_SECTION_PLANES * 4) && !uniSameA(fm, lc, b, MAX_SECTION_PLANES * 4)) this.gl.uniform4fv(lc, b);
+    if (!lineSetA(v, 44, b, MAX_SECTION_PLANES * 4) && !uniSameA(fm, lc, b, MAX_SECTION_PLANES * 4)) this.uniV(lc, b);
     const ln = this.loc(p, 'u_nclip');
-    if (!lineSet(v, 19, 1, n) && !uniSame(fm, ln, 1, n)) this.gl.uniform1i(ln, n);
+    if (!lineSet(v, 19, 1, n) && !uniSame(fm, ln, 1, n)) this.uniI(ln, n);
   }
 
   private loc(pr: Prog, name: string): WebGLUniformLocation | null {
@@ -6766,8 +6841,8 @@ export class Renderer3d {
         // 0.76.0 행렬·평면·안개 눈 깊이 행도 선 기억과 견준다(drawLines와 같은 칸)
         if (mc) this.lineMvpc(p, clip!, lv);
         else {
-          if (!lineSetA(lv, 28, this.m4a, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
-          if (clip && !lineSetA(lv, 20, clip, 4)) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+          if (!lineSetA(lv, 28, this.m4a, 16)) this.uniM(this.loc(p, 'u_mvp'), this.m4a);
+          if (clip && !lineSetA(lv, 20, clip, 4)) this.uniF(this.loc(p, 'u_clip'), 4, clip[0], clip[1], clip[2], clip[3]);
         }
         if (wclips) this.setClips(p, wclips, lv);
         if (fog) this.lineMvz(p, f, model, lv);
@@ -6792,11 +6867,11 @@ export class Renderer3d {
           for (const k of C) {
             this.setClips(p, clipsOfCut(r.src.id, model, k.cut));
             if (k.n.total) {
-              gl.uniform4f(this.loc(p, 'u_color'), col[0], col[1], col[2], col[3]);
+              this.uniF(this.loc(p, 'u_color'), 4, col[0], col[1], col[2], col[3]);
               wireList(k.n);
             }
             if (k.h.total) {
-              gl.uniform4f(this.loc(p, 'u_color'), hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
+              this.uniF(this.loc(p, 'u_color'), 4, hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
               wireList(k.h);
             }
           }
@@ -6812,7 +6887,7 @@ export class Renderer3d {
           lineForget(lm);
           L.forEach((list, k) => {
             if (!list.total) return;
-            if (k === 1) gl.uniform4f(this.loc(p, 'u_color'), hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
+            if (k === 1) this.uniF(this.loc(p, 'u_color'), 4, hiTint[0], hiTint[1], hiTint[2], hiTint[3]);
             wireList(list);
           });
         }
@@ -7218,15 +7293,15 @@ export class Renderer3d {
         if (perItem) {
           gl.activeTexture(gl.TEXTURE4);
           gl.bindTexture(gl.TEXTURE_2D, this.profCol!.tex);
-          gl.uniform1i(this.loc(pp, 'u_pcol'), 4);
+          this.uniI(this.loc(pp, 'u_pcol'), 4);
         }
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, this.profTex!.tex);
-        gl.uniform1i(this.loc(pp, 'u_depth'), 1);
-        gl.uniform2f(this.loc(pp, 'u_texel'), 1 / devW, 1 / devH);
-        gl.uniform1f(this.loc(pp, 'u_r'), Math.max(1, st.profiles.width / 2));
-        gl.uniform4f(this.loc(pp, 'u_color'), pc[0], pc[1], pc[2], pc[3]);
-        gl.uniform1f(this.loc(pp, 'u_ortho'), ortho);
+        this.uniI(this.loc(pp, 'u_depth'), 1);
+        this.uniF(this.loc(pp, 'u_texel'), 2, 1 / devW, 1 / devH);
+        this.uniF(this.loc(pp, 'u_r'), 1, Math.max(1, st.profiles.width / 2));
+        this.uniF(this.loc(pp, 'u_color'), 4, pc[0], pc[1], pc[2], pc[3]);
+        this.uniF(this.loc(pp, 'u_ortho'), 1, ortho);
         gl.disable(gl.DEPTH_TEST);
         gl.depthMask(false);
         gl.enable(gl.BLEND);
@@ -7418,12 +7493,12 @@ export class Renderer3d {
       const gm = this.grid.model;
       if (gm) {
         this.m4a.set(mat4Mul(f.viewProj, gm, this.d4a));
-        gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, this.m4a);
-      } else gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, vpF);
-      gl.uniform1f(this.loc(p, 'u_vcol'), 0);
-      gl.uniform1f(this.loc(p, 'u_alpha'), 1);
-      gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-      gl.uniform1f(this.loc(p, 'u_bias'), 0);
+        this.uniM(this.loc(p, 'u_mvp'), this.m4a);
+      } else this.uniM(this.loc(p, 'u_mvp'), vpF);
+      this.uniF(this.loc(p, 'u_vcol'), 1, 0);
+      this.uniF(this.loc(p, 'u_alpha'), 1, 1);
+      this.uniF(this.loc(p, 'u_override'), 4, 0, 0, 0, 0);
+      this.uniF(this.loc(p, 'u_bias'), 1, 0);
       const g = this.grid;
       const parts: [ThinRec | null, Rgba][] = [
         [g.minor, st.colors.gridMinor],
@@ -7433,7 +7508,7 @@ export class Renderer3d {
       ];
       for (const [r, c] of parts) {
         if (!r) continue;
-        gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
+        this.uniF(this.loc(p, 'u_color'), 4, c[0], c[1], c[2], c[3]);
         gl.bindVertexArray(r.vao);
         gl.drawArrays(gl.LINES, 0, r.count);
         stats.drawCalls++;
@@ -7754,14 +7829,14 @@ export class Renderer3d {
       (!fog || (v[14] === fog.color[0] && v[15] === fog.color[1] && v[16] === fog.color[2] && v[17] === fog.start && v[18] === fog.end))
     )
       return v;
-    if (!lineSet(v, 0, 4, c[0], c[1], c[2], c[3])) gl.uniform4f(this.loc(p, 'u_color'), c[0], c[1], c[2], c[3]);
-    if (!lineSet(v, 4, 1, vcol)) gl.uniform1f(this.loc(p, 'u_vcol'), vcol);
-    if (!lineSet(v, 5, 1, alpha)) gl.uniform1f(this.loc(p, 'u_alpha'), alpha);
-    if (!lineSet(v, 6, 1, 1)) gl.uniform4f(this.loc(p, 'u_override'), 0, 0, 0, 0);
-    if (!lineSet(v, 7, 1, bias)) gl.uniform1f(this.loc(p, 'u_bias'), bias);
+    if (!lineSet(v, 0, 4, c[0], c[1], c[2], c[3])) this.uniF(this.loc(p, 'u_color'), 4, c[0], c[1], c[2], c[3]);
+    if (!lineSet(v, 4, 1, vcol)) this.uniF(this.loc(p, 'u_vcol'), 1, vcol);
+    if (!lineSet(v, 5, 1, alpha)) this.uniF(this.loc(p, 'u_alpha'), 1, alpha);
+    if (!lineSet(v, 6, 1, 1)) this.uniF(this.loc(p, 'u_override'), 4, 0, 0, 0, 0);
+    if (!lineSet(v, 7, 1, bias)) this.uniF(this.loc(p, 'u_bias'), 1, bias);
     if (fog) {
-      if (!lineSet(v, 14, 3, fog.color[0], fog.color[1], fog.color[2])) gl.uniform4f(this.loc(p, 'u_fogCol'), fog.color[0], fog.color[1], fog.color[2], 1);
-      if (!lineSet(v, 17, 2, fog.start, fog.end)) gl.uniform2f(this.loc(p, 'u_fog'), fog.start, fog.end);
+      if (!lineSet(v, 14, 3, fog.color[0], fog.color[1], fog.color[2])) this.uniF(this.loc(p, 'u_fogCol'), 4, fog.color[0], fog.color[1], fog.color[2], 1);
+      if (!lineSet(v, 17, 2, fog.start, fog.end)) this.uniF(this.loc(p, 'u_fog'), 2, fog.start, fog.end);
     }
     return v;
   }
@@ -7809,17 +7884,17 @@ export class Renderer3d {
       // 0.51.0 앞 그리기와 프로그램·값이 같으면(memo) 프로그램·고정 균일 변수를 다시 보내지 않는다 — 그물마다 바뀌는 행렬·단면 평면·안개 깊이 행만.
       // 0.75.0 프로그램마다 값을 따로 들고 다른 균일 변수만 보낸다(lineFix — 안개 색·범위도 고정 값으로)
       const v = this.lineFix(p, memo, o.color, o.vcol ? 1 : 0, o.alpha, o.bias ?? 0, fog);
-      if (!lineSet(v, 11, 2, vw, vh)) gl.uniform2f(this.loc(p, 'u_viewport'), vw, vh);
-      if (!lineSet(v, 8, 1, wDev)) gl.uniform1f(this.loc(p, 'u_width'), wDev);
-      if (!lineSet(v, 9, 2, dash, DASH[1] * st.dpr)) gl.uniform2f(this.loc(p, 'u_dash'), dash, DASH[1] * st.dpr);
+      if (!lineSet(v, 11, 2, vw, vh)) this.uniF(this.loc(p, 'u_viewport'), 2, vw, vh);
+      if (!lineSet(v, 8, 1, wDev)) this.uniF(this.loc(p, 'u_width'), 1, wDev);
+      if (!lineSet(v, 9, 2, dash, DASH[1] * st.dpr)) this.uniF(this.loc(p, 'u_dash'), 2, dash, DASH[1] * st.dpr);
       if (clips) this.setClips(p, clips, v);
       // 0.76.0 시점 투영 · 모형·단면 평면(평면 없음 값 포함)·안개 눈 깊이 행도 그 프로그램에 마지막으로 보낸 값과 비트까지 같으면 다시 보내지 않는다(선분 묶음처럼 모형이 같은 선)
       if (fog) this.lineMvz(p, f, matrix, v);
       if (mc) this.lineMvpc(p, clip!, v);
       else {
-        if (!lineSetA(v, 28, mvp, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
+        if (!lineSetA(v, 28, mvp, 16)) this.uniM(this.loc(p, 'u_mvp'), mvp);
         const cp = clip ?? NO_CLIP;
-        if (!lineSetA(v, 20, cp, 4)) gl.uniform4f(this.loc(p, 'u_clip'), cp[0], cp[1], cp[2], cp[3]);
+        if (!lineSetA(v, 20, cp, 4)) this.uniF(this.loc(p, 'u_clip'), 4, cp[0], cp[1], cp[2], cp[3]);
       }
       gl.bindVertexArray(r.wide);
       // 0.52.0 묶음 저장소의 윤곽선은 묶음 선분 버퍼 안 그 그물 자리부터(r.first — 아니면 0)
@@ -7853,8 +7928,8 @@ export class Renderer3d {
       if (fog) this.lineMvz(p, f, matrix, v);
       if (mc) this.lineMvpc(p, clip!, v);
       else {
-        if (!lineSetA(v, 28, mvp, 16)) gl.uniformMatrix4fv(this.loc(p, 'u_mvp'), false, mvp);
-        if (clip && !lineSetA(v, 20, clip, 4)) gl.uniform4f(this.loc(p, 'u_clip'), clip[0], clip[1], clip[2], clip[3]);
+        if (!lineSetA(v, 28, mvp, 16)) this.uniM(this.loc(p, 'u_mvp'), mvp);
+        if (clip && !lineSetA(v, 20, clip, 4)) this.uniF(this.loc(p, 'u_clip'), 4, clip[0], clip[1], clip[2], clip[3]);
       }
       gl.bindVertexArray(r.thin);
       gl.drawArrays(gl.LINES, ((r.first ?? 0) + o.first) * 2, o.count * 2);
@@ -8143,7 +8218,8 @@ function lineSetA(v: Float64Array | null, k: number, a: ArrayLike<number>, n: nu
  * 0.76.0 그물(면) 프로그램 균일 변수 기억: 균일 변수 위치(프로그램 하나의 균일 변수 하나)마다 그 프로그램에 마지막으로 보낸 값. 그리기 한 번(render) 동안만 쓴다 —
  * GL은 균일 변수 값을 프로그램마다 들고 있어 다른 프로그램을 쓴 뒤 돌아와도 남는다. 기억 밖에서 그 균일 변수를 쓰는 길(묶음 구간 그리기의 자리 자료 단위)이 끼면 그 칸을 지운다.
  * 0.77.0 인스턴싱 선 변종(drawLinesInst)·점·깊이 그림(해 그림자·외곽선 색 깊이) 프로그램도 같은 기억을 쓴다 — 이 프로그램들의 균일 변수는 그 차례 하나만 쓰고 모두 이 기억을 거친다
- * (묶음 구간 그리기의 MSHIFT 변종 u_mvp0·u_mv0·u_nmat0·u_shadow0 직접 쓰기는 기억이 들지 않는 이름이라 겹치지 않는다)
+ * (묶음 구간 그리기의 MSHIFT 변종 u_mvp0·u_mv0·u_nmat0·u_shadow0 직접 쓰기는 기억이 들지 않는 이름이라 겹치지 않는다).
+ * 0.80.0 이 기억을 지나 보내는 값은 모두 위치 기억(Renderer.uniLast — 그리기·프레임을 넘어)과 한 번 더 견준다
  */
 export type UniMemo = Map<WebGLUniformLocation, Float64Array>;
 
