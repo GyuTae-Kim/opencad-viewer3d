@@ -9573,6 +9573,10 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 [2dcad-viewer](https://github.com/GyuTae-Kim/opencad-dwgdxf)의 `src/viewer3d/`에서 분리했습니다(커밋 `d7c584a` 기준, 처음 들어온 것은 PR #7).
 2D 뷰어 안에서 3D 문서를 열던 탭·리본·패널 화면(`src/app/view3d/`)은 그 커밋의 2dcad-viewer에 남아 있습니다.
 
+## 기여
+
+이슈와 PR을 반깁니다. 방법은 [CONTRIBUTING.md](CONTRIBUTING.md)(한국어·영어)에 있고, 참여하는 모든 분은 [행동 강령](CODE_OF_CONDUCT.md)을 따릅니다.
+
 ## 라이선스
 
 MIT
