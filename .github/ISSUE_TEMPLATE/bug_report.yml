@@ -6,6 +6,7 @@ body:
     attributes:
       value: |
         한국어나 영어로 쓰시면 됩니다. STEP·SKP·NC 파일을 잘못 읽는 문제는 각 앱 저장소(opencad-step·opencad-skp·opencad-nc)에 올려 주십시오.
+        보안 문제는 이슈 대신 [비공개 신고](https://github.com/GyuTae-Kim/opencad-viewer3d/security/advisories/new)를 써 주십시오.
         (Korean or English is fine. File-parsing bugs belong in each app repository.)
   - type: input
     id: version

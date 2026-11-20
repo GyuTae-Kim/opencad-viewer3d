@@ -9576,6 +9576,7 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 ## 기여
 
 이슈와 PR을 반깁니다. 방법은 [CONTRIBUTING.md](CONTRIBUTING.md)(한국어·영어)에 있고, 참여하는 모든 분은 [행동 강령](CODE_OF_CONDUCT.md)을 따릅니다.
+보안 문제는 공개 이슈 대신 [SECURITY.md](SECURITY.md)의 비공개 신고로 알려 주십시오.
 
 ## 라이선스
 
