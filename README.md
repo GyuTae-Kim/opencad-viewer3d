@@ -102,7 +102,8 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   법선·무늬 좌표를 작은 정수 배열(Int8·Int16 정규화)로 받아 그대로 GPU에 올리기. GPU 버퍼 바이트를 성분별(위치·법선·무늬 좌표·색인·선분 등)로 읽기(`stats.buffers`).
   0.88.0부터 `dispose()`한 뷰어에 앱이 창 키를 넘기거나(`handleKey`·`handleKeyUp`) 측정 스냅·그리기 선택을 주어도 창·문서 리스너·타이머를 다시 걸지 않고 키를 삼키지 않는다
   (`false` — 0.87.0은 걷기 키·Shift에 리스너를 다시 걸고 F·1~7·걷기 키에 `true`를 돌려 기본 동작을 막았다).
-  0.89.0부터 dispose 뒤 알림 등록(`on*`)은 콜백을 들지 않고, 알림 콜백 안에서 dispose하면 같은 알림의 남은 콜백을 부르지 않으며, dispose 뒤 `toBlob()`은 Error로 거절한다
+  0.89.0부터 dispose 뒤 알림 등록(`on*`)은 콜백을 들지 않고, 알림 콜백 안에서 dispose하면 같은 알림의 남은 콜백을 부르지 않으며, dispose 뒤 `toBlob()`은 Error로 거절한다.
+  0.90.0부터 알림 아홉(`on*`)은 브라우저 사건(`EventTarget`)처럼 알림 동안 뗀 콜백은 부르지 않고 단 콜백은 다음 알림부터 부르며, dispose는 키보드 스냅 선택(앱 `announce`)·덧그림·피할 상자·측정 글 꼴도 놓는다
 
 ## 장면 계약
 
@@ -9687,6 +9688,80 @@ NaN·무한대 훑기(0.82.0~0.87.0)와 다른 견고성 갈래인 수명을 가
 - 뷰어를 dispose하는 앱(임베드 등): dispose 뒤 `toBlob()`의 거절을 받아야 한다(선택을 준 `toBlob`과 같다). dispose 뒤에 다는 알림은 아무것도 하지 않는다
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 0.88.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 +41 B(gzip +13 B), 묶어 그리기·면 미리 강조 조각 바이트 그대로(`import()` 뷰어 조각 +41 B·gzip +23~25 B — 첫 화면 입구 바이트 그대로)
+
+## 0.90.0: 알림 아홉을 한 규칙으로(브라우저 사건과 같게)·dispose가 앱 함수·덧그림·피할 상자도 놓기(90차 — 0.89.0 남은 한계)
+
+0.89.0 남은 한계 「사본을 도는 다섯 알림은 콜백 안에서 다른 콜백을 떼어도 그 알림 동안에는 뗀 콜백을 부른다」와 「dispose는 덧그림·키보드 스냅 선택(앱 `announce` 콜백)·피할 상자·측정 글 꼴은 놓지 않는다」를
+코드로 읽고 가짜 WebGL 시험으로 재현했다. 알림 아홉을 부르는 곳 12군데를 모두 읽었다 — 알림 동안 목록이 바뀔 때 두 무리의 규칙이 달랐다
+
+### 찾은 것(0.89.0 — 코드 읽기와 새 시험, 0.89.0 src에서 65 가운데 24 실패)
+
+| 알림 | 알림을 부를 때 | 콜백 안에서 뒤 콜백을 뗌 | 콜백 안에서 새 콜백을 닮 | 콜백 안에서 다른 콜백을 뗐다 다시 닮 | 콜백 안에서 dispose |
+|---|---|---|---|---|---|
+| `onPick`·`onMeasure`·`onCameraChange`·`onSectionChange` | 목록(Map·Set)을 바로 돈다 | 부르지 않음 | **그 알림에 부름** | **끝 자리에서 그 알림에 또 부름** | 멈춤 |
+| `onSceneIssues`·`onContextLost`·`onContextRestore`·`onContextRestoreDone`·`onViewCubeExpandedChange` | Set 사본을 돈다 | **그 알림에 부름** | 부르지 않음 | **처음 자리에서 부름** | 멈춤(0.89.0) |
+| 0.90.0 아홉 모두 | 시작할 때의 목록을 단 차례대로 | 부르지 않음 | 다음 알림부터(끝 자리) | 다음 알림부터(끝 자리) | 멈춤 |
+
+- 브라우저 `EventTarget.dispatchEvent`(DOM 명세의 리스너 부르기)는 시작할 때의 목록 사본을 돌며 그 동안 뗀 리스너는 건너뛰고, 그 동안 단 리스너(뗐다 다시 단 것도 새 등록)는 부르지 않는다. 0.90.0 규칙이 이것이다
+- 바로 도는 넷에서 자기를 뗐다 다시 다는 콜백(한 번 받고 다시 거는 꼴 등)은 같은 알림 안에서 다시 불렸다 — 그만두지 않으면 끝없이 되풀이한다(시험은 다섯 번째에서 그만두게 해 0.89.0에서 한 알림에 다섯 번)
+- 콜백을 하나만 단 앱이나 알림 안에서 콜백을 달거나 떼지 않는 앱에서는 차이가 드러나지 않는다
+- `dispose()`는 키보드 스냅 선택(앱 `announce`·`pickName`·`formatNumber`·글 함수·`pickCycle.group`·`faceRanges`), 가상 커서(고르기 후보), 측정 덧그림(`setAnnotations` 목록·모양),
+  피할 상자(`setMeasureLabelAvoid`), 측정 글 꼴(`setMeasureFormat` 함수), 고르기 미리 강조(`setPickPreview` 사본)를 놓지 않았고 getter는 마지막 값을 돌려주었다.
+  dispose 뒤 `setKeyboardSnap`·`setMeasureLabelAvoid`·`setMeasureFormat`은 새 값을 쥐었다(`setAnnotations`·`setPickPreview`는 그 전부터 아무것도 하지 않았다)
+- 코드를 읽다 찾음: 가상 커서 Enter로 찍은 측정의 알림(`onMeasure`) 안에서 앱이 dispose하거나 측정 모드를 끄면(측정을 지운다) 찍은 점을 읽다 TypeError가 났다(0.89.0 — 코드 읽기)
+
+### 고친 것
+
+- 알림 목록을 콜백 → 등록 표 Map으로 두고(Set 여덟을 바꿈) 아홉 알림을 한 도움 함수로 부른다: 시작할 때 목록 사본을 단 차례대로 돌며 지금도 같은 등록 표인 콜백만 부르고, dispose되면 멈춘다(0.89.0 그대로)
+  - 같은 함수를 다시 달면 처음 자리·같은 등록 표 그대로다(0.89.0과 같은 차례). `onPick`은 같은 선택 객체에 선택만 바꿔 넣는다(0.22.0 「마지막 선택」 그대로 — 알림 동안 다시 달아도 뗀 것이 아니어서 그 알림에 새 선택으로 부른다)
+- `dispose()`가 위 여섯을 놓는다(알리지 않는다 — `announce`의 'end'도 없다): `keyboardSnap`·`keyboardCursor`·`measureLabelAvoid`·`pickPreview`는 null, `annotations`·`annotationLabelRects`는 빈 배열.
+  그 뒤 `setKeyboardSnap`·`setMeasureLabelAvoid`·`setMeasureFormat`도 아무것도 하지 않는다
+- 가상 커서 Enter 측정: 찍은 뒤 알림 안에서 dispose했거나 커서를 껐으면 끝(고르기 쪽 Enter와 같은 꼴), 찍은 점이 없으면(앱이 측정을 지움) 그 찍기 알림 글 없이 끝
+- 그리기 길·렌더러·셰이더는 바꾸지 않았다
+
+### 크기
+
+- 89차 하네스를 그대로 썼다(0.89.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.89.0 값이 0.89.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 452,778 (154,022) → 453,070 (154,098) B(+292 / gzip +76), 묶어 그리기 조각 46,414 (18,488) B 그대로, 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 (985) B 그대로, 뷰어 조각 458,197 (156,493) → 458,489 (156,576) B(+292 / gzip +83).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,641 → 5,640 — 조각 이름 해시), 뷰어 조각 447,263 (152,748) → 447,555 (152,826) B(+292 / gzip +78)
+
+### 바뀐 기본 동작
+
+- 알림 콜백 안에서 단 콜백은 그 알림에 부르지 않고 다음 알림부터 부른다(`onPick`·`onMeasure`·`onCameraChange`·`onSectionChange` — 0.89.0은 그 알림에 불렀다)
+- 알림 콜백 안에서 뗀 콜백은 그 알림에 부르지 않는다(`onSceneIssues`·`onContextLost`·`onContextRestore`·`onContextRestoreDone`·`onViewCubeExpandedChange` — 0.89.0은 불렀다)
+- 알림 콜백 안에서 뗐다 다시 단 콜백은 그 알림에 부르지 않고 다음 알림부터 끝 자리에서 부른다(아홉 모두 — 0.89.0은 바로 도는 넷이 끝 자리에서, 사본 다섯이 처음 자리에서 그 알림에 불렀다).
+  자기를 뗐다 다시 다는 콜백은 알림마다 한 번이다
+- dispose 뒤 `keyboardSnap`·`keyboardCursor`·`measureLabelAvoid`·`pickPreview`는 null, `annotations`·`annotationLabelRects`는 빈 배열이다(0.89.0은 마지막 값).
+  dispose 뒤 `setKeyboardSnap`·`setMeasureLabelAvoid`·`setMeasureFormat`은 아무것도 하지 않는다
+- 콜백을 하나만 단 앱의 알림 차례·횟수·값, 알림 안에서 콜백을 달거나 떼지 않는 앱의 알림, 살아 있는 뷰어의 그리기는 0.89.0과 같다
+
+### 확인
+
+- 새 시험 `tests/v0900listeners.test.ts`(67): 알림 아홉마다 일곱(하나만 단 콜백의 차례·횟수·값, 같은 함수 두 번, 콜백 안에서 뒤 콜백 떼기·새 콜백 달기·다른 콜백 뗐다 다시 달기·자기 뗐다 다시 달기·dispose),
+  dispose가 놓는 것 둘(getter·안쪽 자료, 그 뒤 setter), 가상 커서 Enter 측정 알림 안의 dispose·측정 모드 끄기 둘.
+  0.89.0 src로는 앞 65 가운데 24 실패(바로 도는 넷 × 셋 — 단 콜백·뗐다 다시 단 콜백·자기 다시 달기, 사본 다섯 × 둘 — 뗀 콜백·뗐다 다시 단 콜백, dispose 놓기 둘), 41 통과(두 판 모두 —
+  하나만 단 콜백, 같은 함수 두 번, 콜백 안 dispose, 바로 도는 넷의 뗀 콜백, 사본 다섯의 단 콜백·자기 다시 달기). 뒤에 더한 Enter 측정 둘은 0.89.0 src로 돌리지 않았다(코드 읽기 — TypeError)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0890dispose` — dispose와 알림 아홉, `v0260` — 고르기 알림 차례·같은 함수 다시 달기·front, `v0460keysnap` — 가상 커서 Enter 측정·알림 글) 4파일 126개 통과
+- 세 앱의 알림 쓰임(읽기만): 알림마다 콜백을 하나씩 달거나(SKP `onCameraChange`는 셋), 알림 밖에서 달고 뗀다 — 알림 안에서 콜백을 달거나 떼는 곳이 없어 받는 알림은 같다
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 브라우저.
+  그리기 길을 바꾸지 않아 화소는 0.89.0과 같아야 한다
+
+### 남은 한계
+
+- dispose 뒤 값만 받는 다른 설정 setter(`setMeasureLabelSpot` 등)는 상태만 바꾸고 getter는 마지막 값을 돌려준다(앱 함수는 쥐지 않는다)
+- `onPick`을 알림 동안 떼지 않고 같은 함수로 다시 달면 그 알림에서 새 선택으로 부른다(브라우저 `addEventListener`는 같은 리스너를 다시 달면 아무것도 하지 않지만, 0.22.0부터 「마지막 선택」을 따른다)
+- 해제 함수는 등록마다가 아니라 함수마다다 — 같은 함수를 두 번 달고 받은 해제 함수 가운데 하나를 부르면 뗀다(0.89.0 그대로, 브라우저 `removeEventListener`와 같다)
+- 가상 커서 Enter 측정 알림 안에서 앱이 측정을 지우면 그 찍기의 알림 글은 없다(앱이 알린다)
+- 실제 브라우저는 보지 않았다(가짜 WebGL)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 세 앱은 알림 안에서 콜백을 달거나 떼지 않고 뷰어를 dispose하지 않으므로 바뀌는 것이 없다
+- 알림 콜백 안에서 콜백을 달거나 떼는 앱: 단 콜백은 다음 알림부터, 뗀 콜백은 그 알림부터 부르지 않는다(브라우저 사건과 같다)
+- 뷰어를 dispose하는 앱(임베드 등): dispose 뒤 `keyboardSnap`·`annotations` 등은 빈 값이다. 다시 쓰려면 새 뷰어에 다시 준다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 0.89.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 +292 B(gzip +76 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +292 B·gzip +78~83 B)
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
