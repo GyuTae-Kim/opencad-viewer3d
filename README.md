@@ -50,7 +50,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   단면 API(`setSection`·`setSections`·`setSectionAxis`·`setSectionPosition`·`moveSectionByPixels`)는 NaN·무한대 법선·offset·위치를 받지 않고(앞 단면 그대로 — `setSections`는 그 평면만 뺀다),
   0.87.0부터 아주 짧은 법선으로 나눠 넘친 위치도 받지 않는다(0.86.0은 위치 ±Infinity 평면으로 단면 균일 변수가 무한이었다).
   0.91.0부터 단면·보기·투영 API(`setSection`·`setSections`·`setSectionAxis`·`setView`·`setViewDir`·`setProjection`·`setRenderMode`·`setCamera`·`flyTo` 등)는 꼴이 틀린 인자(`null`·엉뚱한 글·배열 대신 객체 등 —
-  TypeScript 형 밖 값)도 던지지 않고 받지 않거나(앞 상태 그대로 — `setView`·`setViewDir`는 곧 false) 끄거나 그 선택을 주지 않은 것과 같게 본다(0.90.0은 `TypeError`를 던지거나 투영·그리기 모드에 그 값을 두었다)
+  TypeScript 형 밖 값)도 던지지 않고 받지 않거나(앞 상태 그대로 — `setView`·`setViewDir`는 곧 false) 끄거나 그 선택을 주지 않은 것과 같게 본다(0.90.0은 `TypeError`를 던지거나 투영·그리기 모드에 그 값을 두었다).
+  0.92.0부터 마커·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기 API(`setMarker`·`setGridZ`·`setHighlightSegments`·`setItemLooks`·`setAnnotations`·`setRenderOptions`·`setNavigation` 등)와
+  선택 객체 `null`도 같은 규칙이다(0.91.0은 엉뚱한 마커 `kind`에 그리기마다 `TypeError`를 던져 그 뒤 그림이 멈췄고, 높이가 아닌 격자 높이에 격자 `u_mvp`가 NaN이었다)
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 같은 그물을 여러 자리에 놓은 장면(같은 배열을 함께 쓰는 자리 — 조립의 같은 부품)은 자리마다가 아니라 같은 그물끼리 그리기 한 번에 그립니다(인스턴싱 — 정의 12개 × 자리 3,000에서
   그리기 호출 6,004 → 28, 자리 색·강조·분해 행렬·숨기기는 자리마다 그대로, 0.43.0부터 단면 하나·그림자를 켜도 면은 모은다).
@@ -9864,6 +9866,89 @@ NaN·무한대 훑기(0.82.0~0.87.0)와 다른 견고성 갈래인 수명을 가
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.90.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 +878 B(gzip +257 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +878 B·gzip +243~285 B)
 
+## 0.92.0: 마커 kind·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기 API의 꼴이 틀린 인자도 0.91.0 규칙으로(92차 — 0.91.0 남은 한계)
+
+0.91.0 「남은 한계」 표(단면·보기·투영 밖 API)를 가짜 WebGL 탐색 시험으로 0.91.0 src에서 다시 재현했다. 가장 앞은 `setMarker`의 `kind`다 — 모양 이름이 아니면 그리기마다 `TypeError`를 던져
+그 뒤 그림이 멈췄다. 표의 나머지와 같은 꼴(선택 객체 `null`을 바로 읽는 API — 코드 읽기로 찾음)도 모두 API 입구 한두 줄이라 함께 0.91.0 규칙과 도움 함수(`optsOf`·`iterable`·이름 판정)로 맞췄다
+
+### 찾은 것(0.91.0 — 상자 셋(하나는 원점)·선분 묶음, 탐색 시험과 새 시험이 0.91.0 src에서 재현)
+
+| API | 꼴이 틀린 인자 | 0.91.0 | 0.92.0 |
+|---|---|---|---|
+| `setMarker`의 `kind` | 엉뚱한 글·`null`·`'Cone'`·수·빈 글 / 물려받은 이름(`'toString'`·`'constructor'`) | **그리기마다 `TypeError`**(마커 모양을 찾지 못함 — 그 뒤 그림이 멈추고 `toBlob()`도 던짐) / 빈 마커 | 주지 않은 것(`'cone'`) |
+| `setGridZ` | 엉뚱한 글·NaN·±Infinity·`{}`·한도(1e15) 밖 수 / `null`·수로 읽히는 글·참·배열 | 원점을 쓰는 장면은 격자 `u_mvp`가 유한하지 않음, 아니면 격자가 사라짐 / 격자가 사라짐 | 받지 않음(앞 높이 그대로) |
+| 생성자 `gridZ` | 위와 같음 | 위와 같음 | 주지 않은 것(`'min'`) |
+| `setHighlightSegments` | Float32Array가 아닌 값(일반 배열·글·유사 배열) / 다른 형식 배열(Float64Array·Uint8Array) | `TypeError` — 앞 강조를 지운 뒤 던져 **그 뒤 그리기마다 지운 VAO를 묶음**(가짜 WebGL은 던짐) / 받음(실제 GL은 그 바이트를 float로 읽음) | `null`과 같다(해제) |
+| `setItemLooks`·`setItemMatrices` | 돌 수 없는 목록(`null`·`{}`·수·`undefined`) / 돌 수 없는 항목(`null`·`{}`·수) | `TypeError` / `TypeError` — 앞 항목만 걸고 던져 맞춤 범위(`fitBounds`)가 옛 값 | 0(아무것도 걸지 않음) / 그 항목을 건너뜀 |
+| `setItemMatrix` | `undefined` | `TypeError` | 받지 않음(배열이 아닌 행렬과 같다) |
+| `setItemColor`·`setItemEdgeColor`·`setItemProfileColor` | `undefined` | `TypeError` | `null`과 같다(되돌림 — 깨진 색과 같다) |
+| `setAnnotations` | 글·유사 배열 | `TypeError` | `null`과 같다(지움 — `{}`·수가 이미 지움) |
+| `highlight` | `{}`·수·참 | `TypeError` | `null`과 같다(해제) |
+| `setRenderOptions` | `null`·글·수·`undefined`·참 | `TypeError` | 받지 않음 |
+| `setNavigation` | `'fly'`·`null`·`undefined`·`'Walk'`·`'toString'`·수 | 그 값을 상태(`navigation`)에 둠 — 걷는 중이면 걷기 카메라 그대로 | 받지 않음(선택도 — 앞 걷기 그대로) |
+| 선택 객체: `setItemOpacity`·`setAnnotations`·`setLineDrawRange`·`setMesh`·`project`·`closestPoints`·`trianglesNear`·생성자 / `closestPointsAsync` | `null` | `TypeError`(`setItemOpacity`는 앞 겉모습의 불투명도만 바꾸고 던짐) / 거절 | 주지 않은 것 |
+
+- 0.91.0도 문제 없던 것(그대로): `setMarker`의 `kind` `undefined`(`'cone'`)·선택 `null`·자리 글과 `{}`(마커 없음), `setGridZ(undefined)`(`'min'`)·생성자 `gridZ: null`,
+  `setItemMatrix`의 글·수(받지 않음), 색 API의 수·`{}`(되돌림 — 0.83.0), 글 하나 목록(`setItemLooks('ab')`는 0, `highlight('ab')`는 글자마다 id), `setAnnotations`의 `{}`·수(지움)·`[null]`,
+  `setNavigation`·`setMarker`·`setHighlightSegments`·`highlightSegmentIds`·`setDrawLimitBySegmentId`·`setPickPreview`의 선택 `null`, 수로 읽히는 불투명도 글(`setItemOpacity(id, '0.5')`)
+- 앱에서 닿는 길(읽기만): NC 마커 모양은 공구 판정의 세 이름, 세 앱의 강조 선분은 Float32Array, SKP 걷기는 `'orbit'`·`'walk'` 고정, 그리기 선택·겉모습·덧그림·강조는 객체·배열·`null`로 넘긴다 —
+  이번에 고친 길로 들어오는 앱 값은 없다
+
+### 고친 것
+
+- 규칙(0.91.0 그대로): 꼭 줘야 하는 자리가 깨지면 그 API가 이미 쓰는 깨진 값 규칙을 따른다 — 받지 않음(`setGridZ`·`setItemMatrix`·`setRenderOptions`·`setNavigation`) 또는
+  `null`(색은 되돌림, 강조 선분·`highlight`는 해제, `setAnnotations` 목록은 지움). 선택 필드·선택 객체가 깨지면 주지 않은 것(마커 `kind` → `'cone'`, 생성자 `gridZ` → `'min'`, 선택 `null` → `{}`).
+  목록의 돌 수 없는 항목은 건너뛴다(0.33.0 `setItemLooks`가 겉모습이 객체가 아닌 항목을 건너뛰는 것과 같다)
+- `viewer.ts` 안 도움 함수 둘(`isMarkerKind`·`isGridZ`)을 더하고 0.91.0 `optsOf`·`iterable`을 다시 쓴다. 이름 판정은 물려받은 이름(`'toString'`)을 받지 않고(마커 모양 표는 `Record<MarkerKind, true>`라
+  모양을 더하면 형 검사가 잡는다), 격자 높이의 수는 0.50.0 좌표 한도(1e15) 안이어야 한다(`setMarker` 자리와 같다)
+- API 입구에서만 거른다 — 그리기 길·렌더러·셰이더와 순수 함수 `markerMesh`·`gridSpec`은 바꾸지 않았다. 공개 형(TypeScript 선언)은 그대로다
+
+### 크기
+
+- 91차 하네스를 그대로 썼다(0.91.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.91.0 값이 0.91.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 453,948 (154,355) → 454,488 (154,523) B(+540 / gzip +168), 묶어 그리기 조각 46,414 B 그대로(gzip 18,488 → 18,487), 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 (987) B 그대로, 뷰어 조각 459,367 (156,861) → 459,907 (157,003) B(+540 / gzip +142).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,639 → 5,640), 뷰어 조각 448,433 (153,069) → 448,973 (153,227) B(+540 / gzip +158)
+
+### 바뀐 기본 동작
+
+- 모양 이름이 아닌 마커 `kind`는 `'cone'`으로 그린다 — 0.91.0은 그리기마다 던졌다(물려받은 이름은 빈 마커)
+- `setGridZ`는 높이가 아닌 값을 받지 않는다(앞 높이 그대로 — `null`·수로 읽히는 글 `'5'`도. 0.91.0은 격자가 사라지거나 `u_mvp`가 NaN). 한도 1e15 밖 수도 받지 않는다
+  (0.91.0은 그 높이에 그렸고 원점을 쓰는 장면은 `u_mvp`가 무한). 생성자의 높이가 아닌 `gridZ`는 `'min'`이다
+- `setHighlightSegments`는 Float32Array만 받는다 — Float64Array·Uint8Array 같은 다른 형식 배열도 `null`(해제)이다(0.91.0은 받아 실제 GL에서 바이트를 float로 읽었다)
+- 겉모습 목록의 돌 수 없는 항목은 건너뛰고 나머지를 건다(0.91.0은 앞 항목만 걸고 던졌다). 색 API의 `undefined`는 되돌림, `setItemMatrix(id, undefined)`는 받지 않음이다
+- `setRenderOptions`·`setNavigation`은 객체·이름이 아니면 받지 않는다 — `navigation`은 늘 `'orbit'`·`'walk'`다. `setAnnotations`의 배열이 아닌 목록은 지움, `highlight`의 돌 수 없는 값은 해제다
+- 선택 객체 `null`은 주지 않은 것이다(`new Viewer3d(host, null)`도 기본으로 만든다)
+- 정상 인자의 그림·GL 호출·돌려준 값·상태는 0.91.0과 같다
+
+### 확인
+
+- 새 시험 `tests/v0920args.test.ts`(일흔 — 0.91.0 src로는 쉰넷 실패): 깨진 인자 쉰네 가지(그리기에서 던지거나 깨지던 것 스물여덟 — 마커 여덟·격자 열하나·생성자 격자 넷·강조 선분 다섯,
+  겉모습 여덟, 덧그림·강조·그리기 선택·걷기 열둘, 선택 객체 `null` 여섯)마다 깨진 값을 준 뷰어와 같아야 할 부름(부르지 않음·주지 않음·`null`)의 뷰어가 상태(겉모습·맞춤 범위·덧그림·걷기·
+  그리기 선택·격자·카메라)·돌려준 값·그리기 기록(가짜 WebGL2 — 프로그램·속성·균일 변수 값)에서 같고, 그 뒤 그리기도 던지지 않으며 균일 변수가 모두 유한하다. 0.91.0도 문제 없던 열둘은 두 판 모두 통과
+- 정상 값 그리기(저장소에 넣지 않은 탐색 시험): 상자 넷(원점·행렬 있는 것 포함)·선분 묶음에 마커(모양 셋·축·반지름·화면 높이·색·지움)·격자 높이 일곱과 끄고 켜기·생성자 다섯·
+  겉모습(목록·Map·행렬 목록·행렬 하나·색 셋·불투명도)·덧그림·강조·강조 선분·번호 강조·선 그리기 구간·번호 한도·그리기 선택 여덟·걷기 다섯·`setMesh`·`project`·`closestPoints`·`trianglesNear`·
+  `closestPointsAsync`를 건 여든하나 그림의 그리기 기록·펼친 도형(tests/drawexpand.ts)·돌려준 값·상태 해시가 0.91.0 src와 모두 같다(그리기 9~22, 펼친 도형 99~711)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0850overlay` — 마커·덧그림·강조 선분, `v0830looks` — 겉모습)과 탐색 시험 4파일 135개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 브라우저.
+  그리기 길을 바꾸지 않아 화소는 0.91.0과 같아야 한다
+
+### 남은 한계
+
+- 순수 함수 `markerMesh(kind)`(`opencad-viewer3d/marker`)는 이름이 아닌 `kind`에 여전히 던진다(뷰어는 이제 이름만 넘긴다)
+- 꼴이 틀린 인자는 0.91.0 표와 그와 같은 꼴(선택 객체 `null`)만 봤다 — 그 밖의 공개 API(측정·키보드 스냅·뷰 큐브 등)를 이 규칙으로 따로 훑지 않았다
+- 선택 객체 안 필드의 다른 값(`setRenderOptions`의 `merging: 'foo'`는 `'off'`, `profiles: 'yes'`는 켬 — 참·거짓·이름 자리)과 수로 읽히는 글(불투명도 `'0.5'`)·글 하나 목록(글자마다 id)은
+  0.91.0대로 읽는다(깨진 상태 없음)
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 세 앱은 마커 모양·걷기를 고정 이름으로, 강조 선분을 Float32Array로, 겉모습·덧그림·그리기 선택·강조를 객체·배열·`null`로 넘겨
+  바뀌는 것이 없다
+- 형 밖 값을 넘길 수 있는 앱(설정 파일·링크를 그대로 넘기는 임베드 등): 받지 않은 걷기는 `navigation`, 그리기 선택은 `renderOptions`, 겉모습은 `itemLook()`과 `setItemLooks`·`setItemMatrices`가 돌려준 건 수로 안다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.91.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 +540 B(gzip +168 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +540 B·gzip +142~158 B)
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
@@ -10273,8 +10358,9 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
   API 인자는 0.50.0 `setMarker`·`setItemColor`, 0.82.0 카메라 API, 0.83.0 겉모습·그리기 선택 API(`setItemLooks`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`,
   `setRenderOptions`의 외곽선·윤곽선·숨은 점선), 0.84.0 바탕·안개·조명(`setBackground`·`setFog`·`setLighting`), 0.85.0 선분 강조·덧그림·마커 선택·선 그리기 구간,
   0.87.0 단면 평면의 넘친 위치만 고쳤다 — 0.87.0이 훑은 측정·고르기 미리 강조 API는 재현되는 증상이 없어 그대로 두었고(0.87.0 "남은 한계"), 그 밖의 API 인자와
-  강조 선분 좌표(`positions`)의 값은 이 규칙으로 따로 훑지 않았다. 꼴이 틀린 인자(TypeScript 형 밖 값)는 0.91.0이 단면·보기·투영·그리기 모드·카메라 투영만 고쳤다 —
-  그리기마다 던지는 `setMarker`의 `kind`, 격자 `u_mvp`가 NaN인 `setGridZ`, 던지는 겉모습·덧그림·강조·그리기 선택 인자는 0.91.0 "남은 한계" 표에 남았다
+  강조 선분 좌표(`positions`)의 값은 이 규칙으로 따로 훑지 않았다. 꼴이 틀린 인자(TypeScript 형 밖 값)는 0.91.0이 단면·보기·투영·그리기 모드·카메라 투영을,
+  0.92.0이 그 "남은 한계" 표(마커 `kind`·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기)와 선택 객체 `null`을 고쳤다 — 그 밖의 공개 API(측정·키보드 스냅·뷰 큐브 등)는
+  이 규칙으로 따로 훑지 않았고, 순수 함수 `markerMesh`는 이름이 아닌 `kind`에 여전히 던진다(0.92.0 "남은 한계")
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
 - 앱이 포인터를 맡는 훅(0.32.0 `setPointerClaim`·`claimPointer`)은 누르기 단위다 — 휠·키는 맡지 않고(앱이 막으려면 그 사건을 먼저 받아 막는다), 코어에는 관성·길게 누르기가 없어
   앱이 길게 누르기를 하려면 제 타이머에서 `claimPointer`로 맡는다. 맡은 포인터 id로 보낸 합성 사건도 앱 것이라 코어 측정 미리 보기를 쓰는 정밀 조준은 지금처럼 합성 `pointercancel`을 쓴다.
