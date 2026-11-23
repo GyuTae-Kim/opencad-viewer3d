@@ -40,7 +40,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 깨진 장면 입력(0.50.0): 해석기가 깨진 파일에서 만든 NaN·무한대·1e15 넘는 좌표, 정점 수 밖 색인(0xffffffff 포함), 길이가 맞지 않는 배열, 유한하지 않은 색·원점·행렬·굵기·범위가 와도
   예외·빈 화면 없이 깨진 부분만 빼거나 고쳐 그리고 무엇을 했는지 알림(`sceneIssues`·`onSceneIssues`)으로 알린다(멀쩡한 장면은 그대로).
   0.82.0부터 카메라 API(`orbitBy`·`lookBy`·`walkBy`·`setCamera`·`flyTo`)도 NaN·무한대 인자나 그릴 수 없는 카메라(거리 0 이하·시야각 (0, π) 밖)를 받지 않는다
-  (0.81.0은 그 하나로 화면이 비고 전체 보기로도 돌아오지 않았다)
+  (0.81.0은 그 하나로 화면이 비고 전체 보기로도 돌아오지 않았다). 0.83.0부터 겉모습·그리기 선택 API(`setItemLooks`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`,
+  `setRenderOptions`의 선 색·외곽선 굵기·숨은 점선)도 `setItemColor`처럼 유한하지 않은 값이 든 색 배열과 NaN(자른 뒤에도 유한하지 않은) 불투명도·굵기를
+  `null`(되돌림·기본값)과 같게 본다(0.82.0은 그 묶음·선이 검거나 사라졌다)
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 같은 그물을 여러 자리에 놓은 장면(같은 배열을 함께 쓰는 자리 — 조립의 같은 부품)은 자리마다가 아니라 같은 그물끼리 그리기 한 번에 그립니다(인스턴싱 — 정의 12개 × 자리 3,000에서
   그리기 호출 6,004 → 28, 자리 색·강조·분해 행렬·숨기기는 자리마다 그대로, 0.43.0부터 단면 하나·그림자를 켜도 면은 모은다).
@@ -9186,6 +9188,71 @@ CPU(가짜 WebGL — 줄어든 GL 호출 수를 기준으로 본다. 이 차수�
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.81.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 gzip +108 B, 묶어 그리기 조각 그대로(`import()` 뷰어 조각 gzip +103~136 B — 첫 화면 입구 바이트 그대로)
 
+## 0.83.0: 겉모습·그리기 선택 API의 NaN·무한대 값을 `setItemColor`와 같은 규칙으로(83차 — 0.82.0 남은 한계)
+
+0.82.0이 찾고 남긴 것을 고쳤다: 겉모습·그리기 선택 API가 유한하지 않은 값을 그대로 둬 그 묶음·선의 균일 변수가 NaN이었다(검게 칠하거나 사라짐).
+0.50.0 `setItemColor` 규칙 — 유한하지 않은 값이 든 색 배열은 `null`과 같다(되돌림 — 무시가 아니라 앞서 건 색도 지운다) — 을 이 API들로 넓혔다
+
+### 찾은 것(0.82.0, 상자 둘 — 새 시험이 0.82.0 src에서 재현)
+
+| API | 받는 값 | `null`·없음 | 0.82.0의 유한하지 않은 값 | 0.83.0 |
+|---|---|---|---|---|
+| `setItemColor` | RGBA·CSS 글 | 되돌림 | `null`과 같다(0.50.0) | 그대로 |
+| `setItemLooks`의 `color` | 같음(문서: `setItemColor`를 하나씩 부른 것과 같다) | 되돌림 | 그대로 둠 — `u_color` NaN(검게). 문서와 다르다 | `null`과 같다 |
+| `setItemLooks`의 `edgeColor`·`profileColor`, `setItemEdgeColor`·`setItemProfileColor` | RGBA·CSS 글 | 되돌림 | 그대로 둠 — `u_color`(음영+윤곽·와이어프레임)·`u_pcol` NaN | `null`과 같다 |
+| `setItemOpacity`·`setItemLooks`의 `opacity` | 수(0~1로 자름) | 되돌림(고르기 빼기도) | NaN → 0(보이지 않음 — `pickable: false`도 남음), ±Infinity → 1·0 | NaN은 `null`과 같다, ±Infinity는 그대로 자름 |
+| `setRenderOptions`의 `profiles.width` | 수(1 이상, 없으면 2) | 2 | NaN·Infinity 그대로 — `u_r` NaN·무한(외곽선 사라짐), −Infinity → 1 | NaN·Infinity는 주지 않은 것(2), −Infinity는 그대로 1 |
+| `profiles.color`·`edgeColor`·`hiddenEdges.color` | RGBA·CSS 글·`'contrast'` | 테마 선 색·모드 색 | 그대로 둠 — 외곽선·윤곽선·숨은 점선 `u_color` NaN(그물마다 외곽선 색이 있으면 `u_pcol`도) | `null`과 같다 |
+| `hiddenEdges`(수)·`hiddenEdges.opacity` | 0~1로 자름 | 끔·0.35 | NaN 그대로(점선을 그리지 않음, `renderOptions.hiddenEdges` NaN), ±Infinity → 1·0 | NaN은 `null`(끔)·주지 않은 것(0.35)과 같다 |
+
+### 고친 것
+
+- 규칙: 값이 NaN이거나 범위로 자른 뒤에도 유한하지 않으면 그 자리에 `null`을 준 것과 같다 — 겉모습은 되돌림(앞서 건 값도 지운다), 외곽선 굵기·숨은 점선 불투명도는 주지 않은 것(기본).
+  색 배열 판정은 0.50.0 `setItemColor` 그대로(앞 셋과 넷째(없으면 1)가 유한한 수)
+- `viewer.ts` 안 함수 둘(색 배열 판정 `badRgba`, 불투명도 `lookAlpha`)을 `setItemColor`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`·`setItemLooks`·`setRenderOptions`가 함께 쓴다.
+  API 입구에서만 거른다 — 그리기 길·셰이더·균일 변수는 바꾸지 않았다. 공개 API 주석에 0.83.0 규칙을 적었다
+- 유한한 값은 0.82.0과 같은 값으로 둔다: 범위 밖 불투명도·숨은 점선 불투명도·굵기를 끝으로 자르는 것(±Infinity·−Infinity 굵기 포함), 범위 밖 색 성분(2·−1 같은), CSS 글(못 읽으면 검정)
+
+### 크기
+
+- 0.82.0이 다시 만든 54차 꼴 하네스를 그대로 썼다(0.82.0 src는 git에서 바로 읽어 같은 하네스로 견줌)
+- 코어 조각 451,423 (153,627) → 451,639 (153,668) B(+216 / gzip +41), 묶어 그리기 조각 46,414 B 그대로(gzip 18,487 → 18,488 — 받는 조각 이름의 해시), 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 B 그대로(gzip 987 → 985 — 조각 이름 해시), 뷰어 조각 456,847 (156,099) → 457,063 (156,118) B(+216 / gzip +19).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,641 → 5,640), 뷰어 조각 445,913 (152,318) → 446,129 (152,349) B(+216 / gzip +31)
+
+### 바뀐 기본 동작
+
+- 위 API에 유한하지 않은 값이 든 색 배열을 주면 그 색을 되돌린다 — 앞서 건 색도 지운다(0.82.0은 깨진 색으로 그려 그 묶음·선이 검거나 사라졌다)
+- `setItemOpacity(id, NaN)`·`setItemLooks`의 `opacity: NaN`은 `null`과 같다 — 불투명도와 고르기 빼기(`pickable: false`)를 되돌린다(0.82.0은 불투명도 0으로 보이지 않고 `pickable`은 남았다).
+  `setItemOpacity`에 수로 바꿀 수 없는 값(타입 밖 `undefined`·글)을 준 것도 같다(0.82.0은 0)
+- `setRenderOptions`: 외곽선 굵기 NaN·Infinity → 2, `hiddenEdges: NaN` → 끔(그림은 0.82.0과 같고 `renderOptions.hiddenEdges`가 NaN 대신 0), `hiddenEdges: { opacity: NaN }` → 0.35로 그린다(0.82.0은 그리지 않았다)
+- 정상 인자의 겉모습·그림·GL 호출은 0.82.0과 같다
+
+### 확인
+
+- 시험 `tests/v0830looks.test.ts`(스물넷 — 0.82.0 src로는 스물둘 실패): 깨진 값 스물두 가지(`setItemLooks`의 색 NaN·알파 Infinity·셋에 −Infinity·윤곽선 색·외곽선 색·불투명도·넷 함께,
+  `setItemEdgeColor` NaN·Infinity(와이어프레임), `setItemProfileColor` NaN·알파 NaN, `setItemOpacity` NaN 둘, 외곽선 굵기 NaN·Infinity, 외곽선 색 NaN 둘(그물마다 외곽선 색 길 포함),
+  윤곽선 색 NaN·알파 Infinity, 숨은 점선 NaN·불투명도 NaN·색 NaN)마다 깨진 값을 준 뷰어와 `null`(주지 않음)을 준 뷰어가 겉모습·보여 주기 선택·그리기 기록(가짜 WebGL2 —
+  프로그램·속성·균일 변수 값)에서 같고 균일 변수가 모두 유한하다(`tests/glguard.ts`). `setItemColor` NaN(0.50.0)과 유한한 값(자르기·범위 밖 색 성분·CSS 글·`'contrast'`)은 두 판 모두 통과
+- 정상 값 그리기(저장소에 넣지 않은 탐색 시험): 상자 셋에 정상 겉모습·선택 세 벌 × 모드(음영+윤곽·숨은 선·와이어프레임) 일곱 그림의 그리기 기록(프로그램·속성·균일 변수 값)과
+  펼친 도형(tests/drawexpand.ts) 해시가 0.82.0 src와 모두 같다(그리기 10~17, 펼친 도형 143~227)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0330looks` — `setItemLooks`와 하나씩 부른 것, `v0110` — 윤곽선 색·불투명도·외곽선 굵기 길) 3파일 41개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 GPU. 그리기 길을 바꾸지 않아 화소는 0.82.0과 같아야 한다
+
+### 남은 한계
+
+- 다른 선택 API의 색·수(`setBackground`·`setFog`·`setLighting`·선분 강조·덧그림·마커 크기 등)는 보지 않았다(0.82.0에서 바탕 색 NaN은 문제 없었다)
+- ±Infinity 불투명도·숨은 점선 불투명도와 −Infinity 굵기는 NaN과 달리 끝으로 자른다(유한한 결과라 0.82.0대로 뒀다)
+- 못 읽는 CSS 색 글은 0.82.0처럼 검정이다(되돌리지 않는다)
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL 균일 변수 셈)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 겉모습·선 색에 깨진 색 배열이나 NaN 불투명도를 주면 이제 되돌림이다 —
+  NaN으로 숨기거나 검게 칠하던 길은 앱에 없다(STEP은 `setItemLooks`에 앱이 셈한 값, SKP는 `Number.isFinite`로 거른 선 색). 숨기려면 지금처럼 불투명도 0·보이기 끄기를 쓴다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.82.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 gzip +41 B, 묶어 그리기 조각 바이트 그대로(`import()` 뷰어 조각 gzip +19~31 B — 첫 화면 입구 바이트 그대로)
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
@@ -9592,8 +9659,8 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 원점(`origin`) 없이 큰 좌표를 그대로 넣은 장면은 예전처럼 떨린다(해석기가 원점을 채워야 한다)
 - 장면 입력 검사(0.50.0)는 좌표·색인·색·원점·행렬·굵기·크기·범위·배열 길이만 본다 — 법선·무늬 좌표의 값(NaN·0)과 무늬 그림은 보지 않고, 같은 id는 알리기만 한다.
   깨진 끝점 선분을 그리지 않는 것은 WebGL이 NaN 꼭짓점 도형을 버리는 것에 기댄다. 반투명 면의 주변 가림(드리우기)은 설계만 있다(0.50.0 "남은 한계").
-  API 인자는 0.50.0 `setMarker`·`setItemColor`와 0.82.0 카메라 API만 본다 — `setItemLooks`의 색·윤곽선·외곽선 색, `setItemEdgeColor`·`setItemProfileColor`,
-  `setRenderOptions`의 외곽선 굵기·윤곽선 색의 NaN은 그대로 그려 그 묶음·선이 검거나 사라진다(0.82.0 "남은 한계")
+  API 인자는 0.50.0 `setMarker`·`setItemColor`, 0.82.0 카메라 API, 0.83.0 겉모습·그리기 선택 API(`setItemLooks`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`,
+  `setRenderOptions`의 외곽선·윤곽선·숨은 점선)만 본다 — `setBackground`·`setFog`·`setLighting`·선분 강조·덧그림 등 다른 선택의 색·수는 보지 않았다(0.83.0 "남은 한계")
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
 - 앱이 포인터를 맡는 훅(0.32.0 `setPointerClaim`·`claimPointer`)은 누르기 단위다 — 휠·키는 맡지 않고(앱이 막으려면 그 사건을 먼저 받아 막는다), 코어에는 관성·길게 누르기가 없어
   앱이 길게 누르기를 하려면 제 타이머에서 `claimPointer`로 맡는다. 맡은 포인터 id로 보낸 합성 사건도 앱 것이라 코어 측정 미리 보기를 쓰는 정밀 조준은 지금처럼 합성 `pointercancel`을 쓴다.
