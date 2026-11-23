@@ -1598,7 +1598,8 @@ function okPoint3(p: readonly number[] | ArrayLike<number> | null | undefined): 
 
 /**
  * 0.82.0 앱이 준 카메라(setCamera·flyTo)를 그릴 수 있는지: 대상점 유한한 수 셋, 거리 유한 > 0, 방위각·앙각 유한, 시야각 (0, π), 굴림·렌즈 이동은 없거나 유한.
- * 0.81.0은 그대로 받아 NaN 하나로 그리기마다 시점 행렬이 NaN이었고(화면이 빔), 전체 보기도 방향·시야각을 그대로 써서 돌아오지 않았다. 유한하면 큰 값도 받는다
+ * 0.81.0은 그대로 받아 NaN 하나로 그리기마다 시점 행렬이 NaN이었고(화면이 빔), 전체 보기도 방향·시야각을 그대로 써서 돌아오지 않았다. 유한하면 큰 값도 받는다.
+ * 0.91.0 투영이 'perspective'·'orthographic'이 아니거나(없음 포함) 시야각이 수가 아니면(글·참·배열) 받지 않는다(0.90.0은 받아 투영 판정이 섞이고 움직임 보간이 글을 이었다)
  */
 function cameraOk(c: CameraState | null | undefined): boolean {
   if (!c || typeof c !== 'object') return false;
@@ -1614,12 +1615,45 @@ function cameraOk(c: CameraState | null | undefined): boolean {
     c.distance > 0 &&
     Number.isFinite(c.yaw) &&
     Number.isFinite(c.pitch) &&
+    isProjection(c.projection) &&
+    Number.isFinite(c.fovY) &&
     c.fovY > 0 &&
     c.fovY < Math.PI &&
     fin(c.roll) &&
     fin(c.shiftX) &&
     fin(c.shiftY)
   );
+}
+
+/** 0.91.0 투영 이름인지(setProjection·생성자·setCamera·flyTo — 형 밖 값은 받지 않거나 기본으로) */
+function isProjection(p: unknown): p is Projection {
+  return p === 'perspective' || p === 'orthographic';
+}
+
+/** 0.91.0 그리기 모드 이름(물려받은 이름은 아니다 — 모드를 더하면 형 검사가 이 표를 채우게 한다) */
+const RENDER_MODE_OK: Readonly<Record<RenderMode, true>> = { shaded: true, shadedEdges: true, wireframe: true, xray: true, hiddenLine: true, monochrome: true, noTexture: true };
+function isRenderMode(m: unknown): m is RenderMode {
+  return typeof m === 'string' && Object.prototype.hasOwnProperty.call(RENDER_MODE_OK, m);
+}
+
+/** 0.91.0 단면 축 이름인지('toString' 같은 물려받은 이름은 아니다) */
+function isAxis(a: unknown): a is SectionAxis {
+  return a === 'x' || a === 'y' || a === 'z';
+}
+
+/** 0.91.0 잘린 면 채우기: 이름이 아니면(엉뚱한 글 등) undefined — 주지 않은 것과 같다 */
+function capsOf(c: unknown): SectionCaps | undefined {
+  return c === 'closed' || c === 'all' || c === 'none' ? c : undefined;
+}
+
+/** 0.91.0 선택 객체 인자: 객체가 아니면(null·글·수 — 기본 인자는 undefined만 바꾼다) 주지 않은 것({})과 같다 */
+function optsOf<T extends object>(o: T | null | undefined): Partial<T> {
+  return o && typeof o === 'object' ? o : {};
+}
+
+/** 0.91.0 목록 자리의 값을 for…of로 돌 수 있는지(돌 수 없는 {}·수는 null을 준 것과 같다) */
+function iterable<T>(x: Iterable<T> | null | undefined): x is Iterable<T> {
+  return x != null && typeof (x as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
 }
 
 /**
@@ -2248,8 +2282,9 @@ export class Viewer3d {
     this.motion = normalizeAnimate(opts.animate);
     this.measureFmt = opts.formatMeasure ?? null;
     this.gridOn = this.opts.grid;
-    this.mode = opts.renderMode ?? 'shadedEdges';
-    this.cam = { ...defaultCamera(), projection: opts.projection ?? 'perspective' };
+    // 0.91.0 이름이 아닌 그리기 모드·투영(형 밖 값)은 주지 않은 것과 같다(0.90.0은 그 값을 두어 와이어프레임처럼 그리거나 첫 맞춤 거리가 0이었다)
+    this.mode = isRenderMode(opts.renderMode) ? opts.renderMode : 'shadedEdges';
+    this.cam = { ...defaultCamera(), projection: isProjection(opts.projection) ? opts.projection : 'perspective' };
 
     if (getComputedStyle(host).position === 'static') {
       this.hostPos = host.style.position;
@@ -3258,11 +3293,11 @@ export class Viewer3d {
 
   /**
    * 주어진 항목(그물·선·점 id) 가운데 보이는 것만 맞춰 보기. 맞출 것이 없으면 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다).
-   * 0.65.0 fit: false 묶음도 id로 주면 맞춘다
+   * 0.65.0 fit: false 묶음도 id로 주면 맞춘다. 0.91.0 돌 수 없는 값({}·수)은 null과 같다(전체 보기 — 0.90.0은 TypeError)
    */
   fitItems(ids: readonly string[], animate = this.animate): Promise<boolean> {
     let b = emptyBox();
-    for (const id of new Set(ids)) {
+    for (const id of new Set(iterable(ids) ? ids : null)) {
       const it = this.items.get(id);
       if (it && this.visible(id, it.item.group)) b = unionBox(b, this.visibleBoundsOf(it));
     }
@@ -3270,13 +3305,22 @@ export class Viewer3d {
     return this.goto(fitCamera(this.cam, b, this.cssW / this.cssH), animate);
   }
 
-  /** 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다) */
+  /**
+   * 표준 뷰(위·아래·앞·뒤·왼쪽·오른쪽·남서/남동/북동/북서 등각)로 돌리고 전체 보기. 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다).
+   * 0.91.0 표준 뷰 이름이 아니면(엉뚱한 글·null·대문자·'toString' 같은 물려받은 이름) 받지 않고 곧 false(카메라·옮기던 움직임 그대로 — 0.90.0은 TypeError, 물려받은 이름은 앞 보기로)
+   */
   setView(name: ViewName, animate = this.animate): Promise<boolean> {
+    if (!Object.prototype.hasOwnProperty.call(VIEW_DIRS, name)) return Promise.resolve(false);
     return this.setViewDir(VIEW_DIRS[name], animate);
   }
 
-  /** 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로). 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다) */
+  /**
+   * 눈 방향(대상 → 눈)으로 돌리고 전체 보기(굴림·렌즈 이동은 0으로). 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다).
+   * 0.91.0 유한한 수 셋이 아니면(null·NaN·±Infinity·수 둘·글) 받지 않고 곧 false(카메라·옮기던 움직임 그대로 — flyTo의 깨진 카메라와 같다.
+   * 0.90.0은 null에서 TypeError, ±Infinity에서 방위각 NaN 카메라(화면 빔), 그 밖에는 앞 보기로 갔다). 유한한 0 방향은 0.90.0처럼 앞 보기다
+   */
   setViewDir(dir: readonly number[], animate = this.animate): Promise<boolean> {
+    if (!dir || !fin3(dir)) return Promise.resolve(false);
     const a = dirToAngles(dir, 0);
     const { roll: _r, shiftX: _x, shiftY: _y, ...base } = this.cam;
     void _r, _x, _y;
@@ -3306,8 +3350,12 @@ export class Viewer3d {
     this.invalidate();
   }
 
+  /**
+   * 원근·평행 투영. 0.91.0 'perspective'·'orthographic'이 아니면(엉뚱한 글·null·undefined) 받지 않는다(앞 투영 그대로 — 0.90.0은 그 값을 두어
+   * 그리기는 평행 행렬인데 다른 판정은 원근이었고, 그 뒤 전체 보기가 거리 0으로 갔다)
+   */
   setProjection(p: Projection): void {
-    if (this.cam.projection === p) return;
+    if (!isProjection(p) || this.cam.projection === p) return;
     this.finishAnim();
     this.cam = { ...this.cam, projection: p };
     this.invalidate();
@@ -3317,7 +3365,9 @@ export class Viewer3d {
     return this.cam.projection;
   }
 
+  /** 그리기 모드. 0.91.0 모드 이름이 아니면(엉뚱한 글·null·대문자) 받지 않는다(앞 모드 그대로 — 0.90.0은 그 값을 두어 와이어프레임처럼 그렸다) */
   setRenderMode(m: RenderMode): void {
+    if (!isRenderMode(m)) return;
     this.mode = m;
     this.invalidate();
   }
@@ -3970,7 +4020,9 @@ export class Viewer3d {
    * 잘린 쪽은 그물·선·점·윤곽선·강조 선분 모두 그리지 않고, 고르기·측정·확대 기준점에서도 무시한다.
    * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
    * 법선이 0이거나 유한한 수 셋이 아니거나 offset이 유한하지 않으면 받지 않는다(앞 단면 그대로). 0.87.0: 법선 길이로 나눈 offset이 넘쳐도(아주 짧은 법선 — 1e-200 등)
-   * 받지 않는다(0.86.0은 위치 ±Infinity 평면으로 단면 균일 변수가 무한이었다)
+   * 받지 않는다(0.86.0은 위치 ±Infinity 평면으로 단면 균일 변수가 무한이었다).
+   * 0.91.0 형 밖 값: normal이 없거나(null·undefined) s가 평면 객체가 아니면(글·수·배열) 받지 않는다(0.90.0은 TypeError). opts가 객체가 아니면(null) 주지 않은 것,
+   * caps가 이름이 아니면 caps를 주지 않은 것(앞 값 — 0.90.0은 그 글을 두고 'closed'처럼 그렸다)
    */
   setSection(s: { normal: readonly number[]; offset: number } | null, opts: SectionOptions = {}): void {
     if (this.disposed) return;
@@ -3992,17 +4044,22 @@ export class Viewer3d {
    * 여러 단면 평면(0.7.0, 최대 MAX_SECTION_PLANES = 6 — 상자 단면): 모든 평면의 남는 쪽(교집합)만 남긴다. null·빈 목록이면 끈다.
    * 평면마다 items(그 평면이 자르는 묶음 id, 없으면 모두)·caps·outline·plane을 따로 줄 수 있다(주지 않으면 opts, 그다음 기본값).
    * 첫 평면이 예전 단면 API(section·setSectionPosition·sectionHandle …의 기본 번호 0)의 평면이다.
-   * setSection이 받지 않는 평면(법선·offset이 깨짐, 0.87.0 넘친 위치)은 빼고, 남는 평면이 없으면 끈다
+   * setSection이 받지 않는 평면(법선·offset이 깨짐, 0.87.0 넘친 위치)은 빼고, 남는 평면이 없으면 끈다.
+   * 0.91.0 형 밖 값: 목록이 배열이 아니면(글·유사 배열 — {}·Set처럼) null과 같고(끔), 객체가 아닌 평면(null·수·글)은 깨진 평면처럼 뺀다(0.90.0은 TypeError).
+   * opts가 객체가 아니면 주지 않은 것, 이름이 아닌 caps는 주지 않은 것, 돌 수 없는 items({}·수)는 주지 않은 것(모든 묶음 — 0.90.0은 TypeError)
    */
   setSections(list: readonly SectionPlane[] | null, opts: SectionOptions = {}): void {
     if (this.disposed) return;
-    if (!list || !list.length) return this.setSection(null);
+    const planes = Array.isArray(list) ? (list as readonly SectionPlane[]) : null;
+    if (!planes || !planes.length) return this.setSection(null);
+    const o = optsOf(opts);
     const out: Section[] = [];
-    for (const q of list.slice(0, MAX_SECTION_PLANES)) {
-      const base = { caps: q.caps ?? opts.caps ?? 'closed', outline: q.outline ?? opts.outline ?? true, plane: q.plane ?? opts.plane ?? true };
+    for (const q of planes.slice(0, MAX_SECTION_PLANES)) {
+      if (!q || typeof q !== 'object') continue;
+      const base = { caps: capsOf(q.caps) ?? capsOf(o.caps) ?? 'closed', outline: q.outline ?? o.outline ?? true, plane: q.plane ?? o.plane ?? true };
       const n = this.makeSection(q.normal, q.offset, base);
       if (!n) continue;
-      if (q.items) {
+      if (q.items && iterable(q.items)) {
         // 0.44.0 묶음 id는 통째로, 묶음 안 구간({ id, start, count, edges? })은 묶음·종류마다 합친다(통째로 준 묶음의 구간은 버린다)
         const ids = new Set<string>();
         let rg: Map<string, { prims: IndexRange[]; edges: IndexRange[] }> | null = null;
@@ -4052,27 +4109,31 @@ export class Viewer3d {
   /**
    * 축 단면: axis(x·y·z)에 수직인 평면을 둔다. value는 장면 범위 안 위치 0~1(0 = 최소, 1 = 최대 좌표)이고 world면 그 축 좌표.
    * 기본은 +축 쪽(좌표가 위치보다 큰 쪽)을 잘라 낸다. flip이면 반대쪽. flip을 주지 않으면 같은 축의 앞 값을 지킨다.
-   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다). 위치가 유한하지 않으면(value NaN·±Infinity, 범위 안 위치로 셈이 넘침) 받지 않는다(앞 단면 그대로)
+   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다). 위치가 유한하지 않으면(value NaN·±Infinity, 범위 안 위치로 셈이 넘침) 받지 않는다(앞 단면 그대로).
+   * 0.91.0 axis가 'x'·'y'·'z'가 아니면(엉뚱한 글·null·대문자·'toString' 같은 물려받은 이름) 받지 않는다(앞 단면 그대로 — 0.90.0은 TypeError).
+   * opts가 객체가 아니면 주지 않은 것, 이름이 아닌 caps는 주지 않은 것(앞 값)
    */
   setSectionAxis(axis: SectionAxis, value: number, opts: SectionOptions & { flip?: boolean; world?: boolean } = {}): void {
-    if (this.disposed) return;
+    if (this.disposed || !isAxis(axis)) return;
+    const o = optsOf(opts);
     const dir = [...AXIS_DIRS[axis]] as V3;
-    const flip = opts.flip ?? (this.sec?.axis === axis ? this.sec.flip : false);
-    const pos = opts.world ? value : this.rangeAt(dir, value);
+    const flip = o.flip ?? (this.sec?.axis === axis ? this.sec.flip : false);
+    const pos = o.world ? value : this.rangeAt(dir, value);
     if (!Number.isFinite(pos)) return;
-    this.sec = { ...this.sectionOpts(opts), dir, flip, pos, axis, items: null };
+    this.sec = { ...this.sectionOpts(o), dir, flip, pos, axis, items: null };
     this.secMore = [];
     this.sectionChanged();
   }
 
   /**
    * 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position). index는 평면 번호(기본 0).
-   * 위치가 유한하지 않거나 그 번호의 평면이 없으면 아무것도 하지 않는다
+   * 위치가 유한하지 않거나 그 번호의 평면이 없으면 아무것도 하지 않는다. 0.91.0 opts가 객체가 아니면(null) 주지 않은 것(0.90.0은 TypeError)
    */
   setSectionPosition(value: number, opts: { world?: boolean; index?: number } = {}): void {
-    const s = this.secAt(opts.index);
+    const o = optsOf(opts);
+    const s = this.secAt(o.index);
     if (!s) return;
-    const pos = opts.world ? value : this.rangeAt(s.dir, value);
+    const pos = o.world ? value : this.rangeAt(s.dir, value);
     if (!Number.isFinite(pos) || pos === s.pos) return;
     s.pos = pos;
     this.sectionChanged();
@@ -4088,11 +4149,14 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시). index는 평면 번호(기본 0) */
+  /**
+   * 단면 표시 선택만 바꾼다(채우기·테두리·평면 표시). index는 평면 번호(기본 0).
+   * 0.91.0 opts가 객체가 아니면(null·글) 받지 않는다(0.90.0은 null에서 TypeError), 이름이 아닌 caps는 주지 않은 것(앞 값)
+   */
   setSectionOptions(opts: SectionOptions, index = 0): void {
     const s = this.secAt(index);
-    if (!s) return;
-    Object.assign(s, { caps: opts.caps ?? s.caps, outline: opts.outline ?? s.outline, plane: opts.plane ?? s.plane });
+    if (!s || !opts || typeof opts !== 'object') return;
+    Object.assign(s, { caps: capsOf(opts.caps) ?? s.caps, outline: opts.outline ?? s.outline, plane: opts.plane ?? s.plane });
     this.sectionChanged();
   }
 
@@ -4136,9 +4200,12 @@ export class Viewer3d {
     return st;
   }
 
-  /** 장면 범위를 방향(축 또는 벡터 — 단위로 맞춘다)으로 잰 [min, max]. 슬라이더 눈금·단위 표시에 쓴다 */
+  /**
+   * 장면 범위를 방향(축 또는 벡터 — 단위로 맞춘다)으로 잰 [min, max]. 슬라이더 눈금·단위 표시에 쓴다.
+   * 축 이름이 아닌 글·깨진 방향은 { min: 0, max: 0 }(0.91.0 null·undefined·'toString' 같은 물려받은 이름도 — 0.90.0은 TypeError·NaN)
+   */
   sectionRange(dir: SectionAxis | readonly number[]): { min: number; max: number } {
-    const d = typeof dir === 'string' ? AXIS_DIRS[dir] : planeFrom(dir, 0)?.normal;
+    const d = typeof dir === 'string' ? (isAxis(dir) ? AXIS_DIRS[dir] : null) : planeFrom(dir, 0)?.normal;
     return d ? boxRange(this.allBox, d) : { min: 0, max: 0 };
   }
 
@@ -4169,9 +4236,11 @@ export class Viewer3d {
     return rangeFraction(s.pos, boxRange(this.allBox, s.dir));
   }
 
-  private sectionOpts(o: SectionOptions): Pick<Section, 'caps' | 'outline' | 'plane'> {
+  /** 단면 선택(주지 않은 것은 앞 평면 값, 처음이면 기본). 0.91.0 객체가 아닌 선택·이름이 아닌 caps는 주지 않은 것 */
+  private sectionOpts(opts: SectionOptions | null | undefined): Pick<Section, 'caps' | 'outline' | 'plane'> {
     const p = this.sec;
-    return { caps: o.caps ?? p?.caps ?? 'closed', outline: o.outline ?? p?.outline ?? true, plane: o.plane ?? p?.plane ?? true };
+    const o = optsOf(opts);
+    return { caps: capsOf(o.caps) ?? p?.caps ?? 'closed', outline: o.outline ?? p?.outline ?? true, plane: o.plane ?? p?.plane ?? true };
   }
 
   /** 모든 단면 평면(첫 평면이 앞) */

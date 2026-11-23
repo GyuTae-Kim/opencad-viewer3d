@@ -21,9 +21,11 @@ export const NO_CLIP: Readonly<Plane4> = [0, 0, 0, -1];
 
 /**
  * normal·p = offset 평면(normal은 길이와 상관없음 — 단위로 맞추고 offset도 같은 비율로 나눈다). normal이 0이거나 유한한 수가 아니거나 offset이 유한하지 않으면 null.
- * 0.87.0: 길이로 나눈 offset이 넘쳐도 null(아주 짧은 법선 — 1e-200·비정규 수. 0.86.0은 위치 ±Infinity 평면을 돌려줘 단면 균일 변수가 무한이었다)
+ * 0.87.0: 길이로 나눈 offset이 넘쳐도 null(아주 짧은 법선 — 1e-200·비정규 수. 0.86.0은 위치 ±Infinity 평면을 돌려줘 단면 균일 변수가 무한이었다).
+ * 0.91.0: normal이 없어도(null·undefined — 형 밖 값) null(0.90.0은 TypeError)
  */
 export function planeFrom(normal: readonly number[], offset: number): { normal: V3; offset: number; plane: Plane4 } | null {
+  if (normal == null) return null;
   const l = length(normal);
   if (!(l > 0) || !Number.isFinite(l) || !Number.isFinite(offset)) return null;
   const d = offset / l;
