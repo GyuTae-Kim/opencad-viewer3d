@@ -174,7 +174,7 @@ describe('keysnap 순수 함수', () => {
   it('글: 종류 이름·키 이름·안내·후보 글', () => {
     expect(snapKindText('endpoint')).toBe('끝점');
     expect(snapKindText('axis', 'y')).toBe('Y축');
-    expect(snapKindText(null)).toBe('붙잡지 않은 점');
+    expect(snapKindText(null)).toBe('스냅하지 않은 점');
     expect(snapKindText('axis', 'x', true)).toBe('잠근 선 위 X축');
     expect(keyLabel('ArrowLeft')).toBe('←');
     expect(keyLabel('Shift+Tab')).toBe('Shift+Tab');
@@ -185,7 +185,7 @@ describe('keysnap 순수 함수', () => {
     const num = (v: number): string => String(Math.round(v * 100) / 100);
     expect(candidateText({ kind: 'center', point: [1, 2.5, 0] }, 1, 3, num, null, 'mm')).toBe('중심 2/3: X 1, Y 2.5, Z 0');
     expect(candidateText({ kind: 'endpoint', point: [1, 2, 3] }, 0, 1, num, 4.5, 'mm')).toBe('끝점: X 1, Y 2, Z 3, 거리 4.5 mm');
-    expect(candidateText(null, 0, 0, num, null, '')).toBe('붙잡을 점이 없습니다');
+    expect(candidateText(null, 0, 0, num, null, '')).toBe('스냅할 점이 없습니다');
   });
 
   it('입구가 같은 값을 내보낸다', () => {
@@ -325,7 +325,7 @@ describe('뷰어 — 키보드 붙잡기(setKeyboardSnap)', () => {
     expect(v.measureHoverSnap).toEqual(list[3]);
     expect(said.at(-1)!.index).toBe(3);
     expect(said.at(-1)!.count).toBe(4);
-    expect(said.at(-1)!.text.startsWith('붙잡지 않은 점 4/4: X ')).toBe(true);
+    expect(said.at(-1)!.text.startsWith('스냅하지 않은 점 4/4: X ')).toBe(true);
   });
 
   it('Enter로 찍은 첫째 후보는 같은 자리 마우스 누르기와 같은 점·같은 onMeasure다', () => {

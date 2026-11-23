@@ -138,11 +138,11 @@ export function moveKeyCursor(
 export const SNAP_KIND_LABELS: Readonly<Record<SnapKind, string>> = {
   vertex: '꼭짓점',
   endpoint: '끝점',
-  midpoint: '가운데 점',
+  midpoint: '중간점',
   center: '중심',
   point: '점',
   intersection: '교차점',
-  perpendicular: '수직 발',
+  perpendicular: '수직점',
   axis: '축',
   parallel: '나란한 선',
   tangent: '접점',
@@ -151,7 +151,8 @@ export const SNAP_KIND_LABELS: Readonly<Record<SnapKind, string>> = {
 /**
  * 0.47.0 키보드 알림 글 틀(코어 기본 — 한국어). 앱은 setKeyboardSnap({ messages })로 열쇠마다 제 언어 틀을 준다({0}·{1}… 자리 — 세 앱 다국어 사전과 같은 꼴, 자리 차례는 틀이 정한다).
  * 0.53.0: 틀 대신 글 함수(KeySnapMessageFn — 열쇠·값 → 글)도 받는다.
- * 이 기본 틀로 만든 글은 0.46.0 글과 바이트까지 같다
+ * 이 기본 틀로 만든 글은 0.46.0 글과 바이트까지 같다 — 0.86.0부터 넷만 다르다(앱 화면과 같은 현장 용어: 'snap.midpoint' 중간점, 'snap.perpendicular' 수직점,
+ * noSnap 스냅할 점이 없습니다, 'snap.none' 스냅하지 않은 점 — 열쇠는 그대로)
  */
 export const KEY_SNAP_MESSAGES = {
   /** 켰다: {0} 지금 후보 글, {1} 키 안내 */
@@ -167,7 +168,7 @@ export const KEY_SNAP_MESSAGES = {
   order: '{0} {1}/{2}',
   /** 점 글: {0}·{1}·{2} X·Y·Z(측정 글과 같은 수 꼴) */
   point: 'X {0}, Y {1}, Z {2}',
-  noSnap: '붙잡을 점이 없습니다',
+  noSnap: '스냅할 점이 없습니다',
   /** 고른 것: {0} 묶음 이름(없으면 id), {1} 종류(pick.*) */
   pickItem: '{0} {1}',
   noPick: '고를 것이 없습니다',
@@ -193,16 +194,16 @@ export const KEY_SNAP_MESSAGES = {
   hintJoin: ' · ',
   'snap.vertex': '꼭짓점',
   'snap.endpoint': '끝점',
-  'snap.midpoint': '가운데 점',
+  'snap.midpoint': '중간점',
   'snap.center': '중심',
   'snap.point': '점',
   'snap.intersection': '교차점',
-  'snap.perpendicular': '수직 발',
+  'snap.perpendicular': '수직점',
   'snap.axis': '축',
   'snap.parallel': '나란한 선',
   'snap.tangent': '접점',
   /** 붙잡지 않은 점 */
-  'snap.none': '붙잡지 않은 점',
+  'snap.none': '스냅하지 않은 점',
   'pick.mesh': '면',
   'pick.line': '선분',
   'pick.edge': '모서리',
@@ -254,7 +255,7 @@ export function keySnapText(msgs: KeySnapText, key: KeySnapMessageKey, values: r
   return formatKeySnapMessage(KEY_SNAP_MESSAGES[key], values);
 }
 
-/** 붙잡은 종류 글: 축이면 'X축', 붙잡지 않았으면 '붙잡지 않은 점', 잠근 선 위면 '잠근 선 위 …'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도 — 주지 않으면 기본) */
+/** 붙잡은 종류 글: 축이면 'X축', 붙잡지 않았으면 '스냅하지 않은 점'(0.86.0 — 0.85.0까지 '붙잡지 않은 점'), 잠근 선 위면 '잠근 선 위 …'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도 — 주지 않으면 기본) */
 export function snapKindText(kind: SnapKind | null, axis?: SnapAxis, locked?: boolean, msgs: KeySnapText = KEY_SNAP_MESSAGES): string {
   const k = `snap.${kind}`;
   const base =
@@ -352,7 +353,7 @@ export function orderedText(label: string, index: number, count: number, point: 
 }
 
 /**
- * 측정 후보 알림 글: '끝점 1/3: X 1, Y 2, Z 3'(첫 점에서 거리가 있으면 ', 거리 5 mm'). 후보가 없으면 '붙잡을 점이 없습니다'(0.47.0 msgs = 글 틀, 0.53.0 글 함수도).
+ * 측정 후보 알림 글: '끝점 1/3: X 1, Y 2, Z 3'(첫 점에서 거리가 있으면 ', 거리 5 mm'). 후보가 없으면 '스냅할 점이 없습니다'(0.86.0 — 0.85.0까지 '붙잡을 점이 없습니다'. 0.47.0 msgs = 글 틀, 0.53.0 글 함수도).
  * 0.56.0: num 둘째 인자로 수 종류('x'·'y'·'z'·'distance')를 준다. 거리 글은 num(거리, 'distance') 뒤에 unit을 붙인다(뷰어는 단위까지 num이 만들고 unit을 비운다)
  */
 export function candidateText(

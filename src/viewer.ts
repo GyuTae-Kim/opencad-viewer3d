@@ -823,7 +823,8 @@ export interface KeyboardSnapOptions {
    */
   pickCycle?: boolean | KeyPickCycleOptions;
   /**
-   * 0.47.0 알림 글 틀: 열쇠 → 틀 글({0}·{1} 자리 — KEY_SNAP_MESSAGES의 열쇠와 자리 뜻). 준 열쇠만 바꾸고 나머지는 기본(한국어 — 0.46.0 글과 같다).
+   * 0.47.0 알림 글 틀: 열쇠 → 틀 글({0}·{1} 자리 — KEY_SNAP_MESSAGES의 열쇠와 자리 뜻). 준 열쇠만 바꾸고 나머지는 기본(한국어 — 0.46.0 글과 같다. 0.86.0부터 'snap.midpoint'·'snap.perpendicular'·noSnap·'snap.none' 넷은 현장 용어 —
+   * 중간점·수직점·스냅할 점이 없습니다·스냅하지 않은 점).
    * 앱 다국어 사전의 같은 열쇠 틀을 그대로 넣는다(알림 값은 그대로 — 값으로 제 글을 만들어도 된다).
    * 0.53.0: 글 함수 (key, values) => string 도 받는다(values = 그 열쇠 틀의 {0}·{1}… 자리 값 차례 — 앱 번역 함수로 잇는다. 글이 아니면 그 열쇠의 기본 틀)
    */

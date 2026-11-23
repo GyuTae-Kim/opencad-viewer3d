@@ -1,6 +1,7 @@
 /**
  * 0.47.0 키보드 알림 글 바꾸기(46차가 남긴 것 — 코어 알림 글은 한국어 하나): setKeyboardSnap({ messages })에 열쇠 → 틀 글({0}·{1} 자리 — 앱 다국어 사전과 같은 꼴)을 주면
- * 그 틀로 알림 글을 만든다. 주지 않은 열쇠는 기본(한국어 KEY_SNAP_MESSAGES) — 0.46.0 글과 바이트까지 같다.
+ * 그 틀로 알림 글을 만든다. 주지 않은 열쇠는 기본(한국어 KEY_SNAP_MESSAGES) — 0.46.0 글과 바이트까지 같다
+ * (0.86.0부터 스냅 종류 둘·스냅 없음 둘은 현장 용어 — 중간점·수직점·스냅할 점이 없습니다·스냅하지 않은 점, tests/v0860terms.test.ts).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
@@ -83,13 +84,13 @@ describe('키 붙잡기 글 틀(순수)', () => {
     for (const [k, v] of Object.entries(PICK_KIND_LABELS)) expect(KEY_SNAP_MESSAGES[`pick.${k}` as keyof typeof KEY_SNAP_MESSAGES]).toBe(v);
   });
 
-  it('기본 틀은 0.46.0 글과 같고, 틀을 주면 그 말로', () => {
+  it('기본 틀은 0.46.0 글과 같고(0.86.0 현장 용어 넷 빼고), 틀을 주면 그 말로', () => {
     const num = (v: number): string => v.toFixed(1);
     expect(snapKindText('endpoint')).toBe('끝점');
     expect(snapKindText('axis', 'x', true)).toBe('잠근 선 위 X축');
-    expect(snapKindText(null)).toBe('붙잡지 않은 점');
+    expect(snapKindText(null)).toBe('스냅하지 않은 점');
     expect(candidateText({ kind: 'endpoint', point: [1, 2, 3] }, 0, 3, num, 5, 'mm')).toBe('끝점 1/3: X 1.0, Y 2.0, Z 3.0, 거리 5.0 mm');
-    expect(candidateText(null, 0, 0, num, null, '')).toBe('붙잡을 점이 없습니다');
+    expect(candidateText(null, 0, 0, num, null, '')).toBe('스냅할 점이 없습니다');
     expect(keySnapHint(KEY_SNAP_KEYS, 'measure')).toBe('옮기기 ←→↑↓ · 후보 Tab · 찍기 Enter · 끄기 Esc');
     const en = keySnapMessages(EN);
     expect(snapKindText('axis', 'x', true, en)).toBe('X axis on locked line');
