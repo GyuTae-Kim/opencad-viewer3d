@@ -1635,6 +1635,17 @@ function lookAlpha(a: number): number | null {
   return Number.isNaN(x) ? null : x;
 }
 
+/**
+ * 0.84.0 바탕·안개·조명 선택의 얕은 사본: 색 배열 필드(colors)가 깨졌거나(badRgba) 수 필드(nums)가 유한하지 않은 수면 그 필드를 뺀다 — 주지 않은 것(기본)과 같다
+ * (0.83.0 규칙을 넓힘 — 0.83.0은 그대로 두어 지우기 색·하늘·안개·해 균일 변수가 NaN). 멀쩡한 필드는 0.83.0과 같은 사본
+ */
+function withoutBad<T extends object>(o: T, colors: readonly string[], nums: readonly string[] = []): T {
+  const c = { ...o } as Record<string, unknown>;
+  for (const k of colors) if (badRgba(c[k] as Rgba | string | undefined)) delete c[k];
+  for (const k of nums) if (typeof c[k] === 'number' && !Number.isFinite(c[k])) delete c[k];
+  return c as T;
+}
+
 function hasBillboard(m: Mesh3d): boolean {
   const o = m.billboard?.origin as ArrayLike<number> | undefined;
   return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
@@ -3340,10 +3351,11 @@ export class Viewer3d {
   /**
    * 바탕(0.7.0): color = 한 색(테마 바탕 대신 — 앱이 파일 스타일을 따를 때), sky·ground = 지평선 위·아래 색(주면 하늘·땅 기울기 바탕 —
    * 지평선은 카메라 앙각을 따라 움직인다), skyHorizon·groundHorizon = 지평선 근처 색(없으면 각각 sky·ground). null이면 테마 바탕으로.
-   * 색은 CSS 색 문자열 또는 RGBA 0~1. 투명 바탕 그림 저장에는 그리지 않는다
+   * 색은 CSS 색 문자열 또는 RGBA 0~1. 투명 바탕 그림 저장에는 그리지 않는다.
+   * 0.84.0: 유한하지 않은 값이 든 색 배열은 그 색을 주지 않은 것과 같다(0.50.0 setItemColor 규칙 — 0.83.0은 그대로 두어 지우기 색·숨은 선 면·하늘·땅이 NaN)
    */
   setBackground(o: BackgroundOptions | null): void {
-    this.bgOpt = o ? { ...o } : null;
+    this.bgOpt = o ? withoutBad(o, ['color', 'sky', 'skyHorizon', 'ground', 'groundHorizon']) : null;
     // 0.59.0 좌표축 대비를 켰으면 새 한 색 바탕에 맞춰 다시 고른다
     if (this.axisFit) this.applyTheme();
     this.invalidate();
@@ -3361,10 +3373,21 @@ export class Viewer3d {
 
   /**
    * 해 조명(0.7.0, 기본은 꺼짐 — 예전 고정 조명): sun.direction = 해 쪽 세계 방향(예: [0.4, −0.6, 0.7]), intensity(기본 0.85)·color, ambient(기본 0.35).
-   * shadows면 해 쪽 평행 투영 깊이 그림(기본 2048², 3×3 PCF)으로 그림자를 드리운다 — 장면·보이기·단면·겉모습·조명이 바뀔 때만 다시 그린다. null이면 끈다
+   * shadows면 해 쪽 평행 투영 깊이 그림(기본 2048², 3×3 PCF)으로 그림자를 드리운다 — 장면·보이기·단면·겉모습·조명이 바뀔 때만 다시 그린다. null이면 끈다.
+   * 0.84.0: 해 방향이 유한한 수 셋이 아니면(NaN·±Infinity·수 둘·sun·direction 없음) null과 같다(끈다 — 0.83.0은 u_sunDir NaN으로 모든 면이 검었고 sun·direction이 없으면 던졌다).
+   * 유한하지 않은 값이 든 색 배열(sun.color)과 유한하지 않은 수(intensity·ambient·shadows의 size·bias)는 그 필드를 주지 않은 것(기본)과 같다
    */
   setLighting(o: LightingOptions | null): void {
-    this.lightOpt = o ? { ...o, sun: { ...o.sun, direction: [...o.sun.direction] } } : null;
+    const d = o?.sun?.direction;
+    const s = o?.shadows;
+    this.lightOpt =
+      o && d && Number.isFinite(d[0]) && Number.isFinite(d[1]) && Number.isFinite(d[2])
+        ? {
+            ...withoutBad(o, [], ['ambient']),
+            sun: { ...withoutBad(o.sun, ['color'], ['intensity']), direction: [...d] },
+            ...(s && typeof s === 'object' ? { shadows: withoutBad(s, [], ['size', 'bias']) } : {}),
+          }
+        : null;
     this.shadowVer++;
     this.invalidate();
   }
@@ -3373,9 +3396,12 @@ export class Viewer3d {
     return this.lightOpt ? { ...this.lightOpt, sun: { ...this.lightOpt.sun } } : null;
   }
 
-  /** 선형 안개(0.7.0, 기본 꺼짐): 눈 깊이 start(세계 단위)부터 end까지 color(기본 바탕색)로 섞는다. 그물·선·점(덧그림 제외). null이면 끈다 */
+  /**
+   * 선형 안개(0.7.0, 기본 꺼짐): 눈 깊이 start(세계 단위)부터 end까지 color(기본 바탕색)로 섞는다. 그물·선·점(덧그림 제외). null이면 끈다(start·end가 유한하지 않아도).
+   * 0.84.0: 유한하지 않은 값이 든 색 배열은 색을 주지 않은 것(바탕색)과 같다(0.83.0은 u_fogCol NaN)
+   */
   setFog(o: FogOptions | null): void {
-    this.fogOpt = o && Number.isFinite(o.start) && Number.isFinite(o.end) ? { ...o } : null;
+    this.fogOpt = o && Number.isFinite(o.start) && Number.isFinite(o.end) ? withoutBad(o, ['color']) : null;
     this.invalidate();
   }
 
