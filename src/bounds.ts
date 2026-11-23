@@ -216,9 +216,16 @@ export function copyBox(b: Box3): Box3 {
 /** 장면 전체 범위. keep이 있으면 그 항목만 */
 export function sceneBounds(scene: Scene3d, keep?: (item: Mesh3d | LineSet3d | PointSet3d) => boolean): Box3 {
   let b = emptyBox();
-  for (const m of scene.meshes) if (!keep || keep(m)) b = unionBox(b, meshBounds(m));
-  for (const l of scene.lines) if (!keep || keep(l)) b = unionBox(b, lineBounds(l));
-  for (const p of scene.points ?? []) if (!keep || keep(p)) b = unionBox(b, pointBounds(p));
+  // 0.94.0 장면 계약 밖 값은 범위에 넣지 않는다(0.93.0은 TypeError — 장면 검사 checkScene이 빼는 항목과 같다): 객체가 아닌 장면, 돌 수 없는 목록(돌 수 있는 객체는 돈다),
+  // null 항목, Float32Array가 아닌 positions
+  if (!scene || typeof scene !== 'object') return b;
+  const list = <T extends Mesh3d | LineSet3d | PointSet3d>(x: readonly T[] | null | undefined): T[] =>
+    (x !== null && typeof x === 'object' && typeof (x as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function' ? [...x] : []).filter(
+      (it) => it?.positions instanceof Float32Array && (!keep || keep(it)),
+    );
+  for (const m of list(scene.meshes)) b = unionBox(b, meshBounds(m));
+  for (const l of list(scene.lines)) b = unionBox(b, lineBounds(l));
+  for (const p of list(scene.points)) b = unionBox(b, pointBounds(p));
   return b;
 }
 

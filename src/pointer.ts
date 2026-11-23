@@ -44,8 +44,12 @@ export interface PickTolerance {
 /**
  * 포인터 종류별 고르기 허용 거리. 마우스·펜은 { mouse, SNAP_PX }, 터치는 { touch, max(SNAP_PX, touch) }.
  * 같은 포인터 종류면 마우스 위 미리 보기(측정 붙잡을 점)와 누르기가 같은 점을 고른다.
+ * 0.94.0 mouse·touch가 유한한 수가 아니면(글·수로 읽히는 글·NaN·±Infinity·객체·null) 기본(PICK_TOLERANCE_PX·TOUCH_PICK_TOLERANCE_PX) — 고르기 셈이 `+`로 이어
+ * 글이 될 수 있다(0.93.0은 그 값을 그대로 돌려줘 뷰어 생성자 pickTolerance·touchPickTolerance가 깨지면 선분을 고르지 못하거나 어디서나 골랐다)
  */
 export function pickTolerance(pointerType: string | null | undefined, mouse: number, touch: number): PickTolerance {
+  if (!Number.isFinite(mouse)) mouse = PICK_TOLERANCE_PX;
+  if (!Number.isFinite(touch)) touch = TOUCH_PICK_TOLERANCE_PX;
   if (!isTouch(pointerType)) return { tol: mouse, snap: SNAP_PX };
   return { tol: touch, snap: Math.max(SNAP_PX, touch) };
 }
@@ -94,6 +98,8 @@ const WALK_CODES: Readonly<Record<string, WalkKey>> = {
  * 걷기 키가 아니면 null
  */
 export function walkKeyOf(e: { code?: string; key?: string }): WalkKey | null {
+  // 0.94.0 키 사건이 없으면(null·undefined) 걷기 키가 아니다 — 0.93.0은 TypeError
+  if (!e) return null;
   const c = e.code ? WALK_CODES[e.code] : undefined;
   if (c) return c;
   if (e.code && e.code !== 'Unidentified') return null;

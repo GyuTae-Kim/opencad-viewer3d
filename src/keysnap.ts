@@ -101,7 +101,8 @@ export function keySnapAction(
   e: { key?: string; shiftKey?: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean },
   keys: KeySnapKeys = KEY_SNAP_KEYS,
 ): { action: KeySnapAction; big: boolean } | null {
-  const k = e.key;
+  // 0.94.0 키 사건이 없으면(null·undefined) 할 일이 아니다 — 0.93.0은 TypeError
+  const k = e?.key;
   if (typeof k !== 'string' || !k) return null;
   const shift = !!e.shiftKey, alt = !!e.altKey, ctrl = !!e.ctrlKey, meta = !!e.metaKey;
   for (const loose of [false, true])

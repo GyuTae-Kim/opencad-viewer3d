@@ -42,6 +42,8 @@ const le24 = (b: Uint8Array, o: number): number => b[o]! | (b[o + 1]! << 8) | (b
 
 /** 첫 바이트로 그림 꼴·크기 읽기(모르는 꼴이면 null). 크기를 못 읽으면 width·height 없이 */
 export function imageInfo(b: Uint8Array): ImageInfo | null {
+  // 0.94.0 바이트가 없으면(null·undefined) 모르는 꼴 — 0.93.0은 TypeError(글·수·{}는 이미 null)
+  if (!b) return null;
   // PNG: IHDR(가로·세로·색 형식). 색 형식 4·6은 알파, 그 밖은 IDAT 앞 tRNS 조각이 있으면 투명색
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
     if (b.length < 26) return { mime: 'image/png', alpha: true };
