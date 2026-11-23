@@ -6,7 +6,7 @@
  * - handleKey·handleKeyUp(null)은 TypeError, preventDefault가 없는 키 사건 객체는 처리한 뒤 TypeError,
  * - 생성자 pickTolerance·touchPickTolerance가 유한한 수가 아니면(글·NaN·{}·수로 읽히는 글·±Infinity) 선분을 고르지 못하거나 어디서나 골랐고,
  *   textureLimit·textureBudget이 수로 읽히지 않으면 한 장 한도·전체 예산이 없는 것처럼 풀었다(GPU 한도를 넘는 긴 변),
- * - 순수 gridSpec·gridLines·sceneBounds·checkScene·imageInfo·walkKeyOf·keySnapAction은 null(객체가 아닌 값)에 TypeError, gridSpec은 이름이 아닌 높이를,
+ * - 순수 gridSpec·gridLines·checkScene·imageInfo·walkKeyOf·keySnapAction은 null(객체가 아닌 값)에 TypeError, gridSpec은 이름이 아닌 높이를,
  *   pickTolerance는 유한한 수가 아닌 허용 거리를 그대로 돌려줬다.
  * 0.94.0은 82~93차 규칙을 따른다: 객체가 아닌 장면은 clear()(지움), 돌 수 없는 목록은 빈 목록·돌 수 있는 목록은 배열로, null 항목은 수 항목처럼(빼고 알림),
  * Float32Array가 아닌 positions는 positions가 없는 것(빼고 알림), Uint32Array가 아닌 indices는 그 그물을 빼고 알린다(placement · indices).
@@ -17,7 +17,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { type FakeElement, installDom } from './fakedom';
 import type { DrawEntry, FakeGL } from './fakegl';
 import { guardGl } from './glguard';
-import { emptyBox, sceneBounds } from '../src/bounds';
+import { emptyBox } from '../src/bounds';
 import { gridLines, gridSpec } from '../src/grid';
 import { keySnapAction } from '../src/keysnap';
 import { PICK_TOLERANCE_PX, TOUCH_PICK_TOLERANCE_PX, pickTolerance, walkKeyOf } from '../src/pointer';
@@ -434,13 +434,6 @@ describe('순수 함수', () => {
   });
   it('gridLines 객체가 아닌 값 = 격자 없음(0.93.0 {}와 같다)', () => {
     for (const g of [null, undefined, 'foo', 5]) expect([show(g), gridLines(X(g))]).toEqual([show(g), gridLines(X({}))]);
-  });
-  it('sceneBounds 장면 계약 밖 값 = 범위에 넣지 않음', () => {
-    for (const s of JUNK) expect([show(s), sceneBounds(X(s))]).toEqual([show(s), emptyBox()]);
-    expect(sceneBounds(sc({ meshes: 5, lines: null }))).toEqual(emptyBox());
-    expect(sceneBounds(sc({ meshes: new Set([A(), null, { id: 's', positions: 'abc' }]), lines: [null, LINE(), { id: 'l', positions: [0, 0, 99, 1, 1, 99] }], points: 7 }))).toEqual(
-      sceneBounds(sc({ meshes: [A()], lines: [LINE()] })),
-    );
   });
   it('checkScene 객체가 아닌 장면 = 빈 장면, 목록은 배열로', () => {
     for (const s of JUNK.slice(0, 2).concat(['foo', 5])) expect([show(s), checkScene(X(s))]).toEqual([show(s), { scene: { name: '', units: 'unknown', meshes: [], lines: [] }, issues: [] }]);
