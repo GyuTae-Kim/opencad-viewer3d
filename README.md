@@ -52,7 +52,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   0.91.0부터 단면·보기·투영 API(`setSection`·`setSections`·`setSectionAxis`·`setView`·`setViewDir`·`setProjection`·`setRenderMode`·`setCamera`·`flyTo` 등)는 꼴이 틀린 인자(`null`·엉뚱한 글·배열 대신 객체 등 —
   TypeScript 형 밖 값)도 던지지 않고 받지 않거나(앞 상태 그대로 — `setView`·`setViewDir`는 곧 false) 끄거나 그 선택을 주지 않은 것과 같게 본다(0.90.0은 `TypeError`를 던지거나 투영·그리기 모드에 그 값을 두었다).
   0.92.0부터 마커·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기 API(`setMarker`·`setGridZ`·`setHighlightSegments`·`setItemLooks`·`setAnnotations`·`setRenderOptions`·`setNavigation` 등)와
-  선택 객체 `null`도 같은 규칙이다(0.91.0은 엉뚱한 마커 `kind`에 그리기마다 `TypeError`를 던져 그 뒤 그림이 멈췄고, 높이가 아닌 격자 높이에 격자 `u_mvp`가 NaN이었다)
+  선택 객체 `null`도 같은 규칙이다(0.91.0은 엉뚱한 마커 `kind`에 그리기마다 `TypeError`를 던져 그 뒤 그림이 멈췄고, 높이가 아닌 격자 높이에 격자 `u_mvp`가 NaN이었다).
+  0.93.0부터 알림 등록(`on*`)은 함수가 아닌 값을 걸지 않고, 포인터 맡기·측정 글 꼴·테마·측정 스냅 앱 함수·걷기 수 선택·조명 수 필드·창 확대와 나머지 선택 객체 `null`도 같은 규칙이다
+  (0.92.0은 함수가 아닌 콜백·처리기·글 꼴에 알림·누르기·그리기마다 `TypeError`를 던졌고, 수가 아닌 눈높이에 걷기 카메라가 NaN이었다 — 82~93차 모음은 0.93.0 절 끝 표)
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 같은 그물을 여러 자리에 놓은 장면(같은 배열을 함께 쓰는 자리 — 조립의 같은 부품)은 자리마다가 아니라 같은 그물끼리 그리기 한 번에 그립니다(인스턴싱 — 정의 12개 × 자리 3,000에서
   그리기 호출 6,004 → 28, 자리 색·강조·분해 행렬·숨기기는 자리마다 그대로, 0.43.0부터 단면 하나·그림자를 켜도 면은 모은다).
@@ -9949,6 +9951,135 @@ NaN·무한대 훑기(0.82.0~0.87.0)와 다른 견고성 갈래인 수명을 가
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.91.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 +540 B(gzip +168 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +540 B·gzip +142~158 B)
 
+## 0.93.0: 알림 등록·포인터 맡기·측정 글 꼴·테마·측정 스냅·걷기 수 선택의 꼴이 틀린 인자도 0.91.0 규칙으로 — 82~93차 견고성 줄기 마무리(93차 — 0.92.0 남은 한계)
+
+0.92.0 「남은 한계」의 「그 밖의 공개 API(측정·키보드 스냅·뷰 큐브 등)」를 가짜 WebGL 탐색 시험으로 0.92.0 src에서 훑었다 — 91·92차 표에 없는 공개 메서드 마흔여덟·생성자 선택 일곱·
+하위 경로 순수 함수 아홉에 `null`·`undefined`·빈 객체·엉뚱한 글·수·돌 수 없는 목록을 줬다. 알림·누르기·그리기마다 던지거나 카메라·균일 변수가 NaN으로 남는 것이 여럿 나왔다 —
+모두 API 입구 한두 줄이라 같은 꼴(선택 객체 `null`·목록의 `null` 항목)과 함께 91·92차 규칙으로 맞췄다. 82~93차가 다룬 API 묶음과 남은 것은 이 절 끝 표에 모았다
+
+### 찾은 것(0.92.0 — 상자 둘·선분 묶음, 탐색 시험과 새 시험이 0.92.0 src에서 재현)
+
+| API | 꼴이 틀린 인자 | 0.92.0 | 0.93.0 |
+|---|---|---|---|
+| 알림 등록 아홉(`onPick`·`onCameraChange`·`onMeasure`·`onSectionChange`·`onSceneIssues`·`onContextLost` 등) | 함수가 아닌 값(글·`{}`·수·`null`·`undefined`) | 걸어 두고 **알릴 때마다 `TypeError`** — 뒤에 단 알림은 부르지 않음(`onCameraChange`는 카메라가 바뀐 그리기마다 `renderNow`가 던짐) | 걸지 않음(아무것도 하지 않는 해제 함수 — 브라우저 `addEventListener(…, null)`처럼) |
+| `setPointerClaim` | 함수도 `claim`이 함수인 객체도 아님(글·`{}`·수·참·`{ claim: 글 }`) | **누를 때마다 `TypeError`**(끌어도 궤도가 돌지 않음) | `null`과 같다 |
+| 포인터 처리기의 `move`·`end`(`setPointerClaim`·`claimPointer`) | 함수가 아닌 값 | 맡은 포인터를 움직이고 뗄 때마다 `TypeError` | 주지 않은 것(부르지 않음) |
+| `setMeasureFormat`·생성자 `formatMeasure` | 함수가 아닌 값 | **그리기마다 `TypeError`**(측정 글·글 없는 거리 덧그림 — 그 뒤 그림이 멈춤) | `null`과 같다(기본 글) |
+| `setTheme` / 생성자 `theme` | `null` | `TypeError` — `null`이 남아 그 뒤 `setTheme()`도 던짐 / 생성자가 던짐 | 주지 않은 것(앞 테마 / 기본 테마) |
+| 테마 색(`setTheme`·생성자) | 글이 아님(수·배열·`null`·`undefined`) | `TypeError`(그 뒤 `setTheme()`도, 생성자도) | 그 색을 주지 않은 것(기본 테마 색) |
+| `setMeasureSnap`의 `pointsFor`·`refine`·`refineFace` | 함수가 아닌 값 | **측정 미리 보기(그리기)마다 `TypeError`** | 주지 않은 것(`measureSnap`에서도 뺀다) |
+| 〃 `points` | 배열이 아님(`{}`) / `null` 항목 | `TypeError` / `TypeError` | 빈 목록(`Set`도) / 그 항목을 건너뜀 |
+| `setNavigation('walk', …)`의 `eyeHeight`·`speed`·`stepHeight`·`radius` | 유한한 수가 아님(엉뚱한 글·NaN·±Infinity·`{}`) / `eyeHeight: null` | **걷기 카메라 NaN·무한**(`u_mvp`·`u_mv` — 눈높이는 걷기로 들 때, 빠르기는 걸을 때) / 거리 0.000001(대상점이 눈에 붙음) | 주지 않은 것(앞 값) / 기본 눈높이 |
+| `setLighting`의 세기·주변광·그림자 크기·치우침, `setMarker`의 반지름·화면 높이, `setHighlightSegments`의 굵기 | 수로 읽히지 않는 글·객체 | `u_sunCol`·`u_amb`·`u_shadowBias`·마커 `u_mvp`가 NaN, 강조 선분이 1화소 선(0.84.0·0.85.0은 유한하지 않은 수만 봤다) | 주지 않은 것(기본) |
+| `zoomToRect` | 무한대 구석 / NaN·엉뚱한 글 구석 | 카메라 NaN / 옮기지 않고 true | 무시(곧 false — 0.82.0 카메라 규칙) |
+| 생성자 `maxPixelRatio` | 수로 읽히지 않음(엉뚱한 글·NaN·`{}`) | 캔버스 크기 NaN(빈 화면) | 주지 않은 것(2) |
+| 선택 객체: `measureCandidates`·`commitMeasureCandidate`·`snapshotSize`·`renderImage` / `toBlob` / `setScene` | `null` | `TypeError` / 화면 밖 선택 길에서 거절 / `TypeError` — 장면을 반쯤 바꾼 뒤 | 주지 않은 것 |
+| `setWalkInput` | `null` | `TypeError` | 입력 없음(`{}`) |
+| 구간 목록(`setHiddenRanges`·`highlightRanges`·`setItemPickThrough`) | `null` 항목 | `TypeError`(`highlightRanges`는 앞 강조를 지운 뒤) | 그 항목을 건너뜀 |
+| 순수 `markerMesh` | 이름이 아닌 `kind` / 물려받은 이름(`'toString'`) / 수로 읽히지 않는 `segments`(NaN·글) / ±Infinity `segments` | `TypeError` / 빈 메시 / 빈 메시 / 끝나지 않음(코드 읽기 — 돌리지 않았다) | `'cone'`(뷰어 `setMarker`의 기본) / `'cone'` / 24(주지 않은 것) / 24 |
+| 순수 `parseColor` / `mergeRanges` | 글이 아닌 값 / `null` 항목 | `TypeError` / `TypeError` | `null` / 그 항목을 건너뜀 |
+
+- 0.92.0도 문제 없던 것(그대로): 뷰 큐브(`setViewCubeSize`·`setViewCubeTouch`·`setViewCubeVisible`의 글·NaN·`null`), `setKeyboardSnap`(글·수·깨진 `keys`·`messages`·함수가 아닌 `announce` —
+  0.46.0부터 함수 판정), `setMeasureInferenceLock`·`setMeasureTrackPoints`의 깨진 값(false·0), `setAnimate`·`setBackground`·`setAmbientOcclusion`·`setFog`의 글, `highlightSegmentIds`의 글·`{}`·수,
+  `setMeasureLabelAvoid`·`setMeasureLabelSpot`, `setDrawLimitBySegmentId`의 글, `removeMesh`·`setMesh(null)`, `flyTo`·`pick`·`pickCandidates`·`setPickPreview`·`highlightSegmentIds`·`setSectionPosition`의
+  선택 `null`, `claimPointer`의 글·수 처리기, 수로 읽히는 글(해 세기 `'0.5'` 등 — 가짜 WebGL 감시는 글 균일 변수를 유한하지 않다고 세지만 실제 WebGL은 수로 읽는다)
+- 앱에서 닿는 길(읽기만): 세 앱은 알림·포인터 처리기·측정 글 꼴·측정 스냅 앱 함수를 함수·객체로, 테마를 이름·글 색 객체로, 걷기·조명 선택을 수로, 구간을 앱이 만든 배열로,
+  그림 저장 선택을 객체·형식 글로 넘긴다 — 이번에 고친 길로 들어오는 앱 값은 없다
+
+### 고친 것
+
+- 규칙(91·92차 그대로): 꼭 줘야 하는 자리가 깨지면 그 API가 이미 쓰는 깨진 값 규칙을 따른다 — 알림 등록은 받지 않음(걸지 않고 아무것도 하지 않는 해제 함수 — 0.89.0 dispose 뒤 등록과 같다),
+  처리기·글 꼴(`setPointerClaim`·`setMeasureFormat`)은 `null`(끔·기본), 창 확대는 무시(곧 false). 선택 필드·선택 객체가 깨지면 주지 않은 것, 목록의 `null` 항목은 건너뛴다.
+  수로 읽히는 글은 0.92.0대로 읽는다 — 걷기 수 선택만 걷기 셈이 `+`로 이어 글이 될 수 있어 유한한 수만 받는다
+- `viewer.ts` 안 도움 함수 넷(`numBad` — 수로 읽히지 않는 값, `fnOf` — 앱 함수 자리, `holdMove`·`holdEnd` — 포인터 처리기 부르기)을 더하고, 0.84.0 `withoutBad`가 수 필드에 `numBad`를 쓴다.
+  0.91.0 `optsOf`를 다시 쓴다. 테마는 객체 테마의 글인 필드만 덮는다(`applyTheme` — 글인 필드는 0.92.0처럼 모르는 열쇠까지 덮는다)
+- 순수 함수: `markerMesh`(`marker.ts`)·`parseColor`(`theme.ts`)·`mergeRanges`(`ranges.ts`) 입구 한 줄
+- API 입구·도움 함수에서만 거른다 — 그리기 길·렌더러·셰이더는 바꾸지 않았다. 공개 형(TypeScript 선언)은 그대로다
+
+### 크기
+
+- 92차 하네스를 그대로 썼다(0.92.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.92.0 값이 0.92.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 454,488 (154,523) → 455,285 (154,824) B(+797 / gzip +301), 묶어 그리기 조각 46,414 B 그대로(gzip 18,487 → 18,488), 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 B 그대로(gzip 987 → 986), 뷰어 조각 459,907 (157,003) → 460,704 (157,330) B(+797 / gzip +327).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,640 → 5,641), 뷰어 조각 448,973 (153,227) → 449,770 (153,485) B(+797 / gzip +258)
+
+### 바뀐 기본 동작
+
+- 함수가 아닌 값으로 한 알림 등록은 걸리지 않는다 — 돌려받은 해제 함수는 아무것도 하지 않는다(0.92.0은 걸어 알릴 때마다 던졌다)
+- `setPointerClaim`의 함수가 아닌 처리기는 `null`이다(앞 처리기가 맡은 포인터는 `end('off')`를 받는다). 처리기의 함수가 아닌 `move`·`end`는 부르지 않는다
+- `setMeasureFormat`·생성자 `formatMeasure`의 함수가 아닌 값은 기본 글이다. `setTheme(null)`은 앞 테마 그대로(CSS 변수만 다시 읽음), 생성자 `theme: null`은 기본 테마,
+  글이 아닌 테마 색은 기본 테마 색이다
+- `setMeasureSnap`의 함수가 아닌 앱 함수는 주지 않은 것이다 — 그것만 준 선택은 스냅을 끈다(`measureSnap`이 `null`). 배열이 아닌 `points`(글·`Set` 포함)는 빈 목록이다
+- 걷기 수 선택은 유한한 수만 받는다 — 수로 읽히는 글(`'800'`)도 받지 않는다(0.92.0은 받았지만 걷기 셈이 `+`로 이어 글이 될 수 있었다 — 코드 읽기). `eyeHeight: null`은 기본 눈높이다
+- 조명·마커·강조 선분의 수 필드는 수로 읽히지 않는 글·객체도 주지 않은 것이다(0.84.0·0.85.0의 유한하지 않은 수와 같다)
+- `zoomToRect`는 수로 읽히지 않는 구석이면 곧 false다(0.92.0은 NaN·글 구석에 옮기지 않고 true). 생성자 `maxPixelRatio`가 수로 읽히지 않으면 2다
+- `toBlob(null)`은 `toBlob()`과 같다(화면 그림). 글이 아닌 형식(수 등)은 기본 형식으로 넘긴다
+- 순수 `markerMesh`는 이름이 아닌 `kind`에 `'cone'`, 수로 읽히지 않는 `segments`에 24를 쓴다(NaN·글은 0.92.0이 빈 메시였다). `parseColor`의 글이 아닌 값은 `null`이다
+- 정상 인자의 그림·GL 호출·돌려준 값·상태·알림은 0.92.0과 같다
+
+### 확인
+
+- 새 시험 `tests/v0930args.test.ts`(일흔하나): 깨진 인자 예순셋(알림 여섯·포인터 맡기 일곱·글 꼴·테마 열·측정 스냅 다섯·수 자리 열아홉·선택 객체·구간 열하나·순수 다섯)마다 깨진 값을 준 뷰어와
+  같아야 할 부름(부르지 않음·주지 않음·`null`)의 뷰어가 상태(카메라·측정·걷기·조명·구간·겉모습·맡은 포인터·캔버스 크기)·돌려준 값·그 뒤 사건(누르기·끌기·측정 미리 보기·카메라 바꾸기·걷기)·
+  그리기 기록(가짜 WebGL2 — 프로그램·속성·균일 변수 값)에서 같고, 그 뒤 그리기도 던지지 않으며 균일 변수가 모두 유한하다. 0.92.0 src로는 예순하나 실패 — 무한대 `segments` 하나는
+  0.92.0에서 끝나지 않아 돌리지 않았고, 걷는 중 눈높이 한 경우는 기준 확인 뒤 다시 걷기로 드는 사건을 더했다(0.92.0의 그 길은 탐색이 카메라 NaN으로 재현). 0.92.0도 문제 없던 여덟은 두 판 모두 통과
+- 정상 값 그리기(저장소에 넣지 않은 탐색 시험): 알림 다섯과 뗌, 포인터 맡기 셋, 글 꼴(덧그림·측정·끔), 테마 여섯, 생성자 여섯(테마·글 꼴·화소 비율 1.5·0.25·Infinity),
+  측정 스냅 앱 함수(pointsFor·refine·refineFace·후보·후보 찍기·함수 `null`), 걷기 다섯(입력·한 걸음), 조명 다섯(수로 읽히는 글 포함), 마커 넷, 강조 선분 셋, 창 확대 둘, 그림 크기 둘, 장면 선택 둘,
+  구간 다섯의 그림 예순다섯과 순수 `markerMesh` 열여덟·`parseColor` 일곱·`mergeRanges` 셋 — 그리기 기록·펼친 도형(tests/drawexpand.ts)·돌려준 값·상태·알림 기록 해시가 0.92.0 src와
+  모두 같다(그리기 5~16, 펼친 도형 129~441)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0320claim` — 포인터 맡기·처리기, `v0590axis` — 테마 좌표축 대비)과 탐색 시험 4파일 120개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 브라우저.
+  그리기 길을 바꾸지 않아 화소는 0.92.0과 같아야 한다
+
+### 남은 한계
+
+- 장면 계약 밖 값: `setScene(null)`·`setScene({})`(돌 수 없는 `meshes`)와 `setMesh`의 배열이 아닌 위치는 `TypeError`다(0.50.0 장면 검사는 장면 객체 안의 값만 본다)
+- `handleKey(null)`은 `TypeError`다(키 사건 객체 자리 — `handleKeyUp`도 같다, 코드 읽기)
+- 생성자의 다른 수 선택(`pickTolerance`·`touchPickTolerance`·`textureLimit`·`textureBudget`)이 수로 읽히지 않으면 그 값을 쓴다(고르기 허용 거리·무늬 한도가 NaN — 이번 탐색 장면에서는
+  그림이 깨지지 않아 남겼다)
+- 순수 함수는 `markerMesh`·`parseColor`·`mergeRanges`와 탐색한 여섯(`gridSpec`·`gridLines`·`normalizeAnimate`·`normalizeKeySnapKeys`·`keySnapMessages`·`normalizeInference`)만 봤다 —
+  `gridSpec(null)`은 `TypeError`이고 `gridSpec(box, 'foo')`는 높이 `'foo'`를 그대로 돌려준다(뷰어는 0.92.0부터 이름·수만 넘긴다). 하위 경로 입구의 다른 순수 함수는 이 규칙으로 훑지 않았다
+- 유한하지만 아주 큰 `markerMesh` `segments`(1e9 등)는 그만큼 메모리를 쓴다(크기 한도 없음 — 0.82.0 카메라와 같은 까닭)
+- 선택 객체 안의 참·거짓·이름 자리 다른 값과 수로 읽히는 글은 0.92.0대로 읽는다
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL)
+
+### 82~93차 견고성 줄기 모음
+
+82차부터 성능 대신 틀린 동작을 봤다 — 공개 API에 깨진 값을 줄 때 화면이 비거나·던지거나·깨진 상태로 남는 것을 가짜 WebGL(유한하지 않은 균일 변수를 세는 `tests/glguard.ts`)로 재현하고
+같은 규칙으로 맞췄다. 이 줄기는 93차로 마무리한다 — 다음 차수는 아래 「남은 것」이나 다른 갈래(성능·앱 요청 등)를 고른다
+
+| 차수(판) | 다룬 API 묶음 | 깨진 값 | 규칙 |
+|---|---|---|---|
+| 82(0.82.0) | 카메라 상대 이동·절대 카메라(`orbitBy`·`lookBy`·`walkBy`·`setCamera`·`flyTo`) | NaN·무한대 | 받지 않음(`flyTo`는 곧 false) |
+| 83(0.83.0) | 겉모습·그리기 선택(`setItemLooks`·색 API·`setItemOpacity`·`setRenderOptions`) | NaN·무한대 | 깨진 색은 `null`(되돌림 — 0.50.0 `setItemColor`), 깨진 수는 주지 않은 것 |
+| 84(0.84.0) | 바탕·안개·조명 | NaN·무한대 | 그 필드를 주지 않은 것(`withoutBad`), 해 방향이 깨지면 끔 |
+| 85(0.85.0) | 선분 강조·덧그림·마커·선 그리기 구간 | NaN·무한대 | 같은 규칙, 꼭 줘야 하는 자리(원점·축·개수)는 `null` |
+| 86(0.86.0) | 키보드 스냅·장면 경고 기본 글 | (현장 용어 — 견고성 밖) | — |
+| 87(0.87.0) | 단면 평면·측정·고르기 미리 강조 | NaN·무한대·넘친 위치 | 받지 않음(측정·미리 강조는 재현 없음) |
+| 88(0.88.0) | dispose 뒤 키 넘기기·측정 스냅·그리기 선택 | 수명(dispose·문맥 잃음) | 리스너·타이머를 다시 걸지 않음 |
+| 89(0.89.0) | dispose 뒤 알림 등록·알림 도중 dispose·`toBlob()` | 수명 | 앱 콜백을 들지 않음, 거절 |
+| 90(0.90.0) | 알림 아홉·dispose가 놓을 것 | 수명·알림 차례 | 브라우저 `EventTarget` 규칙, 앱 함수·덧그림·피할 상자도 놓음 |
+| 91(0.91.0) | 단면·보기·투영·그리기 모드·카메라 투영 | 꼴이 틀린 인자 | 받지 않음·끔·주지 않은 것 |
+| 92(0.92.0) | 마커 `kind`·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기 모드·선택 객체 `null` | 꼴이 틀린 인자 | 같은 규칙, 목록의 돌 수 없는 항목은 건너뜀 |
+| 93(0.93.0) | 알림 등록·포인터 맡기·측정 글 꼴·테마·측정 스냅 앱 함수·걷기 수 선택·조명 수 필드·창 확대·나머지 선택 객체 `null`·구간 목록, 순수 `markerMesh`·`parseColor`·`mergeRanges` | 꼴이 틀린 인자 | 같은 규칙(등록은 받지 않음, 처리기·글 꼴은 `null`) |
+
+- 남은 것(다음 갈래 후보 — 각 판 「남은 한계」):
+  - 장면 계약 밖 값(`setScene(null)`·`setMesh`의 배열이 아닌 위치)과 키 사건 자리(`handleKey(null)`) — 0.93.0
+  - 생성자의 다른 수 선택(`pickTolerance`·`touchPickTolerance`·`textureLimit`·`textureBudget`)과 하위 경로 입구의 다른 순수 함수(`gridSpec(null)` 등) — 0.93.0
+  - 유한하지만 아주 큰 값: 카메라·단면 위치 1e300(float32로 넘침 — 0.82.0·0.87.0), `markerMesh` `segments` 1e9(메모리) — 크기 한도를 두지 않았다
+  - 강조 선분 좌표·법선·무늬 좌표의 값(정점 자료 — WebGL이 NaN 꼭짓점 도형을 버리는 것에 기댄다, 0.50.0·0.85.0), 고르기 미리 강조가 깨진 후보 값을 그대로 돌려줌(0.87.0)
+  - 수명: dispose 뒤 값만 받는 setter·getter, 묶어 그리기 조각을 받는 중 문맥 복구(0.88.0~0.90.0)
+  - 실제 브라우저·GPU — 82~93차 모두 가짜 WebGL로만 봤다
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 세 앱은 알림·포인터 처리기·측정 글 꼴·측정 스냅 앱 함수를 함수·객체로, 테마를 이름·글 색 객체로,
+  걷기·조명 선택을 수로 넘겨 바뀌는 것이 없다
+- 형 밖 값을 넘길 수 있는 앱(설정 파일·링크를 그대로 넘기는 임베드 등): 걸리지 않은 알림 등록은 돌려받은 해제 함수가 아무것도 하지 않고, 받지 않은 처리기·글 꼴·테마 색은 기본 동작이다 —
+  걸렸는지 알아야 하면 앱이 넘기기 전에 함수인지 본다. 받지 않은 창 확대는 `zoomToRect`의 false로 안다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.92.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 +797 B(gzip +301 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +797 B·gzip +258~327 B)
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
@@ -10359,8 +10490,9 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
   `setRenderOptions`의 외곽선·윤곽선·숨은 점선), 0.84.0 바탕·안개·조명(`setBackground`·`setFog`·`setLighting`), 0.85.0 선분 강조·덧그림·마커 선택·선 그리기 구간,
   0.87.0 단면 평면의 넘친 위치만 고쳤다 — 0.87.0이 훑은 측정·고르기 미리 강조 API는 재현되는 증상이 없어 그대로 두었고(0.87.0 "남은 한계"), 그 밖의 API 인자와
   강조 선분 좌표(`positions`)의 값은 이 규칙으로 따로 훑지 않았다. 꼴이 틀린 인자(TypeScript 형 밖 값)는 0.91.0이 단면·보기·투영·그리기 모드·카메라 투영을,
-  0.92.0이 그 "남은 한계" 표(마커 `kind`·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기)와 선택 객체 `null`을 고쳤다 — 그 밖의 공개 API(측정·키보드 스냅·뷰 큐브 등)는
-  이 규칙으로 따로 훑지 않았고, 순수 함수 `markerMesh`는 이름이 아닌 `kind`에 여전히 던진다(0.92.0 "남은 한계")
+  0.92.0이 그 "남은 한계" 표(마커 `kind`·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기)와 선택 객체 `null`을, 0.93.0이 나머지 공개 API(알림 등록·포인터 맡기·측정·테마·
+  걷기 수 선택·창 확대·구간 목록)와 순수 `markerMesh`·`parseColor`·`mergeRanges`를 고쳤다 — 장면 계약 밖 값(`setScene(null)`)·`handleKey(null)`·생성자의 다른 수 선택·
+  그 밖의 순수 함수는 남겼다(0.93.0 "남은 한계"와 82~93차 모음 표)
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
 - 앱이 포인터를 맡는 훅(0.32.0 `setPointerClaim`·`claimPointer`)은 누르기 단위다 — 휠·키는 맡지 않고(앱이 막으려면 그 사건을 먼저 받아 막는다), 코어에는 관성·길게 누르기가 없어
   앱이 길게 누르기를 하려면 제 타이머에서 `claimPointer`로 맡는다. 맡은 포인터 id로 보낸 합성 사건도 앱 것이라 코어 측정 미리 보기를 쓰는 정밀 조준은 지금처럼 합성 `pointercancel`을 쓴다.
