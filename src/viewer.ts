@@ -1656,6 +1656,17 @@ function iterable<T>(x: Iterable<T> | null | undefined): x is Iterable<T> {
   return x != null && typeof (x as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
 }
 
+/** 0.92.0 마커 모양 이름(물려받은 이름은 아니다 — 모양을 더하면 형 검사가 이 표를 채우게 한다) */
+const MARKER_KIND_OK: Readonly<Record<MarkerKind, true>> = { cone: true, cylinder: true, ball: true };
+function isMarkerKind(k: unknown): k is MarkerKind {
+  return typeof k === 'string' && Object.prototype.hasOwnProperty.call(MARKER_KIND_OK, k);
+}
+
+/** 0.92.0 격자 높이인지: 'min'·'zero'·한도 안의 수(0.50.0 좌표 한도 — 엉뚱한 글·NaN·±Infinity·한도 밖 수는 아니다) */
+function isGridZ(z: unknown): z is GridZ {
+  return z === 'min' || z === 'zero' || (typeof z === 'number' && okCoord(z));
+}
+
 /**
  * 0.83.0 앱이 준 색 배열이 깨졌는지 — 0.50.0 setItemColor 규칙(앞 셋과 넷째(없으면 1)가 유한한 수가 아니면 null을 준 것과 같다)을 겉모습
  * (setItemColor·setItemEdgeColor·setItemProfileColor·setItemLooks)과 그리기 선택(setRenderOptions의 선 색)이 함께 쓴다. CSS 글·null·없음은 깨지지 않은 것으로
@@ -2262,10 +2273,13 @@ export class Viewer3d {
   private off: (() => void)[] = [];
 
   constructor(host: HTMLElement, opts: Viewer3dOptions = {}) {
+    // 0.92.0 선택이 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError)
+    opts = optsOf(opts);
     this.host = host;
     this.opts = {
       grid: opts.grid ?? true,
-      gridZ: opts.gridZ ?? 'min',
+      // 0.92.0 높이가 아니면(엉뚱한 글·NaN·한도 밖 수) 주지 않은 것('min' — 0.91.0은 그 값을 두어 격자 u_mvp가 NaN이거나 격자가 사라졌다)
+      gridZ: isGridZ(opts.gridZ) ? opts.gridZ : 'min',
       viewCube: opts.viewCube ?? true,
       viewCubeSize: cubeSize(opts.viewCubeSize ?? CUBE_CSS),
       viewCubeTouch: cubeTouchOpts(opts.viewCubeTouch),
@@ -2620,9 +2634,11 @@ export class Viewer3d {
    * 새 그물이 그 배열을 주면 통째로 올리고(vertices 구간은 그 배열에 쓰지 않는다), 주지 않으면 정점 수가 같고 위치 배열이 같거나
    * vertices를 주었을 때 올려 둔 것을 그대로 쓴다. vertices를 주었는데 놓은 배열이라 그 구간을 올리지 못하면 console.warn으로 알린다
    * (그 속성은 앞 그대로다 — 바뀌었으면 새 그물에 그 배열을 통째로 준다).
-   * 돌려주는 값: 넣었거나 바꿨으면 true. 장면이 없거나(setScene 먼저) 같은 id가 선분·점 묶음이면 false
+   * 돌려주는 값: 넣었거나 바꿨으면 true. 장면이 없거나(setScene 먼저) 같은 id가 선분·점 묶음이면 false.
+   * 0.92.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError)
    */
   setMesh(mesh: Mesh3d, opts: SetMeshOptions = {}): boolean {
+    opts = optsOf(opts);
     const s = this.sceneRef;
     if (this.disposed || !s || !mesh || typeof mesh.id !== 'string' || !mesh.positions) return false;
     const old = this.items.get(mesh.id);
@@ -3416,7 +3432,8 @@ export class Viewer3d {
     culling?: boolean | null;
     merging?: boolean | MergingMode | { mode?: MergingMode; min?: number } | null;
   }): void {
-    if (this.disposed) return;
+    // 0.92.0 선택이 객체가 아니면(null·글·수) 받지 않는다(0.91.0은 'in'이 TypeError)
+    if (this.disposed || !o || typeof o !== 'object') return;
     if ('profiles' in o) {
       const p = o.profiles;
       const q = p && typeof p === 'object' ? p : null;
@@ -3570,6 +3587,8 @@ export class Viewer3d {
    * radius = 몸 반지름(기본 눈높이의 0.18). 보이는 그물(반투명 포함, pickable: false 제외)과 부딪히고 단면에 잘린 쪽은 지나간다
    */
   setNavigation(mode: 'orbit' | 'walk', opts: WalkOptions = {}): void {
+    // 0.92.0 'orbit'·'walk'가 아니면 받지 않는다(선택도 — 0.91.0은 그 값을 navigation에 두었다)
+    if (mode !== 'orbit' && mode !== 'walk') return;
     const hadGravity = !!this.walkOpts.gravity;
     this.walkOpts = { ...this.walkOpts, ...opts };
     if (mode === this.nav) {
@@ -3730,7 +3749,13 @@ export class Viewer3d {
     this.invalidate();
   }
 
+  /**
+   * 격자 높이: 'min'(범위 바닥)·'zero'(Z 0)·수(그 높이). undefined는 'min'.
+   * 0.92.0 높이가 아니면(엉뚱한 글·null·NaN·±Infinity·한도 1e15 밖 수) 받지 않는다(앞 높이 그대로 — 0.91.0은 그 값을 두어 원점을 쓰는 장면은 격자 u_mvp가 NaN,
+   * 아니면 격자가 사라졌다)
+   */
   setGridZ(z: GridZ): void {
+    if (z !== undefined && !isGridZ(z)) return;
     this.opts.gridZ = z;
     this.rebuildGrid();
     this.invalidate();
@@ -3901,9 +3926,9 @@ export class Viewer3d {
     return !!it && this.visible(id, it.item.group);
   }
 
-  /** 강조할 항목 id(null이면 해제) */
+  /** 강조할 항목 id(null이면 해제). 0.92.0 돌 수 없는 값({}·수·참)은 null과 같다(0.91.0은 TypeError) */
   highlight(ids: readonly string[] | null): void {
-    this.hi = new Set(ids ?? []);
+    this.hi = new Set(iterable(ids) ? ids : []);
     this.invalidate();
   }
 
@@ -3911,13 +3936,16 @@ export class Viewer3d {
    * 선분 강조: 선분 쌍 xyz,xyz…(세계 좌표)를 강조색으로 굵게 그린다. 보이는 부분은 깊이를 따지고,
    * 가려진 부분은 opts.hidden 불투명도로 흐리게 그린다. null이면 해제, 장면을 바꾸면 풀린다.
    * 0.85.0: origin을 주었는데 유한한 수 셋이 아니면 null과 같다(해제 — 0.84.0은 u_mvp NaN으로 강조가 사라졌다). 유한하지 않은 값이 든 색 배열·유한하지 않은 굵기·
-   * 0~1로 자른 뒤 NaN인 hidden은 그 필드를 주지 않은 것과 같다(0.84.0은 u_color NaN·u_width 무한·1화소 선, 가린 부분을 그리지 않았다). ±Infinity hidden은 1·0으로 자른다
+   * 0~1로 자른 뒤 NaN인 hidden은 그 필드를 주지 않은 것과 같다(0.84.0은 u_color NaN·u_width 무한·1화소 선, 가린 부분을 그리지 않았다). ±Infinity hidden은 1·0으로 자른다.
+   * 0.92.0 positions가 Float32Array가 아니면(일반 배열·Float64Array·글 등) null과 같다(해제 — 0.91.0은 앞 강조를 지운 뒤 TypeError를 던져 그 뒤 그리기마다
+   * 지운 VAO를 묶었고, 다른 형식 배열은 바이트를 float로 읽었다)
    */
   setHighlightSegments(positions: Float32Array | null, opts: SegmentHighlightOptions = {}): void {
     if (this.disposed) return;
     const o = withoutBad(opts, ['color'], ['width']);
     if (Number.isNaN(Math.min(1, Math.max(0, o.hidden ?? 0.3)))) delete o.hidden;
-    this.segHi = positions && positions.length >= 6 && (o.origin == null || fin3(o.origin)) ? { positions, opts: o } : null;
+    const p = positions instanceof Float32Array ? positions : null;
+    this.segHi = p && p.length >= 6 && (o.origin == null || fin3(o.origin)) ? { positions: p, opts: o } : null;
     if (this.gpu) this.renderer.setHighlightSegments(this.segHi?.positions ?? null, this.segHi?.opts.origin);
     this.invalidate();
   }
@@ -3962,12 +3990,13 @@ export class Viewer3d {
   /**
    * 선분 묶음의 앞에서 count개만 그린다(NC 재생). null이면 전부.
    * ghost(0~1)를 주면 나머지를 그 불투명도로 흐리게 그린다.
-   * 0.85.0: 자른 개수가 NaN이면 null(전부)과, 유한하지 않은 ghost는 주지 않은 것(0)과 같다(0.84.0은 그 묶음을 그리지 않았고 ghost Infinity는 u_alpha 무한)
+   * 0.85.0: 자른 개수가 NaN이면 null(전부)과, 유한하지 않은 ghost는 주지 않은 것(0)과 같다(0.84.0은 그 묶음을 그리지 않았고 ghost Infinity는 u_alpha 무한).
+   * 0.92.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError)
    */
   setLineDrawRange(id: string, count: number | null, opts: { ghost?: number } = {}): void {
     const n = count === null ? NaN : Math.max(0, Math.floor(count));
     if (Number.isNaN(n)) this.ranges.delete(id);
-    else this.ranges.set(id, { count: n, ghost: ghostOf(opts.ghost) });
+    else this.ranges.set(id, { count: n, ghost: ghostOf(optsOf(opts).ghost) });
     this.invalidate();
   }
 
@@ -4003,12 +4032,15 @@ export class Viewer3d {
   /**
    * 공구 위치 표시(null이면 지움). kind: 'cone'(기본)·'cylinder'·'ball'.
    * 0.85.0: 축(axis)을 주었는데 유한한 수 셋이 아니면 null과 같고(지움 — 0.84.0은 마커 행렬 NaN으로 마커가 사라졌다), 유한하지 않은 값이 든 색 배열·유한하지 않은
-   * 반지름·화면 높이는 그 필드를 주지 않은 것과 같다(테마 색·화면 높이 44 — 0.84.0은 u_color·마커 행렬이 NaN·무한). 선택은 부를 때 복사해 둔다
+   * 반지름·화면 높이는 그 필드를 주지 않은 것과 같다(테마 색·화면 높이 44 — 0.84.0은 u_color·마커 행렬이 NaN·무한). 선택은 부를 때 복사해 둔다.
+   * 0.92.0 kind가 모양 이름이 아니면(엉뚱한 글·null·'toString' 같은 물려받은 이름) 주지 않은 것('cone')과 같다(0.91.0은 그리기마다 TypeError로 그 뒤 그림이 멈췄고,
+   * 물려받은 이름은 빈 마커를 그렸다)
    */
   setMarker(pos: readonly number[] | null, kind: MarkerKind = 'cone', opts: MarkerOptions = {}): void {
     // 0.50.0: 유한한 수 셋(한도 안)이 아닌 자리는 null과 같다(0.49.0은 NaN 행렬로 그려 보이지 않았다)
     const o = withoutBad(opts, ['color'], ['radius', 'sizePx']);
-    this.marker = pos && okPoint3(pos) && (o.axis == null || fin3(o.axis)) ? { pos: [pos[0]!, pos[1]!, pos[2]!], kind, opts: o } : null;
+    const k = isMarkerKind(kind) ? kind : 'cone';
+    this.marker = pos && okPoint3(pos) && (o.axis == null || fin3(o.axis)) ? { pos: [pos[0]!, pos[1]!, pos[2]!], kind: k, opts: o } : null;
     this.invalidate();
   }
 
@@ -5591,9 +5623,12 @@ export class Viewer3d {
    * 세계 점 → 캔버스 위치(CSS 화소, 왼쪽 위 원점)·깊이·보이는지. 앱이 화면 위에 자기 표시(글자·단추)를 붙일 때 쓴다.
    * occlusion이면 음영 모드에서 그 점이 불투명 면에 가렸는지도 따진다(고르기와 같은 광선 — 점이 면 위에 있으면 보인다).
    * 0.45.0 id·raw·edges(ProjectOptions): 그 점이 놓인 묶음(과 기본 도형)을 주면 잘림을 앱 붙잡기 점(SnapPoint)과 같은 규칙으로 판정한다 —
-   * 그 묶음을 자르는 평면(setSections items로 범위를 정한 평면도), raw가 있으면 그 도형이 든 구간 단면의 평면. 주지 않으면 0.44.0 그대로(모든 묶음을 자르는 평면만)
+   * 그 묶음을 자르는 평면(setSections items로 범위를 정한 평면도), raw가 있으면 그 도형이 든 구간 단면의 평면. 주지 않으면 0.44.0 그대로(모든 묶음을 자르는 평면만).
+   * 0.92.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError — closestPoints·closestPointsAsync·trianglesNear·setMesh·setItemOpacity·setAnnotations·
+   * setLineDrawRange·생성자도 같다)
    */
   project(p: readonly number[], opts: ProjectOptions = {}): ProjectedPoint | null {
+    opts = optsOf(opts);
     if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) return null;
     const f = this.frame();
     const depth = viewDepth(f, p);
@@ -5619,6 +5654,7 @@ export class Viewer3d {
    * 0.45.0 rangeA·rangeB: 그 묶음 안 구간(면 하나의 삼각형 구간 등)끼리만 잰다 — 구간만의 BVH(만들어 기억한다)
    */
   closestPoints(idA: string, idB: string, opts: ClosestPointsOptions = {}): ClosestResult | null {
+    opts = optsOf(opts);
     const a = this.closestShape(idA, true, opts.rangeA), b = this.closestShape(idB, true, opts.rangeB);
     if (!a || !b) return null;
     return this.closestIds(idA, idB, closestBetween(a, b, opts));
@@ -5632,6 +5668,7 @@ export class Viewer3d {
    * 아직 BVH가 없는 묶음은 그 묶음 BVH를 한 작업에서 만든 뒤 쉰다(BVH 만들기는 나누지 않는다 — 장면을 올린 뒤 쉬는 틈에 미리 만든다)
    */
   async closestPointsAsync(idA: string, idB: string, opts: ClosestPointsAsyncOptions = {}): Promise<ClosestResult | null> {
+    opts = optsOf(opts);
     const signal = opts.signal ?? null;
     signal?.throwIfAborted();
     const ms = sliceRange(opts.sliceMs);
@@ -5700,6 +5737,7 @@ export class Viewer3d {
    * 숨긴 구간은 뺀다(hidden이면 넣는다). 없는 id·그물이 아닌 묶음·유한하지 않은 점·0보다 작거나 NaN인 반지름이면 null, 구간이 그물 밖뿐이면 빈 목록
    */
   trianglesNear(id: string, point: readonly number[], radius: number, opts: TrianglesNearOptions = {}): number[] | null {
+    opts = optsOf(opts);
     const it = this.items.get(id);
     if (it?.kind !== 'mesh' || !point || !(radius >= 0) || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || !Number.isFinite(point[2])) return null;
     const s = this.closestShape(id, true, opts.range);
@@ -5800,17 +5838,22 @@ export class Viewer3d {
       delete l.pickable;
     } else {
       l.alpha = a;
-      if (opts.pickable !== undefined) l.pickable = opts.pickable;
+      // 0.92.0 opts가 객체가 아니면(null) 주지 않은 것(0.91.0은 앞 겉모습의 불투명도만 제자리에서 바꾸고 TypeError)
+      const p = optsOf(opts).pickable;
+      if (p !== undefined) l.pickable = p;
     }
     this.setLook(id, l, false);
   }
 
-  /** 묶음 색 바꾸기(정점 색·무늬 대신 이 색 — 태그·부품별 색). CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림 */
+  /**
+   * 묶음 색 바꾸기(정점 색·무늬 대신 이 색 — 태그·부품별 색). CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림.
+   * 0.92.0 undefined도 깨진 색처럼 null과 같다(0.91.0은 TypeError — setItemEdgeColor·setItemProfileColor도)
+   */
   setItemColor(id: string, color: Rgba | string | null): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
     // 0.50.0: 유한하지 않은 값이 든 색 배열은 null(되돌림)과 같다(0.49.0은 그 색으로 그려 검게 보였다)
-    if (color === null || badRgba(color)) delete l.color;
+    if (color == null || badRgba(color)) delete l.color;
     else l.color = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
@@ -5824,7 +5867,8 @@ export class Viewer3d {
     const l = this.looks.get(id) ?? {};
     if (matrix === null) delete l.matrix;
     else {
-      const m = lookMatrix(matrix);
+      // 0.92.0 객체가 아닌 행렬(undefined 포함)은 받지 않는다(setItemMatrices와 같다 — 0.91.0은 undefined에 TypeError)
+      const m = matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
       if (!m) return;
       l.matrix = m;
     }
@@ -5838,9 +5882,12 @@ export class Viewer3d {
    * (다음 그리기·고르기에서 한 번 다시 센다). 분해 밀대·끌기처럼 부품 여럿을 한꺼번에 옮길 때. 돌려주는 값: 건 항목 수(건너뛴 것 빼고)
    */
   setItemMatrices(entries: Iterable<readonly [string, ArrayLike<number> | null]>): number {
-    if (this.disposed) return 0;
+    // 0.92.0 돌 수 없는 목록(null·{}·수)은 0, 돌 수 없는 항목(null·{}·수)은 건너뛴다(0.91.0은 TypeError — 항목이면 앞 항목만 걸고 범위는 옛 값)
+    if (this.disposed || !iterable(entries)) return 0;
     const moved: string[] = [];
-    for (const [id, matrix] of entries) {
+    for (const e of entries) {
+      if (!iterable(e)) continue;
+      const [id, matrix] = e;
       if (!this.items.has(id)) continue;
       const m = matrix === null ? null : matrix && typeof matrix === 'object' ? lookMatrix(matrix) : null;
       if (matrix !== null && !m) continue;
@@ -5863,7 +5910,8 @@ export class Viewer3d {
    * 0.83.0: NaN 불투명도·유한하지 않은 값이 든 색 배열도 하나씩 부른 것처럼 그 필드 null과 같다(0.82.0은 색을 그대로 두고 불투명도는 0으로 했다)
    */
   setItemLooks(entries: Iterable<readonly [string, ItemLookInput | null]>): number {
-    if (this.disposed) return 0;
+    // 0.92.0 돌 수 없는 목록·항목은 setItemMatrices와 같다(목록은 0, 항목은 건너뜀 — 0.91.0은 TypeError, 항목이면 앞 항목만 걸고 범위는 옛 값)
+    if (this.disposed || !iterable(entries)) return 0;
     let n = 0;
     const moved: string[] = [];
     // 같은 색 글은 한 번만 푼다(묶음마다 새 배열 — 하나씩 부른 것처럼 겉모습끼리 배열을 함께 쓰지 않는다)
@@ -5874,7 +5922,9 @@ export class Viewer3d {
       if (!p) parsed.set(c, (p = this.rgba(c)));
       return [p[0], p[1], p[2], p[3]] as Rgba;
     };
-    for (const [id, look] of entries) {
+    for (const e of entries) {
+      if (!iterable(e)) continue;
+      const [id, look] = e;
       const it = this.items.get(id);
       if (!it || (look !== null && (!look || typeof look !== 'object'))) continue;
       n++;
@@ -5932,7 +5982,7 @@ export class Viewer3d {
   setItemEdgeColor(id: string, color: Rgba | string | null): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
-    if (color === null || badRgba(color)) delete l.edgeColor;
+    if (color == null || badRgba(color)) delete l.edgeColor;
     else l.edgeColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
@@ -5946,7 +5996,7 @@ export class Viewer3d {
   setItemProfileColor(id: string, color: Rgba | string | null): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
-    if (color === null || badRgba(color)) delete l.profileColor;
+    if (color == null || badRgba(color)) delete l.profileColor;
     else l.profileColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
@@ -6089,10 +6139,13 @@ export class Viewer3d {
    * 선은 깊이를 따져 가려진 부분을 흐리게(opts.hidden), 점·글자는 가려지면 흐리게 그린다. 단면으로 자르지 않고 그림 저장(toBlob)에도 담긴다.
    * 앞의 덧그림을 모두 바꾸고 null이면 지운다. 장면을 바꿔도 남는다(앱이 지운다).
    * 0.85.0: 0~1로 자른 hidden이 NaN이거나 0.5 이상으로 자른 굵기가 유한하지 않으면(NaN·Infinity) 그 선택을 주지 않은 것과 같다(0.35·2 — 0.84.0은 가린 부분을 그리지 않았고
-   * 굵기는 u_width 무한·1화소 선). ±Infinity hidden·−Infinity 굵기는 그대로 끝으로 자른다
+   * 굵기는 u_width 무한·1화소 선). ±Infinity hidden·−Infinity 굵기는 그대로 끝으로 자른다.
+   * 0.92.0 목록이 배열이 아니면(글·유사 배열 — {}·수처럼) null과 같고(지움), opts가 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError)
    */
   setAnnotations(list: readonly Annotation3d[] | null, opts: AnnotationOptions = {}): void {
     if (this.disposed) return;
+    list = Array.isArray(list) ? (list as readonly Annotation3d[]) : null;
+    opts = optsOf(opts);
     if (!list || !list.length) {
       if (!this.annos) return;
       this.annos = null;
