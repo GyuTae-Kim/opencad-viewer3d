@@ -48,7 +48,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   0.85.0부터 선분 강조·덧그림·마커·선 그리기 구간(`setHighlightSegments`·`highlightSegmentIds`·`setAnnotations`·`setMarker`·`setLineDrawRange`·`setDrawLimitBySegmentId`)도 같은 규칙이고,
   유한한 수 셋이 아닌 강조 `origin`·마커 `axis`는 그 호출을, NaN 개수·번호는 그 구간을 `null`과 같게 본다(0.84.0은 그 덧그림이 사라지거나 재생 묶음을 그리지 않았다).
   단면 API(`setSection`·`setSections`·`setSectionAxis`·`setSectionPosition`·`moveSectionByPixels`)는 NaN·무한대 법선·offset·위치를 받지 않고(앞 단면 그대로 — `setSections`는 그 평면만 뺀다),
-  0.87.0부터 아주 짧은 법선으로 나눠 넘친 위치도 받지 않는다(0.86.0은 위치 ±Infinity 평면으로 단면 균일 변수가 무한이었다)
+  0.87.0부터 아주 짧은 법선으로 나눠 넘친 위치도 받지 않는다(0.86.0은 위치 ±Infinity 평면으로 단면 균일 변수가 무한이었다).
+  0.91.0부터 단면·보기·투영 API(`setSection`·`setSections`·`setSectionAxis`·`setView`·`setViewDir`·`setProjection`·`setRenderMode`·`setCamera`·`flyTo` 등)는 꼴이 틀린 인자(`null`·엉뚱한 글·배열 대신 객체 등 —
+  TypeScript 형 밖 값)도 던지지 않고 받지 않거나(앞 상태 그대로 — `setView`·`setViewDir`는 곧 false) 끄거나 그 선택을 주지 않은 것과 같게 본다(0.90.0은 `TypeError`를 던지거나 투영·그리기 모드에 그 값을 두었다)
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 같은 그물을 여러 자리에 놓은 장면(같은 배열을 함께 쓰는 자리 — 조립의 같은 부품)은 자리마다가 아니라 같은 그물끼리 그리기 한 번에 그립니다(인스턴싱 — 정의 12개 × 자리 3,000에서
   그리기 호출 6,004 → 28, 자리 색·강조·분해 행렬·숨기기는 자리마다 그대로, 0.43.0부터 단면 하나·그림자를 켜도 면은 모은다).
@@ -9763,6 +9765,105 @@ NaN·무한대 훑기(0.82.0~0.87.0)와 다른 견고성 갈래인 수명을 가
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 0.89.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 +292 B(gzip +76 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +292 B·gzip +78~83 B)
 
+## 0.91.0: 단면·보기·투영 API의 꼴이 틀린 인자를 던지지 않고 받지 않음·끔·주지 않은 것으로(91차 — 0.87.0 남은 한계)
+
+0.87.0 남은 한계 「`setSectionAxis`에 축 이름이 아닌 글, `setSection`의 `normal: null`은 `TypeError`를 던진다」를 넓혀, 공개 API에 TypeScript 형 밖 값(`null`·`undefined`·빈 객체·엉뚱한 글·
+수 대신 글·배열 대신 객체)을 주는 탐색 시험(가짜 WebGL)으로 0.90.0을 훑었다. 형은 실행 때 지켜 주지 않아, 앱이 파일·보기 링크(`#view=`)·사용자 입력에서 만든 값을 넘기는 길에서는
+형이 틀린 값이 들어올 수 있다. 던지거나 깨진 상태로 남는 것이 단면·보기·투영 밖의 API 열 남짓에도 있어 범위가 넓었다 — 단면·보기·투영(그리기 모드·카메라 투영 포함) 묶음만 고치고
+나머지는 표로 남겼다(아래 「남은 한계」)
+
+### 찾은 것(0.90.0 — 상자 셋·선분 묶음, 탐색 시험과 새 시험이 0.90.0 src에서 재현)
+
+| API | 꼴이 틀린 인자 | 0.90.0 | 0.91.0 |
+|---|---|---|---|
+| `setSection` | `normal: null`·`{}`·글·수·배열 | `TypeError` | 받지 않음(앞 단면 그대로 — NaN 법선과 같다) |
+| `setSection`·`setSectionAxis`·`setSections`·`setSectionPosition`의 선택 | `null` | `TypeError` | 주지 않은 것 |
+| `setSection`·`setSectionAxis`·`setSections`·`setSectionOptions`의 `caps` | 엉뚱한 글 | 그 글을 상태(`section.caps`)에 두고 `'closed'`처럼 그림(앞서 건 caps를 버림) | 주지 않은 것(앞 값, 처음이면 `'closed'`) |
+| `setSections` 목록 | 글·유사 배열 | `TypeError`(`{}`·평면 하나·`Set`은 끔) | `null`과 같다(끔) |
+| 〃 평면 | `null`·`undefined`·수·글·`normal: null` | `TypeError` | 그 평면을 뺀다(깨진 평면과 같다 — 남는 것이 없으면 끔) |
+| 〃 `items` | `{}`·수(돌 수 없는 값) | `TypeError` | 주지 않은 것(모든 묶음) |
+| `setSectionAxis` | 축 이름이 아님(`'w'`·`null`·`'X'`·`'toString'`) | `TypeError` | 받지 않음(앞 단면 그대로) |
+| `setSectionOptions` | `null` | `TypeError` | 받지 않음 |
+| `sectionRange` | `null`·`undefined` | `TypeError` | `{ min: 0, max: 0 }`(축 이름이 아닌 글·NaN 방향과 같다) |
+| `setView` | 이름이 아님(`'foo'`·`null`·`'TOP'`) / 물려받은 이름(`'toString'`·`'constructor'`) | `TypeError`(Promise 전에) / 앞 보기로 감 | 받지 않고 곧 false(카메라·옮기던 움직임 그대로) |
+| `setViewDir` | `null`·`undefined` / ±Infinity 성분 / NaN 성분·글·수 둘 | `TypeError` / 방위각·거리 NaN — `u_mvp`·`u_mv` NaN(화면 빔) / 앞 보기로 감 | 받지 않고 곧 false |
+| `fitItems` | `{}`·수 | `TypeError` | `null`과 같다(전체 보기) |
+| `setProjection` | `'foo'`·`null`·`undefined`·`'ortho'` | 그 값을 둠 — 그리기는 평행 행렬인데 AO 등 다른 판정은 원근이라 그림이 두 투영 모두와 다름, 그 뒤 전체 보기 거리가 0에 가까움 | 받지 않음(앞 투영 그대로) |
+| `setRenderMode` | `'foo'`·`null`·`'Shaded'` | 그 값을 둠 — 와이어프레임처럼 그림(단면 채우기 없음), `getRenderMode()`가 그 값 | 받지 않음(앞 모드 그대로) |
+| 생성자 `projection`·`renderMode` | 엉뚱한 글 | 첫 맞춤 거리가 0에 가까움(0.000044 — 그리기 11 → 7)·와이어프레임처럼 | 주지 않은 것(원근·음영+윤곽 — `null`은 0.90.0도 기본) |
+| `setCamera`·`flyTo` | `projection` 엉뚱한 글·없음 / `fovY` 글·참·배열 | 받음(0.82.0 판정이 보지 않음) — 투영 판정이 섞이고, 시야각은 글·배열로 남아 움직임 보간(`lerpCamera`)이 글을 잇는다(코드 읽기) | 받지 않음(`flyTo`는 곧 false) |
+
+- 0.90.0도 문제 없던 것(그대로): `setSection(undefined)`(끔), offset 글·`null`과 `normal` 글·객체(받지 않음), `setSections`의 `{}`·평면 하나·`Set`(끔), `items` 안의 `null`·수(버림),
+  수로 읽히는 위치 글·`null`(`setSectionAxis('x', '0.25')`는 0.25, `null`은 0), 참·거짓 자리의 다른 값(`flip: 'yes'`·`outline: 'no'`는 참·거짓으로 읽음),
+  카메라 상대 이동·`setRoll`·`setFov`·`setLensShift`의 글·`null`과 `setCamera`의 대상점·거리 글(0.82.0이 받지 않음)
+- 앱에서 닿는 길(읽기만): 세 앱의 보기·투영·그리기 모드·축 단면 버튼은 고정 이름이고, STEP 보기 링크는 투영을 둘 가운데 하나로 읽어 넘긴다 — 이번에 고친 길로 들어오는 앱 값은 없다
+
+### 고친 것
+
+- 규칙(82~87차 그대로): 꼭 줘야 하는 자리가 깨지면 그 호출을 받지 않는다 — 단면·카메라 API가 이미 쓰는 「앞 상태 그대로」(`setView`·`setViewDir`는 `flyTo`처럼 곧 false).
+  `setSections` 목록이 배열이 아니면 `null`(끔 — `{}`가 이미 끔이었다)이고, 목록 안의 객체가 아닌 평면은 깨진 평면처럼 뺀다. 선택 객체·선택 필드(`caps`·`items`)가 깨지면 그것을 주지 않은 것과 같다
+- `planeFrom`(`src/section.ts`): `normal`이 없으면(`null`·`undefined`) `null` — 깨진 법선과 같은 길이라 `setSection`·`setSections`·`sectionRange`가 함께 고쳐진다
+- `viewer.ts` 안 도움 함수 여섯(`isProjection`·`isRenderMode`·`isAxis`·`capsOf`·`optsOf`·`iterable`)을 API 입구에서만 쓴다. 이름 판정은 물려받은 이름(`'toString'`)을 받지 않는다.
+  0.82.0 카메라 판정(`setCamera`·`flyTo`)에 투영 이름과 시야각 수 판정을 더했다. 그리기 길·렌더러·셰이더는 바꾸지 않았다. 공개 형(TypeScript 선언)은 그대로다
+- `setViewDir`는 0.85.0 `fin3`(유한한 수 셋 — 크기 한도 없음)로 본다: NaN 성분·수로 읽히는 글 셋도 받지 않는다. 유한한 0 방향은 0.90.0처럼 앞 보기다
+
+### 크기
+
+- 90차 하네스를 그대로 썼다(0.90.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.90.0 값이 0.90.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 453,070 (154,098) → 453,948 (154,355) B(+878 / gzip +257), 묶어 그리기 조각 46,414 (18,488) B 그대로, 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 B 그대로(gzip 985 → 987 — 조각 이름 해시), 뷰어 조각 458,489 (156,576) → 459,367 (156,861) B(+878 / gzip +285).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,640 → 5,639), 뷰어 조각 447,555 (152,826) → 448,433 (153,069) B(+878 / gzip +243)
+
+### 바뀐 기본 동작
+
+- 위 표의 꼴이 틀린 인자에 단면·보기 API가 던지지 않는다 — 받지 않거나(앞 단면·카메라 그대로, `setView`·`setViewDir`는 곧 false) 끄거나(배열이 아닌 `setSections` 목록) 그 선택을 주지 않은 것과 같다
+- `setProjection`·`setRenderMode`·`setCamera`·`flyTo`는 이름이 아닌 투영·그리기 모드와 수가 아닌 시야각을 받지 않는다 — `getProjection()`·`getRenderMode()`·`getCamera()`는 늘 형 안의 값이다.
+  생성자의 이름이 아닌 `projection`·`renderMode`는 기본(원근·음영+윤곽)이다
+- `setView`의 물려받은 이름과 `setViewDir`의 NaN 성분·글·수 둘은 앞 보기로 가지 않고 곧 false다. 수로 읽히는 글 셋(`['1', '0', '0']`)도 받지 않는다(0.90.0은 수로 읽어 그 방향)
+- 이름이 아닌 `caps`는 앞 값(처음이면 `'closed'`)이다 — 0.90.0은 그 글을 상태에 두고 `'closed'`처럼 그려 앞서 건 `'all'`·`'none'`을 버렸다
+- `setSections` 목록 안의 `null`·수·글 평면은 빼고, 돌 수 없는 `items`는 주지 않은 것(모든 묶음)이다. 순수 함수 `planeFrom(null, …)`은 `null`을 돌려준다
+- 정상 인자의 그림·GL 호출·돌려준 값·상태는 0.90.0과 같다
+
+### 확인
+
+- 새 시험 `tests/v0910args.test.ts`(일흔하나 — 0.90.0 src로는 쉰여덟 실패): `planeFrom` 하나, 깨진 인자 쉰다섯 가지(단면 열여덟, 보기 열아홉, 투영·그리기 모드·카메라 열여덟)마다 깨진 값을 준 뷰어와
+  같아야 할 부름(부르지 않음·주지 않음·`null`)의 뷰어가 상태(단면 모두·카메라·투영·그리기 모드)·돌려준 값·그리기 기록(가짜 WebGL2 — 프로그램·속성·균일 변수 값)에서 같고 균일 변수가 모두 유한하다.
+  받지 않은 `setView`·`setViewDir`가 옮기던 움직임을 그만두지 않음, 시야각 글 카메라를 받지 않아 움직이는 동안 균일 변수가 유한함 둘. 0.90.0도 문제 없던 열셋은 두 판 모두 통과
+- 정상 값 그리기(저장소에 넣지 않은 탐색 시험): 상자 넷(원점·행렬 있는 것 포함)·선분 묶음에 단면(평면 하나·축·뒤집기·옮기기·끌기·여러 평면 선택·구간·끄기)·표준 뷰 열·`setViewDir` 다섯·
+  `fitItems`·투영 둘·그리기 모드 일곱·`setCamera`·`flyTo`·생성자 셋을 건 예순다섯 그림의 그리기 기록·펼친 도형(tests/drawexpand.ts)·돌려준 값·상태 해시가 0.90.0 src와 모두 같다
+  (그리기 9~22, 펼친 도형 183~319)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0870section` — 단면 API, `v0820cam` — `setCamera`·`flyTo` 판정)과 탐색 시험 4파일 98개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 브라우저.
+  그리기 길을 바꾸지 않아 화소는 0.90.0과 같아야 한다
+
+### 남은 한계
+
+- 재현만 하고 고치지 않은 것(묶음 밖 — 0.90.0 src·0.91.0 src 같음):
+
+| API | 꼴이 틀린 인자 | 지금 |
+|---|---|---|
+| `setMarker`의 `kind` | 엉뚱한 글·`null` | **그리기마다 `TypeError`**(마커 모양을 찾지 못해 그 뒤 그림이 멈춤) |
+| `setGridZ` | 엉뚱한 글 | 격자 `u_mvp` NaN(격자가 사라짐) |
+| `setItemLooks` / `setItemMatrices` | `null`·`{}`·`[null]` / `null` | `TypeError` |
+| `setItemColor`·`setItemEdgeColor` | `undefined` 색 | `TypeError`(`null`은 되돌림) |
+| `setItemOpacity`·`setAnnotations`의 선택 | `null` | `TypeError` |
+| `setAnnotations` / `highlight` / `setHighlightSegments` / `setRenderOptions` | 글 / `{}` / Float32Array가 아닌 배열 / `null`·글 | `TypeError` |
+| `setNavigation` | `'fly'` | 그 값을 상태(`navigation`)에 둠 |
+
+- 위를 같은 규칙으로 맞추는 것이 다음 후보다 — 그리기마다 던지는 마커 `kind`가 가장 앞이다. 바탕·조명·안개·테마·뷰 큐브 손가락·측정 선택 API는 글을 줘도 문제 없었다
+- 수로 읽히는 위치 글·`null` 위치(`setSectionAxis`·`setSectionPosition`), 참·거짓 자리의 다른 값(`flip`·`outline`·`plane` — 상태에는 준 값이 남는다),
+  목록 자리의 글 하나(`items`·`fitItems` — 글자마다 id)는 0.90.0대로 받는다(깨진 상태 없음)
+- 생성자의 선택 객체 `null`(`new Viewer3d(host, null)`)은 보지 않았다
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 세 앱은 보기·투영·그리기 모드·축 단면을 버튼의 고정 이름으로, STEP 보기 링크는 읽은 투영을 둘 가운데 하나로,
+  SKP 파일 단면은 앱이 만든 배열로 넘겨 바뀌는 것이 없다
+- 형 밖 값을 넘길 수 있는 앱(링크·설정 파일을 그대로 넘기는 임베드 등): 받지 않은 보기는 `setView`·`setViewDir`의 false로, 받지 않은 투영·그리기 모드·카메라는 `getProjection()`·`getRenderMode()`·`getCamera()`로 안다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.90.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 +878 B(gzip +257 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +878 B·gzip +243~285 B)
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
@@ -10172,7 +10273,8 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
   API 인자는 0.50.0 `setMarker`·`setItemColor`, 0.82.0 카메라 API, 0.83.0 겉모습·그리기 선택 API(`setItemLooks`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`,
   `setRenderOptions`의 외곽선·윤곽선·숨은 점선), 0.84.0 바탕·안개·조명(`setBackground`·`setFog`·`setLighting`), 0.85.0 선분 강조·덧그림·마커 선택·선 그리기 구간,
   0.87.0 단면 평면의 넘친 위치만 고쳤다 — 0.87.0이 훑은 측정·고르기 미리 강조 API는 재현되는 증상이 없어 그대로 두었고(0.87.0 "남은 한계"), 그 밖의 API 인자와
-  강조 선분 좌표(`positions`)의 값은 이 규칙으로 따로 훑지 않았다
+  강조 선분 좌표(`positions`)의 값은 이 규칙으로 따로 훑지 않았다. 꼴이 틀린 인자(TypeScript 형 밖 값)는 0.91.0이 단면·보기·투영·그리기 모드·카메라 투영만 고쳤다 —
+  그리기마다 던지는 `setMarker`의 `kind`, 격자 `u_mvp`가 NaN인 `setGridZ`, 던지는 겉모습·덧그림·강조·그리기 선택 인자는 0.91.0 "남은 한계" 표에 남았다
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
 - 앱이 포인터를 맡는 훅(0.32.0 `setPointerClaim`·`claimPointer`)은 누르기 단위다 — 휠·키는 맡지 않고(앱이 막으려면 그 사건을 먼저 받아 막는다), 코어에는 관성·길게 누르기가 없어
   앱이 길게 누르기를 하려면 제 타이머에서 `claimPointer`로 맡는다. 맡은 포인터 id로 보낸 합성 사건도 앱 것이라 코어 측정 미리 보기를 쓰는 정밀 조준은 지금처럼 합성 `pointercancel`을 쓴다.
