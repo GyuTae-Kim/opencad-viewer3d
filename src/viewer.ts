@@ -1748,6 +1748,10 @@ const CUBE_INSET = 8;
 export const SNAPSHOT_MAX_PIXELS = 4096 * 4096;
 /** 그림 저장 한 변 한도(화소) */
 const SNAPSHOT_MAX_SIDE = 16384;
+/** 그릴 문맥이 없을 때(잃은 동안·dispose 뒤) 그림 저장 Error 글 */
+const NO_GL_SNAPSHOT = '3D 보기 문맥이 없어 그림을 만들 수 없습니다';
+/** 0.89.0 dispose 뒤 on* 등록이 돌려주는 해제 함수(아무것도 하지 않고 뷰어·콜백을 쥐지 않는다) */
+const NO_OFF = (): void => {};
 /** 0.45.0 최근접점 구간 모양(closestPoints rangeA·rangeB)을 묶음(정점·번호 배열)마다 기억하는 개수 — 면 표에서 고른 면 짝을 잇달아 잴 때 다시 만들지 않게 */
 const CLOSEST_PART_CACHE = 64;
 /**
@@ -2472,13 +2476,23 @@ export class Viewer3d {
    * 돌려준 함수로 그만 듣는다
    */
   onSceneIssues(cb: (issues: readonly SceneIssue[]) => void): () => void {
-    this.issueCbs.add(cb);
-    return () => this.issueCbs.delete(cb);
+    return this.listen(this.issueCbs, cb);
+  }
+
+  /**
+   * 0.89.0 알림 등록(on* 여덟 — onPick은 선택을 함께 든다). dispose 뒤에는 아무것도 걸지 않고 아무것도 하지 않는 해제 함수를 돌려준다
+   * (0.88.0은 dispose가 비운 목록에 다시 넣어, 부르지 않는 앱 콜백과 그 콜백이 쥔 자료가 없앤 뷰어와 함께 남았다)
+   */
+  private listen<F>(set: Set<F>, cb: F): () => void {
+    if (this.disposed) return NO_OFF;
+    set.add(cb);
+    return () => set.delete(cb);
   }
 
   private emitIssues(list: readonly SceneIssue[]): void {
     if (!list.length) return;
-    for (const cb of [...this.issueCbs]) cb(list);
+    // 0.89.0 사본을 도는 동안 앞 알림이 dispose하면 남은 알림은 부르지 않는다(목록을 바로 도는 알림은 dispose가 목록을 비워 멈춘다)
+    for (const cb of [...this.issueCbs]) if (!this.disposed) cb(list);
   }
 
   /** 장면 비우기(단면도 끈다) */
@@ -2692,8 +2706,7 @@ export class Viewer3d {
    * 준 것부터 되돌아온다(비동기로 천천히 주어도 된다 — 다 주지 않은 무늬는 평균색 그대로). 해제 함수를 돌려준다
    */
   onContextRestore(cb: (need: ContextRestoreNeed) => void | Promise<unknown>): () => void {
-    this.restoreCbs.add(cb);
-    return () => this.restoreCbs.delete(cb);
+    return this.listen(this.restoreCbs, cb);
   }
 
   /**
@@ -2701,8 +2714,7 @@ export class Viewer3d {
    * 브라우저가 문맥을 되찾으면 onContextRestore가 온다. 해제 함수를 돌려준다
    */
   onContextLost(cb: () => void): () => void {
-    this.lostCbs.add(cb);
-    return () => this.lostCbs.delete(cb);
+    return this.listen(this.lostCbs, cb);
   }
 
   /**
@@ -2752,7 +2764,7 @@ export class Viewer3d {
     const need = this.renderer.restoreNeed(this.sceneRef);
     this.restoreEmitting = true;
     try {
-      for (const cb of [...this.restoreCbs]) void cb(need);
+      for (const cb of [...this.restoreCbs]) if (!this.disposed) void cb(need);
     } finally {
       this.restoreEmitting = false;
     }
@@ -2766,8 +2778,7 @@ export class Viewer3d {
    * 끝나기 전에 다시 잃으면 그 되찾기의 알림은 없고 다음 되찾기가 끝날 때 온다. 그 사이 setScene으로 새 장면을 주면 그 장면을 다 올렸을 때다. 해제 함수를 돌려준다
    */
   onContextRestoreDone(cb: () => void): () => void {
-    this.restoreDoneCbs.add(cb);
-    return () => this.restoreDoneCbs.delete(cb);
+    return this.listen(this.restoreDoneCbs, cb);
   }
 
   /**
@@ -2880,7 +2891,7 @@ export class Viewer3d {
     const n = this.renderer.restoreNeed(this.sceneRef);
     if (n.meshes.length || n.textures.length) return;
     this.restoreWait = false;
-    for (const cb of [...this.restoreDoneCbs]) cb();
+    for (const cb of [...this.restoreDoneCbs]) if (!this.disposed) cb();
   }
 
   /** mesh가 쓰는 정점 속성 배열 가운데 a와 같은 객체가 있는지 */
@@ -3041,7 +3052,9 @@ export class Viewer3d {
    * 뷰어를 없앤다: 입력·관찰·타이머를 풀고 GPU 자료를 지운 뒤 문맥을 놓는다.
    * 장면·BVH·강조 같은 큰 자료의 참조도 놓는다(앱이 뷰어 객체를 들고 있어도 장면 배열이 메모리에 남지 않게). 그 뒤의 호출은 아무것도 하지 않는다.
    * 0.88.0 측정 붙잡기 선택(앱 점 배열·점 색인)도 놓는다 — measureSnap은 null, setMeasurePickThrough·setMeasureInferenceLock은 false(붙잡기가 꺼진 것과 같다).
-   * 그 뒤 handleKey·handleKeyUp·setMeasureSnap·setRenderOptions도 아무것도 하지 않는다(창·문서 리스너·타이머를 다시 걸지 않는다)
+   * 그 뒤 handleKey·handleKeyUp·setMeasureSnap·setRenderOptions도 아무것도 하지 않는다(창·문서 리스너·타이머를 다시 걸지 않는다).
+   * 0.89.0 알림 콜백(on* 아홉)을 모두 놓고, 그 뒤 on* 등록은 아무것도 걸지 않고 아무것도 하지 않는 해제 함수를 돌려준다. 알림 콜백 안에서 dispose하면
+   * 같은 알림의 남은 콜백도 부르지 않는다. 그 뒤 toBlob()은 Error로 거절한다
    */
   dispose(): void {
     if (this.disposed) return;
@@ -3677,15 +3690,14 @@ export class Viewer3d {
    * dispose 뒤에는 부르지 않는다. 그만 받으려면 돌려준 함수를 부른다
    */
   onViewCubeExpandedChange(cb: (expanded: boolean, e: ViewCubeExpandEvent) => void): () => void {
-    this.cubeCbs.add(cb);
-    return () => this.cubeCbs.delete(cb);
+    return this.listen(this.cubeCbs, cb);
   }
 
-  /** 0.53.0 펴기·접기 알림을 보낸다 */
+  /** 0.53.0 펴기·접기 알림을 보낸다(0.89.0 앞 알림이 dispose하면 남은 알림은 부르지 않는다) */
   private cubeNotify(reason: ViewCubeExpandReason): void {
     if (!this.cubeCbs.size) return;
     const expanded = this.cubeZoom > 0;
-    for (const cb of [...this.cubeCbs]) cb(expanded, { reason, rect: this.viewCubeRect });
+    for (const cb of [...this.cubeCbs]) if (!this.disposed) cb(expanded, { reason, rect: this.viewCubeRect });
   }
 
   /** 0.44.0 지금 큐브 한 변(편 동안은 편 크기)과 누르는 자리 띠(편 동안만 손가락 띠 — 아니면 undefined = 0.43.0 띠) */
@@ -4345,8 +4357,7 @@ export class Viewer3d {
    * 두 번째 인자는 모든 평면 상태(여러 단면일 때)
    */
   onSectionChange(cb: (s: SectionState | null, all: SectionState[]) => void): () => void {
-    this.sectionCbs.add(cb);
-    return () => this.sectionCbs.delete(cb);
+    return this.listen(this.sectionCbs, cb);
   }
 
   private emitSection(): void {
@@ -4651,20 +4662,20 @@ export class Viewer3d {
    * 차례: 한 누르기의 알림은 단 차례대로 부른다(같은 함수를 다시 달면 처음 자리, 끊었다 다시 달면 끝). front 없이 단 알림들은 모두 같은 사건 객체를 받는다
    */
   onPick(cb: (p: Pick3d | null, e: PickEvent) => void, opts?: OnPickOptions): () => void {
+    // 0.89.0 dispose 뒤에는 걸지 않는다(다른 on*와 같다 — listen)
+    if (this.disposed) return NO_OFF;
     this.pickCbs.set(cb, { meshesOnly: !!opts?.meshesOnly, through: !!opts?.throughTranslucent, front: !!opts?.front });
     return () => this.pickCbs.delete(cb);
   }
 
   /** 측정 알림(두 번째 점을 찍을 때 결과, 지우거나 세 번째 점으로 새 측정을 시작하면 null) */
   onMeasure(cb: (m: MeasureResult | null) => void): () => void {
-    this.measureCbs.add(cb);
-    return () => this.measureCbs.delete(cb);
+    return this.listen(this.measureCbs, cb);
   }
 
   /** 카메라가 바뀐 프레임마다 알림 */
   onCameraChange(cb: (c: CameraState) => void): () => void {
-    this.camCbs.add(cb);
-    return () => this.camCbs.delete(cb);
+    return this.listen(this.camCbs, cb);
   }
 
   /**
@@ -6074,9 +6085,11 @@ export class Viewer3d {
   /**
    * 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로. 첫 인자로 선택을 주면 화면 밖에서 다시 그린다:
    * scale(화면 화소의 몇 배, 기본 1 — 굵기·점 크기도 같은 비율), transparent(바탕을 비운 PNG), overlays(측정·덧그림·좌표축·단면 표시, 기본 true),
-   * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다
+   * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다.
+   * 0.89.0 dispose 뒤에는 선택이 없어도 선택을 준 toBlob과 같은 Error로 거절한다(0.88.0은 놓은 캔버스 그대로를 그림으로 풀어 주었다)
    */
   toBlob(type: string | SnapshotOptions = 'image/png', quality?: number): Promise<Blob> {
+    if (this.disposed) return Promise.reject(new Error(NO_GL_SNAPSHOT));
     if (typeof type === 'object') return this.snapshotBlob(type);
     // 나눠 올리는 중이면 그림에는 다 올린 장면을 담는다
     if (this.gpu && this.renderer.uploading) this.pumpUpload(Infinity);
@@ -6146,7 +6159,7 @@ export class Viewer3d {
 
   /** GPU에 화면 밖으로 그려 화소를 읽는다(읽은 버퍼를 그대로 ImageData로 — 위아래 뒤집기·알파 곱 풀기는 그 자리에서) */
   private renderPixels(o: Omit<SnapshotOptions, 'type' | 'quality'>): { data: ImageData; f: ViewFrame; k: number } {
-    if (!this.gpu) throw new Error('3D 보기 문맥이 없어 그림을 만들 수 없습니다');
+    if (!this.gpu) throw new Error(NO_GL_SNAPSHOT);
     if (this.renderer.uploading) this.pumpUpload(Infinity);
     const gl = this.gl;
     const { width: W, height: H } = this.snapshotSize(o);
@@ -8657,8 +8670,8 @@ export class Viewer3d {
       this.raf = 0;
       // 0.30.0: 미룬 무늬 다시 그리기는 버린다(되찾은 뒤는 0.29.0 차례)
       this.texReset();
-      // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다)
-      if (!this.disposed) for (const cb of [...this.lostCbs]) cb();
+      // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다. 0.89.0 앞 알림이 dispose하면 남은 알림도)
+      for (const cb of [...this.lostCbs]) if (!this.disposed) cb();
     });
     this.on(cv, 'webglcontextrestored', () => {
       if (this.disposed) return;
