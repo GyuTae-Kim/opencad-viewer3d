@@ -1595,6 +1595,32 @@ function okPoint3(p: readonly number[] | ArrayLike<number> | null | undefined): 
   return !!p && p.length >= 3 && okCoord(p[0]!) && okCoord(p[1]!) && okCoord(p[2]!);
 }
 
+/**
+ * 0.82.0 앱이 준 카메라(setCamera·flyTo)를 그릴 수 있는지: 대상점 유한한 수 셋, 거리 유한 > 0, 방위각·앙각 유한, 시야각 (0, π), 굴림·렌즈 이동은 없거나 유한.
+ * 0.81.0은 그대로 받아 NaN 하나로 그리기마다 시점 행렬이 NaN이었고(화면이 빔), 전체 보기도 방향·시야각을 그대로 써서 돌아오지 않았다. 유한하면 큰 값도 받는다
+ */
+function cameraOk(c: CameraState | null | undefined): boolean {
+  if (!c || typeof c !== 'object') return false;
+  const t = c.target as ArrayLike<number> | null | undefined;
+  const fin = (x: unknown): boolean => x === undefined || Number.isFinite(x);
+  return (
+    !!t &&
+    t.length >= 3 &&
+    Number.isFinite(t[0]) &&
+    Number.isFinite(t[1]) &&
+    Number.isFinite(t[2]) &&
+    Number.isFinite(c.distance) &&
+    c.distance > 0 &&
+    Number.isFinite(c.yaw) &&
+    Number.isFinite(c.pitch) &&
+    c.fovY > 0 &&
+    c.fovY < Math.PI &&
+    fin(c.roll) &&
+    fin(c.shiftX) &&
+    fin(c.shiftY)
+  );
+}
+
 function hasBillboard(m: Mesh3d): boolean {
   const o = m.billboard?.origin as ArrayLike<number> | undefined;
   return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
@@ -3058,8 +3084,12 @@ export class Viewer3d {
     return { ...this.cam, target: [...this.cam.target] as V3 };
   }
 
-  /** 카메라를 바로 바꾼다(움직임 없음 — 옮기던 움직임은 그만둔다: 그 Promise는 false). 저장된 보기로 날아가려면 flyTo */
+  /**
+   * 카메라를 바로 바꾼다(움직임 없음 — 옮기던 움직임은 그만둔다: 그 Promise는 false). 저장된 보기로 날아가려면 flyTo.
+   * 0.82.0 그릴 수 없는 카메라(대상점·거리·방위각·앙각·굴림·렌즈 이동에 유한하지 않은 수, 거리 0 이하, 시야각이 (0, π) 밖)는 받지 않는다(아무것도 하지 않는다)
+   */
   setCamera(c: CameraState): void {
+    if (!cameraOk(c)) return;
     this.dropAnim();
     this.wheelAnchor = null;
     this.cam = { ...c, target: [...c.target] as V3 };
@@ -3073,9 +3103,11 @@ export class Viewer3d {
    * 0.49.0 끝 알림과 길이: 돌려준 Promise는 카메라가 끝 자리에 닿으면 true로 풀린다 — 다 옮긴 그림을 그린 뒤, 움직이지 않으면(animate false·'auto'에서 줄이기 선호·
    * duration 0 이하) 곧바로, 끌기·휠·굴림·움직임 끄기가 옮기던 것을 끝 자리로 마치면 그때. 닿기 전에 다른 카메라 길(flyTo·fit·setView·뷰 큐브·키 등)·setCamera·
    * 새 장면 맞춤(setScene)·걷기 이동이 카메라를 바꾸거나 dispose하면 false로 풀린다(dispose 뒤 부르면 바로 false). 실패(reject)하지 않는다.
-   * opts.duration: 움직이는 길이(ms, 기본 320 — 0.48.0 그대로, 60초에서 자름)
+   * opts.duration: 움직이는 길이(ms, 기본 320 — 0.48.0 그대로, 60초에서 자름).
+   * 0.82.0 그릴 수 없는 카메라(setCamera와 같은 판정)는 옮기지 않고 곧 false(옮기던 움직임은 그대로)
    */
   flyTo(c: CameraState, animate = this.animate, opts?: FlyToOptions): Promise<boolean> {
+    if (!cameraOk(c)) return Promise.resolve(false);
     return this.goto({ ...c, target: [...c.target] as V3 }, animate, moveDuration(opts?.duration));
   }
 
@@ -3458,15 +3490,17 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  /** 1인칭 한 걸음(세계 단위): 수평 앞·오른쪽, 세계 위 */
+  /** 1인칭 한 걸음(세계 단위): 수평 앞·오른쪽, 세계 위. 0.82.0 유한하지 않은 인자는 받지 않는다(옮기던 움직임도 그대로) */
   walkBy(forward: number, right: number, up = 0): void {
+    if (!Number.isFinite(forward) || !Number.isFinite(right) || !Number.isFinite(up)) return;
     this.finishAnim();
     this.walkMove(forward, right, up);
     this.invalidate();
   }
 
-  /** 제자리에서 고개 돌리기(라디안, 왼쪽·아래가 +) */
+  /** 제자리에서 고개 돌리기(라디안, 왼쪽·아래가 +). 0.82.0 유한하지 않은 인자는 받지 않는다(옮기던 움직임도 그대로) */
   lookBy(dYaw: number, dPitch: number): void {
+    if (!Number.isFinite(dYaw) || !Number.isFinite(dPitch)) return;
     this.finishAnim();
     this.cam = lookCamera(this.cam, dYaw, dPitch);
     this.invalidate();
@@ -3518,8 +3552,9 @@ export class Viewer3d {
     this.invalidate();
   }
 
-  /** 대상점 둘레 회전(라디안) */
+  /** 대상점 둘레 회전(라디안). 0.82.0 유한하지 않은 인자는 받지 않는다(옮기던 움직임도 그대로 — 0.81.0은 NaN 하나로 카메라가 NaN이 되어 전체 보기로도 돌아오지 않았다) */
   orbitBy(dYaw: number, dPitch: number): void {
+    if (!Number.isFinite(dYaw) || !Number.isFinite(dPitch)) return;
     this.finishAnim();
     this.wheelAnchor = null;
     this.cam = orbitCamera(this.cam, dYaw, dPitch);
