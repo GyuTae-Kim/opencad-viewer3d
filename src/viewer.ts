@@ -1621,6 +1621,20 @@ function cameraOk(c: CameraState | null | undefined): boolean {
   );
 }
 
+/**
+ * 0.83.0 앱이 준 색 배열이 깨졌는지 — 0.50.0 setItemColor 규칙(앞 셋과 넷째(없으면 1)가 유한한 수가 아니면 null을 준 것과 같다)을 겉모습
+ * (setItemColor·setItemEdgeColor·setItemProfileColor·setItemLooks)과 그리기 선택(setRenderOptions의 선 색)이 함께 쓴다. CSS 글·null·없음은 깨지지 않은 것으로
+ */
+function badRgba(c: Rgba | string | null | undefined): boolean {
+  return c != null && typeof c !== 'string' && ![c[0], c[1], c[2], c[3] ?? 1].every((x) => Number.isFinite(x));
+}
+
+/** 0.83.0 겉모습 불투명도: 0.82.0처럼 수로 바꿔 0~1로 자르고(±Infinity는 끝으로), NaN이면 null(되돌림 — 0.82.0은 0으로 두어 보이지 않았다) */
+function lookAlpha(a: number): number | null {
+  const x = Math.min(1, Math.max(0, Number(a)));
+  return Number.isNaN(x) ? null : x;
+}
+
 function hasBillboard(m: Mesh3d): boolean {
   const o = m.billboard?.origin as ArrayLike<number> | undefined;
   return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
@@ -3271,6 +3285,8 @@ export class Viewer3d {
    * 장면만 켜고(장면을 올리는 걸음 안에서 굽는다 — 그보다 작은 장면은 0.51.0과 같다), true·'on'은 늘, false·null·'off'는 끈다(묶음 그물을 그물마다 버퍼로 되돌린다).
    * { min }이면 'auto' 문턱을 바꾼다. 그물마다 그리던 차례·값 그대로라 SwiftShader 그림은 같고, 기계 GPU는 셰이더가 자료에서 만든 행렬의 곱이 깊이 마지막 자리에서 달라
    * 모서리 선이 면과 겨루는 몇 화소가 다를 수 있다(인스턴싱과 같다). 바꾸거나 뺀 그물은 묶음에서 빠지고, 묶음 안 빠진 몫이 ¼을 넘으면 남은 그물로 다시 굽는다
+   * 0.83.0: 외곽선 굵기·숨은 점선 불투명도가 NaN이거나 자른 뒤에도 유한하지 않으면 그 수를, 색 배열(profiles.color·hiddenEdges.color·edgeColor)에 유한하지 않은 값이
+   * 있으면 그 색을 주지 않은(null) 것과 같다(0.50.0 setItemColor 규칙 — 0.82.0은 그대로 두어 외곽선·윤곽선이 사라지거나 검었다). ±Infinity 불투명도와 −Infinity 굵기는 끝으로 자른다
    */
   setRenderOptions(o: {
     profiles?: boolean | { width?: number; color?: Rgba | string } | null;
@@ -3283,21 +3299,27 @@ export class Viewer3d {
   }): void {
     if ('profiles' in o) {
       const p = o.profiles;
-      this.renderOpts.profiles = !p ? null : { width: Math.max(1, (typeof p === 'object' ? p.width : undefined) ?? 2), color: typeof p === 'object' ? (p.color ?? null) : null };
+      const q = p && typeof p === 'object' ? p : null;
+      // 0.83.0 자른 굵기가 유한하지 않으면(NaN·Infinity) 주지 않은 것(2)과, 깨진 색 배열은 주지 않은 것과 같다(0.82.0은 u_r·u_color가 NaN)
+      const w = Math.max(1, q?.width ?? 2);
+      this.renderOpts.profiles = !p ? null : { width: Number.isFinite(w) ? w : 2, color: q && !badRgba(q.color) ? (q.color ?? null) : null };
     }
     if ('hiddenEdges' in o) {
       const h = o.hiddenEdges;
       if (h && typeof h === 'object') {
-        this.renderOpts.hiddenEdges = Math.min(1, Math.max(0, h.opacity ?? 0.35));
+        // 0.83.0 불투명도 NaN은 주지 않은 것(0.35)과, 깨진 색 배열은 null과 같다(0.82.0은 NaN을 두어 점선을 그리지 않았고 색은 u_color가 NaN)
+        const a = Math.min(1, Math.max(0, h.opacity ?? 0.35));
+        this.renderOpts.hiddenEdges = Number.isNaN(a) ? 0.35 : a;
         this.renderOpts.hiddenEdgesShaded = !!h.shaded;
-        this.renderOpts.hiddenEdgeColor = h.color ?? null;
+        this.renderOpts.hiddenEdgeColor = badRgba(h.color) ? null : (h.color ?? null);
       } else {
-        this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) : 0;
+        // 0.83.0 NaN은 null(끔)과 같다(0.82.0은 NaN을 그대로 두었다)
+        this.renderOpts.hiddenEdges = h === true ? 0.35 : typeof h === 'number' ? Math.min(1, Math.max(0, h)) || 0 : 0;
         this.renderOpts.hiddenEdgesShaded = false;
         this.renderOpts.hiddenEdgeColor = null;
       }
     }
-    if ('edgeColor' in o) this.renderOpts.edgeColor = o.edgeColor ?? null;
+    if ('edgeColor' in o) this.renderOpts.edgeColor = badRgba(o.edgeColor) ? null : (o.edgeColor ?? null);
     if ('instancing' in o) {
       const i = o.instancing;
       const min = i && typeof i === 'object' && typeof i.min === 'number' && Number.isFinite(i.min) ? Math.max(2, Math.floor(i.min)) : INSTANCE_MIN;
@@ -5582,16 +5604,18 @@ export class Viewer3d {
 
   /**
    * 묶음(그물·선·점 id) 불투명도 0~1(묶음 색 알파에 곱한다, null이면 되돌림). 1보다 작으면 반투명 차례에 뒤에서 앞으로 그린다.
-   * pickable: false면 고르기·측정·가림(덧그림·윤곽선)에서 뺀다(유령처럼 흐리게 둘 때). null로 되돌리면 pickable도 true로
+   * pickable: false면 고르기·측정·가림(덧그림·윤곽선)에서 뺀다(유령처럼 흐리게 둘 때). null로 되돌리면 pickable도 true로.
+   * 0.83.0: NaN은 null과 같다(되돌림 — 0.82.0은 0으로 두어 보이지 않았다). ±Infinity는 1·0으로 자른다
    */
   setItemOpacity(id: string, alpha: number | null, opts: { pickable?: boolean } = {}): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
-    if (alpha === null) {
+    const a = alpha === null ? null : lookAlpha(alpha);
+    if (a === null) {
       delete l.alpha;
       delete l.pickable;
     } else {
-      l.alpha = Math.min(1, Math.max(0, Number(alpha) || 0));
+      l.alpha = a;
       if (opts.pickable !== undefined) l.pickable = opts.pickable;
     }
     this.setLook(id, l, false);
@@ -5602,8 +5626,7 @@ export class Viewer3d {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
     // 0.50.0: 유한하지 않은 값이 든 색 배열은 null(되돌림)과 같다(0.49.0은 그 색으로 그려 검게 보였다)
-    const bad = typeof color !== 'string' && color !== null && ![color[0], color[1], color[2], color[3] ?? 1].every((x) => Number.isFinite(x));
-    if (color === null || bad) delete l.color;
+    if (color === null || badRgba(color)) delete l.color;
     else l.color = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
@@ -5652,7 +5675,8 @@ export class Viewer3d {
    * (Map도 그대로 준다). 결과(그림·고르기·측정·범위·단면·최근접점·itemLook)는 목록 차례대로, 한 항목 안에서는 opacity(pickable과 함께) → color → matrix → edgeColor →
    * profileColor → pickOpaque → pickThrough 차례로 하나씩 부른 것과 같다 — 같은 id가 둘이면 뒤의 것이 덮고, 없는 id·겉모습이 객체도 null도 아닌 항목은 건너뛰며,
    * 앞 16개가 유한한 수가 아닌 행렬(배열이 아닌 값 포함)은 그 행렬만 건너뛴다(setItemMatrix와 같다). pickThrough는 그물에만.
-   * 그림자·고르기 목록·측정 미리 보기와 행렬을 바꾼 묶음의 범위·모형 행렬은 한 번만 버린다(setItemMatrices와 같다). 돌려주는 값: 건 항목 수(건너뛴 것 빼고)
+   * 그림자·고르기 목록·측정 미리 보기와 행렬을 바꾼 묶음의 범위·모형 행렬은 한 번만 버린다(setItemMatrices와 같다). 돌려주는 값: 건 항목 수(건너뛴 것 빼고).
+   * 0.83.0: NaN 불투명도·유한하지 않은 값이 든 색 배열도 하나씩 부른 것처럼 그 필드 null과 같다(0.82.0은 색을 그대로 두고 불투명도는 0으로 했다)
    */
   setItemLooks(entries: Iterable<readonly [string, ItemLookInput | null]>): number {
     if (this.disposed) return 0;
@@ -5679,14 +5703,16 @@ export class Viewer3d {
       }
       const l = this.looks.get(id) ?? {};
       const { opacity, color, matrix, edgeColor, profileColor, pickOpaque, pickThrough } = look;
-      if (opacity === null) {
+      // 0.83.0: NaN 불투명도·깨진 색 배열은 하나씩 부른 것처럼 그 필드 null과 같다(0.82.0은 색을 그대로 두어 균일 변수가 NaN, 불투명도는 0)
+      const a = opacity == null ? opacity : lookAlpha(opacity);
+      if (a === null) {
         delete l.alpha;
         delete l.pickable;
-      } else if (opacity !== undefined) {
-        l.alpha = Math.min(1, Math.max(0, Number(opacity) || 0));
+      } else if (a !== undefined) {
+        l.alpha = a;
         if (look.pickable !== undefined) l.pickable = look.pickable;
       }
-      if (color === null) delete l.color;
+      if (color === null || badRgba(color)) delete l.color;
       else if (color !== undefined) l.color = col(color);
       if (matrix === null) {
         if (l.matrix) moved.push(id);
@@ -5698,9 +5724,9 @@ export class Viewer3d {
           moved.push(id);
         }
       }
-      if (edgeColor === null) delete l.edgeColor;
+      if (edgeColor === null || badRgba(edgeColor)) delete l.edgeColor;
       else if (edgeColor !== undefined) l.edgeColor = col(edgeColor);
-      if (profileColor === null) delete l.profileColor;
+      if (profileColor === null || badRgba(profileColor)) delete l.profileColor;
       else if (profileColor !== undefined) l.profileColor = col(profileColor);
       if (pickOpaque !== undefined) {
         if (pickOpaque) l.pickOpaque = true;
@@ -5716,12 +5742,13 @@ export class Viewer3d {
   /**
    * 그물 윤곽선 색(0.9.0): 그 그물의 윤곽선(Mesh3d.edges)·삼각형 변(와이어프레임·숨은 선)을 이 색으로 — 재질별·묶음별 모서리 색.
    * 전역 setRenderOptions({ edgeColor })보다 먼저 쓰고(강조색이 가장 먼저, X-ray는 알파에 0.9), edgeColor: 'contrast'면 이 색에도 바탕 대비를 따진다.
-   * CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림. 숨은 점선(뒤 모서리) 색은 바꾸지 않는다
+   * CSS 색 문자열 또는 RGBA 0~1. null이면 되돌림. 숨은 점선(뒤 모서리) 색은 바꾸지 않는다.
+   * 0.83.0: 유한하지 않은 값이 든 색 배열은 null과 같다(setItemColor와 같은 규칙 — 0.82.0은 그대로 두어 선이 검거나 사라졌다)
    */
   setItemEdgeColor(id: string, color: Rgba | string | null): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
-    if (color === null) delete l.edgeColor;
+    if (color === null || badRgba(color)) delete l.edgeColor;
     else l.edgeColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
@@ -5729,12 +5756,13 @@ export class Viewer3d {
   /**
    * 그물 외곽선 색(0.9.0): 외곽선(setRenderOptions({ profiles }))이 이 그물이 앞에 있는 곳에서 이 색 — 그물이 뒤 그물·바탕과 맞닿은 테두리와
    * 구멍 테두리. 앞 그물이 뒤 그물 위에 겹친 테두리는 앞 그물의 색이다. 주지 않은 그물은 profiles.color.
-   * 한 그물이라도 색을 주면 외곽선 깊이 그림과 함께 화면 크기 색 그림(RGBA8) 한 장을 더 그린다(모두 되돌리면 놓는다). null이면 되돌림
+   * 한 그물이라도 색을 주면 외곽선 깊이 그림과 함께 화면 크기 색 그림(RGBA8) 한 장을 더 그린다(모두 되돌리면 놓는다). null이면 되돌림.
+   * 0.83.0: 유한하지 않은 값이 든 색 배열은 null과 같다(setItemColor와 같은 규칙)
    */
   setItemProfileColor(id: string, color: Rgba | string | null): void {
     if (this.disposed) return;
     const l = this.looks.get(id) ?? {};
-    if (color === null) delete l.profileColor;
+    if (color === null || badRgba(color)) delete l.profileColor;
     else l.profileColor = typeof color === 'string' ? this.rgba(color) : ([color[0], color[1], color[2], color[3] ?? 1] as Rgba);
     this.setLook(id, l, false);
   }
