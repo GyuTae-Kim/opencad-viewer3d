@@ -3922,6 +3922,8 @@ export class Viewer3d {
    * normal은 길이와 상관없다(단위로 맞추고 offset도 같은 비율로 나눈다). 축 방향 법선이면 축 단면(axis)으로 기억한다.
    * 잘린 쪽은 그물·선·점·윤곽선·강조 선분 모두 그리지 않고, 고르기·측정·확대 기준점에서도 무시한다.
    * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
+   * 법선이 0이거나 유한한 수 셋이 아니거나 offset이 유한하지 않으면 받지 않는다(앞 단면 그대로). 0.87.0: 법선 길이로 나눈 offset이 넘쳐도(아주 짧은 법선 — 1e-200 등)
+   * 받지 않는다(0.86.0은 위치 ±Infinity 평면으로 단면 균일 변수가 무한이었다)
    */
   setSection(s: { normal: readonly number[]; offset: number } | null, opts: SectionOptions = {}): void {
     if (this.disposed) return;
@@ -3943,6 +3945,7 @@ export class Viewer3d {
    * 여러 단면 평면(0.7.0, 최대 MAX_SECTION_PLANES = 6 — 상자 단면): 모든 평면의 남는 쪽(교집합)만 남긴다. null·빈 목록이면 끈다.
    * 평면마다 items(그 평면이 자르는 묶음 id, 없으면 모두)·caps·outline·plane을 따로 줄 수 있다(주지 않으면 opts, 그다음 기본값).
    * 첫 평면이 예전 단면 API(section·setSectionPosition·sectionHandle …의 기본 번호 0)의 평면이다.
+   * setSection이 받지 않는 평면(법선·offset이 깨짐, 0.87.0 넘친 위치)은 빼고, 남는 평면이 없으면 끈다
    */
   setSections(list: readonly SectionPlane[] | null, opts: SectionOptions = {}): void {
     if (this.disposed) return;
@@ -3984,7 +3987,7 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** normal·p = offset 평면 → 단면(축 방향이면 축 단면). 법선이 0이거나 수가 아니면 null */
+  /** normal·p = offset 평면 → 단면(축 방향이면 축 단면). 법선이 0이거나 수가 아니면 null(0.87.0 길이로 나눈 offset이 넘쳐도 — planeFrom) */
   private makeSection(normal: readonly number[], offset: number, o: Pick<Section, 'caps' | 'outline' | 'plane'>): Section | null {
     const pf = planeFrom(normal, offset);
     if (!pf) return null;
@@ -4002,7 +4005,7 @@ export class Viewer3d {
   /**
    * 축 단면: axis(x·y·z)에 수직인 평면을 둔다. value는 장면 범위 안 위치 0~1(0 = 최소, 1 = 최대 좌표)이고 world면 그 축 좌표.
    * 기본은 +축 쪽(좌표가 위치보다 큰 쪽)을 잘라 낸다. flip이면 반대쪽. flip을 주지 않으면 같은 축의 앞 값을 지킨다.
-   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다).
+   * 평면 하나만 둔다(setSections로 둔 다른 평면은 지운다). 위치가 유한하지 않으면(value NaN·±Infinity, 범위 안 위치로 셈이 넘침) 받지 않는다(앞 단면 그대로)
    */
   setSectionAxis(axis: SectionAxis, value: number, opts: SectionOptions & { flip?: boolean; world?: boolean } = {}): void {
     if (this.disposed) return;
@@ -4015,7 +4018,10 @@ export class Viewer3d {
     this.sectionChanged();
   }
 
-  /** 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position). index는 평면 번호(기본 0) */
+  /**
+   * 단면 평면을 방향은 두고 옮긴다. value는 범위 안 0~1(state.t와 같은 뜻), world면 기준 방향 위치(state.position). index는 평면 번호(기본 0).
+   * 위치가 유한하지 않거나 그 번호의 평면이 없으면 아무것도 하지 않는다
+   */
   setSectionPosition(value: number, opts: { world?: boolean; index?: number } = {}): void {
     const s = this.secAt(opts.index);
     if (!s) return;
@@ -4102,7 +4108,8 @@ export class Viewer3d {
 
   /**
    * 화면 끌기(CSS 화소)만큼 단면을 법선 방향으로 옮기고 새 범위 위치 t(0~1)를 돌려준다.
-   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null. index는 평면 번호(기본 0)
+   * 법선이 화면에 드러나면 그 방향 성분을 쓰고, 눈 쪽을 거의 바로 향하면 세로 끌기(위 = 눈 쪽)를 쓴다. 단면이 없으면 null. index는 평면 번호(기본 0).
+   * 옮길 거리가 유한하지 않으면(dx·dy NaN·±Infinity 등) 옮기지 않고 지금 t를 돌려준다
    */
   moveSectionByPixels(dx: number, dy: number, index = 0): number | null {
     const s = this.secAt(index);
