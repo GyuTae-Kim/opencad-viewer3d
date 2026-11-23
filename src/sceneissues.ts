@@ -67,7 +67,7 @@ export interface SceneIssue {
 
 /** 알림 글(한국어 기본 — 앱이 code로 제 말을 쓸 수 있다). {id}·{field}·{count} 자리를 채운다 */
 export const SCENE_ISSUE_MESSAGES: Readonly<Record<SceneIssueCode, string>> = {
-  bounds: '장면 범위(bounds)가 유한하지 않아 그물에서 다시 셌습니다',
+  bounds: '장면 범위(bounds)가 유한하지 않아 메시에서 다시 셌습니다',
   placement: '{id}: {field}가 유한한 수가 아니거나 항목을 좌표 한도 밖으로 옮겨 그리지 않았습니다',
   billboard: '{id}: billboard.origin이 유한하지 않아 마주 보기를 하지 않았습니다',
   positions: '{id}: {field} 정점 {count}개가 NaN·무한대이거나 너무 커서 그 정점을 쓰는 도형을 그리지 않았습니다',
