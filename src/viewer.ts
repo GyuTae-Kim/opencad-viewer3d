@@ -1646,6 +1646,16 @@ function withoutBad<T extends object>(o: T, colors: readonly string[], nums: rea
   return c as T;
 }
 
+/** 0.85.0 앱이 준 방향·원점(마커 축·강조 선분 원점)이 유한한 수 셋인지(크기 한도는 보지 않는다 — 0.84.0이 받던 유한한 값 그대로) */
+function fin3(p: readonly number[]): boolean {
+  return p.length >= 3 && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]);
+}
+
+/** 0.85.0 선 그리기 구간의 흐린 나머지 불투명도(자르지 않는 수): 없거나 유한하지 않은 수면 0(흐린 나머지 없음 — 0.84.0은 Infinity를 u_alpha로 보냈다) */
+function ghostOf(g: number | undefined): number {
+  return typeof g === 'number' && !Number.isFinite(g) ? 0 : (g ?? 0);
+}
+
 function hasBillboard(m: Mesh3d): boolean {
   const o = m.billboard?.origin as ArrayLike<number> | undefined;
   return !!o && typeof o.length === 'number' && o.length >= 3 && Number.isFinite(o[0]) && Number.isFinite(o[1]) && Number.isFinite(o[2]);
@@ -3802,10 +3812,14 @@ export class Viewer3d {
   /**
    * 선분 강조: 선분 쌍 xyz,xyz…(세계 좌표)를 강조색으로 굵게 그린다. 보이는 부분은 깊이를 따지고,
    * 가려진 부분은 opts.hidden 불투명도로 흐리게 그린다. null이면 해제, 장면을 바꾸면 풀린다.
+   * 0.85.0: origin을 주었는데 유한한 수 셋이 아니면 null과 같다(해제 — 0.84.0은 u_mvp NaN으로 강조가 사라졌다). 유한하지 않은 값이 든 색 배열·유한하지 않은 굵기·
+   * 0~1로 자른 뒤 NaN인 hidden은 그 필드를 주지 않은 것과 같다(0.84.0은 u_color NaN·u_width 무한·1화소 선, 가린 부분을 그리지 않았다). ±Infinity hidden은 1·0으로 자른다
    */
   setHighlightSegments(positions: Float32Array | null, opts: SegmentHighlightOptions = {}): void {
     if (this.disposed) return;
-    this.segHi = positions && positions.length >= 6 ? { positions, opts: { ...opts } } : null;
+    const o = withoutBad(opts, ['color'], ['width']);
+    if (Number.isNaN(Math.min(1, Math.max(0, o.hidden ?? 0.3)))) delete o.hidden;
+    this.segHi = positions && positions.length >= 6 && (o.origin == null || fin3(o.origin)) ? { positions, opts: o } : null;
     if (this.gpu) this.renderer.setHighlightSegments(this.segHi?.positions ?? null, this.segHi?.opts.origin);
     this.invalidate();
   }
@@ -3814,6 +3828,7 @@ export class Viewer3d {
    * 원본 번호(LineSet3d.segmentIds — 예: NC 이동 번호)로 보이는 선분 묶음에서 선분을 모아 강조한다.
    * 찾은 선분 수를 돌려준다(없으면 0이고 강조는 풀린다). null·빈 목록이면 해제.
    * 묶음 원점(origin)이 있으면 첫 묶음의 원점 기준으로 모아 큰 좌표에서도 정밀하게 그린다.
+   * 0.85.0: 선택은 setHighlightSegments 규칙 그대로 — 그래서 깨진 origin으로 강조를 풀면 0을 돌려준다
    */
   highlightSegmentIds(ids: readonly number[] | null, opts: SegmentHighlightOptions = {}): number {
     const s = this.sceneRef;
@@ -3821,7 +3836,7 @@ export class Viewer3d {
     const base = s ? s.lines.find((l) => l.segmentIds && hasOrigin(l.origin) && accept(l))?.origin : undefined;
     const p = s && ids?.length ? segmentsById(s.lines, ids, accept, base, (l) => this.rangeSel.get(l.id)?.test) : null;
     this.setHighlightSegments(p, base ? { ...opts, origin: base } : opts);
-    return p ? p.length / 6 : 0;
+    return p && this.segHi ? p.length / 6 : 0;
   }
 
   /**
@@ -3849,10 +3864,12 @@ export class Viewer3d {
   /**
    * 선분 묶음의 앞에서 count개만 그린다(NC 재생). null이면 전부.
    * ghost(0~1)를 주면 나머지를 그 불투명도로 흐리게 그린다.
+   * 0.85.0: 자른 개수가 NaN이면 null(전부)과, 유한하지 않은 ghost는 주지 않은 것(0)과 같다(0.84.0은 그 묶음을 그리지 않았고 ghost Infinity는 u_alpha 무한)
    */
   setLineDrawRange(id: string, count: number | null, opts: { ghost?: number } = {}): void {
-    if (count === null) this.ranges.delete(id);
-    else this.ranges.set(id, { count: Math.max(0, Math.floor(count)), ghost: opts.ghost ?? 0 });
+    const n = count === null ? NaN : Math.max(0, Math.floor(count));
+    if (Number.isNaN(n)) this.ranges.delete(id);
+    else this.ranges.set(id, { count: n, ghost: ghostOf(opts.ghost) });
     this.invalidate();
   }
 
@@ -3860,19 +3877,21 @@ export class Viewer3d {
    * NC 재생: segmentIds가 있는 모든 선분 묶음에서 원본 번호가 limitId 이하인 앞쪽 선분만 그린다
    * (급속·공구별로 나뉜 묶음을 이동 번호 하나로 함께 돌린다. segmentIds는 오름차순이라고 본다).
    * null이면 모두 그린다. 돌려주는 값은 지금 공구 위치(그려진 선분 가운데 번호가 가장 큰 것의 끝점).
+   * 0.85.0: 번호 NaN은 null과 같고(0.84.0은 모든 묶음을 그리지 않았다 — ±Infinity는 그대로 전부·없음), 유한하지 않은 ghost는 주지 않은 것(0)과 같다
    */
   setDrawLimitBySegmentId(limitId: number | null, opts: { ghost?: number } = {}): V3 | null {
     let best: { id: number; p: V3 } | null = null;
+    const ghost = ghostOf(opts?.ghost);
     for (const it of this.items.values()) {
       if (it.kind !== 'line' || !it.item.segmentIds) continue;
       const l = it.item;
-      if (limitId === null) {
+      if (limitId === null || Number.isNaN(Number(limitId))) {
         this.ranges.delete(l.id);
         continue;
       }
       const ids = l.segmentIds!;
       const n = countIdsUpTo(ids, Math.floor(l.positions.length / 6), limitId);
-      this.ranges.set(l.id, { count: n, ghost: opts.ghost ?? 0 });
+      this.ranges.set(l.id, { count: n, ghost });
       if (n > 0 && (!best || ids[n - 1]! > best.id)) {
         const o = (n - 1) * 6 + 3;
         const g = l.origin;
@@ -3883,10 +3902,15 @@ export class Viewer3d {
     return best ? best.p : null;
   }
 
-  /** 공구 위치 표시(null이면 지움). kind: 'cone'(기본)·'cylinder'·'ball' */
+  /**
+   * 공구 위치 표시(null이면 지움). kind: 'cone'(기본)·'cylinder'·'ball'.
+   * 0.85.0: 축(axis)을 주었는데 유한한 수 셋이 아니면 null과 같고(지움 — 0.84.0은 마커 행렬 NaN으로 마커가 사라졌다), 유한하지 않은 값이 든 색 배열·유한하지 않은
+   * 반지름·화면 높이는 그 필드를 주지 않은 것과 같다(테마 색·화면 높이 44 — 0.84.0은 u_color·마커 행렬이 NaN·무한). 선택은 부를 때 복사해 둔다
+   */
   setMarker(pos: readonly number[] | null, kind: MarkerKind = 'cone', opts: MarkerOptions = {}): void {
     // 0.50.0: 유한한 수 셋(한도 안)이 아닌 자리는 null과 같다(0.49.0은 NaN 행렬로 그려 보이지 않았다)
-    this.marker = pos && okPoint3(pos) ? { pos: [pos[0]!, pos[1]!, pos[2]!], kind, opts } : null;
+    const o = withoutBad(opts, ['color'], ['radius', 'sizePx']);
+    this.marker = pos && okPoint3(pos) && (o.axis == null || fin3(o.axis)) ? { pos: [pos[0]!, pos[1]!, pos[2]!], kind, opts: o } : null;
     this.invalidate();
   }
 
@@ -5928,6 +5952,8 @@ export class Viewer3d {
    * 앱 측정 덧그림: 거리(a–b)·각(꼭짓점 a, 팔 b·c)·반지름(중심 a, 원 위 b, normal을 주면 원도)·점(a)을 내장 측정과 같은 모양으로 그린다.
    * 선은 깊이를 따져 가려진 부분을 흐리게(opts.hidden), 점·글자는 가려지면 흐리게 그린다. 단면으로 자르지 않고 그림 저장(toBlob)에도 담긴다.
    * 앞의 덧그림을 모두 바꾸고 null이면 지운다. 장면을 바꿔도 남는다(앱이 지운다).
+   * 0.85.0: 0~1로 자른 hidden이 NaN이거나 0.5 이상으로 자른 굵기가 유한하지 않으면(NaN·Infinity) 그 선택을 주지 않은 것과 같다(0.35·2 — 0.84.0은 가린 부분을 그리지 않았고
+   * 굵기는 u_width 무한·1화소 선). ±Infinity hidden·−Infinity 굵기는 그대로 끝으로 자른다
    */
   setAnnotations(list: readonly Annotation3d[] | null, opts: AnnotationOptions = {}): void {
     if (this.disposed) return;
@@ -5948,11 +5974,15 @@ export class Viewer3d {
       for (const p of g.dots) expandPoint(box, p[0], p[1], p[2]);
       expandPoint(box, g.labelAt[0], g.labelAt[1], g.labelAt[2]);
     }
+    // 0.85.0 자른 hidden이 NaN이거나 자른 굵기가 유한하지 않으면(NaN·Infinity) 주지 않은 것(0.35·2)과 같다(0.84.0은 가린 부분을 그리지 않았고 u_width 무한·1화소 선).
+    // ±Infinity hidden과 −Infinity 굵기는 그대로 끝(1·0, 0.5)으로 자른다
+    const hidden = Math.min(1, Math.max(0, opts.hidden ?? 0.35));
+    const width = Math.max(0.5, opts.width ?? 2);
     this.annos = {
       list: copy,
       geo,
-      hidden: Math.min(1, Math.max(0, opts.hidden ?? 0.35)),
-      width: Math.max(0.5, opts.width ?? 2),
+      hidden: Number.isNaN(hidden) ? 0.35 : hidden,
+      width: Number.isFinite(width) ? width : 2,
       box: boxIsEmpty(box) ? null : box,
     };
     this.uploadAnnotations();
