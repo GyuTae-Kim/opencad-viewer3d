@@ -1752,6 +1752,11 @@ const SNAPSHOT_MAX_SIDE = 16384;
 const NO_GL_SNAPSHOT = '3D 보기 문맥이 없어 그림을 만들 수 없습니다';
 /** 0.89.0 dispose 뒤 on* 등록이 돌려주는 해제 함수(아무것도 하지 않고 뷰어·콜백을 쥐지 않는다) */
 const NO_OFF = (): void => {};
+/**
+ * 0.90.0 알림 목록(on* 여덟): 콜백 → 등록 표. 등록마다 새 표라 알림 동안 뗐다 다시 단 콜백을 그 알림의 사본과 가린다(emit).
+ * 같은 함수를 다시 달면 처음 자리·같은 표 그대로다(0.89.0 Set과 같은 차례)
+ */
+type Listeners<F> = Map<F, object>;
 /** 0.45.0 최근접점 구간 모양(closestPoints rangeA·rangeB)을 묶음(정점·번호 배열)마다 기억하는 개수 — 면 표에서 고른 면 짝을 잇달아 잴 때 다시 만들지 않게 */
 const CLOSEST_PART_CACHE = 64;
 /**
@@ -2158,17 +2163,17 @@ export class Viewer3d {
 
   /**
    * 고르기 알림과 그 알림의 고르기 선택(0.22.0 onPick의 meshesOnly, 0.23.0 throughTranslucent, 0.26.0 front) — 단 차례대로
-   * (Map이라 같은 함수를 다시 달면 처음 자리를 지킨다)
+   * (Map이라 같은 함수를 다시 달면 처음 자리를 지킨다). 0.90.0 선택 객체가 그 등록 표다(다시 달면 같은 객체에 선택만 바꿔 넣는다 — emit)
    */
   private pickCbs = new Map<(p: Pick3d | null, e: PickEvent) => void, { meshesOnly: boolean; through: boolean; front: boolean }>();
   /** 0.25.0 지금 장면의 놓기 선택(setScene의 release — 문맥 복구에서 다시 올릴 때도 쓴다) */
   private releaseOpt: ReleaseFlags | null = null;
   /** 0.25.0 문맥 복구 알림(놓은 것을 다시 받는다 — 놓기 선택이 없어도 빈 need로 부른다) */
-  private restoreCbs = new Set<(need: ContextRestoreNeed) => unknown>();
+  private restoreCbs: Listeners<(need: ContextRestoreNeed) => unknown> = new Map();
   /** 0.25.0 문맥 잃음 알림 */
-  private lostCbs = new Set<() => void>();
+  private lostCbs: Listeners<() => void> = new Map();
   /** 0.29.0 되찾은 뒤 다시 올리기가 다 끝났을 때 알림 */
-  private restoreDoneCbs = new Set<() => void>();
+  private restoreDoneCbs: Listeners<() => void> = new Map();
   /** 0.58.0 whenMerged 약속을 푸는 함수들(끝나거나 문맥을 잃거나 뷰어를 없앨 때 — 풀면 비운다) */
   private mergeWaits: ((r: MergeWaitResult) => void)[] = [];
   /** 0.29.0 문맥을 잃은 뒤 다시 올리기가 아직 끝나지 않았는지(잃는 순간부터 끝 알림까지 — restorePending) */
@@ -2188,7 +2193,7 @@ export class Viewer3d {
   /** 0.30.0 그 울타리를 둔 때와 미룬 다시 그리기가 그 울타리를 기다렸는지(기다렸으면 그 화면의 GPU 시간으로 간격을 다시 정한다) */
   private texFenceAt = 0;
   private texFenceWaited = false;
-  private sectionCbs = new Set<(s: SectionState | null, all: SectionState[]) => void>();
+  private sectionCbs: Listeners<(s: SectionState | null, all: SectionState[]) => void> = new Map();
   private lastClick: LastClick = { t: 0, x: 0, y: 0, n: 0 };
   /** 묶음 안 구간(숨김·강조) */
   private rangeSel = new Map<string, RangeState>();
@@ -2209,14 +2214,14 @@ export class Viewer3d {
   } | null = null;
   /** 0.51.0 기다리는 그리기가 나눠 올리기 걸음만으로 생겼는지(다른 까닭의 invalidate가 끼면 false — redrawMs가 이 그리기만 건너뛴다) */
   private upOnly = false;
-  private measureCbs = new Set<(m: MeasureResult | null) => void>();
-  private camCbs = new Set<(c: CameraState) => void>();
+  private measureCbs: Listeners<(m: MeasureResult | null) => void> = new Map();
+  private camCbs: Listeners<(c: CameraState) => void> = new Map();
   /** 0.53.0 손가락 뷰 큐브 펴기·접기 알림(onViewCubeExpandedChange) */
-  private cubeCbs = new Set<(expanded: boolean, e: ViewCubeExpandEvent) => void>();
+  private cubeCbs: Listeners<(expanded: boolean, e: ViewCubeExpandEvent) => void> = new Map();
   private lastCamKey = '';
   /** 0.50.0 지금 장면의 입력 알림(sceneIssues)과 듣는 함수(onSceneIssues) */
   private issues: SceneIssue[] = [];
-  private issueCbs = new Set<(issues: readonly SceneIssue[]) => void>();
+  private issueCbs: Listeners<(issues: readonly SceneIssue[]) => void> = new Map();
 
   private ro: ResizeObserver;
   private hostPos: string | null = null;
@@ -2483,16 +2488,30 @@ export class Viewer3d {
    * 0.89.0 알림 등록(on* 여덟 — onPick은 선택을 함께 든다). dispose 뒤에는 아무것도 걸지 않고 아무것도 하지 않는 해제 함수를 돌려준다
    * (0.88.0은 dispose가 비운 목록에 다시 넣어, 부르지 않는 앱 콜백과 그 콜백이 쥔 자료가 없앤 뷰어와 함께 남았다)
    */
-  private listen<F>(set: Set<F>, cb: F): () => void {
+  private listen<F>(map: Listeners<F>, cb: F): () => void {
     if (this.disposed) return NO_OFF;
-    set.add(cb);
-    return () => set.delete(cb);
+    // 0.90.0 같은 함수를 다시 달면 처음 자리·같은 등록 표(뗐다 다시 달면 새 표 — 끝 자리)
+    if (!map.has(cb)) map.set(cb, {});
+    return () => map.delete(cb);
+  }
+
+  /**
+   * 0.90.0 알림 보내기(on* 아홉의 한 규칙 — 브라우저 EventTarget.dispatchEvent와 같다): 알림을 시작할 때의 목록을 단 차례대로 돌되,
+   * 그 동안 뗀 콜백(뗐다 다시 단 것도 — 등록 표가 바뀐다)은 부르지 않고 그 동안 단 콜백은 다음 알림부터 부른다.
+   * 0.89.0 부르는 도중 dispose되면 남은 콜백을 부르지 않는다. 0.89.0은 목록을 바로 도는 넷(고르기·측정·카메라·단면)이 그 동안 단 콜백을 불렀고
+   * (뗐다 다시 단 콜백은 끝 자리에서 또 — 자기를 그리하면 끝없이), 사본을 도는 다섯은 그 동안 뗀 콜백을 불렀다
+   */
+  private emit<F, R>(map: Map<F, R>, call: (cb: F, reg: R) => void): void {
+    if (!map.size) return;
+    for (const [cb, reg] of [...map]) {
+      if (this.disposed) return;
+      if (map.get(cb) === reg) call(cb, reg);
+    }
   }
 
   private emitIssues(list: readonly SceneIssue[]): void {
     if (!list.length) return;
-    // 0.89.0 사본을 도는 동안 앞 알림이 dispose하면 남은 알림은 부르지 않는다(목록을 바로 도는 알림은 dispose가 목록을 비워 멈춘다)
-    for (const cb of [...this.issueCbs]) if (!this.disposed) cb(list);
+    this.emit(this.issueCbs, (cb) => cb(list));
   }
 
   /** 장면 비우기(단면도 끈다) */
@@ -2764,7 +2783,7 @@ export class Viewer3d {
     const need = this.renderer.restoreNeed(this.sceneRef);
     this.restoreEmitting = true;
     try {
-      for (const cb of [...this.restoreCbs]) if (!this.disposed) void cb(need);
+      this.emit(this.restoreCbs, (cb) => void cb(need));
     } finally {
       this.restoreEmitting = false;
     }
@@ -2891,7 +2910,7 @@ export class Viewer3d {
     const n = this.renderer.restoreNeed(this.sceneRef);
     if (n.meshes.length || n.textures.length) return;
     this.restoreWait = false;
-    for (const cb of [...this.restoreDoneCbs]) if (!this.disposed) cb();
+    this.emit(this.restoreDoneCbs, (cb) => cb());
   }
 
   /** mesh가 쓰는 정점 속성 배열 가운데 a와 같은 객체가 있는지 */
@@ -3054,7 +3073,9 @@ export class Viewer3d {
    * 0.88.0 측정 붙잡기 선택(앱 점 배열·점 색인)도 놓는다 — measureSnap은 null, setMeasurePickThrough·setMeasureInferenceLock은 false(붙잡기가 꺼진 것과 같다).
    * 그 뒤 handleKey·handleKeyUp·setMeasureSnap·setRenderOptions도 아무것도 하지 않는다(창·문서 리스너·타이머를 다시 걸지 않는다).
    * 0.89.0 알림 콜백(on* 아홉)을 모두 놓고, 그 뒤 on* 등록은 아무것도 걸지 않고 아무것도 하지 않는 해제 함수를 돌려준다. 알림 콜백 안에서 dispose하면
-   * 같은 알림의 남은 콜백도 부르지 않는다. 그 뒤 toBlob()은 Error로 거절한다
+   * 같은 알림의 남은 콜백도 부르지 않는다. 그 뒤 toBlob()은 Error로 거절한다.
+   * 0.90.0 키보드 스냅 선택(앱 announce 등 — 알리지 않는다)·가상 커서·측정 덧그림·피할 상자·측정 글 꼴·고르기 미리 강조도 놓는다 — keyboardSnap·keyboardCursor·
+   * measureLabelAvoid·pickPreview는 null, annotations·annotationLabelRects는 빈 배열. 그 뒤 setKeyboardSnap·setMeasureLabelAvoid·setMeasureFormat도 아무것도 하지 않는다
    */
   dispose(): void {
     if (this.disposed) return;
@@ -3106,6 +3127,14 @@ export class Viewer3d {
     this.tracker = null;
     // 0.88.0 측정 붙잡기 선택(앱 점 배열·색인)
     this.snapOpt = null;
+    // 0.90.0 앱 함수·덧그림·피할 상자(키보드 스냅 선택의 announce·pickName·formatNumber·글 함수, 가상 커서 후보, 측정 덧그림, 피할 상자, 측정 글 꼴, 미리 강조) — 알리지 않는다
+    this.keySnap = null;
+    this.keyCur = null;
+    this.annos = null;
+    this.annoLabels = [];
+    this.labelAvoid = null;
+    this.measureFmt = null;
+    this.pickPrev = null;
     this.bvhs = new WeakMap();
     this.parts = new WeakMap();
     this.boxes = new WeakMap();
@@ -3693,11 +3722,11 @@ export class Viewer3d {
     return this.listen(this.cubeCbs, cb);
   }
 
-  /** 0.53.0 펴기·접기 알림을 보낸다(0.89.0 앞 알림이 dispose하면 남은 알림은 부르지 않는다) */
+  /** 0.53.0 펴기·접기 알림을 보낸다(0.89.0 앞 알림이 dispose하면 남은 알림은 부르지 않는다, 0.90.0 emit 규칙) */
   private cubeNotify(reason: ViewCubeExpandReason): void {
     if (!this.cubeCbs.size) return;
     const expanded = this.cubeZoom > 0;
-    for (const cb of [...this.cubeCbs]) if (!this.disposed) cb(expanded, { reason, rect: this.viewCubeRect });
+    this.emit(this.cubeCbs, (cb) => cb(expanded, { reason, rect: this.viewCubeRect }));
   }
 
   /** 0.44.0 지금 큐브 한 변(편 동안은 편 크기)과 누르는 자리 띠(편 동안만 손가락 띠 — 아니면 undefined = 0.43.0 띠) */
@@ -4364,7 +4393,7 @@ export class Viewer3d {
     if (!this.sectionCbs.size) return;
     const st = this.section;
     const all = this.sections;
-    for (const cb of this.sectionCbs) cb(st, all);
+    this.emit(this.sectionCbs, (cb) => cb(st, all));
   }
 
   // ───────────────────────── 묶음 안 구간 ─────────────────────────
@@ -4659,12 +4688,17 @@ export class Viewer3d {
    * 면을 가리지도 않는다, 그물 면이 없으면 null)를 준다. 같은 누르기의 다른 알림(선택 없이 단 것)은 그대로다. 같은 함수를 다시 달면 마지막 선택을 따른다.
    * 0.23.0: { throughTranslucent: true }면 반투명 그물의 면을 지나 고른 결과(pick(x, y, { throughTranslucent: true })와 같은 고르기)를 준다
    * 0.26.0: { front: true }면 그 알림의 사건(그 알림만의 사본)에 throughTranslucent만 뺀 같은 누르기의 고르기(PickEvent.front)를 함께 준다.
-   * 차례: 한 누르기의 알림은 단 차례대로 부른다(같은 함수를 다시 달면 처음 자리, 끊었다 다시 달면 끝). front 없이 단 알림들은 모두 같은 사건 객체를 받는다
+   * 차례: 한 누르기의 알림은 단 차례대로 부른다(같은 함수를 다시 달면 처음 자리, 끊었다 다시 달면 끝). front 없이 단 알림들은 모두 같은 사건 객체를 받는다.
+   * 0.90.0 알림 동안 단 알림은 다음 누르기부터, 알림 동안 끊은 알림(끊었다 다시 단 것도)은 그 누르기에 부르지 않는다(on* 아홉 같은 규칙 — 브라우저 EventTarget과 같다)
    */
   onPick(cb: (p: Pick3d | null, e: PickEvent) => void, opts?: OnPickOptions): () => void {
     // 0.89.0 dispose 뒤에는 걸지 않는다(다른 on*와 같다 — listen)
     if (this.disposed) return NO_OFF;
-    this.pickCbs.set(cb, { meshesOnly: !!opts?.meshesOnly, through: !!opts?.throughTranslucent, front: !!opts?.front });
+    const o = { meshesOnly: !!opts?.meshesOnly, through: !!opts?.throughTranslucent, front: !!opts?.front };
+    // 0.90.0 다시 달면 같은 등록 표(선택 객체)에 선택만 바꿔 넣는다 — 알림 동안 그리해도 뗀 것이 아니어서 그 알림에 새 선택으로 부른다(0.89.0과 같다)
+    const had = this.pickCbs.get(cb);
+    if (had) Object.assign(had, o);
+    else this.pickCbs.set(cb, o);
     return () => this.pickCbs.delete(cb);
   }
 
@@ -4988,9 +5022,11 @@ export class Viewer3d {
    * - Enter: 측정 모드면 지금 후보를 측정 점으로 찍고(onMeasure), 아니면 그 자리를 누른 것처럼 고른다(onPick — pointerType 'keyboard', clicks 1, Shift+Enter면 shiftKey).
    *   커서가 꺼져 있으면 켠다
    * - Esc: 뷰 큐브 접기·측정 지우기(뷰어 Esc)가 먼저, 지울 것이 없으면 커서를 끈다. 포인터가 캔버스에서 움직이거나(4화소 이상) 누르거나 캔버스가 초점을 잃어도 끈다
-   * 걷기 중에는 받지 않는다(화살표는 걷기). 키는 keys로 바꾸거나 끈다. true = 기본값, false·null = 끈다(켜진 커서도 알리지 않고 끈다)
+   * 걷기 중에는 받지 않는다(화살표는 걷기). 키는 keys로 바꾸거나 끈다. true = 기본값, false·null = 끈다(켜진 커서도 알리지 않고 끈다).
+   * 0.90.0 dispose 뒤에는 아무것도 하지 않는다(앱 announce 등을 쥐지 않는다 — keyboardSnap은 null)
    */
   setKeyboardSnap(o: KeyboardSnapOptions | boolean | null): void {
+    if (this.disposed) return;
     if (!o) {
       this.keyEnd(false);
       this.keySnap = null;
@@ -5331,8 +5367,10 @@ export class Viewer3d {
    * 0.24.0: 화면 덧그림에서는 이것을 주지 않아도 덧그림 글상자끼리(덧그림 차례 — 뒤 글상자가 비킨다)와 측정 거리 글상자(덧그림 글상자를 비킨다)가 겹치지 않게 그린다.
    * 0.31.0: points: true면 측정 거리 글상자가 두 측정 점 표식을 덮는 자리도 옮긴다(MeasureLabelAvoid.points — 이것만 줘도 켠다)
    * 0.33.0: snapshotPoints도 true면 그림 저장(toBlob·renderImage)의 측정 거리 글상자도 표식만 같은 규칙으로 비킨다(MeasureLabelAvoid.snapshotPoints)
+   * 0.90.0 dispose 뒤에는 아무것도 하지 않는다(measureLabelAvoid는 null)
    */
   setMeasureLabelAvoid(avoid: MeasureLabelAvoid | readonly MeasureLabelRect[] | null): void {
+    if (this.disposed) return;
     const o: MeasureLabelAvoid | null = Array.isArray(avoid) ? { rects: avoid as readonly MeasureLabelRect[] } : (avoid as MeasureLabelAvoid | null);
     const rects: MeasureLabelRect[] = [];
     for (const r of Array.isArray(o?.rects) ? o!.rects : []) {
@@ -5465,7 +5503,7 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.clearTrack();
-    if (had) for (const cb of this.measureCbs) cb(null);
+    if (had) this.emit(this.measureCbs, (cb) => cb(null));
     // 0.46.0: 가상 커서가 켜져 있으면 그 자리 미리 보기를 다시 구한다(알리지 않는다)
     if (this.keyCur && this.measuring && !this.disposed) this.keyRecompute();
     this.invalidate();
@@ -5969,8 +6007,10 @@ export class Viewer3d {
   /**
    * 측정 글 꼴 바꾸기(null이면 기본). 내장 측정과 글을 주지 않은 거리 덧그림에 쓴다.
    * 0.31.0: fn(m, core)의 core는 그 글상자의 코어 기본 꼴(MeasureFormatCore — 기본 줄·수 꼴·자릿수·단위 글·어느 글상자인지)
+   * 0.90.0 dispose 뒤에는 아무것도 하지 않는다(앱 함수를 쥐지 않는다)
    */
   setMeasureFormat(fn: MeasureFormat | null): void {
+    if (this.disposed) return;
     this.measureFmt = fn ?? null;
     this.invalidate();
   }
@@ -8213,7 +8253,7 @@ export class Viewer3d {
   private commitMeasure(s: MeasurePick): void {
     if (this.measurePts.length >= 2) {
       this.measurePts = [];
-      for (const cb of this.measureCbs) cb(null);
+      this.emit(this.measureCbs, (cb) => cb(null));
     }
     // 같은 점 객체가 두 번 찍혀도 종류를 따로 지키도록 복사해 넣는다(붙잡기 선택이 있을 때만 — 없으면 0.7.2 그대로)
     const p: V3 = this.snapOpt ? [s.p[0], s.p[1], s.p[2]] : s.p;
@@ -8232,7 +8272,7 @@ export class Viewer3d {
     }
     this.lastLockable = null;
     const m = this.measurement();
-    if (m) for (const cb of this.measureCbs) cb(m);
+    if (m) this.emit(this.measureCbs, (cb) => cb(m));
     this.invalidate();
   }
 
@@ -8514,8 +8554,12 @@ export class Viewer3d {
     }
     this.refsSet(ent.after);
     this.commitMeasure(ent.pick);
+    // 0.90.0 측정 알림 안에서 앱이 dispose했거나 커서를 껐으면(고르기 모드처럼) 알리지 않고 끝, 측정을 지웠으면(측정 모드 끄기 등) 찍은 점이 없어 알리지 않는다
+    // (0.89.0은 찍은 점을 읽다 TypeError)
+    if (this.keyCur !== c) return;
     const pts = this.measurePoints;
-    const point = pts[pts.length - 1]!;
+    const point = pts[pts.length - 1];
+    if (!point) return;
     const m = this.measurement();
     // 찍은 뒤 같은 자리에서 다음 미리 보기(마우스는 다음 이동에서 — 키보드는 커서를 옮기지 않아도 들리게)
     this.keyRecompute();
@@ -8550,11 +8594,11 @@ export class Viewer3d {
       if (p === undefined) faces.set(through, (p = this.pickDetail(c.x, c.y, true, KEY_POINTER, false, false, true, through)?.pick ?? null));
       return p;
     };
-    for (const [cb, o] of this.pickCbs) {
+    this.emit(this.pickCbs, (cb, o) => {
       const p = o.meshesOnly && cand.kind !== 'mesh' ? faceOf(o.through) : cand;
       if (o.front) cb(p, { ...ev, front: p });
       else cb(p, ev);
-    }
+    });
   }
 
   /** key = 0.46.0 가상 커서 Enter(늘 한 번 누르기 — 바로 앞 누르기와 두 번 누르기로 짝짓지 않고, 다음 누르기의 짝도 되지 않는다) */
@@ -8599,7 +8643,7 @@ export class Viewer3d {
       }
       return dm;
     };
-    for (const [cb, o] of this.pickCbs) {
+    this.emit(this.pickCbs, (cb, o) => {
       const dm = pickOf(o.meshesOnly, o.through);
       const p = dm ? dm.pick : null;
       // 0.26.0 front: 그 알림만의 사본에 반투명 너머가 아닌 같은 고르기(같은 선택 짝 고르기는 한 번만)
@@ -8607,7 +8651,7 @@ export class Viewer3d {
         const df = o.through ? pickOf(o.meshesOnly, false) : dm;
         cb(p, { ...ev, front: df ? df.pick : null });
       } else cb(p, ev);
-    }
+    });
   }
 
   // ───────────────────────── 내부: 입력 ─────────────────────────
@@ -8670,8 +8714,8 @@ export class Viewer3d {
       this.raf = 0;
       // 0.30.0: 미룬 무늬 다시 그리기는 버린다(되찾은 뒤는 0.29.0 차례)
       this.texReset();
-      // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다. 0.89.0 앞 알림이 dispose하면 남은 알림도)
-      for (const cb of [...this.lostCbs]) if (!this.disposed) cb();
+      // 0.25.0: 앱에 알린다(놓기 선택과 무관 — 없앤 뒤 dispose가 부른 잃음은 알리지 않는다. 0.89.0 앞 알림이 dispose하면 남은 알림도, 0.90.0 emit 규칙)
+      this.emit(this.lostCbs, (cb) => cb());
     });
     this.on(cv, 'webglcontextrestored', () => {
       if (this.disposed) return;
@@ -9214,7 +9258,7 @@ export class Viewer3d {
     if (key !== this.lastCamKey) {
       this.lastCamKey = key;
       const c = this.getCamera();
-      for (const cb of this.camCbs) cb(c);
+      this.emit(this.camCbs, (cb) => cb(c));
     }
   }
 
