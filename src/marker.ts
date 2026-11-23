@@ -41,8 +41,13 @@ const PROFILES: Record<MarkerKind, [number, number][]> = {
 /** 표시 그물의 높이(로컬, 반지름 1 기준) */
 export const MARKER_HEIGHT = 5;
 
+/**
+ * 0.93.0 kind가 모양 이름이 아니면(엉뚱한 글·null·'toString' 같은 물려받은 이름) 'cone'(뷰어 setMarker의 기본 — 0.92.0은 TypeError, 물려받은 이름은 빈 그물),
+ * segments가 수로 읽히지 않으면(NaN·±Infinity·글·객체) 주지 않은 것(24 — 0.92.0은 빈 그물이고 무한대는 끝나지 않았다). 수로 읽히는 값은 0.92.0 그대로
+ */
 export function markerMesh(kind: MarkerKind, segments = 24): { positions: Float32Array; normals: Float32Array } {
-  const prof = PROFILES[kind];
+  const prof = Object.prototype.hasOwnProperty.call(PROFILES, kind) ? PROFILES[kind] : PROFILES.cone;
+  if (!Number.isFinite(Number(segments))) segments = 24;
   const pos: number[] = [];
   const nrm: number[] = [];
   for (let k = 0; k + 1 < prof.length; k++) {
