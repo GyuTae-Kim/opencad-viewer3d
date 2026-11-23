@@ -42,7 +42,8 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   0.82.0부터 카메라 API(`orbitBy`·`lookBy`·`walkBy`·`setCamera`·`flyTo`)도 NaN·무한대 인자나 그릴 수 없는 카메라(거리 0 이하·시야각 (0, π) 밖)를 받지 않는다
   (0.81.0은 그 하나로 화면이 비고 전체 보기로도 돌아오지 않았다). 0.83.0부터 겉모습·그리기 선택 API(`setItemLooks`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`,
   `setRenderOptions`의 선 색·외곽선 굵기·숨은 점선)도 `setItemColor`처럼 유한하지 않은 값이 든 색 배열과 NaN(자른 뒤에도 유한하지 않은) 불투명도·굵기를
-  `null`(되돌림·기본값)과 같게 본다(0.82.0은 그 묶음·선이 검거나 사라졌다)
+  `null`(되돌림·기본값)과 같게 본다(0.82.0은 그 묶음·선이 검거나 사라졌다). 0.84.0부터 바탕·안개·조명(`setBackground`·`setFog`·`setLighting`)도
+  깨진 색 배열과 유한하지 않은 세기·주변광·그림자 값은 주지 않은 것(기본)과, 유한한 수 셋이 아닌 해 방향은 `setLighting(null)`과 같게 본다(0.83.0은 바탕·면이 검거나 던졌다)
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 같은 그물을 여러 자리에 놓은 장면(같은 배열을 함께 쓰는 자리 — 조립의 같은 부품)은 자리마다가 아니라 같은 그물끼리 그리기 한 번에 그립니다(인스턴싱 — 정의 12개 × 자리 3,000에서
   그리기 호출 6,004 → 28, 자리 색·강조·분해 행렬·숨기기는 자리마다 그대로, 0.43.0부터 단면 하나·그림자를 켜도 면은 모은다).
@@ -9253,6 +9254,81 @@ CPU(가짜 WebGL — 줄어든 GL 호출 수를 기준으로 본다. 이 차수�
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.82.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 gzip +41 B, 묶어 그리기 조각 바이트 그대로(`import()` 뷰어 조각 gzip +19~31 B — 첫 화면 입구 바이트 그대로)
 
+## 0.84.0: 바탕·안개·조명 선택의 NaN·무한대 값을 0.83.0과 같은 규칙으로(84차 — 0.83.0 남은 한계)
+
+0.83.0이 보지 않은 선택 API(색 배열·수를 받는 공개 메서드)를 코드로 읽고 가짜 WebGL로 재현했다. 0.82.0 표의 「바탕 색 NaN은 문제 없었다」는 지우기 색(`clearColor`)을 세지 않아서였다 —
+이번 시험은 지우기 색도 센다. 장면 전체 그림이 틀리는 바탕·안개·조명을 고쳤고, 그 덧그림 하나만 틀리는 선분 강조·덧그림·마커·선 그리기 구간은 표만 남겼다(아래 「남은 한계」)
+
+### 찾은 것(0.83.0, 상자 둘 — 새 시험이 0.83.0 src에서 재현)
+
+| API | 받는 값 | 주지 않음·`null` | 0.83.0의 유한하지 않은 값 | 0.84.0 |
+|---|---|---|---|---|
+| `setBackground`의 `color` | RGBA·CSS 글 | 테마 바탕 | 그대로 둠 — 지우기 색 NaN, 숨은 선의 바탕색 면 `u_color`·안개 기본 색 `u_fogCol` NaN, `'contrast'` 선 색을 NaN 바탕으로 고름 | 주지 않은 것과 같다 |
+| `sky`·`skyHorizon`·`ground`·`groundHorizon` | RGBA·CSS 글 | 없음(지평선 색은 `sky`·`ground`) | `u_sky`·`u_skyH`·`u_ground`·`u_groundH` NaN. `sky` NaN 하나만 줘도 기울기 바탕을 그림 | 주지 않은 것과 같다 |
+| `setFog`의 `color` | RGBA·CSS 글 | 바탕색 | `u_fogCol` NaN | 주지 않은 것과 같다 |
+| `setFog`의 `start`·`end` | 수 | (꼭 준다) | 0.7.0부터 끔 | 그대로 |
+| `setLighting`의 `sun.direction` | 수 셋 | (꼭 준다) | NaN·±Infinity·수 둘 — `u_sunDir` NaN(모든 면, 그림자를 켜면 깊이 그림도 그림). `sun`·`direction`이 없으면 `TypeError` | `setLighting(null)`(끔)과 같다 |
+| `sun.intensity`·`sun.color`·`ambient` | 수·RGBA·CSS 글·수 | 0.85·흰색·0.35 | `u_sunCol`·`u_amb` NaN·무한(세기 −Infinity도) | 주지 않은 것과 같다 |
+| `shadows`의 `bias`·`size` | 수 | 0.0015·2048 | `u_shadowBias` NaN·무한. `size`는 렌더러가 2048로 그림(그림 같음 — `lighting` 읽기에 NaN) | 주지 않은 것과 같다 |
+| `setAmbientOcclusion`의 `radius`·`intensity` | 수 | 기본 | 0.49.0부터 그리기 값에서 거름(그림 같음, 읽기는 문서대로 준 그대로) | 그대로 |
+
+### 고친 것
+
+- 규칙(0.83.0을 넓힘): 유한하지 않은 값이 든 색 배열(0.50.0 `setItemColor` 판정 — 앞 셋과 넷째(없으면 1)가 유한한 수)과 유한하지 않은 수는 그 필드를 주지 않은 것(기본)과 같다.
+  이 선택들의 필드는 `null`을 받지 않아 「`null`과 같다」 대신 「주지 않은 것」이다. 세기·주변광·그림자 값은 자르지 않는 수라 ±Infinity도 기본으로 둔다
+- 꼭 줘야 하는 해 방향이 유한한 수 셋이 아니면 `setLighting(null)`(끔)과 같다 — 안개 `start`·`end`(0.7.0부터 끔)와 같은 꼴. `sun`·`direction`이 없어도 던지지 않는다
+- `viewer.ts` 안 함수 `withoutBad`(깨진 필드를 뺀 얕은 사본)를 세 API가 함께 쓴다. `background`·`fog`·`lighting` 읽기도 뺀 사본이다.
+  API 입구에서만 거른다 — 그리기 길·셰이더·균일 변수는 바꾸지 않았다. 공개 API 주석에 0.84.0 규칙을 적었다
+- 유한한 값은 0.83.0과 같은 값으로 둔다: 범위 밖 색 성분(2·−1 같은)·CSS 글(못 읽으면 검정)·방향 0·길이가 넘치는 큰 방향(둘 다 해 균일 변수 유한)·음수 세기·큰 주변광·
+  뒤집힌 안개 깊이(셰이더가 막는다)
+
+### 크기
+
+- 83차 하네스를 그대로 썼다(0.83.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.83.0 값이 0.83.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 451,639 (153,668) → 452,069 (153,800) B(+430 / gzip +132), 묶어 그리기 조각 46,414 (18,488) B 그대로, 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 B 그대로(gzip 985 → 986 — 조각 이름 해시), 뷰어 조각 457,063 (156,118) → 457,493 (156,269) B(+430 / gzip +151).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 (5,640) B 그대로, 뷰어 조각 446,129 (152,349) → 446,559 (152,530) B(+430 / gzip +181)
+
+### 바뀐 기본 동작
+
+- `setBackground`·`setFog`·`setLighting`에 유한하지 않은 값이 든 색 배열이나 유한하지 않은 세기·주변광·그림자 값을 주면 그 필드는 기본이다(0.83.0은 바탕·하늘·안개·해 색이 NaN이었다).
+  읽기(`background`·`fog`·`lighting`)에도 그 필드가 없다. 알파만 유한하지 않은 바탕 색도 같다 — 0.83.0은 그 RGB로 칠했다(지우기 색은 RGB만 쓴다)
+- 해 방향이 유한한 수 셋이 아니면 조명이 꺼진다(`lighting`이 `null` — 0.83.0은 모든 면의 해 균일 변수가 NaN). `sun`·`direction`이 없는 객체도 던지지 않고 끈다
+- 정상 인자의 바탕·안개·조명 읽기·그림·GL 호출은 0.83.0과 같다
+
+### 확인
+
+- 시험 `tests/v0840scene.test.ts`(서른하나 — 0.83.0 src로는 스물아홉 실패): 깨진 값 스물아홉 가지(바탕 `color` NaN·알파 Infinity와 그 숨은 선·안개·바탕 대비 윤곽선 길, `sky`·`skyHorizon`·`ground`·
+  `groundHorizon`, 깨진 색 넷과 CSS 글 하나, 안개 색 NaN·−Infinity, 해 방향 NaN·Infinity·수 둘·그림자와 함께·`sun` 없음·`direction` 없음, 세기 NaN·±Infinity, 해 색, 주변광 NaN·Infinity,
+  그림자 치우침 NaN·Infinity·크기 NaN, 깨진 값 다섯 함께)마다 깨진 값을 준 뷰어와 그 필드를 주지 않은(또는 `null`) 뷰어가 선택 읽기·지우기 색·그리기 기록(가짜 WebGL2 — 프로그램·속성·
+  균일 변수 값)에서 같고 균일 변수·지우기 색이 모두 유한하다. 안개 `start` NaN·`end` Infinity(0.7.0부터 끔)와 유한한 값은 두 판 모두 통과
+- 정상 값 그리기(저장소에 넣지 않은 탐색 시험): 상자 셋·선분 묶음에 정상 바탕·안개·조명 세 벌을 걸고 모드를 바꿔 그린 여덟 그림의 그리기 기록·지우기 색·펼친 도형(tests/drawexpand.ts) 해시가
+  0.83.0 src와 모두 같다(그리기 12~22, 펼친 도형 157~266)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0590axis` — `setBackground` 한 색에 맞추는 좌표축 대비, `v0110` — 해 조명·그림자를 건 두 뷰어) 3파일 75개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 GPU. 그리기 길을 바꾸지 않아 화소는 0.83.0과 같아야 한다
+
+### 남은 한계
+
+- 재현만 하고 고치지 않은 것(0.83.0 src·0.84.0 src 같음 — 그 덧그림 하나만 틀린다):
+
+| API | 유한하지 않은 값 |
+|---|---|
+| `setHighlightSegments`·`highlightSegmentIds`의 `color`·`width`·`hidden`·`origin` | 색 NaN → `u_color` NaN, 굵기 NaN → 1화소 선·Infinity → 굵기 균일 변수 무한, `hidden` NaN → 가린 부분을 그리지 않음, `origin` NaN → `u_mvp` NaN |
+| `setAnnotations`의 `width`·`hidden` | 굵기 NaN → 1화소 선·Infinity → 굵기 균일 변수 무한, `hidden` NaN → 가린 부분을 그리지 않음(점 NaN은 문제 없음) |
+| `setMarker`의 `color`·`axis`·`radius`·`sizePx` | 색 NaN → `u_color` NaN, 축 NaN·반지름 Infinity·화면 높이 NaN·Infinity → 마커 행렬 NaN·무한(마커만 사라짐 — 화면 맞춤은 건너뛴다). 반지름 NaN은 화면 높이로 그림 |
+| `setLineDrawRange`·`setDrawLimitBySegmentId`의 개수·번호·`ghost` | 개수·번호 NaN → 그 묶음을 그리지 않음, `ghost` Infinity → 흐린 나머지 `u_alpha` 무한. 개수·번호 Infinity·`ghost` NaN은 문제 없음 |
+
+- 위 넷을 같은 규칙(깨진 색은 기본, 자른 뒤에도 유한하지 않은 수는 기본, 꼭 줘야 하는 자리가 깨지면 `null`)으로 맞추는 것이 다음 후보다. `setViewCubeSize`·`setWalkInput`은 문제 없었다
+- 못 읽는 CSS 색 글은 0.83.0처럼 검정이다. 해 방향 0은 받는다(해 균일 변수 0 — 0.83.0과 같은 그림)
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL 균일 변수·지우기 색 셈)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 바탕·안개·조명에 깨진 값을 주면 이제 그 필드가 기본이고, 깨진 해 방향은 조명을 끈다 —
+  SKP는 파일에서 읽은 해·안개·하늘 값을 넘긴다(대부분 앱이 수 판정을 거친다 — 남은 깨진 값도 이제 기본·끔으로 그린다). STEP·NC는 이 API를 부르지 않는다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.83.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 gzip +132 B, 묶어 그리기 조각 바이트 그대로(`import()` 뷰어 조각 gzip +151~181 B — 첫 화면 입구 바이트 그대로)
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
@@ -9660,7 +9736,8 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
 - 장면 입력 검사(0.50.0)는 좌표·색인·색·원점·행렬·굵기·크기·범위·배열 길이만 본다 — 법선·무늬 좌표의 값(NaN·0)과 무늬 그림은 보지 않고, 같은 id는 알리기만 한다.
   깨진 끝점 선분을 그리지 않는 것은 WebGL이 NaN 꼭짓점 도형을 버리는 것에 기댄다. 반투명 면의 주변 가림(드리우기)은 설계만 있다(0.50.0 "남은 한계").
   API 인자는 0.50.0 `setMarker`·`setItemColor`, 0.82.0 카메라 API, 0.83.0 겉모습·그리기 선택 API(`setItemLooks`·`setItemEdgeColor`·`setItemProfileColor`·`setItemOpacity`,
-  `setRenderOptions`의 외곽선·윤곽선·숨은 점선)만 본다 — `setBackground`·`setFog`·`setLighting`·선분 강조·덧그림 등 다른 선택의 색·수는 보지 않았다(0.83.0 "남은 한계")
+  `setRenderOptions`의 외곽선·윤곽선·숨은 점선), 0.84.0 바탕·안개·조명(`setBackground`·`setFog`·`setLighting`)만 고쳤다 — 선분 강조·덧그림·마커 선택·선 그리기 구간의
+  NaN·무한대는 0.84.0이 재현만 했다(0.84.0 "남은 한계" 표)
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
 - 앱이 포인터를 맡는 훅(0.32.0 `setPointerClaim`·`claimPointer`)은 누르기 단위다 — 휠·키는 맡지 않고(앱이 막으려면 그 사건을 먼저 받아 막는다), 코어에는 관성·길게 누르기가 없어
   앱이 길게 누르기를 하려면 제 타이머에서 `claimPointer`로 맡는다. 맡은 포인터 id로 보낸 합성 사건도 앱 것이라 코어 측정 미리 보기를 쓰는 정밀 조준은 지금처럼 합성 `pointercancel`을 쓴다.
