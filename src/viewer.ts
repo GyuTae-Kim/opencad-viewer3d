@@ -3040,6 +3040,8 @@ export class Viewer3d {
   /**
    * 뷰어를 없앤다: 입력·관찰·타이머를 풀고 GPU 자료를 지운 뒤 문맥을 놓는다.
    * 장면·BVH·강조 같은 큰 자료의 참조도 놓는다(앱이 뷰어 객체를 들고 있어도 장면 배열이 메모리에 남지 않게). 그 뒤의 호출은 아무것도 하지 않는다.
+   * 0.88.0 측정 붙잡기 선택(앱 점 배열·점 색인)도 놓는다 — measureSnap은 null, setMeasurePickThrough·setMeasureInferenceLock은 false(붙잡기가 꺼진 것과 같다).
+   * 그 뒤 handleKey·handleKeyUp·setMeasureSnap·setRenderOptions도 아무것도 하지 않는다(창·문서 리스너·타이머를 다시 걸지 않는다)
    */
   dispose(): void {
     if (this.disposed) return;
@@ -3089,6 +3091,8 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.tracker = null;
+    // 0.88.0 측정 붙잡기 선택(앱 점 배열·색인)
+    this.snapOpt = null;
     this.bvhs = new WeakMap();
     this.parts = new WeakMap();
     this.boxes = new WeakMap();
@@ -3309,6 +3313,7 @@ export class Viewer3d {
    * 모서리 선이 면과 겨루는 몇 화소가 다를 수 있다(인스턴싱과 같다). 바꾸거나 뺀 그물은 묶음에서 빠지고, 묶음 안 빠진 몫이 ¼을 넘으면 남은 그물로 다시 굽는다
    * 0.83.0: 외곽선 굵기·숨은 점선 불투명도가 NaN이거나 자른 뒤에도 유한하지 않으면 그 수를, 색 배열(profiles.color·hiddenEdges.color·edgeColor)에 유한하지 않은 값이
    * 있으면 그 색을 주지 않은(null) 것과 같다(0.50.0 setItemColor 규칙 — 0.82.0은 그대로 두어 외곽선·윤곽선이 사라지거나 검었다). ±Infinity 불투명도와 −Infinity 굵기는 끝으로 자른다
+   * 0.88.0 dispose 뒤에는 아무것도 하지 않는다(0.87.0은 merging을 켜면 없앤 렌더러로 묶어 그리기 조각 받기·기다림 타이머를 걸었다)
    */
   setRenderOptions(o: {
     profiles?: boolean | { width?: number; color?: Rgba | string } | null;
@@ -3319,6 +3324,7 @@ export class Viewer3d {
     culling?: boolean | null;
     merging?: boolean | MergingMode | { mode?: MergingMode; min?: number } | null;
   }): void {
+    if (this.disposed) return;
     if ('profiles' in o) {
       const p = o.profiles;
       const q = p && typeof p === 'object' ? p : null;
@@ -4750,9 +4756,11 @@ export class Viewer3d {
    * 측정 점 붙잡기 넓히기(0.8.0, 기본 꺼짐 — 끄면 0.7.2처럼 꼭짓점·끝점에만): midpoints = 선분·윤곽선 가운데 점, edges = 측정 중에만 윤곽선 고르기,
    * points = 늘 후보인 앱 점(원 중심 등), pointsFor = 고른 것에 따라 앱이 더하는 점. 붙잡기 거리 안에서 화면에 가장 가까운 것을 붙잡고(같으면 꼭짓점·끝점),
    * 마우스를 올리면 표식 모양으로 종류를 보인다(끝점·꼭짓점 네모, 가운데 점 세모, 중심 ⊕, 0.38.0 접점('tangent') 동그라미 위 가로선, 그 밖의 앱 점 마름모). 측정 결과에 snapA·snapB가 실린다.
-   * null(또는 빈 선택)이면 끈다. 장면을 바꿔도 남는다(점 목록은 앱이 장면에 맞춰 다시 준다)
+   * null(또는 빈 선택)이면 끈다. 장면을 바꿔도 남는다(점 목록은 앱이 장면에 맞춰 다시 준다).
+   * 0.88.0 dispose 뒤에는 아무것도 하지 않는다(0.87.0은 붙잡기를 켜고 점 색인·타이머를 만들었다 — dispose는 앞 선택도 놓는다)
    */
   setMeasureSnap(o: MeasureSnapOptions | null): void {
+    if (this.disposed) return;
     const pts = o?.points ?? [];
     const inference = normalizeInference(o?.inference);
     if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference && !o.refine && !o.refineFace && !o.throughTranslucent)) this.snapOpt = null;
@@ -8986,8 +8994,10 @@ export class Viewer3d {
   /**
    * 뷰어 키(F 전체 보기, 1~7 표준 뷰, Esc 측정 지우기)를 처리한다. 처리했으면 기본 동작을 막고 true.
    * 캔버스에 초점이 없을 때 앱이 창 키를 넘겨 같은 규칙을 쓰게 한다(입력 칸 걸러내기는 앱 몫).
+   * 0.88.0 dispose 뒤에는 아무것도 하지 않고 false(기본 동작을 막지 않는다 — 0.87.0은 걷기 키·Shift에 창·문서 리스너를 다시 걸고 F·1~7·걷기 키에 true였다)
    */
   handleKey(e: KeyboardEvent): boolean {
+    if (this.disposed) return false;
     // 0.46.0 키보드 붙잡기(setKeyboardSnap을 켰을 때만 — 캔버스가 받은 키): 화살표 가상 커서·Tab 후보 돌리기·Enter 찍기·Esc 끄기
     if (this.keySnap && this.keyboardKey(e)) {
       e.preventDefault();
@@ -9021,8 +9031,9 @@ export class Viewer3d {
     return true;
   }
 
-  /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true */
+  /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true. 0.88.0 dispose 뒤에는 false */
   handleKeyUp(e: KeyboardEvent): boolean {
+    if (this.disposed) return false;
     if (e.key === 'Shift') this.setShift(false);
     const k = walkKeyOf(e);
     if (!k || !this.walkKeys.delete(k)) return false;

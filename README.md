@@ -99,7 +99,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
 - 장면 전체를 다시 주지 않고 그물 하나만 넣기·바꾸기·빼기(`setMesh`·`removeMesh` — 그 그물의 GPU 버퍼·BVH만 다시, 바뀐 정점 구간만 올리기도)
 - 큰 모형 메모리: 놓기 선택을 주면 올린 뒤 법선·무늬 좌표·무늬 원본을 코어가 놓고, 그래픽 문맥을 되찾으면 위치·색으로 먼저 그린 뒤 앱에서 다시 받기. 문맥 잃음·되찾음 알림과 되찾은 뒤 다시 올리기가 다 끝났다는 알림.
   앱이 손질하는 무늬는 장면을 먼저 올리고 나중에 받기(그동안 그물 색).
-  법선·무늬 좌표를 작은 정수 배열(Int8·Int16 정규화)로 받아 그대로 GPU에 올리기. GPU 버퍼 바이트를 성분별(위치·법선·무늬 좌표·색인·선분 등)로 읽기(`stats.buffers`)
+  법선·무늬 좌표를 작은 정수 배열(Int8·Int16 정규화)로 받아 그대로 GPU에 올리기. GPU 버퍼 바이트를 성분별(위치·법선·무늬 좌표·색인·선분 등)로 읽기(`stats.buffers`).
+  0.88.0부터 `dispose()`한 뷰어에 앱이 창 키를 넘기거나(`handleKey`·`handleKeyUp`) 측정 스냅·그리기 선택을 주어도 창·문서 리스너·타이머를 다시 걸지 않고 키를 삼키지 않는다
+  (`false` — 0.87.0은 걷기 키·Shift에 리스너를 다시 걸고 F·1~7·걷기 키에 `true`를 돌려 기본 동작을 막았다)
 
 ## 장면 계약
 
@@ -9543,6 +9545,83 @@ CPU(가짜 WebGL — 줄어든 GL 호출 수를 기준으로 본다. 이 차수�
   정상 평면은 그림 같음
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.86.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 +41 B(gzip −1 B), 묶어 그리기·면 미리 강조 조각 바이트 그대로(`import()` 뷰어 조각 +41 B·gzip −1~+6 B — 첫 화면 입구 바이트 그대로)
+
+## 0.88.0: dispose 뒤 키 넘기기·측정 스냅·그리기 선택이 리스너·타이머를 다시 걸지 않게 — 수명(dispose·문맥 잃음) 훑기(88차 — 82차 후보)
+
+NaN·무한대 훑기(0.82.0~0.87.0)와 다른 견고성 갈래인 수명을 가짜 WebGL 뷰어로 훑었다 — `dispose()` 뒤에 공개 API를 부를 때, WebGL 문맥을 잃은 동안·되찾은 뒤에 부를 때
+던지는지, 남는 것(타이머·requestAnimationFrame·창·문서·요소·미디어 질의 리스너·ResizeObserver·GL 부름)이 있는지, 되찾은 뒤 그림이 잃지 않은 뷰어와 다른지.
+가짜 WebGL은 실제 브라우저처럼 잃은 동안 모든 부름이 아무것도 하지 않고(`create*`는 `null`, `isContextLost()`는 `true`) 되찾으면 묶은 상태가 빈 새 문맥이며,
+되찾은 뒤 옛 문맥의 GL 객체를 쓰는지 센다. 재현된 것은 dispose 뒤 부름 넷이 리스너·타이머를 다시 걸거나 처리했다고 답하는 것 하나 묶음이다
+
+### 찾은 것(0.87.0 — 상자 넷(원점·행렬 있는 것 포함)·선분 묶음, 탐색 시험과 새 시험이 0.87.0 src에서 재현)
+
+| API | 조건 | 0.87.0 | 0.88.0 |
+|---|---|---|---|
+| `dispose()` 자체(걷기·측정·키보드 스냅·`animate: 'auto'`·뷰 큐브·덧그림·단면·옮기던 `flyTo`를 켠 뷰어) | — | 남는 rAF·타이머·리스너·ResizeObserver 0, `flyTo`는 `false`로 풀림, GL 부름은 지우기뿐 | 그대로 |
+| `handleKey` 걷기 키(W·화살표 등) | dispose 전 걷기 | 창 `keyup`·`blur`와 문서 `visibilitychange` 리스너 3개를 다시 걸고 `true`·기본 동작 막기 | 아무것도 하지 않고 `false` |
+| `handleKey` Shift | dispose 전 측정 + 추론 잠금(`inference: { lock: true }`) | 창 `keyup`·`blur` 리스너 2개를 다시 걺 | 아무것도 하지 않음(`false`) |
+| `handleKey` F·1~7 | — | 아무것도 하지 않는데 `true`·기본 동작 막기(앱이 넘긴 키를 삼킴) | `false` |
+| `handleKeyUp` 걷기 키 | 위 걷기 키 뒤 | `true` | `false` |
+| `setMeasureSnap`(앱 점이 색인 문턱 512개 이상) | — | 스냅을 켜고 앱 점 색인·타이머 1개를 만듦(콜백은 아무것도 안 함) | 아무것도 하지 않음 |
+| `setRenderOptions({ merging: 'on' })` | 묶어 그리기 조각을 받기 전 | 없앤 렌더러를 모듈 전역 조각 기다림 목록에 다시 넣고 조각 받기(`import()`)·기다림 타이머를 걺 | 아무것도 하지 않음 |
+| `setMeasurePickThrough`·`setMeasureInferenceLock` | dispose 전 스냅을 켬 | `true`(dispose가 스냅 선택을 놓지 않음) | dispose가 스냅 선택(앱 점 배열·색인)도 놓아 문서대로 `false`, `measureSnap`은 `null` |
+| 그 밖의 공개 메서드·getter(모두 162번 부름) | dispose 뒤 | 던짐 없음, rAF·타이머·리스너를 걸지 않음. `toBlob(선택)`·`renderImage`는 문서대로 Error | 그대로 |
+| 주요 API 53가지(장면·메시 바꾸기·단면·겉모습·그리기 모드·바탕·조명·카메라·덧그림·강조·숨김·마커·격자·테마·그림 저장 등) | 잃은 동안 부르고 되찾음 | 던짐 0, 잃은 동안 GL 부름 0, 되찾은 뒤 옛 GL 객체 0, 되찾은 뒤 그리기 = 잃지 않은 뷰어(아래 둘은 꺼진 상태 값만 다름) | 그대로 |
+| 같은 53가지 | 되찾은 뒤 부름 | 같음 | 그대로 |
+| 잃은 동안 `dispose()`·dispose 뒤 잃음·되찾음 사건·되찾은 뒤 `dispose()` | — | 던짐·알림 없음, 되찾은 문맥의 버퍼 40개를 모두 지움 | 그대로 |
+
+- 와이어프레임·X-ray의 선과 하늘 바탕은 되찾은 뒤 그리기 기록이 꺼진 상태의 값만 다르다(선: `POLYGON_OFFSET_FILL`이 꺼진 채 면 밀기 값 1,1 ↔ 0,0, 하늘: `DEPTH_TEST`가 꺼진 채
+  깊이 함수) — 화소에 닿지 않아 고치지 않았다
+
+### 고친 것
+
+- `handleKey`·`handleKeyUp`: dispose 뒤에는 아무것도 하지 않고 `false`(걷기 키·Shift 떼기 리스너를 걸지 않고, 키의 기본 동작을 막지 않는다)
+- `setMeasureSnap`·`setRenderOptions`: dispose 뒤에는 아무것도 하지 않는다(이미 `if (this.disposed) return` 꼴인 `setAnimate`·`setScene` 등과 같다)
+- `dispose()`: 측정 스냅 선택(앱 점 배열·점 색인)도 놓는다 — 문서의 「장면·BVH·강조 같은 큰 자료의 참조도 놓는다」에 든다
+- 모두 `this.disposed` 거름과 dispose 안 한 줄이라 살아 있는 뷰어의 길(그리기·GL 호출·돌려준 값)은 0.87.0과 같다. 렌더러·셰이더·균일 변수는 바꾸지 않았다
+
+### 크기
+
+- 87차 하네스를 그대로 썼다(0.87.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.87.0 값이 0.87.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 452,623 (153,988) → 452,737 (154,009) B(+114 / gzip +21), 묶어 그리기 조각 46,414 B 그대로(gzip 18,488 → 18,487 — 조각 이름 해시), 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 (987) B 그대로, 뷰어 조각 458,042 (156,454) → 458,156 (156,468) B(+114 / gzip +14).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,642 → 5,641), 뷰어 조각 447,108 (152,711) → 447,222 (152,725) B(+114 / gzip +14)
+
+### 바뀐 기본 동작
+
+- dispose 뒤 `handleKey`·`handleKeyUp`은 늘 `false`다(0.87.0은 F·1~7·걷기 키에 `true`를 돌리고 기본 동작을 막았다)
+- dispose 뒤 `measureSnap`은 `null`, `setMeasurePickThrough`·`setMeasureInferenceLock`은 `false`, `measureSnapLimit`는 `null`이다(스냅 선택을 놓았으므로 — 꺼진 스냅과 같다)
+- dispose 뒤 `setMeasureSnap`·`setRenderOptions`는 상태를 바꾸지 않는다(`renderOptions`는 dispose 때 값 그대로)
+- 살아 있는 뷰어는 0.87.0과 같다
+
+### 확인
+
+- 새 시험 `tests/v0880dispose.test.ts`(여덟 — 0.87.0 src로는 여섯 실패): dispose 뒤 걷기 키·Shift·F·1·Esc·`handleKeyUp`이 창·문서 리스너 수를 바꾸지 않고 `false`·기본 동작 그대로인지,
+  dispose 뒤 `setMeasureSnap`·`setRenderOptions`가 `setTimeout`을 부르지 않고 조각 받기 상태가 `'idle'` 그대로인지, dispose가 스냅 선택을 놓는지.
+  살아 있는 뷰어 대조 둘(걷기 키는 리스너 셋을 듣고 떼면 놓고 `true`, 누르는 동안 dispose하면 놓음)은 두 판 모두 통과
+- 탐색(저장소에 넣지 않은 시험 셋 — 위 표): 고친 뒤 다시 돌려 차이가 고친 것뿐임을 봤다. 잃은 동안 묶어 그리기를 켠 경우 하나만 그리기 수가 갈렸는데,
+  0.87.0 탐색에서는 dispose 뒤 `setRenderOptions`(이번에 고친 길)가 조각을 미리 받아 두어 같았던 것이다 — 조각을 받는 중에 되찾으면 0.56.0 문서대로
+  장면 올리기를 조각이 올 때까지 미루고, 받은 뒤에는 같다(잃음과 무관)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0460keysnap` — 키보드 스냅·`handleKey`, `v0120` — Shift 잠금, `v0580wait` — dispose·잃음 기다림) 4파일 60개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 브라우저 문맥 잃음, 실제 GPU.
+  그리기 길을 바꾸지 않아 화소는 0.87.0과 같아야 한다
+
+### 남은 한계
+
+- dispose 뒤 알림 등록(`onPick`·`onMeasure`·`onCameraChange`·`onSectionChange`·`onSceneIssues`·`onContextRestore`·`onContextLost`·`onContextRestoreDone`·`onViewCubeExpandedChange`)은
+  콜백을 목록에 넣어 들고 있다(부르지는 않는다). 다른 설정 setter는 상태만 바꾸고(아무것도 걸지 않는다), getter는 마지막 값(`annotations`·`fitBounds`·`project` 등)을 돌려준다
+- dispose는 덧그림·키보드 스냅 선택(앱 `announce` 콜백)·피할 상자·측정 글 꼴은 놓지 않는다(작은 자료라 두었다)
+- `toBlob()`(선택 없이)은 잃은 동안·dispose 뒤에도 캔버스 그대로를 풀어 준다(브라우저에서는 빈 그림일 수 있다). 선택을 준 `toBlob`·`renderImage`는 Error다
+- 묶어 그리기 조각을 받는 중에 문맥을 되찾으면 조각이 올 때까지(0.55.0 기다림 한도 4초 안) 장면을 그리지 않는다(0.56.0 `setScene`과 같은 미루기)
+- 실제 브라우저의 문맥 잃음(`WEBGL_lose_context`)·GPU 재설정은 보지 않았다(가짜 WebGL)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 세 앱은 뷰어를 한 번 만들어 파일마다 `setScene`으로 바꾸고 dispose하지 않으므로 바뀌는 것이 없다.
+  창 키를 `handleKey`로 넘기는 길은 살아 있는 뷰어에서 0.87.0과 같다
+- 뷰어를 dispose한 뒤에도 창 키 처리기가 옛 뷰어에 키를 넘기는 앱(임베드 등)은 이제 그 키를 삼키지 않는다 — 처리기는 dispose와 함께 떼는 것이 맞다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 0.87.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 +114 B(gzip +21 B), 묶어 그리기·면 미리 강조 조각 바이트 그대로(`import()` 뷰어 조각 +114 B·gzip +14 B — 첫 화면 입구 바이트 그대로)
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
