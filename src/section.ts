@@ -19,12 +19,16 @@ export const AXIS_DIRS: Readonly<Record<SectionAxis, V3>> = { x: [1, 0, 0], y: [
 /** 아무것도 자르지 않는 평면(값이 늘 −1). 셰이더에 "단면 없음"으로 넘긴다 */
 export const NO_CLIP: Readonly<Plane4> = [0, 0, 0, -1];
 
-/** normal·p = offset 평면(normal은 길이와 상관없음 — 단위로 맞추고 offset도 같은 비율로 나눈다). normal이 0이면 null */
+/**
+ * normal·p = offset 평면(normal은 길이와 상관없음 — 단위로 맞추고 offset도 같은 비율로 나눈다). normal이 0이거나 유한한 수가 아니거나 offset이 유한하지 않으면 null.
+ * 0.87.0: 길이로 나눈 offset이 넘쳐도 null(아주 짧은 법선 — 1e-200·비정규 수. 0.86.0은 위치 ±Infinity 평면을 돌려줘 단면 균일 변수가 무한이었다)
+ */
 export function planeFrom(normal: readonly number[], offset: number): { normal: V3; offset: number; plane: Plane4 } | null {
   const l = length(normal);
   if (!(l > 0) || !Number.isFinite(l) || !Number.isFinite(offset)) return null;
-  const n: V3 = [normal[0]! / l, normal[1]! / l, normal[2]! / l];
   const d = offset / l;
+  if (!Number.isFinite(d)) return null;
+  const n: V3 = [normal[0]! / l, normal[1]! / l, normal[2]! / l];
   return { normal: n, offset: d, plane: [n[0], n[1], n[2], -d] };
 }
 
