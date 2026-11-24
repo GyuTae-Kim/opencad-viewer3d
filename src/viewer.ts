@@ -4715,7 +4715,8 @@ export class Viewer3d {
     // 0.44.0 평면을 새로 두었으면 구간 단면 갈래·고르기 목록을 새로
     this.secSync();
     this.wheelAnchor = null;
-    if (this.measuring) this.measureHover = null;
+    // 0.109.0 측정 미리 보기는 그 커서 자리에서 다시 구한다(마우스·펜 — 0.108.0은 버렸다)
+    this.rehoverOrDrop();
     // 0.99.0 지나간 기준 선분은 모두 버린다(단면은 모든 묶음의 보이는 조각을 바꾼다 — 어느 선분이 잘렸는지는 따지지 않는다. 0.98.0은 잘린 선분과 나란함을 그렸다)
     this.refsDrop(() => true);
     // 0.98.0 가상 커서 후보는 다음 그림에서 그 자리에서 다시 구한다(0.97.0은 잘린 후보를 Tab으로 알리고 표식으로 그렸다)
@@ -5057,8 +5058,8 @@ export class Viewer3d {
 
   /**
    * 0.103.0 측정 미리 보기(measureHoverSnap — 커서 아래 붙잡을 점) 값이 바뀐 그림 뒤 한 번 알림(그 그림을 다 그린 뒤 — 같은 그림의 onCameraChange 다음).
-   * 포인터 이동·가상 커서 키로 바뀐 것도, 코어가 포인터 밖에서 다시 구하거나(메시 바꾸기·보이기·선분 그리기 범위가 줄 때·붙잡기 한도·다듬기 비우기·잠금 — 다음 그림)
-   * 버린 것(겉모습·단면·새 장면·clear·붙잡기 선택·측정 지우기·측정 모드 끄기 — 곧)도 같다. 한 프레임에 여러 길이 와도 한 번, 값(measureHoverSnap과 measureHoverLock의
+   * 포인터 이동·가상 커서 키로 바뀐 것도, 코어가 포인터 밖에서 다시 구하거나(메시 바꾸기·보이기·선분 그리기 범위가 줄 때·붙잡기 한도·다듬기 비우기·잠금,
+   * 0.109.0 겉모습·setPickEdges·단면 — 다음 그림) 버린 것(새 장면·clear·붙잡기 선택·측정 지우기·측정 모드 끄기 — 곧. 0.108.0까지는 겉모습·단면도)도 같다. 한 프레임에 여러 길이 와도 한 번, 값(measureHoverSnap과 measureHoverLock의
    * 모든 필드 — 점·종류·축·방향·잠금·기준 선분·선분·끌어온 점·면, Shift가 잠글 방향)이 같으면 알리지 않고, 없어지면 null(앞 값이 있었을 때만). 달 때의 값은 알리지 않는다.
    * 받는 값은 그때의 measureHoverSnap(복사본 — 한 알림의 듣는 쪽은 같은 객체). 듣는 쪽이 없으면 셈하지 않고, 있어도 그리기·GL·다른 알림은 같다.
    * 가상 커서의 announce('move'·'refresh' 등)가 먼저 온다. 알림 규칙은 다른 on*와 같다(0.90.0 emit — 0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않는다).
@@ -5165,11 +5166,14 @@ export class Viewer3d {
     return this.pickList(x, y, o.pointerType, o, max).map((d) => copyPick(d.pick));
   }
 
-  /** 누르기·측정·onPick이 그물 윤곽선도 고르는지(Viewer3dOptions.pickEdges) */
+  /**
+   * 누르기·측정·onPick이 그물 윤곽선도 고르는지(Viewer3dOptions.pickEdges).
+   * 0.109.0 측정 미리 보기(마우스·펜)는 다음 그림에서 그 자리에서 새 선택으로 다시 구한다(0.108.0은 버렸다 — 다음 포인터 이동까지 없었다)
+   */
   setPickEdges(on: boolean): void {
     if (this.opts.pickEdges === on) return;
     this.opts.pickEdges = on;
-    if (this.measuring) this.measureHover = null;
+    this.rehoverOrDrop();
     // 0.99.0 가상 커서 후보도 다음 그림·Tab 앞에서 새 선택으로 다시 구한다(장면 길과 같은 꼴 — 0.98.0은 옛 윤곽선 후보를 Tab으로 알리고 고르기 모드 표식으로 그렸다)
     this.keySceneChanged();
     if (on) this.scheduleBvh();
@@ -5367,7 +5371,8 @@ export class Viewer3d {
   }
 
   /**
-   * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때. 0.98.0 장면 길, 0.106.0 음영 가림이 바뀐 setRenderMode도).
+   * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때. 0.98.0 장면 길, 0.106.0 음영 가림이 바뀐 setRenderMode도,
+   * 0.109.0 겉모습·setPickEdges·단면도 — rehoverOrDrop).
    * 0.104.0 같은 프레임에 먼저 온 포인터 이동이 아직 구하지 않은 새 자리(hoverAt)를 적어 두었으면 그 자리를 둔다(가장 늦은 자리 — 0.103.0은 마지막으로 구한 자리로 덮어
    * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수뿐이다
    */
@@ -5376,6 +5381,18 @@ export class Viewer3d {
       this.hoverAt ??= this.lastHoverAt;
       this.invalidate();
     }
+  }
+
+  /**
+   * 0.109.0 겉모습·setPickEdges·단면 뒤 측정 미리 보기: 마우스·펜 커서의 미리 보기가 있고 끌기 중도, 앱이 맡은 포인터도 없으면 장면 길처럼 다음 그림에서 그 자리에서
+   * 다시 구하고(rehover — 0.108.0은 버려 다음 포인터 이동까지 표식이 없고 onMeasureHoverChange가 null을 받았다), 아니면 0.108.0처럼 버린다(측정 중일 때만).
+   * 가상 커서의 미리 보기는 버리고 keySceneChanged가 다음 그림에서 알리지 않고 다시 구한다(0.98.0·0.99.0 그대로 — rehover의 'refresh' 알림을 더하지 않는다)
+   */
+  private rehoverOrDrop(): void {
+    if (!this.measuring) return;
+    const at = this.lastHoverAt;
+    if (this.measureHover && at && at.pointerType !== KEY_POINTER && !this.drag && !this.holds.size) this.rehover();
+    else this.measureHover = null;
   }
 
   /** 지금 측정 붙잡기 선택(꺼져 있으면 null). inference는 0.9.0부터 세 값으로 편 꼴 */
@@ -6419,7 +6436,8 @@ export class Viewer3d {
       this.cutDirty = true;
       this.wheelAnchor = null;
     }
-    if (this.measuring) this.measureHover = null;
+    // 0.109.0 측정 미리 보기는 그 커서 자리에서 다시 구한다(마우스·펜 — 0.108.0은 버렸다. 고르기에 닿지 않는 색만 바꿔도 다시 구하고 값이 같으면 알리지 않는다)
+    this.rehoverOrDrop();
     // 0.98.0 가상 커서 후보도(행렬로 옮긴 묶음·고르지 않게 한 묶음 — 0.97.0은 옛 자리 선분을 그었다)
     this.keySceneChanged();
     this.invalidate();
@@ -8847,7 +8865,8 @@ export class Viewer3d {
    * 그때의 장면으로 구한 것이라, 다음 그림과 Tab 앞에서 그 자리에서 다시 구하게 표시한다(같은 후보가 남았으면 그 차례 — 알리지 않는다. 0.97.0은 커서를 옮길 때까지 앞 장면 후보를
    * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로).
    * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다. 0.100.0 선분 그리기 범위가 준 뒤에도(drawRangeCut).
-   * 0.106.0 음영 가림이 바뀐 setRenderMode도(측정 미리 보기는 그보다 먼저 rehover)
+   * 0.106.0 음영 가림이 바뀐 setRenderMode도(측정 미리 보기는 그보다 먼저 rehover).
+   * 0.109.0 단면·겉모습·setPickEdges의 마우스 미리 보기는 rehoverOrDrop이 다시 구하고, 가상 커서 미리 보기는 그대로 이 표시로 다시 구한다(알리지 않는다)
    */
   private keySceneChanged(): void {
     if (this.keyCur) this.keyCur.stale = true;

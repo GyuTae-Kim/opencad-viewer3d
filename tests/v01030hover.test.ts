@@ -139,29 +139,32 @@ describe('0.103.0 포인터 밖에서 바뀐 미리 보기', () => {
     expect(z(v.measureHoverSnap)).toBe(50);
   });
 
-  it('겉모습·단면·붙잡기 선택·측정 모드 끄기로 버리면 다음 그림 뒤 null 한 번(앞 값이 있을 때만), 다시 가리키면 그 값', () => {
+  it('붙잡기 선택·측정 모드 끄기로 버리면 다음 그림 뒤 null 한 번(앞 값이 있을 때만), 다시 가리키면 그 값 — 0.109.0 겉모습·단면은 다음 그림에서 다시 구한다', () => {
     const v = measuring();
     const c = at(v, [50, 50, 50]);
     hover(v, c);
     const got = listen(v);
     v.setItemOpacity('U', 0.5);
-    // 0.102.0처럼 곧 버린다 — 알림은 그 그림 뒤
-    expect(v.measureHoverSnap).toBeNull();
-    expect(got).toEqual([]);
+    // 0.109.0: 장면 길처럼 다음 그림에서 그 자리에서 다시 구한다(0.102.0~0.108.0은 곧 버려 null을 알렸다) — 반투명 U도 고르므로 같은 값, 알리지 않는다
+    expect(z(v.measureHoverSnap)).toBe(50);
     v.renderNow();
-    expect(got).toEqual([null]);
+    expect(got).toEqual([]);
+    expect(z(v.measureHoverSnap)).toBe(50);
+    // U를 잘라 내면 그 아래 L 윗면 — 그 그림 뒤 한 번(0.108.0은 null 다음 포인터 이동에서)
     v.setSection({ normal: [0, 0, 1], offset: 30 });
     v.renderNow();
-    expect(got).toEqual([null]);
-    hover(v, c);
-    expect(got.map(z)).toEqual([null, 20]);
+    expect(got.map(z)).toEqual([20]);
+    // 붙잡기 선택은 곧 버린다 — 알림은 그 그림 뒤
     v.setMeasureSnap({ midpoints: true });
+    expect(v.measureHoverSnap).toBeNull();
+    expect(got).toHaveLength(1);
     v.renderNow();
-    expect(got.map(z)).toEqual([null, 20, null]);
+    expect(got.map(z)).toEqual([20, null]);
     hover(v, c);
+    expect(got.map(z)).toEqual([20, null, 20]);
     v.setMeasureMode(false);
     v.renderNow();
-    expect(got.map(z)).toEqual([null, 20, null, 20, null]);
+    expect(got.map(z)).toEqual([20, null, 20, null]);
   });
 
   it('한 프레임에 여러 길이 와도 한 번(마지막 값), 버린 뒤 그리기 전에 같은 자리로 옮겨 같은 값이면 없음', () => {
