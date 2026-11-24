@@ -3506,10 +3506,20 @@ export class Viewer3d {
     return this.cam.projection;
   }
 
-  /** 그리기 모드. 0.91.0 모드 이름이 아니면(엉뚱한 글·null·대문자) 받지 않는다(앞 모드 그대로 — 0.90.0은 그 값을 두어 와이어프레임처럼 그렸다) */
+  /**
+   * 그리기 모드. 0.91.0 모드 이름이 아니면(엉뚱한 글·null·대문자) 받지 않는다(앞 모드 그대로 — 0.90.0은 그 값을 두어 와이어프레임처럼 그렸다).
+   * 0.106.0 음영 가림이 바뀌면(음영 계열 ↔ 와이어프레임·X-ray — 고르기·측정 붙잡기가 불투명 면 뒤 선분·점·윤곽선을 가리는지, shadedMode) 측정 미리 보기는 다음 그림에서
+   * 그 커서 자리에서 다시 구하고(rehover — 있을 때만), 가상 커서 후보는 다음 그림·Tab 앞에서 다시 구한다(keySceneChanged — 장면 길과 같은 꼴. 0.105.0은 커서를 옮길 때까지
+   * 앞 모드의 가림으로 구한 미리 보기·후보를 그리고 알렸다). 같은 모드·같은 가림 계열 안에서 바꾸면(음영 ↔ 음영+윤곽 등) 고르기가 같아 다시 구하지 않는다
+   */
   setRenderMode(m: RenderMode): void {
     if (!isRenderMode(m)) return;
+    const was = this.shadedMode;
     this.mode = m;
+    if (this.shadedMode !== was) {
+      this.rehover();
+      this.keySceneChanged();
+    }
     this.invalidate();
   }
 
@@ -5314,7 +5324,7 @@ export class Viewer3d {
   }
 
   /**
-   * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때).
+   * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때. 0.98.0 장면 길, 0.106.0 음영 가림이 바뀐 setRenderMode도).
    * 0.104.0 같은 프레임에 먼저 온 포인터 이동이 아직 구하지 않은 새 자리(hoverAt)를 적어 두었으면 그 자리를 둔다(가장 늦은 자리 — 0.103.0은 마지막으로 구한 자리로 덮어
    * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수뿐이다
    */
@@ -8604,7 +8614,7 @@ export class Viewer3d {
     return s.caps === 'all' || m.closed === true || m.capGroup !== undefined;
   }
 
-  /** 면이 앞의 것을 가리는 모드(음영 계열 — 고르기·가림·잘린 면 채우기) */
+  /** 면이 앞의 것을 가리는 모드(음영 계열 — 고르기·가림·잘린 면 채우기). 0.106.0 이 값이 바뀌는 setRenderMode는 측정 미리 보기·가상 커서 후보를 다시 구한다 */
   private get shadedMode(): boolean {
     const m = this.mode;
     return m === 'shaded' || m === 'shadedEdges' || m === 'hiddenLine' || m === 'monochrome' || m === 'noTexture';
@@ -8783,7 +8793,8 @@ export class Viewer3d {
    * 0.98.0 장면 조각이 바뀌었다(setScene·clear·setMesh·removeMesh·보이기·구간 숨김·단면·겉모습): 켜진 가상 커서의 후보(측정 후보 목록·겹친 고르기 후보·고른 것)는
    * 그때의 장면으로 구한 것이라, 다음 그림과 Tab 앞에서 그 자리에서 다시 구하게 표시한다(같은 후보가 남았으면 그 차례 — 알리지 않는다. 0.97.0은 커서를 옮길 때까지 앞 장면 후보를
    * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로).
-   * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다. 0.100.0 선분 그리기 범위가 준 뒤에도(drawRangeCut)
+   * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다. 0.100.0 선분 그리기 범위가 준 뒤에도(drawRangeCut).
+   * 0.106.0 음영 가림이 바뀐 setRenderMode도(측정 미리 보기는 그보다 먼저 rehover)
    */
   private keySceneChanged(): void {
     if (this.keyCur) this.keyCur.stale = true;
