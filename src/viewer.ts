@@ -4119,12 +4119,21 @@ export class Viewer3d {
    * 선분 묶음의 앞에서 count개만 그린다(NC 재생). null이면 전부.
    * ghost(0~1)를 주면 나머지를 그 불투명도로 흐리게 그린다.
    * 0.85.0: 자른 개수가 NaN이면 null(전부)과, 유한하지 않은 ghost는 주지 않은 것(0)과 같다(0.84.0은 그 묶음을 그리지 않았고 ghost Infinity는 u_alpha 무한).
-   * 0.92.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError)
+   * 0.92.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.91.0은 TypeError).
+   * 0.100.0 범위 밖 선분(흐리게 그려도)은 고르기·측정이 보지 않는다. 범위가 줄면 범위 밖이 된 선분이 낸 지나간 기준 선분을 버리고 측정 미리 보기·가상 커서 후보를
+   * 그 자리에서 다시 구한다(drawRangeCut — 0.99.0은 남겼다). 범위가 늘거나, 기준 선분·측정 미리 보기·가상 커서가 없으면 상수 시간 확인뿐이다
    */
   setLineDrawRange(id: string, count: number | null, opts: { ghost?: number } = {}): void {
     const n = count === null ? NaN : Math.max(0, Math.floor(count));
+    // 0.100.0 줄었는지는 바꾸기 전 개수로 본다(따질 상태가 있을 때만 — 재생은 프레임마다 부른다)
+    const it = !Number.isNaN(n) && this.drawRangeWatch() ? this.items.get(id) : undefined;
+    const cut = it?.kind === 'line' && this.drawRangeCut(it.item, this.ranges.get(id)?.count, n);
     if (Number.isNaN(n)) this.ranges.delete(id);
     else this.ranges.set(id, { count: n, ghost: ghostOf(optsOf(opts).ghost) });
+    if (cut) {
+      this.rehover();
+      this.keySceneChanged();
+    }
     this.invalidate();
   }
 
@@ -4132,11 +4141,15 @@ export class Viewer3d {
    * NC 재생: segmentIds가 있는 모든 선분 묶음에서 원본 번호가 limitId 이하인 앞쪽 선분만 그린다
    * (급속·공구별로 나뉜 묶음을 이동 번호 하나로 함께 돌린다. segmentIds는 오름차순이라고 본다).
    * null이면 모두 그린다. 돌려주는 값은 지금 공구 위치(그려진 선분 가운데 번호가 가장 큰 것의 끝점).
-   * 0.85.0: 번호 NaN은 null과 같고(0.84.0은 모든 묶음을 그리지 않았다 — ±Infinity는 그대로 전부·없음), 유한하지 않은 ghost는 주지 않은 것(0)과 같다
+   * 0.85.0: 번호 NaN은 null과 같고(0.84.0은 모든 묶음을 그리지 않았다 — ±Infinity는 그대로 전부·없음), 유한하지 않은 ghost는 주지 않은 것(0)과 같다.
+   * 0.100.0 범위가 준 묶음이 있으면 setLineDrawRange처럼 범위 밖이 된 선분이 낸 상태를 버리거나 다시 구한다(늘기만 하면 상수 시간 확인뿐)
    */
   setDrawLimitBySegmentId(limitId: number | null, opts: { ghost?: number } = {}): V3 | null {
     let best: { id: number; p: V3 } | null = null;
     const ghost = ghostOf(opts?.ghost);
+    // 0.100.0 따질 상태(기준 선분·측정 미리 보기·가상 커서)가 있을 때만 묶음마다 줄었는지 본다
+    const watch = this.drawRangeWatch();
+    let cut = false;
     for (const it of this.items.values()) {
       if (it.kind !== 'line' || !it.item.segmentIds) continue;
       const l = it.item;
@@ -4146,12 +4159,17 @@ export class Viewer3d {
       }
       const ids = l.segmentIds!;
       const n = countIdsUpTo(ids, Math.floor(l.positions.length / 6), limitId);
+      if (watch && this.drawRangeCut(l, this.ranges.get(l.id)?.count, n)) cut = true;
       this.ranges.set(l.id, { count: n, ghost });
       if (n > 0 && (!best || ids[n - 1]! > best.id)) {
         const o = (n - 1) * 6 + 3;
         const g = l.origin;
         best = { id: ids[n - 1]!, p: [l.positions[o]! + (g?.[0] ?? 0), l.positions[o + 1]! + (g?.[1] ?? 0), l.positions[o + 2]! + (g?.[2] ?? 0)] };
       }
+    }
+    if (cut) {
+      this.rehover();
+      this.keySceneChanged();
     }
     this.invalidate();
     return best ? best.p : null;
@@ -8589,6 +8607,27 @@ export class Viewer3d {
   }
 
   /**
+   * 0.100.0 선분 그리기 범위가 줄 때 따질 상태가 있는지 — 지나간 기준 선분·측정 미리 보기·켜진 가상 커서. 없으면 범위 길(setLineDrawRange·setDrawLimitBySegmentId —
+   * NC 재생이 프레임마다 부른다)은 이 확인뿐이다(배열 훑기·할당 없음)
+   */
+  private drawRangeWatch(): boolean {
+    return !!(this.parallelRef || this.trackDirRef || this.parallelOwn || this.keyCur || (this.measuring && this.measureHover));
+  }
+
+  /**
+   * 0.100.0 선분 묶음 l의 그리기 범위가 was(없으면 전부)에서 n개로 줄었으면(묶음 선분 수로 자른 값끼리) 범위 밖이 된 선분(배열 안 번호 n 이상 — 고르기·측정이 보지 않는다)이 낸
+   * 지나간 기준 선분만 버리고 true — 부르는 쪽이 측정 미리 보기(rehover — 있을 때만)와 가상 커서 후보(keySceneChanged)를 그 자리에서 다시 구하게 한다.
+   * 늘거나 같으면(재생 앞으로 감기) 범위 밖이 되는 선분이 없어 false. 0.99.0은 범위 길에서 아무것도 버리지 않아, 범위를 줄인 뒤 그리지 않는 선분과 나란한 안내선,
+   * 그 선분 위 측정 미리 보기와 가상 커서 후보를 커서를 옮길 때까지 남겼다
+   */
+  private drawRangeCut(l: LineSet3d, was: number | undefined, n: number): boolean {
+    const total = Math.floor(l.positions.length / 6);
+    if (Math.min(n, total) >= Math.min(was ?? total, total)) return false;
+    if (this.parallelRef || this.trackDirRef || this.parallelOwn) this.refsDrop((p) => p.kind === 'line' && p.id === l.id && (p.raw ?? p.index) >= n);
+    return true;
+  }
+
+  /**
    * 한 화면 자리의 측정 후보(차례대로, max개까지): 첫째는 그 자리 마우스 미리 보기와 같은 것(measureAt 그대로), 다음은 앞 후보로 고른 점 붙잡기 자리를 빼고 같은 measureAt —
    * 그래서 붙잡기 차례·우선(0.41.0)·다듬기·잠금·구간 단면이 그대로다. 점 붙잡기가 다하면 선 추론(축·나란함·끌어온 축·잠근 선 교차) 하나, 그다음 선 추론 없이
    * 'fallback' 앱 점과 붙잡지 않은 자리(선분·면 위 점, 잠근 동안이면 커서를 잠근 선에 내린 자리). 자리가 꼭 같은 결과는 앞의 것만 둔다.
@@ -8657,7 +8696,7 @@ export class Viewer3d {
    * 0.98.0 장면 조각이 바뀌었다(setScene·clear·setMesh·removeMesh·보이기·구간 숨김·단면·겉모습): 켜진 가상 커서의 후보(측정 후보 목록·겹친 고르기 후보·고른 것)는
    * 그때의 장면으로 구한 것이라, 다음 그림과 Tab 앞에서 그 자리에서 다시 구하게 표시한다(같은 후보가 남았으면 그 차례 — 알리지 않는다. 0.97.0은 커서를 옮길 때까지 앞 장면 후보를
    * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로).
-   * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다
+   * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다. 0.100.0 선분 그리기 범위가 준 뒤에도(drawRangeCut)
    */
   private keySceneChanged(): void {
     if (this.keyCur) this.keyCur.stale = true;
