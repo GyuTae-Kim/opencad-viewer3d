@@ -6,6 +6,7 @@
  * 커서를 다시 옮긴 것과 같고, 알림은 값이 바뀌었을 때만 한 번(잘려 붙잡을 것이 없으면 null).
  * 측정이 꺼졌거나 미리 보기가 없거나(포인터가 떠남 포함) 끌기 중·앱이 맡은 포인터가 있으면 0.108.0 그대로 버리고(다시 구하지 않는다), 가상 커서는 0.98.0·0.99.0 그대로
  * 알리지 않고 다음 그림에서 다시 구한다.
+ * 0.111.0: 미리 보기가 null이어도 마우스·펜 커서가 그 자리에 그대로 있으면 다시 구한다(v01110stillhover) — 아래 「미리 보기가 없으면」은 커서를 둔 적 없는 뷰어다.
  * 장면(위에서 봄): 아래 상자 L [-100,-100,0]–[200,200,20], 위 상자 U [20,20,40]–[80,80,50], U 아래 선분 B (30,50,30)–(70,50,30)
  * (가운데 점 (50,50,30) — U 윗면에 가린다. U를 고르지 않게 하거나 반투명으로 하거나 옮기거나 잘라 내면 보인다)
  */
@@ -217,13 +218,13 @@ describe('0.109.0 측정 미리 보기(마우스)를 둔 채 바꾸기 — 다�
     v.renderNow();
     expect(heard.map(z)).toEqual([50, 30, 50, 30, null]);
     expect(v.measureHoverSnap).toBeNull();
-    // 미리 보기가 없어진 뒤에는 다시 구하지 않는다(장면 길과 같은 규칙 — 다음 포인터 이동에서)
+    // 0.111.0 미리 보기가 null이 된 뒤에도 커서가 그 자리에 그대로 있으면 다시 구한다(0.109.0·0.110.0은 장면 길과 같은 규칙으로 다음 포인터 이동까지 null — v01110stillhover)
     const m = calls(v, 'measureAt');
     v.setSection(null);
     v.renderNow();
-    expect(m.n).toBe(0);
-    expect(v.measureHoverSnap).toBeNull();
-    expect(heard).toHaveLength(5);
+    expect(m.n).toBe(1);
+    expect(z(v.measureHoverSnap)).toBe(50);
+    expect(heard.map(z)).toEqual([50, 30, 50, 30, null, 50]);
     hover(v, A);
     expect(heard.map(z)).toEqual([50, 30, 50, 30, null, 50]);
   });
