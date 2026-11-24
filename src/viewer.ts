@@ -1675,6 +1675,19 @@ function numBad(x: unknown): boolean {
   return x != null && (typeof x === 'symbol' || !Number.isFinite(typeof x === 'number' ? x : Number(x)));
 }
 
+/**
+ * 0.94.0 생성자 수 선택(maxPixelRatio·textureLimit·textureBudget): 주지 않았거나(null·undefined) 수로 읽히지 않으면(NaN·엉뚱한 글·객체) d.
+ * ±Infinity·수로 읽히는 글은 그대로 쓴다(0.93.0 maxPixelRatio 규칙 — 쓰는 곳이 Math.min·비교로 자르거나 수로 읽는다)
+ */
+function numOr(x: number | null | undefined, d: number): number {
+  return x == null || typeof x === 'symbol' || Number.isNaN(Number(x)) ? d : x;
+}
+
+/** 0.94.0 키 사건의 기본 동작 막기: preventDefault가 함수일 때만(앱이 만든 키 사건 객체 — 0.93.0은 처리한 뒤 TypeError) */
+function stopKey(e: KeyboardEvent): void {
+  if (typeof e.preventDefault === 'function') e.preventDefault();
+}
+
 /** 0.93.0 걷기 선택의 수 필드(setNavigation — 유한한 수만 받는다) */
 const WALK_NUMS = ['eyeHeight', 'speed', 'stepHeight', 'radius'] as const;
 
@@ -2310,13 +2323,15 @@ export class Viewer3d {
       viewCubeTouch: cubeTouchOpts(opts.viewCubeTouch),
       axes: opts.axes ?? true,
       keyboard: opts.keyboard ?? true,
+      // 0.94.0 유한한 수가 아니면 쓰는 곳(pickTolerance())이 기본을 쓴다(0.93.0은 선분을 고르지 못하거나 어디서나 골랐다)
       pickTolerance: opts.pickTolerance ?? PICK_TOLERANCE_PX,
       touchPickTolerance: opts.touchPickTolerance ?? TOUCH_PICK_TOLERANCE_PX,
       pickEdges: opts.pickEdges ?? false,
       // 0.93.0 수로 읽히지 않으면(엉뚱한 글·NaN·객체) 주지 않은 것(2 — 0.92.0은 캔버스 크기가 NaN이었다). ±Infinity는 0.92.0처럼 자른다
-      maxPixelRatio: Number.isNaN(Number(opts.maxPixelRatio ?? 2)) ? 2 : (opts.maxPixelRatio ?? 2),
-      textureLimit: opts.textureLimit ?? TEXTURE_LIMIT,
-      textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
+      maxPixelRatio: numOr(opts.maxPixelRatio, 2),
+      // 0.94.0 같은 규칙(0.93.0은 한 장 한도·전체 예산이 없는 것처럼 풀었다 — GPU 한도 밖 긴 변). Infinity 한도는 GPU 한도, 0 이하 예산은 끔(그대로)
+      textureLimit: numOr(opts.textureLimit, TEXTURE_LIMIT),
+      textureBudget: numOr(opts.textureBudget, TEXTURE_BUDGET),
     };
     this.themeOpt = opts.theme;
     this.motion = normalizeAnimate(opts.animate);
@@ -2460,6 +2475,11 @@ export class Viewer3d {
     } = {},
   ): void {
     if (this.disposed) return;
+    // 0.94.0 장면이 객체가 아니면(null·undefined·글·수) clear()와 같다 — 장면 비우기(0.93.0은 TypeError). 객체 장면의 깨진 목록·항목은 checkScene이 고친다
+    if (!scene || typeof scene !== 'object') {
+      this.clear();
+      return;
+    }
     // 0.93.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.92.0은 장면을 반쯤 바꾼 뒤 TypeError — 0.92.0 setMesh와 같은 꼴)
     opts = optsOf(opts);
     const hadSection = !!this.sec;
@@ -9236,10 +9256,11 @@ export class Viewer3d {
    * 0.88.0 dispose 뒤에는 아무것도 하지 않고 false(기본 동작을 막지 않는다 — 0.87.0은 걷기 키·Shift에 창·문서 리스너를 다시 걸고 F·1~7·걷기 키에 true였다)
    */
   handleKey(e: KeyboardEvent): boolean {
-    if (this.disposed) return false;
+    // 0.94.0 키 사건이 객체가 아니면(null·undefined·글·수) 처리하지 않는다(false — 0.93.0은 null에 TypeError). preventDefault가 없는 객체는 처리하고 막기만 건너뛴다(stopKey)
+    if (this.disposed || !e || typeof e !== 'object') return false;
     // 0.46.0 키보드 붙잡기(setKeyboardSnap을 켰을 때만 — 캔버스가 받은 키): 화살표 가상 커서·Tab 후보 돌리기·Enter 찍기·Esc 끄기
     if (this.keySnap && this.keyboardKey(e)) {
-      e.preventDefault();
+      stopKey(e);
       return true;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
@@ -9256,7 +9277,7 @@ export class Viewer3d {
       this.walkFast = e.shiftKey;
       this.listenWalkRelease(true);
       this.invalidate();
-      e.preventDefault();
+      stopKey(e);
       return true;
     }
     if (e.key === 'f' || e.key === 'F') this.fit();
@@ -9266,13 +9287,13 @@ export class Viewer3d {
     // 0.16.0: 첫 점 전이라도 끌어온 점이 있으면 Esc가 지운다
     else if (e.key === 'Escape' && (this.measurePts.length || (this.measuring && this.tracker?.size))) this.clearMeasure();
     else return false;
-    e.preventDefault();
+    stopKey(e);
     return true;
   }
 
-  /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true. 0.88.0 dispose 뒤에는 false */
+  /** 걷기 키를 뗐을 때(앱이 창 키를 넘길 때 keyup도 넘긴다). 처리했으면 true. 0.88.0 dispose 뒤에는 false. 0.94.0 객체가 아닌 키 사건도 false(0.93.0은 null에 TypeError) */
   handleKeyUp(e: KeyboardEvent): boolean {
-    if (this.disposed) return false;
+    if (this.disposed || !e || typeof e !== 'object') return false;
     if (e.key === 'Shift') this.setShift(false);
     const k = walkKeyOf(e);
     if (!k || !this.walkKeys.delete(k)) return false;

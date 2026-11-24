@@ -10,14 +10,15 @@
  * 멀쩡한 장면은 같은 객체·같은 배열을 그대로 쓴다(새 배열을 만들지 않는다). 배열 검사는 배열마다 한 번만 한다(WeakMap — 정점 훑기는 범위 계산과 함께).
  */
 import { COORD_LIMIT, onForgetBounds, positionsBad, positionsBox } from './bounds';
-import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d } from './types';
+import type { Box3, LineSet3d, Mesh3d, PointSet3d, Rgba, Scene3d, Texture3d } from './types';
 
 export { COORD_LIMIT } from './bounds';
 
 /**
  * 알림 종류(값은 바뀌지 않는다 — 앱이 제 말로 옮길 때 열쇠로 쓴다):
  * - 'bounds': Scene3d.bounds가 유한하지 않거나 뒤집혔거나 한도 밖 → 쓰지 않고 장면에서 다시 센다
- * - 'placement': origin·matrix가 유한한 수 셋·열여섯이 아니거나 항목 상자를 한도(COORD_LIMIT) 밖으로 옮긴다, positions가 없다 → 그 항목을 그리지도 고르지도 않는다(어디에 놓을지 모른다)
+ * - 'placement': origin·matrix가 유한한 수 셋·열여섯이 아니거나 항목 상자를 한도(COORD_LIMIT) 밖으로 옮긴다, positions가 없다 → 그 항목을 그리지도 고르지도 않는다(어디에 놓을지 모른다).
+ *   0.94.0 positions가 Float32Array가 아니거나(field 'positions') 그물 indices가 Uint32Array가 아니어도(field 'indices') 같다
  * - 'billboard': billboard.origin이 유한하지 않다 → 마주 보기를 하지 않는다(놓인 그대로 그린다)
  * - 'positions': 정점 좌표가 NaN·무한대·|값| > COORD_LIMIT → 범위·카메라 맞춤에서 빼고, 그 정점을 쓰는 삼각형·선분을 그리지 않는다
  * - 'indices': 정점 수 밖 색인(0xffffffff 포함)이 든 삼각형 → 그 삼각형을 그리지 않는다
@@ -293,12 +294,29 @@ export interface SceneCheck {
 
 const GRAY: Rgba = [0.7, 0.7, 0.7, 1];
 
-/** 그물 하나 검사: 그릴 그물(그대로·필드를 고친 얕은 사본·null = 빼기)과 알림을 issues에 더한다 */
+/**
+ * 0.94.0 장면 목록 자리(meshes·lines·points·textures): 배열은 그대로, 배열이 아닌 돌 수 있는 객체(Set 등)는 배열로, 그 밖(수·글·null·{})은 빈 목록 —
+ * 0.93.0은 TypeError(Set은 장면을 반쯤 바꾼 뒤 — 뷰어가 배열 메서드를 쓴다)
+ */
+function listOf<T>(x: unknown): T[] {
+  if (Array.isArray(x)) return x as T[];
+  return x !== null && typeof x === 'object' && typeof (x as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function' ? Array.from(x as Iterable<T>) : [];
+}
+
+/**
+ * 그물 하나 검사: 그릴 그물(그대로·필드를 고친 얕은 사본·null = 빼기)과 알림을 issues에 더한다.
+ * 0.94.0 항목이 null·undefined면 수 항목처럼 positions가 없는 것이고, positions가 Float32Array가 아니면(글·길이만 있는 객체·일반 배열·다른 형식 배열) 없는 것과 같다
+ * (0.93.0은 글이면 TypeError, 그 밖은 GPU 버퍼 밖이라 그리지 못한 채 범위·고르기에 들었다). indices가 Uint32Array가 아니면 삼각형을 몰라 그 그물을 뺀다(placement · indices)
+ */
 export function checkMesh(m: Mesh3d, issues: SceneIssue[]): Mesh3d | null {
-  const id = m.id;
+  const id = m?.id;
   const add = (code: SceneIssueCode, action: SceneIssueAction, field?: string, count = 1): void => void issues.push({ code, action, kind: 'mesh', id, ...(field ? { field } : {}), count });
-  if (!m.positions || typeof m.positions.length !== 'number') {
+  if (!(m?.positions instanceof Float32Array)) {
     add('placement', 'skipped', 'positions');
+    return null;
+  }
+  if (m.indices != null && !(m.indices instanceof Uint32Array)) {
+    add('placement', 'skipped', 'indices');
     return null;
   }
   if (!originOk(m.origin)) {
@@ -375,10 +393,11 @@ export function checkMesh(m: Mesh3d, issues: SceneIssue[]): Mesh3d | null {
   return o ? { ...m, ...(o as Partial<Mesh3d>) } : m;
 }
 
+/** 선분 묶음 하나 검사(0.94.0 null 항목·Float32Array가 아닌 positions는 positions가 없는 것 — checkMesh와 같다) */
 function checkLine(l: LineSet3d, issues: SceneIssue[]): LineSet3d | null {
-  const id = l.id;
+  const id = l?.id;
   const add = (code: SceneIssueCode, action: SceneIssueAction, field?: string, count = 1): void => void issues.push({ code, action, kind: 'line', id, ...(field ? { field } : {}), count });
-  if (!l.positions || typeof l.positions.length !== 'number') {
+  if (!(l?.positions instanceof Float32Array)) {
     add('placement', 'skipped', 'positions');
     return null;
   }
@@ -415,10 +434,11 @@ function checkLine(l: LineSet3d, issues: SceneIssue[]): LineSet3d | null {
   return o ? { ...l, ...(o as Partial<LineSet3d>) } : l;
 }
 
+/** 점 묶음 하나 검사(0.94.0 null 항목·Float32Array가 아닌 positions는 positions가 없는 것 — checkMesh와 같다) */
 function checkPoints(p: PointSet3d, issues: SceneIssue[]): PointSet3d | null {
-  const id = p.id;
+  const id = p?.id;
   const add = (code: SceneIssueCode, action: SceneIssueAction, field?: string, count = 1): void => void issues.push({ code, action, kind: 'point', id, ...(field ? { field } : {}), count });
-  if (!p.positions || typeof p.positions.length !== 'number') {
+  if (!(p?.positions instanceof Float32Array)) {
     add('placement', 'skipped', 'positions');
     return null;
   }
@@ -457,27 +477,31 @@ export function boundsOk(b: Box3 | undefined): boolean {
  * 장면 검사: 깨진 값마다 알림을 모으고, 그릴 장면을 돌려준다 — 고칠 것이 없으면 받은 장면 객체 그대로,
  * 있으면 빼는 항목(placement)을 뺀 목록과 필드를 고친 항목의 얕은 사본(배열은 같은 객체)을 담은 새 장면 객체. 깨진 Scene3d.bounds는 알리기만 한다
  * (뷰어는 boundsOk가 아니면 쓰지 않고 그물에서 다시 센다 — 장면 객체를 새로 만들지 않는다).
- * 좌표·색인 배열 자체는 고치지 않는다 — 범위는 깨진 정점을 건너뛰고(bounds.positionsBox), 그리기는 triangleFix·segmentFix 사본을 올린다
+ * 좌표·색인 배열 자체는 고치지 않는다 — 범위는 깨진 정점을 건너뛰고(bounds.positionsBox), 그리기는 triangleFix·segmentFix 사본을 올린다.
+ * 0.94.0 장면 계약 밖 값: 객체가 아닌 장면(null·글·수)은 빈 장면(이름 '', 단위 'unknown'), 배열이 아닌 목록은 배열(돌 수 있으면)이나 빈 목록으로 고친 새 장면 객체 —
+ * 0.93.0은 TypeError(Set 목록은 뷰어가 장면을 반쯤 바꾼 뒤)
  */
 export function checkScene(scene: Scene3d): SceneCheck {
+  if (!scene || typeof scene !== 'object') return { scene: { name: '', units: 'unknown', meshes: [], lines: [] }, issues: [] };
   const issues: SceneIssue[] = [];
-  let changed = false;
+  const tex = scene.textures != null && !Array.isArray(scene.textures) ? listOf<Texture3d>(scene.textures) : null;
+  let changed = !Array.isArray(scene.meshes) || !Array.isArray(scene.lines) || (scene.points != null && !Array.isArray(scene.points)) || !!tex;
   const meshes: Mesh3d[] = [];
-  for (const m of scene.meshes) {
+  for (const m of listOf<Mesh3d>(scene.meshes)) {
     const c = checkMesh(m, issues);
     if (c !== m) changed = true;
     if (c) meshes.push(c);
   }
   const lines: LineSet3d[] = [];
-  for (const l of scene.lines) {
+  for (const l of listOf<LineSet3d>(scene.lines)) {
     const c = checkLine(l, issues);
     if (c !== l) changed = true;
     if (c) lines.push(c);
   }
   let points: PointSet3d[] | undefined;
-  if (scene.points) {
+  if (scene.points != null) {
     points = [];
-    for (const p of scene.points) {
+    for (const p of listOf<PointSet3d>(scene.points)) {
       const c = checkPoints(p, issues);
       if (c !== p) changed = true;
       if (c) points.push(c);
@@ -492,7 +516,7 @@ export function checkScene(scene: Scene3d): SceneCheck {
   for (const id of dup) issues.push({ code: 'duplicate-id', action: 'kept', kind: 'scene', id, count: 1 });
   if (boundsBroken(scene.bounds)) issues.push({ code: 'bounds', action: 'ignored', kind: 'scene', field: 'bounds', count: 1 });
   if (!changed) return { scene, issues };
-  return { scene: { ...scene, meshes, lines, ...(points ? { points } : {}) }, issues };
+  return { scene: { ...scene, meshes, lines, ...(points ? { points } : {}), ...(tex ? { textures: tex } : {}) }, issues };
 }
 
 /**

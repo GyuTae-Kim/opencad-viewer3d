@@ -2,7 +2,7 @@
  * 바닥 격자(XY 면): 범위에 맞춘 간격(1·2·5×10ⁿ), 큰 칸·작은 칸, 원점을 지나는 X·Y축 선.
  */
 import type { Box3 } from './types';
-import { boxIsEmpty } from './bounds';
+import { boxIsEmpty, emptyBox } from './bounds';
 import { niceStep } from './math';
 
 /** 격자를 놓을 높이: 'min' = 범위 바닥, 'zero' = Z 0, 수 = 그 높이 */
@@ -19,6 +19,9 @@ export interface GridSpec {
 }
 
 export function gridSpec(box: Box3, zMode: GridZ = 'min', cells = 10): GridSpec {
+  // 0.94.0 상자가 아니면(null·글·수·min·max가 없는 객체) 빈 범위(원점 둘레), 이름·수가 아닌 높이(null·글·객체)는 주지 않은 것('min') — 0.93.0은 TypeError·그 높이를 그대로
+  if (!box?.min || !box.max) box = emptyBox();
+  if (zMode !== 'min' && zMode !== 'zero' && typeof zMode !== 'number') zMode = 'min';
   let x0 = -10, x1 = 10, y0 = -10, y1 = 10, zMin = 0;
   if (!boxIsEmpty(box)) {
     x0 = box.min[0];
@@ -62,6 +65,8 @@ export const GRID_MAX_LINES = 4096;
 
 /** 격자 선분(xyz,xyz…). origin을 주면 그 점 기준 좌표로 낸다(세계 = origin + 값 — 큰 좌표에서 float32 정밀도를 지킨다) */
 export function gridLines(g: GridSpec, origin?: readonly number[] | null): GridLines {
+  // 0.94.0 명세가 없으면(null·undefined) 격자 없음 — 0.93.0은 TypeError(글·수·{}는 이미 격자 없음)
+  g ??= {} as GridSpec;
   const major: number[] = [];
   const minor: number[] = [];
   const ox = origin?.[0] ?? 0, oy = origin?.[1] ?? 0, oz = origin?.[2] ?? 0;
