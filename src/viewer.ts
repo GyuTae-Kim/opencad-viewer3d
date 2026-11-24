@@ -719,7 +719,7 @@ export interface MeasureSnapOptions {
   openEdgeLens?: boolean;
 }
 
-/** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap) */
+/** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap — 0.103.0 onMeasureHoverChange가 넘기는 값도) */
 export interface MeasureHoverSnap {
   point: V3;
   /** 붙잡은 종류(붙잡지 않았으면 null) */
@@ -2326,6 +2326,12 @@ export class Viewer3d {
   /** 0.50.0 지금 장면의 입력 알림(sceneIssues)과 듣는 함수(onSceneIssues) */
   private issues: SceneIssue[] = [];
   private issueCbs: Listeners<(issues: readonly SceneIssue[]) => void> = new Map();
+  /**
+   * 0.103.0 측정 미리 보기 바뀜 알림(onMeasureHoverChange)과 마지막으로 견준 미리 보기: 측정 중일 때의 measureHover(같은 객체·같은 찍은 점 1개 여부면 값도 같다 —
+   * 측정 점 고르기 결과는 만든 뒤 고치지 않는다)와 값 열쇠(measureHoverSnap·measureHoverLock의 JSON, 없으면 ''). 듣는 쪽이 있을 때만 맞춘다
+   */
+  private hoverCbs: Listeners<(snap: MeasureHoverSnap | null) => void> = new Map();
+  private hoverSeen: { pick: MeasurePick | null; one: boolean; key: string } = { pick: null, one: false, key: '' };
 
   private ro: ResizeObserver;
   private hostPos: string | null = null;
@@ -2622,7 +2628,7 @@ export class Viewer3d {
   }
 
   /**
-   * 0.90.0 알림 보내기(on* 아홉의 한 규칙 — 브라우저 EventTarget.dispatchEvent와 같다): 알림을 시작할 때의 목록을 단 차례대로 돌되,
+   * 0.90.0 알림 보내기(on* 아홉의 한 규칙 — 0.103.0 onMeasureHoverChange도. 브라우저 EventTarget.dispatchEvent와 같다): 알림을 시작할 때의 목록을 단 차례대로 돌되,
    * 그 동안 뗀 콜백(뗐다 다시 단 것도 — 등록 표가 바뀐다)은 부르지 않고 그 동안 단 콜백은 다음 알림부터 부른다.
    * 0.89.0 부르는 도중 dispose되면 남은 콜백을 부르지 않는다. 0.89.0은 목록을 바로 도는 넷(고르기·측정·카메라·단면)이 그 동안 단 콜백을 불렀고
    * (뗐다 다시 단 콜백은 끝 자리에서 또 — 자기를 그리하면 끝없이), 사본을 도는 다섯은 그 동안 뗀 콜백을 불렀다
@@ -3269,6 +3275,9 @@ export class Viewer3d {
     this.camCbs.clear();
     this.cubeCbs.clear();
     this.issueCbs.clear();
+    // 0.103.0 미리 보기 바뀜 알림과 견준 미리 보기도 놓는다
+    this.hoverCbs.clear();
+    this.hoverSeen = { pick: null, one: false, key: '' };
     this.issues = [];
     this.restoreCbs.clear();
     this.lostCbs.clear();
@@ -4998,6 +5007,38 @@ export class Viewer3d {
   }
 
   /**
+   * 0.103.0 측정 미리 보기(measureHoverSnap — 커서 아래 붙잡을 점) 값이 바뀐 그림 뒤 한 번 알림(그 그림을 다 그린 뒤 — 같은 그림의 onCameraChange 다음).
+   * 포인터 이동·가상 커서 키로 바뀐 것도, 코어가 포인터 밖에서 다시 구하거나(메시 바꾸기·보이기·선분 그리기 범위가 줄 때·붙잡기 한도·다듬기 비우기·잠금 — 다음 그림)
+   * 버린 것(겉모습·단면·새 장면·clear·붙잡기 선택·측정 지우기·측정 모드 끄기 — 곧)도 같다. 한 프레임에 여러 길이 와도 한 번, 값(measureHoverSnap과 measureHoverLock의
+   * 모든 필드 — 점·종류·축·방향·잠금·기준 선분·선분·끌어온 점·면, Shift가 잠글 방향)이 같으면 알리지 않고, 없어지면 null(앞 값이 있었을 때만). 달 때의 값은 알리지 않는다.
+   * 받는 값은 그때의 measureHoverSnap(복사본 — 한 알림의 듣는 쪽은 같은 객체). 듣는 쪽이 없으면 셈하지 않고, 있어도 그리기·GL·다른 알림은 같다.
+   * 가상 커서의 announce('move'·'refresh' 등)가 먼저 온다. 알림 규칙은 다른 on*와 같다(0.90.0 emit — 0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않는다)
+   */
+  onMeasureHoverChange(cb: (snap: MeasureHoverSnap | null) => void): () => void {
+    // 처음 다는 쪽이면 지금 값부터 견준다(듣는 쪽이 없던 동안은 맞추지 않았다)
+    if (!this.hoverCbs.size && !this.disposed && typeof cb === 'function') this.hoverCheck();
+    return this.listen(this.hoverCbs, cb);
+  }
+
+  /**
+   * 0.103.0 지금 측정 미리 보기를 마지막으로 견준 것과 견주어 맞추고, 값이 바뀌었으면 지금 measureHoverSnap(없어졌으면 null)을, 같으면 undefined를 돌려준다.
+   * 미리 보기 객체·측정 모드·찍은 점 1개 여부가 그대로면 셈하지 않는다
+   */
+  private hoverCheck(): MeasureHoverSnap | null | undefined {
+    const s = this.hoverSeen;
+    const pick = this.measuring ? this.measureHover : null;
+    const one = this.measurePts.length === 1;
+    if (pick === s.pick && one === s.one) return undefined;
+    s.pick = pick;
+    s.one = one;
+    const snap = this.measureHoverSnap;
+    const key = snap ? JSON.stringify([snap, this.measureHoverLock]) : '';
+    if (key === s.key) return undefined;
+    s.key = key;
+    return snap;
+  }
+
+  /**
    * 0.32.0 앱이 포인터를 맡는 훅: 캔버스를 누를 때마다(마우스·펜·손가락, 앱이 보내는 합성 사건도) claim에 묻는다 — 누른 순간('down')에 묻고,
    * 맡지 않은 마우스·펜·한 손가락이 끌기 시작 거리를 넘는 순간('drag')에 한 번 더 묻는다. true를 돌려주면 그 포인터는 뗄 때까지 앱 것이다:
    * 코어는 그 포인터로 궤도·이동·걷기 둘러보기·핀치·고르기·측정 점 찍기·측정 미리 보기·두 번 누르기 판별을 하지 않고 움직임·떼기를 move·end로 넘긴다
@@ -5294,7 +5335,7 @@ export class Viewer3d {
 
   /**
    * 측정 중 커서 아래 붙잡을 점과 그 종류(0.8.0 — 앱이 상태 줄에 "끝점·가운데 점·중심"을 보일 때), 축 붙잡기면 그 축(0.9.0).
-   * 측정 중이 아니거나 없으면 null
+   * 측정 중이 아니거나 없으면 null. 0.103.0 값이 바뀐 그림 뒤 onMeasureHoverChange가 알린다(포인터 밖에서 다시 구하거나 버린 것도)
    */
   get measureHoverSnap(): MeasureHoverSnap | null {
     const h = this.measuring ? this.measureHover : null;
@@ -9655,6 +9696,11 @@ export class Viewer3d {
       this.lastCamKey = key;
       const c = this.getCamera();
       this.emit(this.camCbs, (cb) => cb(c));
+    }
+    // 0.103.0 측정 미리 보기 값이 바뀌었으면 이 그림 뒤 한 번(듣는 쪽이 없으면 셈하지 않는다 — 카메라 알림 안의 dispose는 목록을 비운다)
+    if (this.hoverCbs.size) {
+      const snap = this.hoverCheck();
+      if (snap !== undefined) this.emit(this.hoverCbs, (cb) => cb(snap));
     }
   }
 
