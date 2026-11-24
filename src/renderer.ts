@@ -441,10 +441,47 @@ interface TexRec {
   /** missing(0.25.0) = 코어가 원본을 놓은 무늬를 다시 올려야 하는데 앱이 아직 주지 않음, restoring = 앱이 다시 준 원본을 푸는 중(restoreTexture) */
   state: 'queued' | 'decoding' | 'ready' | 'failed' | 'missing' | 'restoring';
   bytes: number;
+  /** 0.95.0 앱이 setTexture로 준 마지막 부름 번호(없으면 undefined — 늦게 끝난 앞 부름을 버린다) */
+  app?: number;
 }
 
 /** 앱이 다시 주는 무늬 원본(0.25.0 — Viewer3d.restoreTexture): 그림 파일 바이트, 푼 그림, 또는 Texture3d와 같은 꼴 */
 export type TextureSource = Uint8Array | ImageBitmap | Pick<Texture3d, 'data' | 'bitmap' | 'mime' | 'width' | 'height'>;
+
+/**
+ * 0.95.0 앱이 장면을 올린 뒤 주는 무늬 그림(Viewer3d.setTexture): TextureSource 꼴에 alpha(이 그림이 투명한 화소를 쓰는지 — 주면 장면 Texture3d.alpha 대신)를 더했다
+ */
+export type TextureUpdate = TextureSource | Pick<Texture3d, 'data' | 'bitmap' | 'mime' | 'width' | 'height' | 'alpha'>;
+
+/** 0.95.0 푼 그림(ImageBitmap) 꼴 — 닫기 함수와 너비 수가 있는 객체(restoreTexture와 같은 판단) */
+function isBitmap(x: unknown): x is ImageBitmap {
+  return !!x && typeof (x as ImageBitmap).close === 'function' && typeof (x as ImageBitmap).width === 'number';
+}
+
+/**
+ * 0.95.0 setTexture가 받는 그림: 그림 바이트(길이가 있는 Uint8Array)나 푼 그림이 있어야 한다(없으면 null — 받지 않는다). 선택 필드는 꼴이 맞을 때만
+ * (mime 글, width·height 유한한 양수, alpha 참·거짓 — 아니면 주지 않은 것)
+ */
+function textureUpdateOf(src: unknown): { data?: Uint8Array; bitmap?: ImageBitmap; mime?: string; width?: number; height?: number; alpha?: boolean } | null {
+  if (src instanceof Uint8Array) return src.length ? { data: src } : null;
+  if (isBitmap(src)) return { bitmap: src };
+  if (!src || typeof src !== 'object') return null;
+  const s = src as Record<string, unknown>;
+  const data = s.data instanceof Uint8Array && s.data.length ? s.data : undefined;
+  const bitmap = isBitmap(s.bitmap) ? s.bitmap : undefined;
+  if (!data && !bitmap) return null;
+  const pos = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+  return { data, bitmap, mime: typeof s.mime === 'string' ? s.mime : undefined, width: pos(s.width), height: pos(s.height), alpha: typeof s.alpha === 'boolean' ? s.alpha : undefined };
+}
+
+/** 0.95.0 받지 않는 setTexture 그림의 푼 그림을 닫는다(코어가 맡은 그림 — 이미 닫혔으면 그대로) */
+export function closeTextureUpdate(src: unknown): void {
+  try {
+    textureUpdateOf(src)?.bitmap?.close();
+  } catch {
+    // 이미 닫혔다
+  }
+}
 
 /**
  * GPU 버퍼 열쇠(0.25.0): 배열과 무관한 객체. 같은 배열 객체는 같은 열쇠다(배열 → 열쇠는 약한 표라 배열을 붙잡지 않는다).
@@ -1226,6 +1263,12 @@ export class Renderer3d {
   private laid = new WeakMap<Mesh3d, MeshLayout>();
   /** 0.25.0 코어가 원본을 지운 무늬 객체(문맥을 잃어도 남는다) */
   private texLaid = new WeakSet<Texture3d>();
+  /** 0.95.0 앱이 setTexture로 그림을 준 무늬 객체(문맥을 잃어도 남는다 — 다시 맞출 때 장면 그림을 풀지 않고 앱을 기다린다. 코어는 준 그림을 붙잡지 않는다) */
+  private texGiven = new WeakSet<Texture3d>();
+  /** 0.95.0 앱이 setTexture로 정한 무늬 알파(무늬 객체마다 — 없으면 Texture3d.alpha. 문맥을 잃어도 남는다) */
+  private texAlphaSet = new WeakMap<Texture3d, boolean>();
+  /** 0.95.0 setTexture 부름 번호 */
+  private texAppSeq = 0;
   /** 0.25.0 나눠 올리는 장면에서 아직 차례가 오지 않은 그물에 앱이 다시 준 배열(차례가 오면 쓴다) */
   private restoreQ = new Map<string, MeshArrays>();
   private vaos = new Set<WebGLVertexArrayObject>();
@@ -4474,7 +4517,8 @@ export class Renderer3d {
     } else count = nv - (nv % 3);
     if (!light) gl.bindVertexArray(null);
     const uv = m.texture && this.texSrc.has(m.texture) ? attrs.uvN : 0;
-    const texAlpha = uv > 0 && this.texSrc.get(m.texture!)!.alpha === true;
+    // 0.95.0 무늬 알파는 앱이 setTexture로 정한 값이 앞선다(없으면 Texture3d.alpha — 0.94.0과 같다)
+    const texAlpha = uv > 0 && this.texAlphaOf(this.texSrc.get(m.texture!)!);
     let transparent = m.color[3] < 0.999 || texAlpha;
     if (hasColors && !transparent) {
       // 정점 색에 반투명이 있으면 투명 차례에 그린다(앞 몇천 개만 본다)
@@ -4494,7 +4538,7 @@ export class Renderer3d {
     const bcol = m.backColor && m.backColor.length >= 3 ? m.backColor : null;
     // 0.26.0 뒷면 무늬 좌표 축척·이동: 따로 준 backUvs면 backUvTransform, uvs를 함께 쓰면 uvTransform
     const buvT = buv ? uvTransformOf(ownBack ? m.backUvTransform : m.uvTransform) : null;
-    const back = bcol || buv ? { color: bcol, tex: buv ? m.backTexture! : null, uv: buv, texAlpha: buv > 0 && this.texSrc.get(m.backTexture!)!.alpha === true, uvT: buvT } : null;
+    const back = bcol || buv ? { color: bcol, tex: buv ? m.backTexture! : null, uv: buv, texAlpha: buv > 0 && this.texAlphaOf(this.texSrc.get(m.backTexture!)!), uvT: buvT } : null;
     if (back?.texAlpha) transparent = true;
     const lay = this.layoutOf(m, nv, attrs, ownBack);
     const miss = lay ? layoutMiss(lay, { normals: !!attrs.nrm, uv: !!attrs.uv, buv: !!attrs.buv }) : null;
@@ -4936,13 +4980,14 @@ export class Renderer3d {
     const maxSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
     const sides = textureSides([...used.values()], Math.max(1, Math.min(maxSize, this.textureLimit)), this.textureBudget);
     // 0.25.0: 코어가 원본을 지운 무늬(문맥을 잃었다 되찾음 등)는 풀지 않고 앱이 다시 줄 때까지 기다린다(그동안 그물은 color).
-    // 0.38.0: 앱이 나중에 주는 무늬(pending — 그림 바이트·푼 그림이 없다)도 같은 상태로 기다린다(restoreTexture가 받는다)
+    // 0.38.0: 앱이 나중에 주는 무늬(pending — 그림 바이트·푼 그림이 없다)도 같은 상태로 기다린다(restoreTexture가 받는다).
+    // 0.95.0: 앱이 setTexture로 그림을 준 무늬도 기다린다 — 코어는 준 그림을 붙잡지 않고, 장면 그림 바이트는 앱이 바꾼 그림이 아니다
     for (const t of fresh)
       this.textures.set(t.id, {
         src: t,
         side: sides.get(t.id) ?? TEXTURE_LIMIT,
         tex: null,
-        state: (this.texLaid.has(t) || t.pending === true) && !t.data?.length && !t.bitmap ? 'missing' : 'queued',
+        state: this.texGiven.has(t) || ((this.texLaid.has(t) || t.pending === true) && !t.data?.length && !t.bitmap) ? 'missing' : 'queued',
         bytes: 0,
       });
     this.pumpTextures();
@@ -5023,6 +5068,98 @@ export class Renderer3d {
     );
   }
 
+  /**
+   * 0.95.0 앱이 장면을 올린 뒤 준 무늬 그림을 풀어 올린다(Viewer3d.setTexture). restoreTexture와 달리 그 무늬의 상태와 상관없이 받는다:
+   * 올린 그림이 없으면(기다림·풀지 못함·코어가 장면 그림을 줄 세우거나 푸는 중) restoring으로 두고 — 코어가 푸는 장면 그림은 버린다(pumpTextures) —,
+   * 올린 그림이 있으면 그 그림을 그대로 그리다가 새 그림을 올리고 앞 GL 무늬를 지운다. 긴 변은 처음 올릴 때와 같은 한도, 받은 ImageBitmap은 다 쓰면(받지 않을 때도) 닫는다.
+   * 같은 무늬에 더 나중 부름이 있으면 앞 부름은 버린다(false). alpha를 주면 올린 순간에 그 값으로 정한다(applyTexAlpha). 풀지 못하면 false —
+   * 올린 그림이 있으면 그대로, 없으면 기다린다(missing). 올렸으면 true
+   */
+  setTexture(id: string, src: TextureUpdate): Promise<boolean> {
+    const o = textureUpdateOf(src);
+    const bmp0 = o?.bitmap ?? null;
+    const close = (): void => {
+      try {
+        bmp0?.close();
+      } catch {
+        /* 이미 닫혔다 */
+      }
+    };
+    const rec = typeof id === 'string' ? this.textures.get(id) : undefined;
+    if (!o || !rec || this.gl.isContextLost()) {
+      close();
+      return Promise.resolve(false);
+    }
+    const s = rec.src;
+    const seq = ++this.texAppSeq;
+    rec.app = seq;
+    this.texGiven.add(s);
+    if (rec.state !== 'ready') rec.state = 'restoring';
+    const t: Texture3d = { id: s.id, data: o.data, bitmap: o.bitmap, mime: o.mime ?? s.mime, width: o.width ?? s.width, height: o.height ?? s.height };
+    /** 이 부름이 아직 그 무늬의 마지막 부름인지(무늬를 빼거나 문맥을 잃으면 기록이 바뀐다) */
+    const live = (): boolean => this.textures.get(s.id) === rec && rec.app === seq && !this.gl.isContextLost();
+    return decodeTexture(t, rec.side).then(
+      (bmp) => {
+        close();
+        if (!live()) {
+          bmp.close();
+          return false;
+        }
+        const old = rec.state === 'ready' ? rec.tex : null;
+        let ok = false;
+        let ms = 0;
+        try {
+          ms = this.uploadTexture(rec, bmp);
+          if (old && old !== rec.tex) this.gl.deleteTexture(old);
+          rec.state = 'ready';
+          ok = true;
+        } catch {
+          if (old) rec.tex = old;
+          else rec.state = 'missing';
+        } finally {
+          bmp.close();
+        }
+        if (ok && o.alpha !== undefined) this.applyTexAlpha(s, o.alpha);
+        this.onTexture?.(ms);
+        return ok;
+      },
+      () => {
+        close();
+        if (live() && rec.state !== 'ready') rec.state = 'missing';
+        return false;
+      },
+    );
+  }
+
+  /** 0.95.0 무늬 알파: 앱이 setTexture로 정한 값, 없으면 Texture3d.alpha가 true인지 */
+  private texAlphaOf(t: Texture3d): boolean {
+    const a = this.texAlphaSet.get(t);
+    return a === undefined ? t.alpha === true : a;
+  }
+
+  /**
+   * 0.95.0 앱이 정한 무늬 알파(setTexture): 그 무늬를 칠한 그물 기록 가운데 앞·뒷면 무늬 알파가 바뀌는 것만 setMesh와 같은 길(installMesh — 버퍼는 물려받고
+   * 그리기 뼈대·잘라내기 덩어리는 그 기록만 고친다)로 다시 만든다. 반투명 차례·잘린 면 채우기·주변 가림·외곽선·같은 그물 묶음(인스턴싱)은 기록을 만들 때(meshRec)와 그리기마다
+   * 정하므로 장면 alpha와 같은 규칙이 된다. 프레임을 넘어 두는 그림자 깊이 그림은 다시 그리게 한다(드리우는 그물이 바뀐다). 다시 만든 기록 수
+   */
+  private applyTexAlpha(t: Texture3d, alpha: boolean): number {
+    this.texAlphaSet.set(t, alpha);
+    const id = t.id;
+    let n = 0;
+    for (let k = 0; k < this.meshes.length; k++) {
+      const r = this.meshes[k]!;
+      if ((r.tex === id && r.texAlpha !== alpha) || (r.back?.tex === id && r.back.texAlpha !== alpha)) {
+        this.installMesh(r.src, k);
+        n++;
+      }
+    }
+    if (n) {
+      this.gl.bindVertexArray(null);
+      if (this.shadowMap) this.shadowMap.version = -1;
+    }
+    return n;
+  }
+
   /** 줄 선 무늬를 TEXTURE_DECODES장까지 풀기 시작한다 */
   private pumpTextures(): void {
     if (this.decoding >= TEXTURE_DECODES) return;
@@ -5036,6 +5173,13 @@ export class Renderer3d {
         (bmp) => {
           if (gen !== this.texGen || this.textures.get(rec.src.id) !== rec || this.gl.isContextLost()) {
             bmp.close();
+            return;
+          }
+          // 0.95.0 푸는 동안 앱이 setTexture로 이 무늬를 맡았으면(상태가 decoding이 아니다) 장면 그림은 버린다
+          if (rec.state !== 'decoding') {
+            bmp.close();
+            this.decoding--;
+            this.pumpTextures();
             return;
           }
           let ms = 0;
@@ -5056,6 +5200,12 @@ export class Renderer3d {
         },
         () => {
           if (gen !== this.texGen || this.textures.get(rec.src.id) !== rec) return;
+          // 0.95.0 앱이 맡은 무늬는 실패로 적지 않는다(앱 그림의 결과를 따른다)
+          if (rec.state !== 'decoding') {
+            this.decoding--;
+            this.pumpTextures();
+            return;
+          }
           rec.state = 'failed';
           this.decoding--;
           this.pumpTextures();

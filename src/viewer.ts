@@ -230,9 +230,11 @@ import {
   type RenderStats,
   type TextureSource,
   type TextureStats,
+  type TextureUpdate,
   INSTANCE_MIN,
   type MergeKitState,
   Renderer3d,
+  closeTextureUpdate,
   loadMergeKit,
   mergeKitState,
 } from './renderer';
@@ -2868,12 +2870,36 @@ export class Viewer3d {
    * 또는 { data, bitmap, mime, width, height }. 처음 올릴 때와 같은 크기 한도로 풀어 올리고 다시 그린다. 원본은 붙잡지 않는다.
    * 올렸으면 true로 풀리는 약속(기다리는 무늬가 아니거나 풀지 못하면 false — 풀지 못하면 다시 기다린다).
    * 0.38.0: 장면에서 Texture3d.pending으로 둔 무늬(앱이 장면을 올린 뒤에 주는 그림 — 손질한 무늬 등)도 기다리는 무늬다. 문맥을 잃지 않아도 setScene 뒤 언제든 준다.
-   * 코어가 붙잡지 않으므로 문맥을 잃었다 되찾으면 다시 기다린다(onContextRestore의 need.textures에 든다). 이미 올린 무늬를 바꾸는 길은 아니다(그때는 false)
+   * 코어가 붙잡지 않으므로 문맥을 잃었다 되찾으면 다시 기다린다(onContextRestore의 need.textures에 든다). 이미 올린 무늬를 바꾸는 길은 아니다(그때는 false —
+   * 바꾸거나 alpha를 함께 정하려면 0.95.0 setTexture)
    */
   restoreTexture(id: string, src: TextureSource): Promise<boolean> {
     if (!this.gpu) return Promise.resolve(false);
     // 0.29.0: 되찾은 뒤에는 무늬마다 다시 그리지 않으므로(푸는 무늬가 다 끝날 때 한 번) 풀지 못한 무늬가 마지막이었으면 여기서 그린다
     return this.renderer.restoreTexture(id, src).then((ok) => {
+      if (!ok && !this.disposed && !this.lost && !this.renderer.texturesBusy) this.invalidate();
+      return ok;
+    });
+  }
+
+  /**
+   * 장면을 올린 뒤 앱이 손질한 무늬 그림을 준다(0.95.0 — SKP 요청: 첫 그림 앞의 무늬 손질을 첫 그림 뒤로). restoreTexture와 같은 꼴·같은 열쇠(무늬 id)에
+   * alpha를 더했고, 문맥 복구가 아닐 때도 그 무늬의 상태와 상관없이 받는다: 기다리는 무늬(Texture3d.pending·놓은 원본)는 풀어 올리고, 이미 올렸거나 코어가 장면 그림을
+   * 푸는 중인 무늬는 이 그림으로 바꾼다(바꾸는 동안은 앞 그림을 그리고, 코어가 풀던 장면 그림은 버린다). 처음 올릴 때와 같은 긴 변 한도로 풀어 올리고 다시 그린다.
+   * src = 그림 파일 바이트(Uint8Array), 푼 그림(ImageBitmap), 또는 { data, bitmap, mime, width, height, alpha }. 받은 ImageBitmap은 다 쓰면(받지 않을 때도) 닫는다.
+   * alpha(이 그림이 투명한 화소를 쓰는지)를 주면 장면 Texture3d.alpha 대신 그 값으로 — 올린 그리기부터 그 무늬를 칠한 그물(앞·뒷면)의 반투명 차례·그림자·잘린 면 채우기·
+   * 같은 그물 묶음을 장면 alpha와 같은 규칙으로 다시 정한다. 장면 객체는 고치지 않고, 그 무늬 객체를 쓰는 동안(setMesh·같은 객체로 다시 setScene·문맥 복구) 남는다.
+   * 주지 않으면 앞서 정한 값(없으면 장면 alpha). 올렸으면 true로 풀리는 약속. false: 장면 그물이 쓰지 않는 무늬 id(무늬 좌표가 있는 그물이 쓸 때만 받는다)·
+   * 그림이 없는 값(길이 0 바이트 포함)·없앤 뒤·문맥을 잃은 동안·같은 무늬에 더 나중 부름이 앞섬·풀지 못함(올린 그림이 있으면 그대로, 없으면 기다림 — restoreNeed에 든다).
+   * mime·width·height·alpha가 꼴이 틀리면 주지 않은 것이다. 코어는 준 그림을 붙잡지 않으므로 문맥을 잃었다 되찾으면 그 무늬는 장면에 그림 바이트가 있어도 다시 기다린다
+   * (onContextRestore의 need.textures — setTexture·restoreTexture로 다시 준다)
+   */
+  setTexture(id: string, src: TextureUpdate): Promise<boolean> {
+    if (!this.gpu) {
+      closeTextureUpdate(src);
+      return Promise.resolve(false);
+    }
+    return this.renderer.setTexture(id, src).then((ok) => {
       if (!ok && !this.disposed && !this.lost && !this.renderer.texturesBusy) this.invalidate();
       return ok;
     });
