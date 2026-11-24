@@ -2135,9 +2135,19 @@ export class Viewer3d {
   private faceKitWait = false;
   /**
    * 0.46.0 가상 커서(켰을 때만): 자리(CSS 화소)·지금 후보 차례·그 자리 측정 후보 목록, 고르기 모드면 커서 아래 고른 것,
-   * 켤 때 포인터 자리(모르면 켠 뒤 처음 본 자리 — 거기서 4화소 넘게 움직이면 끈다). 0.47.0 picks: 고르기 모드 겹친 후보(pickCycle일 때만, 아니면 빈 배열)
+   * 켤 때 포인터 자리(모르면 켠 뒤 처음 본 자리 — 거기서 4화소 넘게 움직이면 끈다). 0.47.0 picks: 고르기 모드 겹친 후보(pickCycle일 때만, 아니면 빈 배열).
+   * 0.98.0 stale: 후보를 구한 뒤 장면 조각이 바뀌었다(keySceneChanged — 다음 그림·Tab 앞에서 그 자리에서 다시 구한다, keyRecompute가 끈다)
    */
-  private keyCur: { x: number; y: number; index: number; list: KeyEntry[]; picks: PickDetail[]; pick: Pick3d | null; ptr: { x: number; y: number } | null } | null = null;
+  private keyCur: {
+    x: number;
+    y: number;
+    index: number;
+    list: KeyEntry[];
+    picks: PickDetail[];
+    pick: Pick3d | null;
+    ptr: { x: number; y: number } | null;
+    stale: boolean;
+  } | null = null;
   /** 0.46.0 바로 앞 포인터 이동 자리(캔버스를 떠나면 null — 가상 커서를 켤 때의 포인터 자리) */
   private lastPtr: { x: number; y: number } | null = null;
   /**
@@ -2521,6 +2531,9 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.clearTrack();
+    // 0.98.0 앱 pointsFor 기억(고르기 사본이 열쇠 — 남기면 새 장면의 같은 자리·id·삼각형에 앞 장면의 앱 점을 붙인다. setMesh·removeMesh는 sceneEdited가 비운다)과 가상 커서 후보
+    if (this.snapOpt) this.snapOpt.pfMemo = null;
+    this.keySceneChanged();
     this.bvhs = new WeakMap();
     this.parts = new WeakMap();
     this.boxes = new WeakMap();
@@ -2635,6 +2648,10 @@ export class Viewer3d {
     this.hi.clear();
     this.ranges.clear();
     this.segHi = null;
+    // 0.98.0 setScene처럼 고르기 후보 미리 강조·면 표식 기억을 풀고(0.97.0은 pickPreview가 비운 장면의 후보를 돌려주었다) 가상 커서 후보를 다시 구하게 한다
+    this.pickPrev = null;
+    this.faceMemo = [];
+    this.keySceneChanged();
     this.measurePts = [];
     this.measureHover = null;
     this.inferLock = null;
@@ -3169,8 +3186,9 @@ export class Viewer3d {
     this.allBox = box;
     if (moved || hadOrigin !== this.usesOrigin) this.rebuildGrid();
     if (this.snapOpt) this.snapOpt.pfMemo = null;
-    // 측정 미리 보기는 그 커서 자리에서 바뀐 그물로 다시 구한다(찍은 점은 그대로)
+    // 측정 미리 보기는 그 커서 자리에서 바뀐 그물로 다시 구한다(찍은 점은 그대로). 0.98.0 가상 커서 후보도(미리 보기가 없던 측정 모드·고르기 모드)
     this.rehover();
+    this.keySceneChanged();
     if (moved && this.sec) this.emitSection();
     this.invalidate();
   }
@@ -4013,6 +4031,9 @@ export class Viewer3d {
     this.visBox = this.fitBx = this.shBx = null;
     this.visLists = null;
     this.cutDirty = true;
+    // 0.98.0 측정 미리 보기는 메시 바꾸기·빼기처럼 그 커서 자리에서 다시 구하고(0.97.0은 마우스를 옮길 때까지 숨긴 묶음·구간의 붙잡기 표식을 그렸다) 가상 커서 후보도 다시 구하게 한다
+    this.rehover();
+    this.keySceneChanged();
     this.invalidate();
   }
 
@@ -4573,6 +4594,8 @@ export class Viewer3d {
     this.secSync();
     this.wheelAnchor = null;
     if (this.measuring) this.measureHover = null;
+    // 0.98.0 가상 커서 후보는 다음 그림에서 그 자리에서 다시 구한다(0.97.0은 잘린 후보를 Tab으로 알리고 표식으로 그렸다)
+    this.keySceneChanged();
     this.invalidate();
     this.emitSection();
   }
@@ -6223,6 +6246,8 @@ export class Viewer3d {
       this.wheelAnchor = null;
     }
     if (this.measuring) this.measureHover = null;
+    // 0.98.0 가상 커서 후보도(행렬로 옮긴 묶음·고르지 않게 한 묶음 — 0.97.0은 옛 자리 선분을 그었다)
+    this.keySceneChanged();
     this.invalidate();
   }
 
@@ -8560,6 +8585,7 @@ export class Viewer3d {
   private keyRecompute(keep = false): void {
     const c = this.keyCur;
     if (!c) return;
+    c.stale = false;
     if (this.measuring) {
       const shown = keep ? (c.list[c.index]?.pick ?? null) : null;
       c.list = this.keyCandidates(c.x, c.y, KEY_POINTER, KEY_CANDIDATES_MAX);
@@ -8587,6 +8613,15 @@ export class Viewer3d {
     }
   }
 
+  /**
+   * 0.98.0 장면 조각이 바뀌었다(setScene·clear·setMesh·removeMesh·보이기·구간 숨김·단면·겉모습): 켜진 가상 커서의 후보(측정 후보 목록·겹친 고르기 후보·고른 것)는
+   * 그때의 장면으로 구한 것이라, 다음 그림과 Tab 앞에서 그 자리에서 다시 구하게 표시한다(같은 후보가 남았으면 그 차례 — 알리지 않는다. 0.97.0은 커서를 옮길 때까지 앞 장면 후보를
+   * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로)
+   */
+  private keySceneChanged(): void {
+    if (this.keyCur) this.keyCur.stale = true;
+  }
+
   /** 가상 커서 후보 수: 측정 모드는 측정 후보, 고르기 모드는 pickCycle일 때 겹친 고르기 후보(아니면 0 — 0.46.0) */
   private keyCount(c: NonNullable<Viewer3d['keyCur']>): number {
     return this.measuring ? c.list.length : this.keySnap?.pickCycle ? c.picks.length : 0;
@@ -8610,7 +8645,7 @@ export class Viewer3d {
   /** 가상 커서를 켠다(캔버스 가운데) */
   private keyStart(): void {
     const lp = this.lastPtr;
-    this.keyCur = { x: this.cssW / 2, y: this.cssH / 2, index: 0, list: [], picks: [], pick: null, ptr: lp ? { x: lp.x, y: lp.y } : null };
+    this.keyCur = { x: this.cssW / 2, y: this.cssH / 2, index: 0, list: [], picks: [], pick: null, ptr: lp ? { x: lp.x, y: lp.y } : null, stale: false };
     this.keyRecompute();
     this.invalidate();
     this.keyAnnounce('start');
@@ -8743,6 +8778,8 @@ export class Viewer3d {
         // 커서가 켜진 측정 모드에서만(그 밖의 Tab은 브라우저 초점 이동 그대로 — 키보드 덫을 만들지 않는다).
         // 0.47.0: 고르기 모드도 pickCycle이면 겹친 고르기 후보를 돌린다(끄면 0.46.0처럼 초점 이동)
         if (!c || (!this.measuring && !ks.pickCycle)) return false;
+        // 0.98.0 장면 조각이 바뀐 뒤 그리기 전이면 그 자리 후보를 먼저 다시 구한다(보이던 후보의 다음 차례로)
+        if (c.stale) this.keyRecompute(true);
         const n = this.keyCount(c);
         if (n) {
           c.index = (c.index + (a.action === 'next' ? 1 : -1) + n) % n;
@@ -9438,6 +9475,8 @@ export class Viewer3d {
       // 0.16.0 끌어온 축: 점 붙잡기 위 머무르기(켰을 때만)
       if (this.tracker) this.dwell(this.measureHover, this.lastHoverAt);
     }
+    // 0.98.0 장면 조각이 바뀐 뒤 가상 커서 후보를 그 자리에서 다시 구한다(알리지 않는다 — 위 'refresh' 길이 이미 구했으면 표시가 꺼져 있다)
+    if (this.keyCur?.stale) this.keyRecompute(true);
     if (this.renderer.uploading) {
       const up = this.upload;
       const sceneUp = !!this.renderer.uploadProgress;
