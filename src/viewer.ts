@@ -2893,6 +2893,7 @@ export class Viewer3d {
 
   /**
    * 그래픽 문맥을 잃었을 때 부른다(0.25.0 — 놓기 선택과 무관). 되찾을 때까지 화면을 다시 그리지 않는다(앱은 안내를 보일 수 있다).
+   * 0.114.0 그동안 toBlob은 선택이 없어도 Error로 거절한다(renderImage는 던진다 — 빈 그림을 풀지 않는다).
    * 브라우저가 문맥을 되찾으면 onContextRestore가 온다. 해제 함수를 돌려준다
    */
   onContextLost(cb: () => void): () => void {
@@ -6631,12 +6632,14 @@ export class Viewer3d {
    * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다.
    * 0.89.0 dispose 뒤에는 선택이 없어도 선택을 준 toBlob과 같은 Error로 거절한다(0.88.0은 놓은 캔버스 그대로를 그림으로 풀어 주었다).
    * 0.93.0 null은 주지 않은 것(화면 그림 PNG — 0.92.0은 화면 밖 선택 길에서 TypeError로 거절). 글이 아닌 형식은 기본 형식(PNG)이다
+   * 0.114.0 문맥을 잃은 동안(webglcontextlost부터 webglcontextrestored까지)에도 선택이 없어도 같은 Error로 거절한다(0.113.0은 그리지 못한 빈 캔버스와 덧그림을 그림으로 풀어 주었다).
+   * 되찾은 뒤에는 첫 그림 전이어도 다시 올린 장면을 그려 푼다
    */
   toBlob(type: string | SnapshotOptions = 'image/png', quality?: number): Promise<Blob> {
-    if (this.disposed) return Promise.reject(new Error(NO_GL_SNAPSHOT));
+    if (!this.gpu) return Promise.reject(new Error(NO_GL_SNAPSHOT));
     if (type && typeof type === 'object') return this.snapshotBlob(type);
     // 나눠 올리는 중이면 그림에는 다 올린 장면을 담는다
-    if (this.gpu && this.renderer.uploading) this.pumpUpload(Infinity);
+    if (this.renderer.uploading) this.pumpUpload(Infinity);
     this.renderNow();
     const c = document.createElement('canvas');
     c.width = this.canvas.width;
