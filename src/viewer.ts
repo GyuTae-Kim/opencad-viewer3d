@@ -3523,7 +3523,7 @@ export class Viewer3d {
    * 같은 그림). 불투명 면·외곽선 깊이·윤곽선·삼각형 변·숨은 점선을 모으고, 단면이 있을 때·반투명 면·묶음 안 구간(setHiddenRanges·highlightRanges)이 있는 그물·
    * 그림자를 쓸 때의 면은 0.41.0처럼 그물마다다. false면 끄고, { min }이면 하한(2 이상)을 바꾸고, true면 기본으로 켠다. 모은 묶음은 장면 차례와 다른 차례로 그리므로
    * 서로 다른 그물이 같은 깊이로 겹치는 곳(맞닿은 면, 반투명 모서리 선이 엇갈린 몇 화소)은 보이는 쪽·섞임이 끔과 다를 수 있다
-   * 0.43.0 pbr(기본 켬): Mesh3d의 PBR 필드(normalTexture·roughness·metallic·metallicRoughnessTexture 등)를 쓴다. false·null이면 끄고 그 그물도 0.42.0 셰이더 그대로 그린다
+   * 0.43.0 pbr(기본 켬): Mesh3d의 PBR 필드(normalTexture·roughness·metallic·metallicRoughnessTexture 등, 0.102.0 occlusionTexture)를 쓴다. false·null이면 끄고 그 그물도 0.42.0 셰이더 그대로 그린다
    * (그림은 그대로 올라가 있어 다시 켜면 바로 쓴다 — 휴대 기기에서 조각 셰이더 몫을 줄일 때). PBR 필드가 없는 그물은 켬·끔과 상관없이 0.42.0과 같다
    * 0.51.0 culling(기본 켬): 화면 밖 잘라내기 — 그물(삼각형 정점과 윤곽선 끝점의 범위를 모형·겉모습 행렬로 옮긴 상자)이 시야 옆 네 평면 가운데 하나의 확실히 바깥이면
    * 면·윤곽선·삼각형 변·숨은 점선·외곽선·주변 가림 깊이·반투명 면을 그리지 않는다(src/cull.ts — 화면에 화소를 내지 않는 그물이라 그림은 끔과 같다. 굵은 선 반폭·

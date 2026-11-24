@@ -27,7 +27,7 @@ export { COORD_LIMIT } from './bounds';
  * - 'colors': 정점 색이 정점 수보다 짧거나 유한하지 않은 값이 있다 → 정점 색을 쓰지 않고 color로 칠한다
  * - 'uvs': 무늬 좌표 길이가 정점 수와 맞지 않는다 → 무늬 없이 칠한다(0.49.0과 같음)
  * - 'color': color·backColor가 유한한 0 이상 수 셋·넷이 아니다 → 기본색(그물 회색, 선분·점은 테마 색)으로 — 뒷면 색은 쓰지 않는다
- * - 'material': roughness·metallic·normalScale·uvTransform이 유한하지 않다 → 그 값을 쓰지 않는다(기본)
+ * - 'material': roughness·metallic·normalScale·uvTransform(0.102.0 occlusionStrength도)이 유한하지 않다 → 그 값을 쓰지 않는다(기본)
  * - 'width': 선 굵기가 유한하지 않다 → 1
  * - 'size': 점 크기가 유한하지 않다 → 4
  * - 'ids': segmentIds·pointIds가 선분·점 수보다 짧다 → 모자란 뒤쪽은 배열 안 번호를 돌려준다(0.49.0과 같음)
@@ -384,7 +384,7 @@ export function checkMesh(m: Mesh3d, issues: SceneIssue[]): Mesh3d | null {
     add('color', c[0] === c[0] ? 'fixed' : 'ignored', 'backColor');
     put('backColor', c[0] === c[0] ? c : undefined);
   }
-  for (const k of ['roughness', 'metallic', 'normalScale'] as const)
+  for (const k of ['roughness', 'metallic', 'normalScale', 'occlusionStrength'] as const)
     if (m[k] !== undefined && !finite(m[k])) {
       add('material', 'ignored', k);
       put(k, undefined);

@@ -27,6 +27,7 @@
  *
  * 0.43.0 PBR 그림: 그물 기록이 PBR 필드(pbr.ts PbrSource)를 기억하고, 그 그림 id도 무늬 표(textures)에 들어 무늬 그림과 같은 길(예산·놓기·pending·복구)로 올린다.
  * 그리기마다 올라간 그림으로 상태(pbrState)를 정해 셰이더 변종(UV·NMAP·PBR)과 무늬 단위 6·7·8(없는 쪽은 흰 1화소 그림)을 건다. PBR 필드가 없는 그물은 늘 0.42.0 길이다.
+ * 0.102.0 가림 그림(occlusionTexture)도 같은 길이다 — 변종 정의 OCC(조각 셰이더 글은 variantSources가 withOcclusion으로 바꿔 만든다 — OCC가 없는 변종의 원본은 그대로)·무늬 단위 11.
  * 인스턴싱(0.42.0)은 그림자·단면 하나일 때도 면을 모은다 — 자리 자료에 그림자 행렬·로컬 평면을 더 쓴다(instMeshes)
  *
  * 0.44.0 묶음 안 구간 단면: 뷰어가 묶음 안 구간(ItemParts.prims·edges)에 그 구간만 더 자르는 평면 비트(RangePart.cut)를 붙여 넘긴다.
@@ -75,6 +76,7 @@ import {
   WIDE_VS,
   withClip,
   withDefines,
+  withOcclusion,
 } from './shaders';
 import {
   MERGE_AUTO_MIN,
@@ -551,6 +553,8 @@ export interface Prog {
   uv?: boolean;
   nmap?: boolean;
   pbr?: boolean;
+  /** 0.102.0 가림 그림 변종(OCC — 무늬 단위 11·u_occStr, 늘 UV와 함께) */
+  occ?: boolean;
   /** 0.52.0 묶어 그리기 변종(MERGE — INST 글에서 자리 번호를 정점 속성 a_item으로, 색도 자리 자료에서) */
   merge?: boolean;
 }
@@ -962,6 +966,8 @@ const INST_UNIT = 5;
 const NMAP_UNIT = 6, ROUGH_UNIT = 7, METAL_UNIT = 8;
 /** 0.49.0 주변 가림 그림을 읽는 무늬 단위(그림자 단위 2를 비우지 않게 따로 — 깊이 그림은 외곽선과 같은 1) */
 const AO_UNIT = 9;
+/** 0.102.0 재질 가림 그림(occlusionTexture) 무늬 단위 — 10은 묶음 자리 자료 저장소(mergegl STORE_UNIT, 프레임을 넘어 묶어 둔다)라 그다음 */
+const OCC_UNIT = 11;
 
 /** 0.42.0 인스턴싱 선택(Renderer3d.instancing): on = 켬(기본), min = 모아 그릴 같은 그물 자리 수 하한(2 이상) */
 export interface InstancingOptions {
@@ -984,6 +990,7 @@ function progFlags(defs: readonly string[]): Omit<Prog, 'p' | 'u'> {
     uv: defs.includes('UV'),
     nmap: defs.includes('NMAP'),
     pbr: defs.includes('PBR'),
+    occ: defs.includes('OCC'),
     merge: defs.includes('MERGE'),
   };
 }
@@ -995,8 +1002,9 @@ function variantSources(base: 'mesh' | 'wide' | 'thin' | 'point' | 'depth' | 'pr
   const v = withDefines(vs, ...defs);
   // 0.54.0 MERGE 변종은 묶음이 있을 때만 부른다(묶음은 조각이 와야 구우므로 조각이 있다 — 없으면 예외, 부르는 쪽은 그물마다 그린다)
   if (defs.includes('MERGE') && !mergeKit) throw new Error('MERGE 변종: 묶어 그리기 조각을 아직 받지 않았다');
-  // 0.62.0 그물 MERGE는 조각 셰이더도(강조 섞기 몫에 그물마다 강조 깃발 — 조각 mergeFrag)
-  const fd = withDefines(fs, ...defs);
+  // 0.62.0 그물 MERGE는 조각 셰이더도(강조 섞기 몫에 그물마다 강조 깃발 — 조각 mergeFrag).
+  // 0.102.0 그물 OCC(가림 그림)는 정의를 넣은 조각 글을 바꿔 만든다(원본 글에는 가림 줄이 없다 — OCC가 없는 변종의 글은 0.101.0 그대로)
+  const fd = base === 'mesh' && defs.includes('OCC') ? withOcclusion(withDefines(fs, ...defs)) : withDefines(fs, ...defs);
   if (!defs.includes('MERGE')) return [v, fd];
   return base === 'mesh' ? [mergeKit!.mergeShader(v, 'mesh'), mergeKit!.mergeFrag(fd)] : [mergeKit!.mergeShader(v, 'line'), fd];
 }
@@ -5355,6 +5363,7 @@ export class Renderer3d {
 
   /**
    * 0.43.0 PBR 변종(p.uv·p.nmap·p.pbr)의 그물마다 균일 변수와 그림(무늬 단위 6·7·8)을 건다. 무늬 그림 변종(TEX)이 아니면 무늬 좌표 값 수·축척도.
+   * 0.102.0 가림 변종(p.occ)은 가림 그림(단위 11)과 세기 u_occStr(상태에 가림 그림이 없으면 흰 1화소 그림·세기 0 — 가림 없음).
    * 끝나면 무늬 단위 0으로 돌려 둔다(무늬 그림 캐시 lastTex는 단위 0만 본다)
    */
   private pbrBind(p: Prog, r: MeshRec, st: PbrState | null, fm: UniMemo | null = null): void {
@@ -5379,6 +5388,12 @@ export class Renderer3d {
       gl.bindTexture(gl.TEXTURE_2D, this.readyTex(st?.metal ?? null) ?? w);
       const f = st?.factors;
       this.uf(fm, p, 'u_pbr', 3, f ? f[0] : 1, f ? f[1] : 0, f ? f[2] : 0);
+    }
+    if (p.occ) {
+      gl.activeTexture(gl.TEXTURE0 + OCC_UNIT);
+      const t = this.readyTex(st?.occ ?? null);
+      gl.bindTexture(gl.TEXTURE_2D, t ?? this.whiteTex());
+      this.uf(fm, p, 'u_occStr', 1, t ? (st?.occStrength ?? 1) : 0);
     }
     gl.activeTexture(gl.TEXTURE0);
   }
@@ -5759,6 +5774,7 @@ export class Renderer3d {
         this.ui(fm, p, 'u_rough', ROUGH_UNIT);
         this.ui(fm, p, 'u_metal', METAL_UNIT);
       }
+      if (p.occ) this.ui(fm, p, 'u_occ', OCC_UNIT);
       if (p.sun && light) {
         // 해 방향을 시점 공간으로(회전만)
         const v = f.view, d = light.dir;

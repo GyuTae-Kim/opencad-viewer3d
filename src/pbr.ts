@@ -8,6 +8,9 @@
  *   세기는 정규화 (n + 8)/8(Blinn-Phong 에너지 보존 어림)에 F0 = mix(0.04, 바탕색, 금속성)와 그 빛의 확산 세기·n·l을 곱한다.
  *   0.42.0 고정 지수 48은 r = √0.2 ≈ 0.447과 같다(PBR_DEFAULT_ROUGHNESS)
  * - 금속성 m: 확산광을 (1 − m)배로, 주변광 몫은 금속이 바탕색으로 되비춘다고 보고 m·주변광·바탕색을 더한다(검게 꺼지지 않게)
+ * - 0.102.0 가림 그림(occlusionTexture — glTF 2.0 occlusionTexture·strength, SketchUp 2025 재질 occlusion_texture): 빨강 채널 가림 a를 간접광에만 mix(1, a, 세기)로 곱한다.
+ *   이 빛 식의 간접광 = 법선과 상관없는 주변광 몫(고정 조명 바닥 0.30·해 조명 ambient, 금속이 되비추는 m·주변광). 보조광·해의 확산과 반사광(직접광)에는 곱하지 않는다(glTF 규칙).
+ *   세기 0이면 가림 칸을 넣지 않는다(그림도 올리지 않는다 — 가림 그림을 주지 않은 그물과 같다)
  */
 import type { Mesh3d } from './types';
 
@@ -29,6 +32,9 @@ export interface PbrSource {
   roughness: number | null;
   metallic: number | null;
   invert: boolean;
+  /** 0.102.0 가림 그림 id(occlusionTexture)와 세기(0 초과 1 이하) — 가림 그림을 주지 않았거나 세기 0이면 두 칸 모두 없다(0.101.0과 같은 정리 결과·그물 열쇠) */
+  occ?: string;
+  occStrength?: number;
 }
 
 /** 셰이더가 이번 그리기에 쓸 것(쓸 것이 없으면 pbrState가 null — 0.42.0 셰이더 그대로) */
@@ -44,14 +50,33 @@ export interface PbrState {
   factors: [number, number, number];
   /** 거칠기·금속성 빛 식(PBR 변종)을 쓰는지 — 법선 그림만이면 false(0.42.0 빛 식) */
   lit: boolean;
+  /** 0.102.0 가림 그림 id(올린 것만)와 세기 — 셰이더 u_occ·u_occStr(OCC 변종). 쓸 가림 그림이 없으면 두 칸 모두 없다 */
+  occ?: string;
+  occStrength?: number;
 }
 
 const str = (x: unknown): string | null => (typeof x === 'string' && x.length > 0 ? x : null);
 const unit = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : null);
 
-/** 그물의 PBR 필드를 정리한다(PBR 필드가 하나도 없으면 null — 0.42.0 그물) */
+/**
+ * 그물의 PBR 필드를 정리한다(PBR 필드가 하나도 없으면 null — 0.42.0 그물). 0.102.0 가림 세기는 거칠기·금속성 값처럼 0~1로 자르고 유한한 수가 아니면 기본 1,
+ * 0이면 가림 그림을 주지 않은 것으로 본다
+ */
 export function pbrSource(
-  m: Pick<Mesh3d, 'normalTexture' | 'normalScale' | 'normalFlipY' | 'roughness' | 'metallic' | 'metallicRoughnessTexture' | 'roughnessTexture' | 'metallicTexture' | 'roughnessInvert'>,
+  m: Pick<
+    Mesh3d,
+    | 'normalTexture'
+    | 'normalScale'
+    | 'normalFlipY'
+    | 'roughness'
+    | 'metallic'
+    | 'metallicRoughnessTexture'
+    | 'roughnessTexture'
+    | 'metallicTexture'
+    | 'roughnessInvert'
+    | 'occlusionTexture'
+    | 'occlusionStrength'
+  >,
 ): PbrSource | null {
   const mr = str(m.metallicRoughnessTexture);
   const s: PbrSource = {
@@ -64,14 +89,20 @@ export function pbrSource(
     metallic: unit(m.metallic),
     invert: m.roughnessInvert === true,
   };
-  return s.normal || s.rough || s.metal || s.roughness !== null || s.metallic !== null ? s : null;
+  const occ = str(m.occlusionTexture);
+  const os = unit(m.occlusionStrength) ?? 1;
+  if (occ && os > 0) {
+    s.occ = occ;
+    s.occStrength = os;
+  }
+  return s.normal || s.rough || s.metal || s.roughness !== null || s.metallic !== null || s.occ ? s : null;
 }
 
-/** 그물이 PBR 그림으로 쓰는 무늬 id(법선·거칠기·금속 — 겹친 것은 한 번) */
+/** 그물이 PBR 그림으로 쓰는 무늬 id(법선·거칠기·금속·0.102.0 가림 — 겹친 것은 한 번) */
 export function pbrTextureIds(s: PbrSource | null): string[] {
   if (!s) return [];
   const out: string[] = [];
-  for (const id of [s.normal, s.rough, s.metal]) if (id && !out.includes(id)) out.push(id);
+  for (const id of [s.normal, s.rough, s.metal, s.occ ?? null]) if (id && !out.includes(id)) out.push(id);
   return out;
 }
 
@@ -84,7 +115,8 @@ export function pbrNeedsUv(m: Parameters<typeof pbrSource>[0]): boolean {
  * 이번 그리기의 PBR 상태: ready(id) = 그 그림이 올라갔는지, uv = 무늬 좌표가 GPU에 있는지(없으면 그림은 쓰지 않는다).
  * 아직 올라가지 않은(기다리는·푸는 중·놓은) 그림은 없는 것처럼 본다 — 법선 그림이면 법선을 바꾸지 않고, 거칠기·금속 그림이면 값을 준 것만 쓴다.
  * 거칠기 값: 그림이 있으면 배율(없으면 1), 없으면 준 값(없으면 PBR_DEFAULT_ROUGHNESS). 금속성: 그림이 있으면 배율(없으면 1), 없으면 준 값(없으면 0).
- * 거칠기·금속성 그림도 값도 없으면 빛 식은 0.42.0 그대로(lit false)이고, 법선 그림까지 없으면 null
+ * 거칠기·금속성 그림도 값도 없으면 빛 식은 0.42.0 그대로(lit false)이고, 법선 그림까지 없으면 null.
+ * 0.102.0 가림 그림도 올라간 것만 쓴다(아직이면 가림 없음 — 세기 0과 같다). 가림 그림만 쓸 것이면 normal·rough·metal이 null이고 lit false인 상태에 occ만 둔다
  */
 export function pbrState(s: PbrSource | null, ready: (id: string) => boolean, uv: boolean): PbrState | null {
   if (!s) return null;
@@ -92,9 +124,10 @@ export function pbrState(s: PbrSource | null, ready: (id: string) => boolean, uv
   const normal = tex(s.normal);
   const rough = tex(s.rough);
   const metal = tex(s.metal);
+  const occ = tex(s.occ ?? null);
   const lit = !!rough || !!metal || s.roughness !== null || s.metallic !== null;
-  if (!normal && !lit) return null;
-  return {
+  if (!normal && !lit && !occ) return null;
+  const st: PbrState = {
     normal,
     scale: [s.normalScale, s.flipY ? -s.normalScale : s.normalScale],
     rough,
@@ -102,14 +135,20 @@ export function pbrState(s: PbrSource | null, ready: (id: string) => boolean, uv
     factors: [rough ? (s.roughness ?? 1) : (s.roughness ?? PBR_DEFAULT_ROUGHNESS), metal ? (s.metallic ?? 1) : (s.metallic ?? 0), rough && s.invert ? 1 : 0],
     lit,
   };
+  if (occ) {
+    st.occ = occ;
+    st.occStrength = s.occStrength ?? 1;
+  }
+  return st;
 }
 
-/** 셰이더 변종 정의(NMAP·PBR, 무늬 좌표를 읽는 UV) — 상태가 없으면 빈 목록 */
+/** 셰이더 변종 정의(NMAP·PBR·0.102.0 OCC — 다른 정의 뒤, 무늬 좌표를 읽는 UV) — 상태가 없으면 빈 목록 */
 export function pbrDefines(st: PbrState | null): string[] {
   if (!st) return [];
   const d = ['UV'];
   if (st.normal) d.push('NMAP');
   if (st.lit) d.push('PBR');
+  if (st.occ) d.push('OCC');
   return d;
 }
 

@@ -137,6 +137,18 @@ export interface Mesh3d {
   /** 0.43.0 거칠기 그림 값이 매끈함(1 − 거칠기)이면 true(SketchUp roughness_texture_invert) */
   roughnessInvert?: boolean;
   /**
+   * 0.102.0 PBR 가림(ambient occlusion) 그림 id(Scene3d.textures, 선택 — glTF 2.0 occlusionTexture, SketchUp 2025 재질 occlusion_texture). 빨강 채널이 가림이다
+   * (0 = 다 가림, 1 = 가리지 않음 — 회색조 그림이면 그대로, glTF처럼 금속·거칠기 그림과 한 장(빨강·초록·파랑)이어도 된다). 간접광 — 고정 조명의 바닥 밝기 0.30,
+   * 해 조명의 ambient, 금속이 되비추는 주변광 몫 — 에만 곱한다(보조광·해의 확산과 반사광에는 곱하지 않는다 — glTF 규칙). 화면 공간 가림(setAmbientOcclusion)을 켜면
+   * 그것은 0.49.0대로 그린 화소 전체에 또 곱한다. 무늬 좌표·앞면에만·쓰지 않는 모드와 아직 올라가지 않은 그림(가림 없음)은 normalTexture와 같다
+   */
+  occlusionTexture?: string;
+  /**
+   * 0.102.0 가림 세기 0~1(선택, 기본 1 — glTF occlusionTexture.strength): 간접광에 mix(1, 가림, 세기)를 곱한다. 범위 밖은 0~1로 자르고(roughness·metallic과 같다),
+   * 유한한 수가 아니면 기본 1(장면 알림 'material'). 0이면 가림 그림을 주지 않은 것과 같다(그림도 올리지 않는다)
+   */
+  occlusionStrength?: number;
+  /**
    * 0.65.0 false면 화면 맞춤 범위에 넣지 않는다(선택 — 기본 넣음): 전체 보기(fit·키 F·가운데 단추 두 번)·표준 뷰(setView·뷰 키·뷰 큐브)·첫 장면 맞춤·
    * 걷기 빠르기와 눈높이가 이 묶음을 빼고 맞춘다(보조선·보조점처럼 멀리 뻗는 묶음). 그리기·고르기·측정·가까운·먼 면·그림자는 그대로다. fitItems로 이 id를
    * 따로 주면 맞춘다. 기본 맞춤 규칙에서 아무것도 숨기지 않았으면 Scene3d.bounds를 그대로 쓴다(Scene3d.fitRange). setScene·setMesh 때 읽는다

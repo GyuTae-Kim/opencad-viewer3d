@@ -39,6 +39,9 @@
  *   화면 미분(dFdx·dFdy)으로 풀어(∂p/∂u·∂p/∂v) 법선에 맞춰 곧게 펴고, 손잡이는 ∂p/∂v 쪽으로 맞춘다(접선 속성이 늘지 않는다). PBR = 거칠기(u_rough 초록)·금속성(u_metal 파랑)
  *   그림 × 배율(u_pbr — 그림이 없으면 흰 1화소 그림이라 배율이 곧 값, z = 거칠기 뒤집기)로 반사광 지수 2/α² − 2(α = 거칠기²)·정규화 (n + 8)/8·F0 = mix(0.04, 바탕색, 금속성)·n·l,
  *   확산광 (1 − 금속성)배, 금속은 주변광 몫을 바탕색으로 되비춘다(둘레 빛 없는 어림 — 계산 근거는 pbr.ts). 뒷면 색·무늬를 칠하는 쪽(BACK)에는 쓰지 않는다
+ * - 가림 그림(OCC, 0.102.0 — 그물 조각 셰이더 변종, 가림 그림을 준 그물만): 원본 글(MESH_FS)에는 가림 줄이 없고 withOcclusion이 정의를 넣은 글을 바꿔 만든다(MERGE 꼴 —
+ *   가림 그림이 없는 길의 GL 셰이더 원본은 0.101.0과 글자까지 같다). 가림 그림 u_occ(빨강)·세기 u_occStr로 pOcc = mix(1, 가림, 세기)를 간접광 — 고정 조명 바닥 0.30·
+ *   해 조명 u_amb·PBR 금속이 되비추는 몫 — 에만 곱한다(직접광의 확산·반사광은 그대로). 뒷면 색·무늬를 칠하는 쪽은 PBR 그림과 같이 1
  * - 행렬·평면 한 배열(MVPC, 0.78.0 — 인스턴싱이 아닌 굵은 선·가는 선의 단면 하나): 그물마다 그리는 선의 시점 투영 · 모형 u_mvp와 로컬 평면 u_clip을 균일 변수 배열
  *   u_mvpc[5](열 0~3 = u_mvp, 4 = u_clip)로 한 번에 받아 같은 이름의 지역 변수로 둔다(INST와 같이 아래 식은 그대로 — 같은 float 값에 같은 연산). 그리기 하나의 GL 호출이
  *   넷(행렬·평면·VAO·그리기)에서 셋으로. 가는 선은 CLIP과 함께만 쓴다. 정의하지 않은 변종의 글은 예전과 전처리 뒤 글자까지 같다
@@ -50,6 +53,38 @@ export const withDefines = (src: string, ...names: string[]): string =>
 
 /** 셰이더 원본에 #define CLIP을 넣은 변종 */
 export const withClip = (src: string): string => withDefines(src, 'CLIP');
+
+/** 0.102.0 가림 변종이 버리기 앞(PBR 그림 읽기 뒤)에 넣는 줄: 가림 그림 읽기와 뒷면 재질 쪽(PBR 그림의 pbrSide와 같은 조건)의 1 */
+const OCC_READ = `  // 0.102.0 가림 그림(빨강 — glTF occlusionTexture): 간접광에 곱할 몫. 읽기는 버리기·갈래 앞에서, 뒷면 색·무늬를 칠하는 쪽은 1
+  float pOcc = mix(1.0, texture(u_occ, v_uv.xy / v_uv.z).r, u_occStr);
+#ifdef BACK
+  if (gl_FrontFacing == (u_flipFace > 0.5)) {
+#ifdef BACKTEX
+    pOcc = 1.0;
+#else
+    if (u_backColor.a >= 0.0) pOcc = 1.0;
+#endif
+  }
+#endif
+`;
+
+/**
+ * 0.102.0 가림 그림 변종(OCC — 그물 조각 셰이더 MESH_FS에 정의를 넣은 글만 받는다): 바꿀 자리를 찾아 가림 그림 균일 변수·읽기를 넣고 간접광 자리 다섯 —
+ * 고정 조명 바닥 0.30, PBR 금속이 되비추는 0.30, 해 조명 u_amb(PBR이 아닌 길 하나·PBR 둘) — 에 pOcc를 곱한다. 원본 글은 그대로라 OCC가 없는 변종의 GL 원본은 바뀌지 않는다.
+ * 자리 수가 맞지 않으면(원본 글이 바뀜) 던진다 — 부르는 쪽(asyncVariant)이 받아 그 문맥의 PBR 변종을 끈다
+ */
+export function withOcclusion(fs: string): string {
+  const swap = (s: string, from: string, to: string, n: number): string => {
+    const parts = s.split(from);
+    if (parts.length - 1 !== n) throw new Error(`가림 변종: 바꿀 자리 ${JSON.stringify(from.split('\n')[0])}가 ${parts.length - 1}번(${n}번이어야 한다)`);
+    return parts.join(to);
+  };
+  let s = swap(fs, '#ifdef NMAP\nuniform sampler2D u_nmap;', 'uniform sampler2D u_occ;\nuniform float u_occStr;\n#ifdef NMAP\nuniform sampler2D u_nmap;', 1);
+  s = swap(s, '#ifdef CLIP\n  if (v_clip > 0.0) discard;', `${OCC_READ}#ifdef CLIP\n  if (v_clip > 0.0) discard;`, 1);
+  s = swap(s, 'float dif = 0.30 + ', 'float dif = 0.30 * pOcc + ', 1);
+  s = swap(s, 'mtl * 0.30)', 'mtl * 0.30 * pOcc)', 1);
+  return swap(s, 'vec3(u_amb)', 'vec3(u_amb * pOcc)', 3);
+}
 
 export const MESH_VS = `#version 300 es
 precision highp float;
