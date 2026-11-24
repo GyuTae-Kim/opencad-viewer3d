@@ -2127,7 +2127,8 @@ export class Viewer3d {
   /** 0.54.0 고르기 후보 미리 강조(setPickPreview — 화면 덧그림만): 고른 것 사본과 앱 삼각형 구간 */
   private pickPrev: { pick: Pick3d; ranges: IndexRange[] | null } | null = null;
   /**
-   * 0.54.0 그물 면 미리 강조 셈 기억(덧그림은 프레임마다 그린다 — 같은 위치·색인 배열·삼각형·구간이면 다시 세지 않는다. 키보드 후보와 setPickPreview를 함께 두게 넷까지)
+   * 0.54.0 그물 면 미리 강조 셈 기억(덧그림은 프레임마다 그린다 — 같은 위치·색인 배열·삼각형·구간이면 다시 세지 않는다. 키보드 후보와 setPickPreview를 함께 두게 넷까지).
+   * 0.96.0 앱 구간이면 tri는 −1(셈이 맞은 삼각형과 상관없다 — 같은 면의 다른 삼각형도 같은 열쇠). setScene·제자리 고침(setMesh vertices)이면 버린다
    */
   private faceMemo: { pos: ArrayLike<number>; idx: ArrayLike<number> | undefined; tri: number; ranges: string | null; out: FaceOutline | null }[] = [];
   /** 0.54.0 면 셈 조각을 기다리는지(오면 다시 그린다 — 한 번만 건다) */
@@ -2707,6 +2708,8 @@ export class Viewer3d {
           forgetBounds(a);
           this.bvhs.delete(a);
           this.parts.delete(a);
+          // 0.96.0 그 배열의 면 미리 강조 셈 기억도(앱 구간 열쇠는 맞은 삼각형과 상관없어 남기면 고치기 전 테두리가 같은 면 다른 삼각형에도 나온다)
+          this.faceMemo = this.faceMemo.filter((x) => x.pos !== a);
           for (const it of this.items.values())
             if (it.item.positions === a) {
               this.boxes.delete(it.item);
@@ -9784,7 +9787,9 @@ export class Viewer3d {
   }
 
   /**
-   * 0.54.0 그물 면 미리 강조 셈(같은 위치·색인 배열·삼각형·구간이면 기억에서 — 넷까지). 면 셈 조각이 아직 없으면 받기를 걸고 null(그 프레임은 표식 없이 — 오면 다시 그린다)
+   * 0.54.0 그물 면 미리 강조 셈(같은 위치·색인 배열·삼각형·구간이면 기억에서 — 넷까지). 면 셈 조각이 아직 없으면 받기를 걸고 null(그 프레임은 표식 없이 — 오면 다시 그린다).
+   * 0.96.0 앱 구간이면 열쇠는 그물 배열 + 구간 내용(rangesFace는 맞은 삼각형을 받지 않는다) — 가상 커서·미리 강조가 같은 면의 새 삼각형을 맞혀도 경계 변을 다시 세지 않는다
+   * (0.95.0은 열쇠에 맞은 삼각형 번호가 들어 새 삼각형마다 셌다 — 한도를 넘는 면은 boundaryOf까지). 같은 평면 면은 그대로 맞은 삼각형마다
    */
   private faceOutlineOf(m: Mesh3d, tri: number, ranges: readonly IndexRange[] | null): FaceOutline | null {
     const pos = m.positions, idx = m.indices;
@@ -9804,15 +9809,16 @@ export class Viewer3d {
       return null;
     }
     const key = ranges ? ranges.map((r) => `${r?.start}:${r?.count}`).join(',') : null;
+    const t = key === null ? tri : -1;
     const memo = this.faceMemo;
-    const hit = memo.findIndex((x) => x.pos === pos && x.idx === idx && x.tri === tri && x.ranges === key);
+    const hit = memo.findIndex((x) => x.pos === pos && x.idx === idx && x.tri === t && x.ranges === key);
     if (hit >= 0) {
       const e = memo[hit]!;
       if (hit) memo.unshift(...memo.splice(hit, 1));
       return e.out;
     }
     const out = ranges ? kit.rangesFace(pos, idx, ranges) : kit.planarFace(pos, idx, tri);
-    memo.unshift({ pos, idx, tri, ranges: key, out });
+    memo.unshift({ pos, idx, tri: t, ranges: key, out });
     if (memo.length > 4) memo.length = 4;
     return out;
   }
