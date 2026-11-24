@@ -6646,7 +6646,7 @@ export class Viewer3d {
   /**
    * 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로. 첫 인자로 선택을 주면 화면 밖에서 다시 그린다:
    * scale(화면 화소의 몇 배, 기본 1 — 굵기·점 크기도 같은 비율), transparent(바탕을 비운 PNG), overlays(측정·덧그림·좌표축·단면 표시, 기본 true),
-   * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다.
+   * type·quality. 너무 크면(한 변 GPU 한도와 SNAPSHOT_MAX_SIDE 16,384 화소, 넓이 SNAPSHOT_MAX_PIXELS 4096² — 약 1,678만 화소) 비율을 줄인다.
    * 0.89.0 dispose 뒤에는 선택이 없어도 선택을 준 toBlob과 같은 Error로 거절한다(0.88.0은 놓은 캔버스 그대로를 그림으로 풀어 주었다).
    * 0.93.0 null은 주지 않은 것(화면 그림 PNG — 0.92.0은 화면 밖 선택 길에서 TypeError로 거절). 글이 아닌 형식은 기본 형식(PNG)이다
    * 0.114.0 문맥을 잃은 동안(webglcontextlost부터 webglcontextrestored까지)에도 선택이 없어도 같은 Error로 거절한다(0.113.0은 그리지 못한 빈 캔버스와 덧그림을 그림으로 풀어 주었다).
