@@ -191,6 +191,11 @@ export function nonFiniteCount(a: Float32Array): number {
   return n;
 }
 
+/** 0.97.0 정점 색 배열을 제자리에서 고친 뒤(Viewer3d.setMesh의 vertices): 그 배열의 유한하지 않은 값 수 기억을 버린다(0.96.0까지는 고친 색을 계속 빼거나 깬 색을 그대로 썼다) */
+export function forgetFinite(a: ArrayLike<number>): void {
+  finiteMemo.delete(a);
+}
+
 /** 0.50.0 삼각형 고침 결과: 그릴 색인(나쁜 삼각형은 한 정점을 세 번 — 넓이 0이라 그리지 않는다)과 그 삼각형 수 */
 export interface TriangleFix {
   indices: Uint32Array;

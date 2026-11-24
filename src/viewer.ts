@@ -196,7 +196,7 @@ import {
 } from './closest';
 import { billboardAngle, billboardBounds, billboardMatrix, towardCamera } from './billboard';
 import { type AmbientOcclusionOptions, aoParams } from './ao';
-import { type SceneIssue, boundsOk, checkMesh, checkScene } from './sceneissues';
+import { type SceneIssue, boundsOk, checkMesh, checkScene, forgetFinite } from './sceneissues';
 import { countIdsUpTo } from './playback';
 import { type AnimateSetting, CAMERA_MOVE_MS, type FlyToOptions, moveDuration, normalizeAnimate, resolveAnimate, watchReducedMotion } from './motion';
 import { DRAG_START_PX, type LastClick, PICK_TOLERANCE_PX, TOUCH_DRAG_START_PX, TOUCH_PICK_TOLERANCE_PX, clickCount, dragStarted, isTouch, pickTolerance, walkKeyOf } from './pointer';
@@ -2710,6 +2710,8 @@ export class Viewer3d {
           this.parts.delete(a);
           // 0.96.0 그 배열의 면 미리 강조 셈 기억도(앱 구간 열쇠는 맞은 삼각형과 상관없어 남기면 고치기 전 테두리가 같은 면 다른 삼각형에도 나온다)
           this.faceMemo = this.faceMemo.filter((x) => x.pos !== a);
+          // 0.97.0 면 셈 조각의 그물 꼴 기억도(같은 위치 꼭짓점 짝·꼭짓점 → 삼각형 목록 — 남기면 갈라지거나 모인 꼭짓점을 고치기 전 짝으로 잇는다)
+          faceKit?.forgetTopo(a);
           for (const it of this.items.values())
             if (it.item.positions === a) {
               this.boxes.delete(it.item);
@@ -2717,6 +2719,8 @@ export class Viewer3d {
             }
         }
       }
+      // 0.97.0 정점 색의 유한하지 않은 값 수 기억(아래 checkMesh가 고친 값으로 다시 센다 — 앞 그물이 깨진 색을 뺀 사본이면 그 배열이 prev에 없어 새 그물의 색으로 버린다)
+      if (mesh.colors) forgetFinite(mesh.colors);
     }
     // 0.50.0 입력 검사(setScene과 같다): 놓을 자리를 모르는 그물(유한하지 않은 원점·행렬)은 넣지 않고 false(앞 그물·알림은 그대로), 깨진 필드는 고친 얕은 사본으로
     const found: SceneIssue[] = [];

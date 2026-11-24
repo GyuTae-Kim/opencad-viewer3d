@@ -117,6 +117,14 @@ function topoOf(positions: ArrayLike<number>, indices: ArrayLike<number> | undef
   return (topoMemo = { positions, indices, canon, start, list });
 }
 
+/**
+ * 0.97.0 위치 배열을 제자리에서 고친 뒤(Viewer3d.setMesh의 vertices): 기억한 그물 꼴이 그 배열 것이면 버린다 — 같은 자리에 있던 꼭짓점이 갈라지거나 모였을 수 있다
+ * (0.96.0까지는 남아 고치기 전 짝·이웃으로 면과 테두리를 셌다). 다음 셈이 다시 만든다
+ */
+export function forgetTopo(positions: ArrayLike<number>): void {
+  if (topoMemo?.positions === positions) topoMemo = null;
+}
+
 /** 삼각형들의 테두리 변(그 가운데 한 번만 나오는 변 — 같은 위치 대표 번호로 센다) */
 function outline(positions: ArrayLike<number>, indices: ArrayLike<number> | undefined, tris: number[], capped: boolean, canon: Int32Array): FaceOutline {
   const seen = new Map<number, { a: number; b: number; n: number }>();
