@@ -5312,10 +5312,14 @@ export class Viewer3d {
     return true;
   }
 
-  /** 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때) */
+  /**
+   * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때).
+   * 0.104.0 같은 프레임에 먼저 온 포인터 이동이 아직 구하지 않은 새 자리(hoverAt)를 적어 두었으면 그 자리를 둔다(가장 늦은 자리 — 0.103.0은 마지막으로 구한 자리로 덮어
+   * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수뿐이다
+   */
   private rehover(): void {
     if (this.measuring && this.measureHover && this.lastHoverAt && !this.drag) {
-      this.hoverAt = this.lastHoverAt;
+      this.hoverAt ??= this.lastHoverAt;
       this.invalidate();
     }
   }
