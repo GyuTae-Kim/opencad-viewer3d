@@ -2268,6 +2268,12 @@ export class Viewer3d {
   private annos: { list: Annotation3d[]; geo: (AnnotationGeometry | null)[]; hidden: number; width: number; box: Box3 | null } | null = null;
   /** 측정 중 미리 볼 자리와 그 포인터 종류(터치 미리 보기는 터치 허용 거리로 — 이어지는 누르기와 같은 점) */
   private hoverAt: { x: number; y: number; pointerType: string } | null = null;
+  /**
+   * 0.110.0 3D 보기 안 사용자 입력(휠·보기 키 F·1~7·가운데 두 번 누르기 전체 보기·뷰 큐브 누르기·끌기·걷기 키·조이스틱·걷기 서기)·3D 보기 크기·setProjection으로
+   * 카메라가 바뀌었다 — 카메라가 멈춘 첫 그림(움직임 끝 프레임·휠 160 ms 뒤·걷기를 멈춘 그림, 한 번이면 다음 그림)에서 내리고, 측정 중이면 측정 미리 보기와 가상 커서 후보를
+   * 그 커서 자리에서 한 번 다시 구한다(draw — camSettle). 미리 보기가 없어도 세운다(움직이는 동안 포인터 이동으로 구한 미리 보기도 끝에서 맞춘다)
+   */
+  private camWait = false;
 
   /**
    * 고르기 알림과 그 알림의 고르기 선택(0.22.0 onPick의 meshesOnly, 0.23.0 throughTranslucent, 0.26.0 front) — 단 차례대로
@@ -2449,6 +2455,8 @@ export class Viewer3d {
           this.cssW = w;
           this.cssH = h;
           this.sizeKnown = true;
+          // 0.110.0 3D 보기 크기가 바뀌면 같은 커서 자리 아래가 바뀐다 — 다음 그림에서 미리 보기·가상 커서 후보를 한 번 다시 구한다
+          this.camWait = true;
           if (this.pendingFit) {
             this.pendingFit = false;
             this.fit(false);
@@ -3498,12 +3506,15 @@ export class Viewer3d {
 
   /**
    * 원근·평행 투영. 0.91.0 'perspective'·'orthographic'이 아니면(엉뚱한 글·null·undefined) 받지 않는다(앞 투영 그대로 — 0.90.0은 그 값을 두어
-   * 그리기는 평행 행렬인데 다른 판정은 원근이었고, 그 뒤 전체 보기가 거리 0으로 갔다)
+   * 그리기는 평행 행렬인데 다른 판정은 원근이었고, 그 뒤 전체 보기가 거리 0으로 갔다).
+   * 0.110.0 측정 미리 보기(마우스·펜)와 가상 커서 후보는 다음 그림에서 그 커서 자리에서 한 번 다시 구한다(값이 바뀌면 onMeasureHoverChange)
    */
   setProjection(p: Projection): void {
     if (!isProjection(p) || this.cam.projection === p) return;
     this.finishAnim();
     this.cam = { ...this.cam, projection: p };
+    // 0.110.0 다음 그림에서 측정 미리 보기·가상 커서 후보를 그 커서 자리에서 한 번 다시 구한다(camWait — 0.109.0은 앞 투영에서 고른 세계 점 그대로)
+    this.camWait = true;
     this.invalidate();
   }
 
@@ -3854,8 +3865,11 @@ export class Viewer3d {
     return u === 'mm' ? 1600 : u === 'inch' ? 63 : u === 'm' ? 1.6 : Math.max(boxSphere(this.fitBox()).radius * 0.1, 1e-6);
   }
 
-  /** 걷기: 누른 키·조이스틱 입력만큼 이 프레임 움직이고, 입력이 남아 있으면 다음 프레임을 부른다 */
-  private stepWalk(now: number): void {
+  /**
+   * 걷기: 누른 키·조이스틱 입력만큼 이 프레임 움직이고, 입력이 남아 있으면 다음 프레임을 부른다.
+   * 0.110.0 움직였으면 true(camWait를 세운다 — 측정 미리 보기·가상 커서 후보는 입력이 없어진 첫 그림에서 한 번 다시 구한다)
+   */
+  private stepWalk(now: number): boolean {
     const K = this.walkKeys, I = this.walkIn;
     const key = (a: string, b: string): number => (K.has(a) || K.has(b) ? 1 : 0);
     const fw = key('w', 'ArrowUp') - key('s', 'ArrowDown') + I.forward;
@@ -3865,7 +3879,7 @@ export class Viewer3d {
     const lk = I.look;
     if (!fw && !rt && !up && !tn && !lk) {
       this.walkT = 0;
-      return;
+      return false;
     }
     const dt = this.walkT ? Math.min(0.1, Math.max(0, (now - this.walkT) / 1000)) : 1 / 60;
     this.walkT = now;
@@ -3873,7 +3887,9 @@ export class Viewer3d {
     this.dropAnim();
     if (fw || rt || up) this.walkMove(fw * v, rt * v, up * v);
     if (tn || lk) this.cam = lookCamera(this.cam, tn * dt * (Math.PI / 2), lk * dt * (Math.PI / 2));
+    this.camWait = true;
     this.invalidate();
+    return true;
   }
 
   /** 대상점 둘레 회전(라디안). 0.82.0 유한하지 않은 인자는 받지 않는다(옮기던 움직임도 그대로 — 0.81.0은 NaN 하나로 카메라가 NaN이 되어 전체 보기로도 돌아오지 않았다) */
@@ -5051,7 +5067,7 @@ export class Viewer3d {
     return this.listen(this.measureCbs, cb);
   }
 
-  /** 카메라가 바뀐 프레임마다 알림 */
+  /** 카메라가 바뀐 프레임마다 알림(0.110.0 카메라가 멈춘 그림에서 측정 미리 보기를 다시 구해 값이 바뀌면 같은 그림의 onMeasureHoverChange가 이 알림 다음에 온다) */
   onCameraChange(cb: (c: CameraState) => void): () => void {
     return this.listen(this.camCbs, cb);
   }
@@ -5059,7 +5075,8 @@ export class Viewer3d {
   /**
    * 0.103.0 측정 미리 보기(measureHoverSnap — 커서 아래 붙잡을 점) 값이 바뀐 그림 뒤 한 번 알림(그 그림을 다 그린 뒤 — 같은 그림의 onCameraChange 다음).
    * 포인터 이동·가상 커서 키로 바뀐 것도, 코어가 포인터 밖에서 다시 구하거나(메시 바꾸기·보이기·선분 그리기 범위가 줄 때·붙잡기 한도·다듬기 비우기·잠금,
-   * 0.109.0 겉모습·setPickEdges·단면 — 다음 그림) 버린 것(새 장면·clear·붙잡기 선택·측정 지우기·측정 모드 끄기 — 곧. 0.108.0까지는 겉모습·단면도)도 같다. 한 프레임에 여러 길이 와도 한 번, 값(measureHoverSnap과 measureHoverLock의
+   * 0.109.0 겉모습·setPickEdges·단면 — 다음 그림, 0.110.0 휠·보기 키·뷰 큐브·걷기 입력·3D 보기 크기·setProjection으로 바뀐 카메라가 멈춘 그림) 버린 것(새 장면·clear·붙잡기 선택·
+   * 측정 지우기·측정 모드 끄기 — 곧. 0.108.0까지는 겉모습·단면도)도 같다. 카메라가 움직이는 동안은 앞 값 그대로라 알리지 않는다. 한 프레임에 여러 길이 와도 한 번, 값(measureHoverSnap과 measureHoverLock의
    * 모든 필드 — 점·종류·축·방향·잠금·기준 선분·선분·끌어온 점·면, Shift가 잠글 방향)이 같으면 알리지 않고, 없어지면 null(앞 값이 있었을 때만). 달 때의 값은 알리지 않는다.
    * 받는 값은 그때의 measureHoverSnap(복사본 — 한 알림의 듣는 쪽은 같은 객체). 듣는 쪽이 없으면 셈하지 않고, 있어도 그리기·GL·다른 알림은 같다.
    * 가상 커서의 announce('move'·'refresh' 등)가 먼저 온다. 알림 규칙은 다른 on*와 같다(0.90.0 emit — 0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않는다).
@@ -5372,9 +5389,9 @@ export class Viewer3d {
 
   /**
    * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때. 0.98.0 장면 길, 0.106.0 음영 가림이 바뀐 setRenderMode도,
-   * 0.109.0 겉모습·setPickEdges·단면도 — rehoverOrDrop).
+   * 0.109.0 겉모습·setPickEdges·단면도 — rehoverOrDrop. 0.110.0 카메라가 멈춘 그림은 camSettle이 같은 꼴로).
    * 0.104.0 같은 프레임에 먼저 온 포인터 이동이 아직 구하지 않은 새 자리(hoverAt)를 적어 두었으면 그 자리를 둔다(가장 늦은 자리 — 0.103.0은 마지막으로 구한 자리로 덮어
-   * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수뿐이다
+   * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수·camSettle뿐이다
    */
   private rehover(): void {
     if (this.measuring && this.measureHover && this.lastHoverAt && !this.drag) {
@@ -5393,6 +5410,20 @@ export class Viewer3d {
     const at = this.lastHoverAt;
     if (this.measureHover && at && at.pointerType !== KEY_POINTER && !this.drag && !this.holds.size) this.rehover();
     else this.measureHover = null;
+  }
+
+  /**
+   * 0.110.0 카메라만 바뀐 뒤 카메라가 멈춘 첫 그림(draw — camWait)에서 한 번, 측정 중일 때만(측정이 꺼진 길 — 고르기 모드 가상 커서 포함 — 은 0.109.0 그대로):
+   * 가상 커서 후보는 keySceneChanged(같은 그림에서 알리지 않고 다시 구한다 — 0.98.0 꼴, 화면 px로 고른 후보라 같은 커서 자리 아래가 바뀐다), 마우스·펜 미리 보기는 측정 중·미리 보기 있음·앱이 맡은 포인터 없음·커서 자리가 3D 보기 안이면 그 커서 자리에서
+   * (rehover와 같은 hoverAt ??= lastHoverAt — 그리기 안이라 invalidate 없이 같은 그림의 미리 보기 셈이 구한다). 아니면 0.109.0 그대로(앞 화면에서 고른 세계 점 — 표식은 그 점의 새 투영).
+   * 끌기(누른 포인터)는 부르는 쪽이 뗀 뒤까지 기다린다 — 끌기 시작에서 마우스 미리 보기를 버리고 누르기에서 가상 커서를 끄므로 그 뒤 다시 구할 것은 대개 없다
+   */
+  private camSettle(): void {
+    if (!this.measuring) return;
+    this.keySceneChanged();
+    const at = this.lastHoverAt;
+    if (!this.measureHover || !at || at.pointerType === KEY_POINTER || this.holds.size) return;
+    if (at.x >= 0 && at.y >= 0 && at.x <= this.cssW && at.y <= this.cssH) this.hoverAt ??= at;
   }
 
   /** 지금 측정 붙잡기 선택(꺼져 있으면 null). inference는 0.9.0부터 세 값으로 편 꼴 */
@@ -8866,7 +8897,8 @@ export class Viewer3d {
    * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로).
    * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다. 0.100.0 선분 그리기 범위가 준 뒤에도(drawRangeCut).
    * 0.106.0 음영 가림이 바뀐 setRenderMode도(측정 미리 보기는 그보다 먼저 rehover).
-   * 0.109.0 단면·겉모습·setPickEdges의 마우스 미리 보기는 rehoverOrDrop이 다시 구하고, 가상 커서 미리 보기는 그대로 이 표시로 다시 구한다(알리지 않는다)
+   * 0.109.0 단면·겉모습·setPickEdges의 마우스 미리 보기는 rehoverOrDrop이 다시 구하고, 가상 커서 미리 보기는 그대로 이 표시로 다시 구한다(알리지 않는다).
+   * 0.110.0 사용자 입력·크기·setProjection으로 바뀐 카메라가 멈춘 그림에서도(camSettle — 0.109.0은 커서를 옮길 때까지 앞 화면 후보)
    */
   private keySceneChanged(): void {
     if (this.keyCur) this.keyCur.stale = true;
@@ -9135,6 +9167,8 @@ export class Viewer3d {
     if (this.nav === 'walk' && n === 2 && d && this.walkOpts.tapToStand !== false) {
       this.finishAnim();
       this.cam = standCamera(this.cam, d.pick.point, this.eyeHeight());
+      // 0.110.0 다음 그림에서 측정 미리 보기·가상 커서 후보를 그 커서 자리에서 한 번 다시 구한다
+      this.camWait = true;
       this.invalidate();
       return;
     }
@@ -9271,6 +9305,8 @@ export class Viewer3d {
         this.cam = orbitCamera(this.cam, -(p.x - cd.lx) * ROT_PER_PX * 1.5, (p.y - cd.ly) * ROT_PER_PX * 1.5);
         cd.lx = p.x;
         cd.ly = p.y;
+        // 0.110.0 끄는 동안(cubeDrag)은 다시 구하지 않고 뗀 뒤 한 번(cubeUp)
+        this.camWait = true;
         this.invalidate();
         return;
       }
@@ -9301,12 +9337,18 @@ export class Viewer3d {
     const cubeUp = (e: PointerEvent, cancel: boolean): void => {
       const cd = this.cubeDrag;
       this.cubeDrag = null;
+      // 0.110.0 큐브를 끌어 돌린 뒤: 끌기는 뗄 때 그리지 않으므로, 다시 구할 것(가상 커서·측정 미리 보기)이 있을 때만 그 한 장을 건다
+      if (cd?.moved && this.camWait && this.measuring && (this.keyCur || this.measureHover)) this.invalidate();
       if (!cd || cd.moved || cancel) return;
       // 0.44.0 손가락으로 접힌 큐브를 누르면 고르지 않고 편다(편 큐브를 다시 눌러 고른다)
       if (cd.touch && !this.cubeZoom && this.unfoldCube()) return;
       const p = this.local(e, cube);
       const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
-      if (h) this.setViewDir(h.dir);
+      if (h) {
+        // 0.110.0 움직임이면 끝 프레임에서, 바로 옮기면 다음 그림에서 한 번 다시 구한다
+        this.camWait = true;
+        this.setViewDir(h.dir);
+      }
       // 편 큐브는 고르거나 큐브 밖을 누르면 접는다
       this.foldCube(h ? 'pick' : 'cube');
     };
@@ -9361,6 +9403,8 @@ export class Viewer3d {
       const now = performance.now();
       if (now - this.lastMiddle.t < 420 && Math.hypot(p.x - this.lastMiddle.x, p.y - this.lastMiddle.y) < 8) {
         this.lastMiddle.t = 0;
+        // 0.110.0 보기 키 F와 같다(움직임 끝 프레임·바로 옮기면 다음 그림에서 한 번 다시 구한다)
+        this.camWait = true;
         this.fit();
         return;
       }
@@ -9549,6 +9593,8 @@ export class Viewer3d {
     e.preventDefault();
     if (this.drag) return;
     this.finishAnim();
+    // 0.110.0 측정 미리 보기·가상 커서 후보는 휠이 멈춘 뒤(궤도 — 마지막 사건 160 ms 뒤 interacting을 내리는 그림) 한 번 다시 구한다. 걷기 휠은 사건마다 한 걸음이라 다음 그림에서
+    this.camWait = true;
     const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.cssH : 1;
     const delta = Math.max(-400, Math.min(400, e.deltaY * k));
     if (this.nav === 'walk') {
@@ -9600,6 +9646,8 @@ export class Viewer3d {
       stopKey(e);
       return true;
     }
+    // 0.110.0 보기 키: 측정 미리 보기·가상 커서 후보는 움직임 끝 프레임(움직임을 끄면 다음 그림)에서 한 번 다시 구한다(camWait)
+    if (e.key === 'f' || e.key === 'F' || VIEW_KEYS[e.key]) this.camWait = true;
     if (e.key === 'f' || e.key === 'F') this.fit();
     else if (VIEW_KEYS[e.key]) this.setView(VIEW_KEYS[e.key]!);
     // 0.44.0: 손가락으로 편 뷰 큐브를 먼저 접는다
@@ -9698,7 +9746,7 @@ export class Viewer3d {
       this.overlay.width = w;
       this.overlay.height = h;
     }
-    if (this.nav === 'walk') this.stepWalk(now);
+    const walked = this.nav === 'walk' && this.stepWalk(now);
     // 마주 보는 그물: 카메라가 바뀌면 그림자·단면 테두리·고르기 목록이 따라 바뀐다
     if (this.bbList.length) {
       // 돌림 각이 하나라도 바뀌었을 때만(카메라가 움직여도 각이 같으면 그림자·테두리는 그대로)
@@ -9711,6 +9759,12 @@ export class Viewer3d {
       }
     }
     const f = this.frame();
+    // 0.110.0 사용자 입력·크기·setProjection으로 카메라가 바뀐 뒤 카메라가 멈춘 첫 그림에서 한 번(움직임 끝 프레임·휠 interacting을 내린 그림·걷기를 멈춘 그림·
+    // 큐브를 뗀 그림, 한 번에 옮겼으면 다음 그림 — 움직이는 동안 프레임마다 다시 고르지 않는다. 누른 포인터가 있으면 뗀 뒤까지 기다린다)
+    if (this.camWait && !this.anim && !this.interacting && !walked && !this.cubeDrag && !this.drag) {
+      this.camWait = false;
+      this.camSettle();
+    }
     // 측정 중 커서 아래 붙잡을 점
     // 0.46.0: 가상 커서 자리를 다시 구할 때(잠금·붙잡기 한도 등 — rehover)는 후보 목록을 다시 구하고 같은 점 후보를 지킨다
     if (this.measuring && this.hoverAt && !this.drag && this.keyCur && this.hoverAt.pointerType === KEY_POINTER) {
