@@ -90,6 +90,15 @@ export interface MeasureInference {
    * (받지 않으면 앞서 받은 기준이 남는다). 끌어온 점의 기준(trackDirs)과는 따로다 — 같은 함수를 둘 다에 주면 같은 선분은 한 번만 묻는다
    */
   parallelEdge?: TrackDirEdgeFilter | null;
+  /**
+   * 0.115.0: 첫 측정 점에서 커서가 앞서 지나간 선분(0.10.0 나란함과 같은 기준 — parallelEdge를 주면 그것이 받은 선분)에 수직인 방향(기본 꺼짐 — true일 때만,
+   * true에 들지 않는다. SketchUp 「모서리에 수직」 자홍 추론). 수직인 방향은 평면 하나라 끌어온 점의 수직 선과 같은 규칙(순수 trackDirGuides의 수직 안내)으로 고른다 —
+   * 첫 점에서 기준 직선으로 내린 수직(첫 점과 모서리가 이루는 평면 안), 축을 모서리에 수직인 평면에 비친 방향(첫 점이 그 직선 위여도 — 모서리 끝을 첫 점으로 찍었을 때).
+   * 축과 같은 선은 축 붙잡기(axes)가 맡아 뺀다. 점은 순수 perpendicularDirSnap(opencad-viewer3d/track)이고, 점 붙잡기가 없을 때 첫 점 축·나란함과 화면에서 가까운 것
+   * (같으면 축 → 나란함 → 이것)이다. 그 점은 snap 'perpendicular'·direction(그 수직 방향)·edge(기준 선분)에 perpendicularDir: true(수직 발과 가른다)가 실리고,
+   * 방향이 있어 Shift·setMeasureInferenceLock(true)가 그 방향으로 잠근다. 수직 선 위 점이라 끌어온 점(track)으로 기억하지 않는다
+   */
+  perpendicularDirs?: boolean;
 }
 
 /** 끌어온 축 안내 선택(0.16.0, MeasureInference.track) */
@@ -175,6 +184,8 @@ export interface NormalizedInference {
   trackDirs?: true | NormalizedTrackDirs;
   /** 0.29.0: 첫 점 나란함의 기준 선분 거르기(함수를 줬을 때만) */
   parallelEdge?: TrackDirEdgeFilter;
+  /** 0.115.0: 첫 점에서 기준 선분에 수직인 방향(perpendicularDirs가 true일 때만) */
+  perpendicularDirs?: true;
 }
 
 /** 편 끌어온 점의 나란함·수직 객체 꼴(0.28.0 { edge }, 0.29.0 meets, 0.30.0 meetGuides) — 준 것만 열쇠가 있다(모두 없으면 객체가 아니라 true) */
@@ -245,7 +256,12 @@ export function normalizeInference(o: MeasureInference | boolean | null | undefi
   if (trackDirs) r.trackDirs = trackDirs;
   // 0.29.0: 첫 점 나란함 기준 거르기는 함수일 때만(이것만으로는 추론을 켜지 않는다 — parallel과 함께)
   if (o !== true && typeof o.parallelEdge === 'function') r.parallelEdge = o.parallelEdge;
-  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track || axisEdges || axisFaces || lockEdges || lockFaces || lockTracks || trackDirs ? r : null;
+  // 0.115.0: 첫 점 수직 방향은 true일 때만(1·'yes' 같은 꼴이 틀린 값은 주지 않은 것 — 0.38.0 뒤 새 불 칸과 같다)
+  const perpendicularDirs = o !== true && o.perpendicularDirs === true;
+  if (perpendicularDirs) r.perpendicularDirs = true;
+  return r.intersections || r.perpendicular || r.axes || r.parallel || r.lock || track || axisEdges || axisFaces || lockEdges || lockFaces || lockTracks || trackDirs || perpendicularDirs
+    ? r
+    : null;
 }
 
 const d2 = (a: readonly number[], b: readonly number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);

@@ -120,6 +120,7 @@ import {
   lockTrackSnap,
   openEdgeSnap,
   openFaceSnap,
+  perpendicularDirSnap,
   sameTrackPoint,
   trackAlongFirst,
   trackAxisSnap,
@@ -623,6 +624,9 @@ export interface MeasureSnapOptions {
    * 첫 점 축·나란함보다 먼저). 첫 점 축과 만나면 axis·direction이 실려 Shift가 그 축에 잠근다.
    * 0.30.0: trackDirs: { meets: { guides: true } } = 그에 더해 두 끌어온 점의 안내 선끼리 3D로 만나는 점(trackGuide — 0.29.0 만나는 점 뒤 차례)
    * 0.29.0: parallelEdge(seg, item) = 0.10.0 나란함(첫 점에서)의 기준 선분이 될 수 있는 선분만(trackDirs edge와 같은 꼴 — 따로 준다, 주지 않으면 0.28.0 그대로)
+   * 0.115.0(true에 들지 않는다 — true일 때만): perpendicularDirs = 첫 측정 점에서 나란함과 같은 기준 선분에 수직인 방향(끌어온 점의 수직 선과 같은 규칙 —
+   * 첫 점에서 기준 직선으로 내린 수직, 축을 그 선분에 수직인 평면에 비친 방향). 첫 점 축·나란함과 화면에서 가까운 것(같으면 축 → 나란함 → 이것), snap 'perpendicular'·
+   * direction·edge·perpendicularDir: true — Shift로 그 방향에 잠근다. 나란함처럼 첫 점에서 추론 색 안내선을 긋는다
    */
   inference?: MeasureInference | boolean | null;
   /**
@@ -771,6 +775,11 @@ export interface MeasureHoverSnap {
    * 첫째 선은 trackFrom(끌어온 점)과 snap(안내 종류)이고 edge는 둘 모두의 기준 선분이다. direction은 없다(첫 점을 지나는 선이 아니다 — 잠그지 않는다)
    */
   trackGuide?: TrackDirLine;
+  /**
+   * 0.115.0: 첫 점에서 기준 선분에 수직인 방향 위 점(inference.perpendicularDirs — snap 'perpendicular'·direction·edge와 함께, 잠그지 않았을 때)이면 true.
+   * 수직 발(snap 'perpendicular' — 선분 위 점, 이 필드 없음)과 가른다. 잠근 뒤(locked)에는 수직 발 잠금과 같은 값이라 없다
+   */
+  perpendicularDir?: true;
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -800,6 +809,8 @@ export interface MeasurePoint {
   face?: SnapFace;
   /** 0.30.0: 두 끌어온 점의 안내 선끼리 만나는 점으로 찍었으면 둘째 끌어온 점의 선(복사본 — MeasureHoverSnap.trackGuide와 같은 규칙) */
   trackGuide?: TrackDirLine;
+  /** 0.115.0: 첫 점에서 기준 선분에 수직인 방향 위 점으로 찍었으면 true(MeasureHoverSnap.perpendicularDir와 같은 규칙) */
+  perpendicularDir?: true;
 }
 
 /**
@@ -1365,6 +1376,8 @@ type MeasurePick = {
   trackOther?: TrackGuide;
   face?: SnapFace;
   trackGuide?: TrackDirLine;
+  /** 0.115.0 첫 점에서 기준 선분에 수직인 방향 위 점(inference.perpendicularDirs) — 수직 발과 가른다 */
+  perpendicularDir?: true;
 };
 /**
  * 0.46.0 후보 돌리기 한 번(measureAt의 다섯째 인자): skip = 앞 후보로 고른 점 붙잡기 자리(이 자리의 점 후보 — 고르기가 붙잡은 점·앱 점·추론 점 — 는 뺀다),
@@ -1390,6 +1403,7 @@ const pointSnapOf = (s: MeasurePick): MeasurePointSnap => {
   if (s.trackOther) r.trackOther = s.trackOther;
   if (s.face) r.face = s.face;
   if (s.trackGuide) r.trackGuide = s.trackGuide;
+  if (s.perpendicularDir) r.perpendicularDir = true;
   return r;
 };
 /**
@@ -1567,8 +1581,9 @@ const faceHitOf = (d: PickDetail | null): FaceHit | null => {
 };
 /** 점 붙잡기(머무르기로 끌어올 수 있는 점 — 0.16.0)인지: 꼭짓점·끝점·가운데 점·중심·앱 점·교차점·수직 발이고 잠근 선 위 점이 아님 */
 const dwellPointOf = (h: MeasurePick | null): V3 | null =>
-  // 0.27.0: 끌어온 점의 나란함·수직 선 위 점('perpendicular'에 trackFrom)은 선 위 점이라 기억하지 않는다(끌어온 점이 실린 것은 모두 선 위 점이다)
-  h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' && !h.trackFrom ? h.p : null;
+  // 0.27.0: 끌어온 점의 나란함·수직 선 위 점('perpendicular'에 trackFrom)은 선 위 점이라 기억하지 않는다(끌어온 점이 실린 것은 모두 선 위 점이다).
+  // 0.115.0: 첫 점의 수직 방향 위 점('perpendicular'에 perpendicularDir)도 선 위 점이다
+  h && !h.locked && h.kind && h.kind !== 'axis' && h.kind !== 'parallel' && !h.trackFrom && !h.perpendicularDir ? h.p : null;
 type AnyItem = Mesh3d | LineSet3d | PointSet3d;
 
 /** 묶음 하나의 구간 상태(숨김·강조, 합친 것)와 그로부터 만든 것 */
@@ -5597,6 +5612,7 @@ export class Viewer3d {
     if (h.trackOther) r.trackOther = copyGuide(h.trackOther);
     if (h.face) r.face = copyFace(h.face);
     if (h.trackGuide) r.trackGuide = copyDirLine(h.trackGuide);
+    if (h.perpendicularDir) r.perpendicularDir = true;
     return r;
   }
 
@@ -5758,6 +5774,7 @@ export class Viewer3d {
       if (s?.trackOther) r.trackOther = copyGuide(s.trackOther);
       if (s?.face) r.face = copyFace(s.face);
       if (s?.trackGuide) r.trackGuide = copyDirLine(s.trackGuide);
+      if (s?.perpendicularDir) r.perpendicularDir = true;
       return r;
     });
   }
@@ -7506,16 +7523,16 @@ export class Viewer3d {
     const meetsOn = !!(inf?.trackDirs && inf.trackDirs !== true && inf.trackDirs.meets);
     const refsBefore = meetsOn ? { parallel: this.parallelRef, track: this.trackDirRef, own: this.parallelOwn } : null;
     // 나란함(0.10.0): 커서가 지나간 선분·윤곽선을 기준으로 기억한다(첫 점을 찍기 전에도)
-    // 0.27.0: 끌어온 점의 나란함·수직(trackDirs)도 같은 기준 선분을 쓴다(parallel을 켜지 않아도 기억한다)
-    if ((inf?.parallel || inf?.trackDirs) && d?.ends) {
+    // 0.27.0: 끌어온 점의 나란함·수직(trackDirs)도 같은 기준 선분을 쓴다(parallel을 켜지 않아도 기억한다). 0.115.0 첫 점 수직 방향(perpendicularDirs)도
+    if ((inf?.parallel || inf?.trackDirs || inf?.perpendicularDirs) && d?.ends) {
       this.parallelRef = d.ends;
       // 0.99.0 그 선분을 낸 고르기(장면 길에서 그 묶음이 빠지거나 바뀌면 버린다 — refsDrop)
       this.refPick.set(d.ends, d.pick);
       // 0.28.0: 앱이 기준 선분을 거르면(trackDirs { edge }) 받은 선분만 끌어온 점의 기준으로(앞 기준이 남는다 — 0.10.0 나란함 기준은 그대로)
       const tdEdge = inf.trackDirs && inf.trackDirs !== true ? inf.trackDirs.edge : null;
       if (tdEdge && this.edgeOk(tdEdge, d, 'track')) this.trackDirRef = d.ends;
-      // 0.29.0: 첫 점 나란함의 기준 거르기(parallelEdge)를 줬으면 받은 선분만 그 기준으로(앞 기준이 남는다)
-      if (inf.parallel && inf.parallelEdge && this.edgeOk(inf.parallelEdge, d, 'parallel')) this.parallelOwn = d.ends;
+      // 0.29.0: 첫 점 나란함의 기준 거르기(parallelEdge)를 줬으면 받은 선분만 그 기준으로(앞 기준이 남는다). 0.115.0 첫 점 수직 방향도 같은 기준
+      if ((inf.parallel || inf.perpendicularDirs) && inf.parallelEdge && this.edgeOk(inf.parallelEdge, d, 'parallel')) this.parallelOwn = d.ends;
     }
     // 커서 둘레 선분(0.9.0 교차점·수직 발과 0.12.0 선분 방향 잠금이 함께 쓴다 — 필요할 때 한 번만 구한다)
     let near: NearSegment[] | null = null;
@@ -7801,14 +7818,18 @@ export class Viewer3d {
       // 0.40.0 띠로 모은 토막의 열린 교차: 축이면 열린 교차(0.20.0), 안내 선이면 안내 선의 열린 교차(0.31.0)와 같은 값
       if (t && lens && t === lens.snap) return lens.line.guide ? this.openEdgePick(f, lens, first, null, openRef, refsBefore) : this.openEdgePick(f, lens, first, null, null, null);
     }
-    // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축)
-    if (first && noPointLine && (inf?.axes || inf?.parallel)) {
+    // 축(0.9.0)·나란함(0.10.0): 점 붙잡기가 하나도 없을 때만 첫 점을 지나는 선에(화면에서 가까운 것, 같으면 축).
+    // 0.115.0 수직 방향(perpendicularDirs): 같은 기준 선분에 수직인 첫 점의 선(끌어온 점 수직 선과 같은 규칙 — perpendicularDirSnap)도 함께 견준다(같으면 축 → 나란함 → 수직)
+    if (first && noPointLine && (inf?.axes || inf?.parallel || inf?.perpendicularDirs)) {
       const a = inf.axes ? axisSnap(f, first, x, y, snapPx) : null;
       // 0.29.0: 첫 점 나란함 기준 거르기를 줬으면 그것이 받은 기준(parallelOwn), 아니면 지나간 선분(0.28.0)
-      const ref = inf.parallel ? (inf.parallelEdge ? this.parallelOwn : this.parallelRef) : null;
+      const base = inf.parallelEdge ? this.parallelOwn : this.parallelRef;
+      const ref = inf.parallel ? base : null;
       const pr = ref ? parallelSnap(f, first, ref, x, y, snapPx, inf.axes) : null;
-      if (a && (!pr || a.distPx <= pr.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
-      if (pr) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
+      const pp = inf.perpendicularDirs && base ? perpendicularDirSnap(f, first, base, x, y, snapPx) : null;
+      if (a && (!pr || a.distPx <= pr.distPx) && (!pp || a.distPx <= pp.distPx)) return { p: a.p, vertex: true, kind: 'axis', axis: a.axis, direction: axisLock(a.axis).direction };
+      if (pr && (!pp || pr.distPx <= pp.distPx)) return { p: pr.p, vertex: true, kind: 'parallel', direction: pr.direction, edge: ref! };
+      if (pp) return { p: pp.p, vertex: true, kind: 'perpendicular', direction: pp.direction, edge: base!, perpendicularDir: true };
     }
     // 끌어온 점을 지나는 축(0.16.0): 첫 점 축·나란함 다음(첫 점 전에도). 첫 점 축이 아니므로 방향(잠글 것)이 없다
     if (tracks && noPointLine) {
@@ -10521,14 +10542,15 @@ export class Viewer3d {
       const hk = pts.length === 1 && !trackDir ? hover : null;
       // 0.29.0: 끌어온 점 안내 선이 첫 점 축·첫 점의 나란함과 만나는 점(trackDirs { meets } — 방향이 있다)이면 첫 점에서 그은 선은 그 선의 색(축 색·추론 색)
       const meetCol = pts.length === 1 && trackDir && hover?.direction ? (hover.axis ? axisColor(hover.axis) : inferColor) : null;
-      // 0.16.0: 끌어온 점을 지나는 축(방향 없음)은 첫 점 축이 아니므로 첫 점에서 그은 선은 보통 측정 색
+      // 0.16.0: 끌어온 점을 지나는 축(방향 없음)은 첫 점 축이 아니므로 첫 점에서 그은 선은 보통 측정 색.
+      // 0.115.0: 첫 점의 수직 방향(perpendicularDir — 잠그지 않은 'perpendicular')은 나란함처럼 추론 색 안내선과 기준 선분 점선
       const guide =
         hk?.kind === 'axis' && hk.axis && !(hk.trackFrom && !hk.direction)
           ? axisColor(hk.axis)
-          : hk && (hk.kind === 'parallel' || (hk.kind === 'perpendicular' && hk.locked))
+          : hk && (hk.kind === 'parallel' || (hk.kind === 'perpendicular' && (hk.locked || hk.perpendicularDir)))
             ? inferColor
             : null;
-      if (hk?.edge && (hk.kind === 'parallel' || hk.locked)) {
+      if (hk?.edge && (hk.kind === 'parallel' || hk.locked || hk.perpendicularDir)) {
         const e0 = P(hk.edge[0]), e1 = P(hk.edge[1]);
         line(e0, e1, th.textBg, 5, []);
         line(e0, e1, inferColor, 2.5, [5, 3]);
@@ -10635,8 +10657,8 @@ export class Viewer3d {
     if (hover) {
       const k = hover.kind;
       // 0.7.2의 두 모양(꼭짓점·끝점 네모, 붙잡지 않음 동그라미) 그대로, 0.8.0 붙잡기 종류만 새 모양
-      if (trackDir && k === 'perpendicular') {
-        // 0.27.0 끌어온 점에서 수직인 선 위: 추론 색 동그라미와 오른쪽 위에 기준 선분 화면 방향의 ⊥(밑줄이 기준 선분 방향)
+      if ((trackDir || hover.perpendicularDir) && k === 'perpendicular') {
+        // 0.27.0 끌어온 점에서 수직인 선 위: 추론 색 동그라미와 오른쪽 위에 기준 선분 화면 방향의 ⊥(밑줄이 기준 선분 방향). 0.115.0 첫 점의 수직 방향 위도 같은 표식
         const sp = P(hover.p);
         if (sp) {
           ctx.fillStyle = inferColor;
