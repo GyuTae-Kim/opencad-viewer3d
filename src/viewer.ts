@@ -2211,7 +2211,10 @@ export class Viewer3d {
     /** 0.40.0 현이 커서에서 붙잡기 거리 밖이어도 활꼴 띠가 닿는 토막의 교차를 보는지(openEdgeLens — 기본 켜짐, refine이 있을 때만 true) */
     lens: boolean;
   } | null = null;
-  /** 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다) */
+  /**
+   * 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다). 미리 보기가 null이어도 채우고 포인터가 떠나도 남는다 —
+   * 0.111.0 커서가 아직 그 자리에 있는지는 lastPtr과 견준다(hoverStill). 측정을 끄면 버린다(가상 커서 자리는 keyEnd가)
+   */
   private lastHoverAt: { x: number; y: number; pointerType: string } | null = null;
   /** 찍은 측정 점의 붙잡은 종류와 축 붙잡기의 축(점 배열 객체 → 붙잡기) */
   private measureSnaps = new WeakMap<V3, MeasurePointSnap>();
@@ -3526,14 +3529,15 @@ export class Viewer3d {
    * 그리기 모드. 0.91.0 모드 이름이 아니면(엉뚱한 글·null·대문자) 받지 않는다(앞 모드 그대로 — 0.90.0은 그 값을 두어 와이어프레임처럼 그렸다).
    * 0.106.0 음영 가림이 바뀌면(음영 계열 ↔ 와이어프레임·X-ray — 고르기·측정 붙잡기가 불투명 면 뒤 선분·점·윤곽선을 가리는지, shadedMode) 측정 미리 보기는 다음 그림에서
    * 그 커서 자리에서 다시 구하고(rehover — 있을 때만), 가상 커서 후보는 다음 그림·Tab 앞에서 다시 구한다(keySceneChanged — 장면 길과 같은 꼴. 0.105.0은 커서를 옮길 때까지
-   * 앞 모드의 가림으로 구한 미리 보기·후보를 그리고 알렸다). 같은 모드·같은 가림 계열 안에서 바꾸면(음영 ↔ 음영+윤곽 등) 고르기가 같아 다시 구하지 않는다
+   * 앞 모드의 가림으로 구한 미리 보기·후보를 그리고 알렸다). 같은 모드·같은 가림 계열 안에서 바꾸면(음영 ↔ 음영+윤곽 등) 고르기가 같아 다시 구하지 않는다.
+   * 0.111.0 측정 미리 보기가 null이어도 마우스·펜 커서가 그 자리에 그대로 있으면 다시 구한다(값이 바뀌었을 때만 onMeasureHoverChange)
    */
   setRenderMode(m: RenderMode): void {
     if (!isRenderMode(m)) return;
     const was = this.shadedMode;
     this.mode = m;
     if (this.shadedMode !== was) {
-      this.rehover();
+      this.rehover(this.hoverStill());
       this.keySceneChanged();
     }
     this.invalidate();
@@ -5081,7 +5085,9 @@ export class Viewer3d {
    * 받는 값은 그때의 measureHoverSnap(복사본 — 한 알림의 듣는 쪽은 같은 객체). 듣는 쪽이 없으면 셈하지 않고, 있어도 그리기·GL·다른 알림은 같다.
    * 가상 커서의 announce('move'·'refresh' 등)가 먼저 온다. 알림 규칙은 다른 on*와 같다(0.90.0 emit — 0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않는다).
    * 0.107.0 끌어온 점 목록(measureTrackPoints)이 바뀐 그림 뒤에도 한 번(머무르기 끝·setMeasureTrackPoints·두 점째·측정 지우기·Esc·측정 모드 끄기·붙잡기 선택·새 장면 —
-   * 미리 보기 값과 함께 바뀌어도 한 번, 같은 목록이면 없음). 그때 받는 값은 그 그림의 measureHoverSnap이라 앞 알림과 같을 수 있다(null 다음 null도) — 목록은 measureTrackPoints로 읽는다
+   * 미리 보기 값과 함께 바뀌어도 한 번, 같은 목록이면 없음). 그때 받는 값은 그 그림의 measureHoverSnap이라 앞 알림과 같을 수 있다(null 다음 null도) — 목록은 measureTrackPoints로 읽는다.
+   * 0.111.0 겉모습·setPickEdges·단면·음영 가림·카메라가 멈춘 그림은 미리 보기가 null이어도 마우스·펜 커서가 그 자리에 그대로 있으면 다시 구한다 — 빈 곳 위에서 형상이 커서 아래로 오면
+   * null 다음 그 값으로 한 번(0.110.0은 다음 포인터 이동까지 알림이 없었다)
    */
   onMeasureHoverChange(cb: (snap: MeasureHoverSnap | null) => void): () => void {
     // 처음 다는 쪽이면 지금 값부터 견준다(듣는 쪽이 없던 동안은 맞추지 않았다)
@@ -5391,24 +5397,36 @@ export class Viewer3d {
    * 측정 미리 보기가 보이는 동안 그 자리에서 다시 구한다(0.10.0 — 붙잡기 한도·추론 잠금이 바뀌었을 때. 0.98.0 장면 길, 0.106.0 음영 가림이 바뀐 setRenderMode도,
    * 0.109.0 겉모습·setPickEdges·단면도 — rehoverOrDrop. 0.110.0 카메라가 멈춘 그림은 camSettle이 같은 꼴로).
    * 0.104.0 같은 프레임에 먼저 온 포인터 이동이 아직 구하지 않은 새 자리(hoverAt)를 적어 두었으면 그 자리를 둔다(가장 늦은 자리 — 0.103.0은 마지막으로 구한 자리로 덮어
-   * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수·camSettle뿐이다
+   * NC 재생처럼 프레임마다 setMesh·그리기 범위가 오는 동안 그 프레임 미리 보기가 앞 자리의 것이었다). 미리 보기가 있을 때 hoverAt을 채우는 것은 포인터 이동과 이 함수·camSettle뿐이다.
+   * 0.111.0 still = 한 번씩 오는 길(단면·겉모습·setPickEdges·음영 가림)이 hoverStill()을 넘기면 미리 보기가 null이어도 그 자리에서 다시 구한다.
+   * 프레임마다 올 수 있는 길(장면·보이기·그리기 범위·붙잡기 한도 — NC 재생)과 잠금·끌어온 점 같은 선택 setter는 넘기지 않는다(0.98.0 규칙 — 빈 곳 위 커서로 프레임마다 고르지 않는다)
    */
-  private rehover(): void {
-    if (this.measuring && this.measureHover && this.lastHoverAt && !this.drag) {
+  private rehover(still = false): void {
+    if (this.measuring && (this.measureHover || still) && this.lastHoverAt && !this.drag) {
       this.hoverAt ??= this.lastHoverAt;
       this.invalidate();
     }
   }
 
   /**
+   * 0.111.0 측정 중 마우스·펜 커서가 마지막으로 미리 보기를 구한 그 자리에 그대로 있는지(미리 보기가 null이어도): 3D 보기를 떠나면 lastPtr이 null이고,
+   * 그 뒤 옮겼으면(측정 밖·끌기·앱이 맡은 포인터 — 또는 아직 구하지 않은 새 자리) lastPtr이 다른 자리다. 가상 커서 자리·끌기 중·앱이 맡은 포인터는 아니다
+   */
+  private hoverStill(): boolean {
+    const a = this.lastHoverAt, p = this.lastPtr;
+    return this.measuring && !!a && !!p && a.pointerType !== KEY_POINTER && a.x === p.x && a.y === p.y && !this.drag && !this.holds.size;
+  }
+
+  /**
    * 0.109.0 겉모습·setPickEdges·단면 뒤 측정 미리 보기: 마우스·펜 커서의 미리 보기가 있고 끌기 중도, 앱이 맡은 포인터도 없으면 장면 길처럼 다음 그림에서 그 자리에서
    * 다시 구하고(rehover — 0.108.0은 버려 다음 포인터 이동까지 표식이 없고 onMeasureHoverChange가 null을 받았다), 아니면 0.108.0처럼 버린다(측정 중일 때만).
-   * 가상 커서의 미리 보기는 버리고 keySceneChanged가 다음 그림에서 알리지 않고 다시 구한다(0.98.0·0.99.0 그대로 — rehover의 'refresh' 알림을 더하지 않는다)
+   * 가상 커서의 미리 보기는 버리고 keySceneChanged가 다음 그림에서 알리지 않고 다시 구한다(0.98.0·0.99.0 그대로 — rehover의 'refresh' 알림을 더하지 않는다).
+   * 0.111.0 미리 보기가 null이어도 커서가 그 자리에 그대로 있으면(hoverStill — 빈 곳 위·단면에 잘린 자리) 다시 구한다(0.110.0은 다음 포인터 이동까지 null)
    */
   private rehoverOrDrop(): void {
     if (!this.measuring) return;
     const at = this.lastHoverAt;
-    if (this.measureHover && at && at.pointerType !== KEY_POINTER && !this.drag && !this.holds.size) this.rehover();
+    if ((this.measureHover && at && at.pointerType !== KEY_POINTER && !this.drag && !this.holds.size) || this.hoverStill()) this.rehover(true);
     else this.measureHover = null;
   }
 
@@ -5416,13 +5434,14 @@ export class Viewer3d {
    * 0.110.0 카메라만 바뀐 뒤 카메라가 멈춘 첫 그림(draw — camWait)에서 한 번, 측정 중일 때만(측정이 꺼진 길 — 고르기 모드 가상 커서 포함 — 은 0.109.0 그대로):
    * 가상 커서 후보는 keySceneChanged(같은 그림에서 알리지 않고 다시 구한다 — 0.98.0 꼴, 화면 px로 고른 후보라 같은 커서 자리 아래가 바뀐다), 마우스·펜 미리 보기는 측정 중·미리 보기 있음·앱이 맡은 포인터 없음·커서 자리가 3D 보기 안이면 그 커서 자리에서
    * (rehover와 같은 hoverAt ??= lastHoverAt — 그리기 안이라 invalidate 없이 같은 그림의 미리 보기 셈이 구한다). 아니면 0.109.0 그대로(앞 화면에서 고른 세계 점 — 표식은 그 점의 새 투영).
-   * 끌기(누른 포인터)는 부르는 쪽이 뗀 뒤까지 기다린다 — 끌기 시작에서 마우스 미리 보기를 버리고 누르기에서 가상 커서를 끄므로 그 뒤 다시 구할 것은 대개 없다
+   * 끌기(누른 포인터)는 부르는 쪽이 뗀 뒤까지 기다린다 — 끌기 시작에서 마우스 미리 보기를 버리고 누르기에서 가상 커서를 끄므로 그 뒤 다시 구할 것은 대개 없다.
+   * 0.111.0 미리 보기가 null이어도 커서가 그 자리에 그대로 있으면(hoverStill) 다시 구한다 — 휠 축소로 윤곽선이 허용 거리 안에 들거나 보기 키로 형상이 커서 아래로 온 그림
    */
   private camSettle(): void {
     if (!this.measuring) return;
     this.keySceneChanged();
     const at = this.lastHoverAt;
-    if (!this.measureHover || !at || at.pointerType === KEY_POINTER || this.holds.size) return;
+    if (!(this.measureHover || this.hoverStill()) || !at || at.pointerType === KEY_POINTER || this.holds.size) return;
     if (at.x >= 0 && at.y >= 0 && at.x <= this.cssW && at.y <= this.cssH) this.hoverAt ??= at;
   }
 
@@ -5689,11 +5708,17 @@ export class Viewer3d {
     };
   }
 
-  /** 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다 */
+  /**
+   * 측정 모드(두 점 거리·dx dy dz). 끄면 측정도 지운다.
+   * 0.111.0 끄면 마우스·펜 미리 보기를 구한 자리 기억(lastHoverAt)도 버린다 — 다시 켠 뒤 첫 미리 보기는 0.110.0처럼 포인터 이동이 정하고, 그 전 단면·겉모습·카메라 길은 옛 자리에서 다시 구하지 않는다
+   */
   setMeasureMode(on: boolean): void {
     this.measuring = on;
     this.canvas.style.cursor = on ? 'crosshair' : '';
-    if (!on) this.clearMeasure();
+    if (!on) {
+      this.clearMeasure();
+      if (this.lastHoverAt?.pointerType !== KEY_POINTER) this.lastHoverAt = null;
+    }
     // 0.46.0: 가상 커서가 켜져 있으면 새 모드로 그 자리를 다시 구한다(알리지 않는다)
     if (this.keyCur) this.keyRecompute();
     this.invalidate();
