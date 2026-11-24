@@ -2328,10 +2328,11 @@ export class Viewer3d {
   private issueCbs: Listeners<(issues: readonly SceneIssue[]) => void> = new Map();
   /**
    * 0.103.0 측정 미리 보기 바뀜 알림(onMeasureHoverChange)과 마지막으로 견준 미리 보기: 측정 중일 때의 measureHover(같은 객체·같은 찍은 점 1개 여부면 값도 같다 —
-   * 측정 점 고르기 결과는 만든 뒤 고치지 않는다)와 값 열쇠(measureHoverSnap·measureHoverLock의 JSON, 없으면 ''). 듣는 쪽이 있을 때만 맞춘다
+   * 측정 점 고르기 결과는 만든 뒤 고치지 않는다)와 값 열쇠(measureHoverSnap·measureHoverLock의 JSON, 없으면 ''). 듣는 쪽이 있을 때만 맞춘다.
+   * 0.107.0 측정 중일 때의 끌어온 점 목록(MeasureTracker.view — 바꿀 때마다 새 배열이라 같은 배열이면 값도 같다)도 견주고, 목록이 있으면 열쇠 뒤에 그 JSON을 붙인다
    */
   private hoverCbs: Listeners<(snap: MeasureHoverSnap | null) => void> = new Map();
-  private hoverSeen: { pick: MeasurePick | null; one: boolean; key: string } = { pick: null, one: false, key: '' };
+  private hoverSeen: { pick: MeasurePick | null; one: boolean; track: readonly V3[] | null; key: string } = { pick: null, one: false, track: null, key: '' };
 
   private ro: ResizeObserver;
   private hostPos: string | null = null;
@@ -3275,9 +3276,9 @@ export class Viewer3d {
     this.camCbs.clear();
     this.cubeCbs.clear();
     this.issueCbs.clear();
-    // 0.103.0 미리 보기 바뀜 알림과 견준 미리 보기도 놓는다
+    // 0.103.0 미리 보기 바뀜 알림과 견준 미리 보기도 놓는다(0.107.0 견준 끌어온 점 목록도)
     this.hoverCbs.clear();
-    this.hoverSeen = { pick: null, one: false, key: '' };
+    this.hoverSeen = { pick: null, one: false, track: null, key: '' };
     this.issues = [];
     this.restoreCbs.clear();
     this.lostCbs.clear();
@@ -5023,7 +5024,9 @@ export class Viewer3d {
    * 버린 것(겉모습·단면·새 장면·clear·붙잡기 선택·측정 지우기·측정 모드 끄기 — 곧)도 같다. 한 프레임에 여러 길이 와도 한 번, 값(measureHoverSnap과 measureHoverLock의
    * 모든 필드 — 점·종류·축·방향·잠금·기준 선분·선분·끌어온 점·면, Shift가 잠글 방향)이 같으면 알리지 않고, 없어지면 null(앞 값이 있었을 때만). 달 때의 값은 알리지 않는다.
    * 받는 값은 그때의 measureHoverSnap(복사본 — 한 알림의 듣는 쪽은 같은 객체). 듣는 쪽이 없으면 셈하지 않고, 있어도 그리기·GL·다른 알림은 같다.
-   * 가상 커서의 announce('move'·'refresh' 등)가 먼저 온다. 알림 규칙은 다른 on*와 같다(0.90.0 emit — 0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않는다)
+   * 가상 커서의 announce('move'·'refresh' 등)가 먼저 온다. 알림 규칙은 다른 on*와 같다(0.90.0 emit — 0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않는다).
+   * 0.107.0 끌어온 점 목록(measureTrackPoints)이 바뀐 그림 뒤에도 한 번(머무르기 끝·setMeasureTrackPoints·두 점째·측정 지우기·Esc·측정 모드 끄기·붙잡기 선택·새 장면 —
+   * 미리 보기 값과 함께 바뀌어도 한 번, 같은 목록이면 없음). 그때 받는 값은 그 그림의 measureHoverSnap이라 앞 알림과 같을 수 있다(null 다음 null도) — 목록은 measureTrackPoints로 읽는다
    */
   onMeasureHoverChange(cb: (snap: MeasureHoverSnap | null) => void): () => void {
     // 처음 다는 쪽이면 지금 값부터 견준다(듣는 쪽이 없던 동안은 맞추지 않았다)
@@ -5033,17 +5036,20 @@ export class Viewer3d {
 
   /**
    * 0.103.0 지금 측정 미리 보기를 마지막으로 견준 것과 견주어 맞추고, 값이 바뀌었으면 지금 measureHoverSnap(없어졌으면 null)을, 같으면 undefined를 돌려준다.
-   * 미리 보기 객체·측정 모드·찍은 점 1개 여부가 그대로면 셈하지 않는다
+   * 미리 보기 객체·측정 모드·찍은 점 1개 여부가 그대로면 셈하지 않는다. 0.107.0 끌어온 점 목록도 값에 든다(같은 배열이면 셈하지 않고, 비었으면 0.106.0과 같은 열쇠)
    */
   private hoverCheck(): MeasureHoverSnap | null | undefined {
     const s = this.hoverSeen;
     const pick = this.measuring ? this.measureHover : null;
     const one = this.measurePts.length === 1;
-    if (pick === s.pick && one === s.one) return undefined;
+    const track = this.measuring && this.tracker ? this.tracker.view : null;
+    if (pick === s.pick && one === s.one && track === s.track) return undefined;
     s.pick = pick;
     s.one = one;
+    s.track = track;
     const snap = this.measureHoverSnap;
-    const key = snap ? JSON.stringify([snap, this.measureHoverLock]) : '';
+    const base = snap ? JSON.stringify([snap, this.measureHoverLock]) : '';
+    const key = track?.length ? `${base}|${JSON.stringify(track)}` : base;
     if (key === s.key) return undefined;
     s.key = key;
     return snap;
@@ -5643,7 +5649,8 @@ export class Viewer3d {
 
   /**
    * 끌어온 점(0.16.0 — setMeasureSnap({ inference: { track } })를 켰을 때, 새것이 앞, 최근 셋까지, 복사본): 마우스·펜이 점 붙잡기 위에 머물러 기억한 점과
-   * 앱이 setMeasureTrackPoints로 준 점. 이 점들을 지나는 X·Y·Z 축과 첫 점 축 위에서 이 점과 나란한 자리에도 붙잡는다. 꺼져 있으면 빈 배열
+   * 앱이 setMeasureTrackPoints로 준 점. 이 점들을 지나는 X·Y·Z 축과 첫 점 축 위에서 이 점과 나란한 자리에도 붙잡는다. 꺼져 있으면 빈 배열.
+   * 0.107.0 목록이 바뀐 그림 뒤 onMeasureHoverChange가 알린다(머무르기 끝처럼 미리 보기 값이 그대로여도)
    */
   get measureTrackPoints(): V3[] {
     return this.tracker?.points ?? [];
@@ -5690,6 +5697,7 @@ export class Viewer3d {
       if (this.disposed || this.tracker !== t || !this.measuring || this.drag) return t.cancel();
       const p = dwellPointOf(this.measureHover), q = t.dwelling;
       if (!p || !q || !sameTrackPoint(p, q)) return t.cancel();
+      // 다음 그림이 끌어온 점 표식을 그리고 그 뒤 onMeasureHoverChange(0.107.0 — 미리 보기는 그 점 붙잡기 그대로라 다시 구하지 않는다: 점 붙잡기가 끌어온 축보다 먼저)
       if (t.commit()) this.invalidate();
     }, ms);
   }
@@ -9713,7 +9721,7 @@ export class Viewer3d {
       const c = this.getCamera();
       this.emit(this.camCbs, (cb) => cb(c));
     }
-    // 0.103.0 측정 미리 보기 값이 바뀌었으면 이 그림 뒤 한 번(듣는 쪽이 없으면 셈하지 않는다 — 카메라 알림 안의 dispose는 목록을 비운다)
+    // 0.103.0 측정 미리 보기 값(0.107.0 끌어온 점 목록도)이 바뀌었으면 이 그림 뒤 한 번(듣는 쪽이 없으면 셈하지 않는다 — 카메라 알림 안의 dispose는 목록을 비운다)
     if (this.hoverCbs.size) {
       const snap = this.hoverCheck();
       if (snap !== undefined) this.emit(this.hoverCbs, (cb) => cb(snap));
