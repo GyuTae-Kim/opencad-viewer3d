@@ -31,6 +31,8 @@
  *   (0.29.0부터 뷰어는 MeasureInference.trackDirs { meets: true }일 때 끌어온 점 후보 뒤 차례로 견준다)
  * - 0.33.0 선이 꺾은선 꼭짓점을 지나는 자리(vertexEdgeCandidates·vertexEdgeSnap): 선이 토막 끝을 화면 반 화소 안으로 지나 선분 교차·열린 교차에서 빠지는 자리를
  *   그 끝을 둔 토막마다 부르는 쪽(뷰어는 MeasureSnapOptions.refineEnds — 앱 refine 'axisEdge', open)에 물어 곡선과의 정확한 교차를 열린 교차와 같은 규칙으로 받는다
+ * - 0.115.0 첫 점에서 기준 선분에 수직인 방향(perpendicularDirSnap): trackDirGuides의 수직 안내를 첫 측정 점에서 그은 선 위 점
+ *   (뷰어는 MeasureInference.perpendicularDirs를 켰을 때 첫 점 축·나란함과 함께 견준다)
  */
 import { type ViewFrame, projectToScreen, screenRay, viewDepth, worldPerPixel } from './camera';
 import { OPEN_INTERSECTION_CHORD, type SnapAxis, rayLinePoint, screenDistance, unitDir } from './inference';
@@ -1940,6 +1942,35 @@ export function trackDirSnap(
       if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
       best = { p: q, from: [P[0]!, P[1]!, P[2]!], kind: g.kind, dir: [g.dir[0], g.dir[1], g.dir[2]], distPx: dist };
     }
+  }
+  return best;
+}
+
+/**
+ * 첫 점에서 기준 선분에 수직인 방향 위 점(0.115.0, 순수 — 뷰어 MeasureInference.perpendicularDirs가 쓴다): 첫 점 a를 지나는 trackDirGuides(a, seg, axes)의 수직 안내
+ * (a에서 seg 직선으로 내린 수직 — a가 그 직선 위가 아닐 때, 축을 seg에 수직인 평면에 비친 방향. 축과 같은 선·앞 안내와 같은 선은 뺀다 — 끌어온 점의 수직 선과 같은 규칙) 위에서
+ * 커서 광선에 가장 가까운 점이 커서에서 snapPx 안이면 후보(가까운 것, 같으면 안내 차례). 커서가 a의 화면 자리 snapPx 안이면 없다(0.10.0 나란함 parallelSnap과 같다).
+ * 선이 커서 광선과 거의 나란하면 그 선은 뺀다. 원근에서 가까운 면보다 앞이면 뺀다. direction은 그 안내의 단위 방향(내린 수직은 a → 발). seg가 없으면 없다
+ */
+export function perpendicularDirSnap(
+  f: ViewFrame,
+  a: readonly number[],
+  seg: readonly [readonly number[], readonly number[]] | null | undefined,
+  x: number,
+  y: number,
+  snapPx: number,
+  axes?: TrackAxes | null,
+): { p: V3; direction: V3; distPx: number } | null {
+  if (!seg || cursorOn(f, a, x, y, snapPx)) return null;
+  const ray = screenRay(f, x, y);
+  let best: { p: V3; direction: V3; distPx: number } | null = null;
+  for (const g of trackDirGuides(a, seg, axes)) {
+    if (g.kind !== 'perpendicular') continue;
+    const q = rayLinePoint(ray.origin, ray.dir, a, g.dir);
+    if (!q) continue;
+    const dist = screenDistance(f, q, x, y);
+    if (dist === null || dist > snapPx || (best && dist >= best.distPx)) continue;
+    best = { p: q, direction: [g.dir[0], g.dir[1], g.dir[2]], distPx: dist };
   }
   return best;
 }

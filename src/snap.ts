@@ -590,6 +590,8 @@ export interface MeasurePointSnap {
   face?: SnapFace;
   /** 0.30.0: 두 끌어온 점의 안내 선끼리 만나는 점으로 찍었으면 둘째 끌어온 점의 선(점·종류·단위 방향) — 측정 결과에는 싣지 않는다 */
   trackGuide?: { from: V3; kind: 'parallel' | 'perpendicular'; dir: V3 };
+  /** 0.115.0: 첫 점에서 기준 선분에 수직인 방향 위 점(inference.perpendicularDirs — 수직 발이 아니다)으로 찍었으면 true — 측정 결과에는 싣지 않는다 */
+  perpendicularDir?: true;
 }
 
 /**
