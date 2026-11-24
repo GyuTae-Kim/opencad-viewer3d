@@ -33,7 +33,8 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   0.96.0부터 앱이 면 구간(`faceRanges`·`setPickPreview`의 `ranges`)을 주면 가상 커서가 같은 면의 다른 삼각형으로 옮겨도 면 테두리를 다시 세지 않는다(그린 표식은 그대로).
   0.98.0부터 메시를 바꾸거나 빼거나 숨긴 뒤(구간 숨김·단면·겉모습·`setScene`·`clear`도) 커서를 옮기지 않아도 다음 그림과 Tab에서 그 자리 후보를 다시 구한다(없는·숨긴 메시를 알리거나 옛 자리에 표식을 그리지 않는다).
   0.99.0부터 붙잡기·고르기 선택을 바꾼 뒤(`setMeasureSnap`·`setPickEdges`)에도 그렇게 하고, 나란함·끌어온 점 방향의 기준 선분(지나간 모서리)은 그 모서리를 낸 메시·선분 묶음을 빼거나 바꾸거나 숨기거나 옮기면(단면·새 장면도) 버린다.
-  0.100.0부터 선분 그리기 범위를 줄인 뒤(`setLineDrawRange`·`setDrawLimitBySegmentId` — 재생 되감기)에도 범위 밖이 된 선분이 낸 기준 선분을 버리고 그 자리 후보·측정 미리 보기를 다시 구한다(측정·커서가 꺼진 재생은 0.99.0과 같은 비용)
+  0.100.0부터 선분 그리기 범위를 줄인 뒤(`setLineDrawRange`·`setDrawLimitBySegmentId` — 재생 되감기)에도 범위 밖이 된 선분이 낸 기준 선분을 버리고 그 자리 후보·측정 미리 보기를 다시 구한다(측정·커서가 꺼진 재생은 0.99.0과 같은 비용).
+  0.103.0부터 측정 미리 보기(`measureHoverSnap`) 값이 바뀌면 그 그림 뒤 한 번 앱에 알린다(`onMeasureHoverChange` — 포인터 이동도, 코어가 장면 길·붙잡기 선택·겉모습·단면 뒤 다시 구하거나 버린 것도. 같은 값이면 없음)
 - 단면 보기: 평면 하나 또는 여럿(상자 단면, 평면마다 자를 묶음 — 0.44.0부터 묶음 안 삼각형·선분 구간만도), 잘린 면 채우기(닫힌 그물·capGroup)·단면 테두리, 고르기·측정도 잘린 쪽을 무시
   (0.45.0부터 앱 붙잡기 점·`project`도 그 점의 기본 도형 번호로 구간 단면을 따른다)
 - 마주 보는 그물(billboard), 뒷면 색·무늬
@@ -191,7 +192,7 @@ viewer.fit();
 - `onPick((pick, e) => …)`: 두 번째 인자 `e`는 누를 때의 `altKey`·`ctrlKey`·`shiftKey`·`metaKey`, `clicks`(1 또는 2 — 바로 앞 누르기와 0.45초·6화소(터치는 24화소) 안이면 2), `button`, `pointerType`. 한 인자 콜백도 그대로 된다.
   한 누르기의 알림은 단 차례대로 부르고, `front` 없이 단 알림들은 같은 사건 객체를 받는다(0.26.0부터 약속). `{ throughTranslucent: true, front: true }`면 `e.front`에 같은 누르기의 가장 앞 고르기(0.26.0)
 - `onMeasure`(두 번째 점에서 결과, 지우거나 새 측정을 시작하면 `null`), `measurePointCount`, `measurePoints`(찍은 점의 좌표·붙잡은 종류 — 0.12.0)
-- `measureHoverSnap`(커서 아래 붙잡을 점), `measureHoverLock`(Shift·잠금 단추가 지금 잠글 방향 — 0.12.0), `setMeasureInferenceLock(true | 'x' | { direction, edge? } | false)`(앱 단추로 잠그기), `measureLabelRect`(코어 거리 글상자 자리 — 앱 툴팁이 피한다, 0.12.0),
+- `measureHoverSnap`(커서 아래 붙잡을 점), `onMeasureHoverChange((snap | null) => …)`(그 값이 바뀐 그림 뒤 한 번 — 0.103.0, 아래 절), `measureHoverLock`(Shift·잠금 단추가 지금 잠글 방향 — 0.12.0), `setMeasureInferenceLock(true | 'x' | { direction, edge? } | false)`(앱 단추로 잠그기), `measureLabelRect`(코어 거리 글상자 자리 — 앱 툴팁이 피한다, 0.12.0),
   `setMeasureLabelAvoid({ rects?, pointerRadius? } | rects | null)`(코어 거리 글상자가 앱 십자선·툴팁과 커서 둘레를 비켜 그리기 — 0.13.0),
   `setMeasureLabelSpot('center' | { measure?, annotations? } | null)`(거리 글상자·덧그림 글상자의 기본 자리 — 0.27.0)
 - `setItemPickOpaque(id, on)`(0.24.0)·`setItemPickThrough(id, ranges)`(0.27.0): 판 너머 고르기(`throughTranslucent`)가 그 그물에서 멈추기·그 그물의 일부 삼각형은 지나가기
@@ -10926,6 +10927,119 @@ if (p.occlusion) {
 - NC·STEP: 판 올림만(칸을 주지 않으면 바뀌는 것이 없다). glTF를 읽는 앱이 생기면 `material.occlusionTexture.index`의 그림을 `occlusionTexture`로, `strength`를 `occlusionStrength`로 그대로 주면 된다
 - 정상 길·PBR 길 코드는 그대로라 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 0.101.0과 같아야 한다(가림 칸을 주는 하네스만 `OCC` 변종·무늬 단위 11이 더 보인다)
 - 코어 조각 +1,528 B(gzip +633 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +1,528 B·gzip +572~592 B)
+
+## 0.103.0: 측정 미리 보기 값이 바뀐 그림 뒤 알림 — `onMeasureHoverChange`(105차 — NC·STEP 코어 요청)
+
+NC 97차·STEP 106차 README에 남은 코어 요청 후보(코어가 마우스 측정 미리 보기를 다시 구할 때 알려 주면 앱이 장면 길 목록을 들고 있지 않아도 된다)를 새 알림 하나로 풀었다.
+0.102.0 코어는 미리 보기를 그리기(`requestAnimationFrame`) 때 구하고, 포인터 이동 밖의 길에서 다시 구하거나 버려도 마우스에는 알리지 않았다.
+그래서 두 앱이 같은 우회를 따로 만들었다 — NC `sceneChanged`(깎기 재생의 메시 바꾸기·재생 붙잡기 한도 뒤), STEP `sceneSnap`(보이기·겉모습·단면·붙잡기 선택·곡면 정의 여섯 길 뒤)이
+다음 프레임에 툴팁·상태 막대 스냅 이름을 다시 읽는다. **알림을 달지 않으면 0.102.0과 그린 도형·GL 호출·알림까지 같다**
+
+### 읽은 표(0.102.0 — 코드 읽기)
+
+미리 보기 값은 하나다(`measureHoverSnap`·`measureHoverLock`이 읽는 측정 점 고르기 결과). 포인터 이동은 자리만 두고 다음 그림 맨 앞에서 구한다.
+
+| 길 | 미리 보기 | 값이 바뀌는 때 | 0.102.0 알림 |
+|---|---|---|---|
+| 메시 바꾸기·빼기(`setMesh`·`removeMesh`), 보이기·구간 숨김(`setItemVisible`·`setGroupVisible`·`setHiddenRanges` 등), 선분 그리기 범위가 줄 때(0.100.0) | 마지막 커서 자리에서 다시 구함 | 다음 그림 | 없음(가상 커서면 다음 그림 `'refresh'`) |
+| `setMeasureSnapLimit`·`clearMeasureRefine`·`clearMeasurePointsFor`·`setMeasurePickThrough`, 잠금·풀기(`setMeasureInferenceLock`·Shift), `setMeasureTrackPoints` | 다시 구함 | 다음 그림 | 위와 같음 |
+| 겉모습(`setItemLooks`·`setItemOpacity`·`setItemColor`·`setItemMatrix` 등), 단면(`setSection` 등·손잡이 끌기), `setPickEdges`, 측정 중 `setMeasureSnap` | 버림(켜진 가상 커서는 다음 그림에 알리지 않고 다시 구함 — 0.98.0·0.99.0) | 곧 | 단면은 `onSectionChange`(미리 보기 값은 없음), 나머지 없음 |
+| `setScene`·`clear`, `clearMeasure`·측정 모드 끄기·뷰어 Esc, `commitMeasureCandidate`, `setKeyboardSnap(null)` | 버림 | 곧 | `onMeasure`(지움·두 점째)만 — 미리 보기 값은 없음 |
+| 포인터 이동 | 그 자리에서 구함 | 다음 그림 | 없음(앱이 `pointermove` 다음 프레임에 읽는다) |
+| 포인터 떠남·끌기 시작·누르기로 찍기 | 버림 | 곧 | 찍기는 `onMeasure` |
+| 가상 커서 키(화살표·Tab·Enter·켜기·끄기) | 그 자리에서 구함 | 곧 | `announce`(`'move'`·`'cycle'`·`'commit'`·`'start'`·`'end'`) |
+| `setRenderMode`, 휠·카메라, 끌어온 점 머무르기 끝 | 다시 구하지 않음(0.100.0 남은 한계 — 세계 점 그대로, 머무르기는 덧그림만) | — | — |
+
+### 새 알림
+
+- `onMeasureHoverChange(cb: (snap: MeasureHoverSnap | null) => void): () => void` — 이름은 상태가 바뀐 그림 뒤 알림의 꼴(`onCameraChange`·`onSectionChange`·`onViewCubeExpandedChange`)이고,
+  받는 값은 getter `measureHoverSnap`과 같은 형(새 형 없음 — 그때의 복사본, 한 알림의 콜백들은 같은 객체)
+- 언제: `measureHoverSnap` 값이 바뀐 그림을 다 그린 뒤 한 번(같은 그림의 `onCameraChange` 다음 — 그 그림의 덧그림·`measureLabelRect`도 새 값). 곧 버리는 길도 그다음 그림 뒤에 알린다.
+  한 프레임에 여러 길이 와도 한 번(그 그림의 값)
+- 무엇을: 까닭을 가리지 않는다 — 위 표의 포인터 밖 길, 포인터 이동·떠남·찍기, 가상 커서 키 모두. 값이 같으면 알리지 않고(버렸다가 그리기 전에 같은 자리로 다시 구해도),
+  없어지면 `null`(앞 값이 있었을 때만). 달 때의 값은 알리지 않는다(단 뒤 바뀐 것만)
+- 같은 값: `[measureHoverSnap, measureHoverLock]`의 JSON이 같다 — 점·붙잡은 종류·축·방향·잠금·기준 선분·`from`·다듬음·선분·끌어온 점·면·안내 선과 Shift·잠금 단추가 잠글 방향.
+  미리 보기 객체·측정 모드·찍은 점 1개 여부가 그대로면 셈하지 않는다(측정 점 고르기 결과는 만든 뒤 고치지 않는다)
+- 가상 커서: `announce`가 먼저(키 처리·그림 안)이고 그 그림 뒤에 이 알림 — 둘 다 온다. `announce`는 화면 읽기 글·후보 차례, 이 알림은 `measureHoverSnap` 값이라 값이 같으면 `announce`만 온다.
+  0.98.0부터 알리지 않고 다시 구하던 가상 커서 후보(단면·겉모습 뒤)도 값이 바뀌면 이 알림이 온다
+- 알림 규칙: 다른 on*와 같은 도움 함수(0.90.0 — 단 차례, 알림 동안 단 콜백은 다음 알림부터·뗀 콜백은 그 알림에 부르지 않음, 알림 안에서 dispose하면 남은 콜백을 부르지 않음.
+  0.89.0 dispose 뒤·0.93.0 함수가 아닌 값은 걸지 않고 아무것도 하지 않는 해제 함수). dispose가 목록과 견준 미리 보기를 놓는다
+
+```ts
+const off = viewer.onMeasureHoverChange((snap) => {
+  // 그 그림의 값 — 다음 프레임을 기다리지 않는다. 잠글 방향 등은 viewer.measureHoverLock으로 같은 그림의 값을 읽는다
+  status.textContent = snap ? snapLabel(snap) : '';
+});
+```
+
+### 포인터 이동도 넣은 까닭
+
+- 듣는 쪽이 없을 때 비용은 넣든 빼든 그리기 끝 목록 크기 확인 하나다. 정상 길 GL·알림은 그대로다(아래 확인)
+- 빼려면 위 표의 포인터 밖 길 열두 곳마다 「포인터 밖에서 바뀜」 표시를 달아야 하고, 앞으로 생길 장면 길도 표시를 잊으면 알림이 빠진다.
+  넣으면 그리기 끝 한 곳에서 값으로 견주므로 길 목록이 필요 없다 — 코드가 작고 빠뜨릴 길이 없다
+- 알림 수는 값이 바뀐 그림마다 많아야 한 번이다(측정 중 마우스로 면 위를 훑으면 프레임마다 하나). 앱이 지금 `pointermove`마다 다음 프레임에 읽는 것과 같은 빈도이고 값이 같으면 없다.
+  그래서 앱은 포인터 길의 다음 프레임 읽기도 이 알림으로 걷을 수 있다(걷지 않아도 같은 값을 한 번 더 읽을 뿐이다)
+
+### 비용
+
+- 듣는 쪽이 없으면: 그리기마다 목록 크기 확인 하나(그 밖에 아무것도 셈하지 않는다)
+- 있으면: 그리기마다 미리 보기 객체·측정 모드·찍은 점 수를 견주고, 바뀐 그림에서만 `measureHoverSnap`·`measureHoverLock` 사본과 JSON 하나. 측정 점 고르기는 더하지 않는다
+
+### 크기
+
+- 104차 하네스를 그대로 썼다(0.102.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.102.0 값이 0.102.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 463,553 (157,459) → 464,162 (157,629) B(+609 / gzip +170), 묶어 그리기 조각 46,414 (18,487) B·면 미리 강조 조각 4,550 (2,172) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 B 그대로(gzip 987 → 986), 뷰어 조각 468,972 (159,992) → 469,581 (160,160) B(+609 / gzip +168).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,640 → 5,641), 뷰어 조각 458,036 (156,210) → 458,645 (156,379) B(+609 / gzip +169)
+
+### 바뀐 기본 동작
+
+- 없다 — `onMeasureHoverChange`를 달지 않으면 0.102.0과 같다(그린 도형·GL 호출·덧그림·알림 — 아래 확인). 달아도 그리기·GL·다른 알림은 같고 이 알림이 더해질 뿐이다.
+  화소 장면은 새 API를 부르지 않으므로 화소가 0.102.0과 같아야 한다
+
+### 확인
+
+- 새 시험 `tests/v01030hover.test.ts`(10개 — 가짜 DOM·가짜 WebGL, 상자 둘):
+  포인터 밖 — 메시를 바꾸면 그리기 전에는 없고 다음 그림 뒤 한 번(그 그림의 `measureHoverSnap` — 달 때의 값은 알리지 않음), 다시 구해도 같은 값이면 없음(같은 꼴로 바꾼 메시·숨긴 아래 메시·
+  붙잡기 한도·다듬기 비우기·같은 자리로 다시 옮김), 겉모습·단면·붙잡기 선택·측정 모드 끄기로 버리면 `null` 한 번(앞 값이 있을 때만), 한 프레임에 길 넷이 와도 한 번·버린 뒤 그리기 전에
+  같은 자리로 옮겨 같은 값이면 없음, 앱 단추 잠금·풀기(잠근 선 위 점). 포인터·가상 커서 — 포인터 이동·한 그림 앞 두 이동·떠남, 가상 커서 키 이동·`'refresh'`(둘 다 `announce` 다음)·
+  알림이 없던 단면 뒤 다시 구함. 그리기·규칙 — 듣는 뷰어와 듣지 않는 뷰어가 열세 걸음(가리킴·메시 바꾸기·보이기·겉모습·두 점 찍기·붙잡기 한도·단면·떠남·측정 끔)에서
+  GL 그리기 기록·덧그림 ctx 호출·미리 보기·찍은 점·거리 글상자·측정 알림이 같다, 0.90.0 알림 규칙, 알림 안 dispose·dispose 뒤·함수가 아닌 값. 0.102.0 src로 10개 모두 실패(API 없음)
+- 정상 길(탐색 시험 — 저장소에 넣지 않음): 0.102.0 절과 같은 104걸음(새 알림을 듣지 않는 길) — 걸음마다 GL 그리기·덧그림 ctx 호출·알림·고르기·측정 알림·상태 해시와
+  `pointsFor`·기준 거르기 부름 수가 0.102.0 src와 107줄 모두 같다
+- typecheck 통과. 새 시험·정상 길 탐색·`v0900listeners`·`v0980stale` 4파일 107개, `v0930args`(알림 등록 꼴)·`v0890dispose`·`v0990refs`·`v01000range` 4파일 138개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 실제 STEP·SKP·NC 표본, 실제 브라우저
+
+### 남은 한계
+
+- 그림이 없으면 알림도 없다: 문맥을 잃은 동안·숨은 탭(브라우저가 `requestAnimationFrame`을 멈춘다)에서는 버린 미리 보기도 다음 그림까지 알리지 않고, 나눠 올리기가 일찍 끝낸 그리기는
+  다음 그림으로 미룬다(`onCameraChange`와 같다). 곧 버린 값은 그 전에도 `measureHoverSnap`으로 읽힌다
+- 알림 콜백이 던지면 다른 on*처럼 그 그리기를 끝내고 뒤 콜백은 부르지 않는다(0.90.0 규칙은 던짐을 가두지 않는다)
+- `measureLabelRect`·`measureInferenceLock`·`measurePoints`만 바뀐 것은 이 알림의 값이 아니다(찍기는 `onMeasure`, 잠금은 미리 보기의 `locked`와 함께 바뀐다).
+  카메라만 움직여 미리 보기 점의 화면 자리가 바뀐 것도 아니다(`onCameraChange`)
+- 같은 프레임에 포인터 이동과 미리 보기를 다시 구하는 장면 길(재생의 메시 바꾸기 등)이 오면 그 그림은 마지막 커서 자리(앞 이동)에서 구한다(0.10.0 다시 구하기가 기다리는 포인터 자리를
+  덮는다 — 이번에 바꾸지 않았다, 다음 이동에서 맞는다). 알림은 그 그림의 값으로 온다
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL·가짜 DOM)
+
+### 앱이 할 일
+
+- NC·STEP: 판 올림(코어 병합 커밋 전체 SHA로 고정) 뒤 장면 길 목록을 걷고 이 알림 하나를 단다
+  - NC 97차 `measure-lock.ts`: `opencad-sim-mesh` 층 사건 듣기와 `sceneChanged()`(`snapLimit()` 안의 부름 포함)를 걷고, 뷰어가 생긴 뒤 한 번 `onMeasureHoverChange`에 `update`를 단다.
+    포인터 길(`pointermove`·`pointerleave`·`pointerup` → 두 프레임 뒤 `update`)도 걷을 수 있다(카메라로 바뀌는 툴팁 자리는 그대로 카메라 알림이 맡는다)
+  - STEP 106차 `app.ts`: `sceneSnap()` 여섯 곳(단면 알림·보이기 둘·겉모습·붙잡기 선택·곡면 정의)을 걷고 뷰어를 만들 때 `onMeasureHoverChange`에 `showHoverSnap`을 단다.
+    포인터 길의 `scheduleHoverSnap`도 걷을 수 있다
+  - 알림 안에서 코어에 피할 자리를 다시 주는 등(`setMeasureLabelAvoid`) 그리기를 예약해도 그 그림에서 값이 같으면 알림이 다시 오지 않는다(되풀이 없음)
+
+```ts
+// NC measure-lock.ts — 97차 sceneChanged(층 사건 'opencad-sim-mesh'·snapLimit 뒤 두 프레임 기다림) 대신
+this.offHover = viewer.onMeasureHoverChange(() => this.update());
+// STEP app.ts — 106차 sceneSnap() 여섯 곳 대신
+this.viewer.onMeasureHoverChange(() => this.showHoverSnap());
+```
+
+- SKP: 판 올림만(달지 않으면 바뀌는 것이 없다)
+- 정상 길 코드는 그대로라 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 0.102.0과 같아야 한다
+- 코어 조각 +609 B(gzip +170 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +609 B·gzip +168~169 B)
 
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
