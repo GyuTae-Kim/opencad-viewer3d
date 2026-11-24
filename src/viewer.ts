@@ -4141,7 +4141,8 @@ export class Viewer3d {
    * 그물 면이면 맞은 삼각형과 같은 평면에서 변을 맞대고 이어진 삼각형(opts.ranges를 주면 그 삼각형 구간 — 앱이 아는 면)을 강조 색으로 옅게 칠하고 테두리를 긋고,
    * 선분·윤곽선은 그 선분, 점은 둘레 고리를 긋는다(키보드 고르기 후보 표식과 같은 꼴). 깊이를 따지지 않고 앞에 그린다(앞 면에 가린 후보도 보인다).
    * 고른 것·강조(highlight)·알림은 바꾸지 않는다. 숨긴 묶음·장면에 없는 묶음·단면의 잘린 면 후보는 그리지 않는다. null이면 지우고, 장면을 바꾸면 풀린다. 그림 저장에는 그리지 않는다.
-   * 0.56.0: 면 삼각형이 PICK_PREVIEW_MAX_TRIS(4,096)를 넘으면 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 한도에서 잘린 자리 안쪽 변을 긋지 않는다)
+   * 0.56.0: 면 삼각형이 PICK_PREVIEW_MAX_TRIS(4,096)를 넘으면 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 한도에서 잘린 자리 안쪽 변을 긋지 않는다).
+   * 0.105.0: 그 가운데 테두리가 없는 닫힌 면(구 전체·원환처럼 B-rep 면 하나가 닫힌 앱 구간)은 면 전체에서 고르게 고른 삼각형(한도까지)을 옅게 칠한다(0.104.0은 아무것도 그리지 않았다)
    */
   setPickPreview(p: Pick3d | null, opts: PickPreviewOptions = {}): void {
     if (this.disposed) return;
@@ -9951,7 +9952,8 @@ export class Viewer3d {
   /**
    * 0.54.0 그물 면 후보 표식(화면 덧그림만): 면 삼각형(ranges면 그 구간, 아니면 맞은 삼각형과 같은 평면으로 이어진 삼각형 — pickpreview.ts)을 강조 색으로 옅게 한 번에 칠하고
    * 테두리 변을 바탕 테 위 강조 색 선으로. 단면의 잘린 면·삼각형 번호가 없는 후보는 그리지 않는다. 눈 뒤 꼭짓점이 있는 삼각형·변은 건너뛴다.
-   * 0.56.0: 삼각형 수 한도(PICK_PREVIEW_MAX_TRIS)에 걸린 면은 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 0.54.0은 한도까지 칠하고 잘린 자리 안쪽 변까지 그었다)
+   * 0.56.0: 삼각형 수 한도(PICK_PREVIEW_MAX_TRIS)에 걸린 면은 칠하지 않고 면 전체로 센 테두리만 긋는다(STEP 66차 — 0.54.0은 한도까지 칠하고 잘린 자리 안쪽 변까지 그었다).
+   * 0.105.0: 그 가운데 테두리가 없는 닫힌 면(구 전체·원환 — FaceOutline.sparse)은 면 전체에서 고르게 고른 삼각형(한도까지)을 칠한다(0.104.0은 칠도 테두리도 없어 아무것도 보이지 않았다)
    */
   private drawFaceMark(ctx: CanvasRenderingContext2D, f: ViewFrame, p: Pick3d, m: Mesh3d, ranges: readonly IndexRange[] | null): void {
     if (p.section || !Number.isInteger(p.index) || p.index < 0) return;
@@ -9965,9 +9967,11 @@ export class Viewer3d {
       return scr(pos[v * 3]!, pos[v * 3 + 1]!, pos[v * 3 + 2]!);
     };
     const th = this.theme;
-    if (!fo.capped) {
+    // 0.105.0 한도에 걸린 면은 칠하지 않되(0.56.0), 테두리가 없는 닫힌 면만 면 전체에서 고르게 고른 삼각형(sparse — 한도까지)을 같은 꼴로 칠한다
+    const fill = fo.capped ? fo.sparse : fo.tris;
+    if (fill) {
       ctx.beginPath();
-      for (const t of fo.tris) {
+      for (const t of fill) {
         const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
         if (!a || !b || !c) continue;
         ctx.moveTo(a[0], a[1]);
@@ -10003,7 +10007,8 @@ export class Viewer3d {
   /**
    * 0.54.0 그물 면 미리 강조 셈(같은 위치·색인 배열·삼각형·구간이면 기억에서 — 넷까지). 면 셈 조각이 아직 없으면 받기를 걸고 null(그 프레임은 표식 없이 — 오면 다시 그린다).
    * 0.96.0 앱 구간이면 열쇠는 그물 배열 + 구간 내용(rangesFace는 맞은 삼각형을 받지 않는다) — 가상 커서·미리 강조가 같은 면의 새 삼각형을 맞혀도 경계 변을 다시 세지 않는다
-   * (0.95.0은 열쇠에 맞은 삼각형 번호가 들어 새 삼각형마다 셌다 — 한도를 넘는 면은 boundaryOf까지). 같은 평면 면은 그대로 맞은 삼각형마다
+   * (0.95.0은 열쇠에 맞은 삼각형 번호가 들어 새 삼각형마다 셌다 — 한도를 넘는 면은 boundaryOf까지). 같은 평면 면은 그대로 맞은 삼각형마다.
+   * 0.105.0 닫힌 면의 고르게 고른 칠(sparse)도 카메라와 상관없어 같은 기억에 담긴다(같은 면이면 다시 고르지 않는다)
    */
   private faceOutlineOf(m: Mesh3d, tri: number, ranges: readonly IndexRange[] | null): FaceOutline | null {
     const pos = m.positions, idx = m.indices;
