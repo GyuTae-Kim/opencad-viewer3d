@@ -54,7 +54,9 @@ OpenCAD의 3D 형식 저장소들이 이 뷰어를 함께 씁니다.
   0.92.0부터 마커·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기 API(`setMarker`·`setGridZ`·`setHighlightSegments`·`setItemLooks`·`setAnnotations`·`setRenderOptions`·`setNavigation` 등)와
   선택 객체 `null`도 같은 규칙이다(0.91.0은 엉뚱한 마커 `kind`에 그리기마다 `TypeError`를 던져 그 뒤 그림이 멈췄고, 높이가 아닌 격자 높이에 격자 `u_mvp`가 NaN이었다).
   0.93.0부터 알림 등록(`on*`)은 함수가 아닌 값을 걸지 않고, 포인터 맡기·측정 글 꼴·테마·측정 스냅 앱 함수·걷기 수 선택·조명 수 필드·창 확대와 나머지 선택 객체 `null`도 같은 규칙이다
-  (0.92.0은 함수가 아닌 콜백·처리기·글 꼴에 알림·누르기·그리기마다 `TypeError`를 던졌고, 수가 아닌 눈높이에 걷기 카메라가 NaN이었다 — 82~93차 모음은 0.93.0 절 끝 표)
+  (0.92.0은 함수가 아닌 콜백·처리기·글 꼴에 알림·누르기·그리기마다 `TypeError`를 던졌고, 수가 아닌 눈높이에 걷기 카메라가 NaN이었다 — 82~93차 모음은 0.93.0 절 끝 표).
+  0.94.0부터 장면 계약 밖 값(`setScene(null)`은 `clear()`, 배열이 아닌 목록은 배열·빈 목록, `Float32Array`가 아닌 위치·`Uint32Array`가 아닌 색인은 그 항목을 빼고 알림)·키 사건 자리(`handleKey(null)`)·
+  생성자 고르기 허용 거리·무늬 한도와 입구 순수 함수(`gridSpec` 등)도 같은 규칙이다(0.93.0은 `TypeError`를 던지거나 `Set` 목록에 장면을 반쯤 바꿨고, 수가 아닌 허용 거리에 선분을 고르지 못했다)
 - 실제 GPU에서 선분 300만 개·삼각형 100만 개를 끌어도 끊기지 않습니다. 나눠 올리기를 쓰면 아주 큰 배열 하나도 여러 프레임에 조각으로 올립니다.
 - 같은 그물을 여러 자리에 놓은 장면(같은 배열을 함께 쓰는 자리 — 조립의 같은 부품)은 자리마다가 아니라 같은 그물끼리 그리기 한 번에 그립니다(인스턴싱 — 정의 12개 × 자리 3,000에서
   그리기 호출 6,004 → 28, 자리 색·강조·분해 행렬·숨기기는 자리마다 그대로, 0.43.0부터 단면 하나·그림자를 켜도 면은 모은다).
@@ -10080,6 +10082,106 @@ NaN·무한대 훑기(0.82.0~0.87.0)와 다른 견고성 갈래인 수명을 가
 - 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.92.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
 - 코어 조각 +797 B(gzip +301 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +797 B·gzip +258~327 B)
 
+## 0.94.0: 장면 계약 밖 값·키 사건 자리·생성자 고르기 허용 거리·무늬 한도·입구 순수 함수의 꼴이 틀린 인자도 0.91.0 규칙으로(94차 — 0.93.0 남은 한계)
+
+82~93차 모음 표 「남은 것」의 앞 둘 — 장면 계약 밖 값(`setScene(null)`·`setMesh`의 배열이 아닌 위치)·키 사건 자리(`handleKey(null)`)와 생성자의 다른 수 선택·하위 경로 순수 함수 — 를
+가짜 WebGL 탐색 시험으로 0.93.0 src에서 재현했다. 하위 경로 입구(`./*`)는 src 모든 파일이라 내보낸 함수가 419개다 — 패키지 입구가 내보내는 함수와 세 앱이 하위 경로에서 가져오는 함수,
+격자 둘을 겹친 것 없이 90개(93차가 본 셋과 비동기 `closestBetweenAsync`는 뺐다) 골라 `null`·`undefined`·빈 객체·엉뚱한 글·수를 줬다. 던지거나 장면을 반쯤 바꾸거나 고르기·무늬가
+깨지는 것을 장면 검사(0.50.0 `checkScene`)와 API·함수 입구 한두 줄로 82~93차 규칙에 맞췄다
+
+### 찾은 것(0.93.0 — 상자 둘·선분 묶음·점 묶음, 탐색 시험과 새 시험이 0.93.0 src에서 재현)
+
+| API | 꼴이 틀린 인자 | 0.93.0 | 0.94.0 |
+|---|---|---|---|
+| `setScene` | 객체가 아닌 장면(`null`·`undefined`·글·수·참) | `TypeError`(장면 그대로) | `clear()`와 같다(장면 비우기 — 단면도 끈다) |
+| 〃 목록(`meshes`·`lines`·`points`·`textures`) | 돌 수 없음(수·`null`·글·`{}`) / 돌 수 있지만 배열이 아님(`Set`) | `TypeError` / **`TypeError` — 장면을 반쯤 바꾼 뒤**(그 뒤 고르기 없음) | 빈 목록 / 배열 |
+| 〃 목록 항목 | `null`·`undefined` | `TypeError` | 수·글 항목과 같다(빼고 `placement` 알림 — 0.93.0도 수·글 항목은 그랬다) |
+| 그물·선분·점 `positions`(`setScene`·`setMesh`) | `Float32Array`가 아님 — 글 / 길이만 있는 객체·일반 배열 / `Float64Array` | `TypeError` / 던지지 않고 **GPU 버퍼 밖**(그리지 못한 채 범위·맞춤·고르기에 듦) / 8바이트 수를 그대로 올려 float로 읽음(다른 도형 — 코드 읽기) | `positions`가 없는 것과 같다(빼고 `placement` · `positions` 알림 — `setMesh`는 false) |
+| 그물 `indices`(`setScene`·`setMesh`) | `Uint32Array`가 아님(글·일반 배열·`Uint16Array`) | 글은 `TypeError`(**`setMesh`는 장면을 바꾼 뒤**), 그 밖은 색인 버퍼 밖 | 그 그물을 빼고 `placement` · `indices`로 알림(`setMesh`는 장면을 바꾸기 전에 false) |
+| `handleKey`·`handleKeyUp` | 객체가 아님(`null`·`undefined`) | `TypeError`(걷는 중·키보드 스냅을 켠 뒤도) | false(처리하지 않음 — 글·수는 0.93.0도 false) |
+| `handleKey` | `preventDefault`가 함수가 아닌 키 사건 객체(`{ key: 'f' }` 등) | **처리한 뒤 `TypeError`**(전체 보기·표준 뷰·걷기 시작·가상 커서는 이미 함) | 처리하고 true(막을 기본 동작이 없다) |
+| 생성자 `pickTolerance`·`touchPickTolerance` | 유한한 수가 아님 — 엉뚱한 글·NaN·`{}`·수로 읽히는 글(`'8'`)·−Infinity / +Infinity | **선분을 고르지 못하고 측정 붙잡기도 없음**(`'8'`은 선분 허용 거리가 `+`로 이어 글이 된다) / 60화소 밖에서도 선분을 고름 | 주지 않은 것(6·14) |
+| 생성자 `textureLimit` / `textureBudget` | 수로 읽히지 않음(엉뚱한 글·NaN·`{}`) | 한 장 한도가 없는 것처럼 풂 — 8192 그림을 GPU 한도(4096) 밖 긴 변 5362로(기본은 예산으로 1967) / 예산을 끈 것과 같음 | 주지 않은 것(2048 / 256 MB — 0.93.0 `maxPixelRatio`와 같은 규칙) |
+| 순수 `gridSpec` | 상자가 아님(`null`·`{}`·글·수) / 이름·수가 아닌 높이(`null`·글·객체·참) | `TypeError` / 그 높이를 그대로 돌려줌 | 빈 범위(원점 둘레 격자) / `'min'` |
+| 순수 `gridLines`·`checkScene`·`imageInfo`·`walkKeyOf`·`keySnapAction` | `null`·`undefined`(`checkScene`은 객체가 아닌 장면도) | `TypeError` | 격자 없음 · 빈 장면(이름 `''`·단위 `'unknown'`) · `null` · `null` · `null` |
+| 순수 `pickTolerance` | 유한한 수가 아닌 허용 거리 | 그대로 돌려줌(터치 붙잡기 거리 NaN) | 기본(`PICK_TOLERANCE_PX`·`TOUCH_PICK_TOLERANCE_PX`) |
+
+- 0.93.0도 문제 없던 것(그대로): 목록의 수·글 항목(빼고 알림), `setMesh`의 수 `positions`(false), 그물 `edges`·`normals`·`colors`·`uvs`가 글(0.50.0 길이 검사가 알림), `handleKey`의 글·수·키 없는 객체(false),
+  생성자 허용 거리 `null`(기본), `textureLimit` Infinity(GPU 한도)·수로 읽히는 글, `textureBudget` 0 이하(끔), 순수 `fitSize`·`dragStartPx`·`isTouch`·`viewKeyOf` 등 스무 함수
+- 앱에서 닿는 길(읽기만): 세 앱은 `handleKey`에 브라우저 키 사건을, `textureLimit`·`textureBudget`에 기기 힌트로 센 수를 넘기고, 장면 배열은 `Float32Array`·`Uint32Array`로 만든다 —
+  이번에 고친 길로 들어오는 앱 값은 없다
+
+### 고친 것
+
+- 규칙(91~93차 그대로): 꼭 줘야 하는 자리가 깨지면 그 API가 이미 쓰는 쪽 — 장면이 아니면 `clear()`(`scene` 읽기가 `null`인 상태), 놓을 수 없는 항목은 0.50.0 장면 검사의 `placement`(빼고 알림),
+  키 사건이 아니면 처리하지 않음(0.88.0 dispose 뒤와 같은 false). 선택 필드가 깨지면 주지 않은 것, 돌 수 없는 목록은 빈 목록, 돌 수 있는 목록은 돈다(0.92.0 `setItemLooks`와 같다).
+  순수 함수는 그 함수 설명이 쓰는 빈 값(빈 범위·격자 없음·모르는 꼴 `null`·걷기 키 아님 `null`·기본 허용 거리)
+- `sceneissues.ts`: 목록 자리 도움 함수 `listOf`, `checkScene`(객체가 아닌 장면·배열이 아닌 목록 — `textures`도), 그물·선분·점 검사(`null` 항목·`Float32Array`가 아닌 `positions`·
+  `Uint32Array`가 아닌 `indices`). `setScene`·`setMesh`는 이 검사를 그대로 쓴다 — `setMesh`는 검사가 빼는 그물이면 장면을 바꾸기 전에 false(0.50.0과 같다)
+- `viewer.ts`: `setScene` 입구 한 줄(객체가 아니면 `clear()`), `handleKey`·`handleKeyUp` 입구 한 줄과 도움 함수 `stopKey`(기본 동작 막기), 생성자 수 선택 도움 함수 `numOr`
+  (`maxPixelRatio`도 이것으로 — 값은 0.93.0 그대로). 생성자 허용 거리는 쓰는 곳이 부르는 순수 `pickTolerance`가 거른다
+- 순수 함수 입구 한두 줄: `gridSpec`·`gridLines`(`grid.ts`), `imageInfo`(`texture.ts`), `pickTolerance`·`walkKeyOf`(`pointer.ts`), `keySnapAction`(`keysnap.ts`)
+- 장면 검사·API 입구에서만 거른다 — 그리기 길·렌더러·셰이더는 바꾸지 않았다. 공개 형(TypeScript 선언)·알림 코드·알림 글은 그대로다
+
+### 크기
+
+- 93차 하네스를 그대로 썼다(0.93.0 src는 git에서 바로 읽어 같은 하네스로 견줌 — 0.93.0 값이 0.93.0 절의 바뀐 뒤 값과 같다)
+- 코어 조각 455,285 (154,824) → 456,135 (155,042) B(+850 / gzip +218), 묶어 그리기 조각 46,414 B 그대로(gzip 18,488 → 18,487), 면 미리 강조 조각 4,491 (2,148) B 그대로
+- 첫 화면이 `opencad-viewer3d/viewkeys`만 가져오는 꼴: 입구 1,685 B 그대로(gzip 986 → 988), 뷰어 조각 460,704 (157,330) → 461,554 (157,633) B(+850 / gzip +303).
+  `opencad-viewer3d/camera`를 가져오는 꼴: 입구 13,456 B 그대로(gzip 5,641 → 5,640), 뷰어 조각 449,770 (153,485) → 450,618 (153,811) B(+848 / gzip +326)
+- 순수 `sceneBounds`도 같은 규칙으로 고쳤다가 되돌렸다 — `bounds` 모듈은 `camera` 입구가 끌어와 그 입구가 13,456 → 13,605 B(gzip 5,641 → 5,732)로 커졌다(남은 한계)
+
+### 바뀐 기본 동작
+
+- `setScene(null)`(객체가 아닌 장면)은 `clear()`다 — 장면·단면·측정을 지운다(0.93.0은 던지고 앞 장면 그대로)
+- 장면 목록이 배열이 아니면 돌 수 있는 것은 배열로, 아니면 빈 목록으로 그린다. 목록의 `null` 항목은 빼고 `placement` · `positions`로 알린다(`id` 없음 — 수 항목과 같다)
+- `Float32Array`가 아닌 `positions`(일반 배열·`Float64Array` 포함)는 `positions`가 없는 것이다 — 그 항목을 빼고 알린다(0.93.0은 받아서 그리지 못하거나 다른 도형을 그렸다).
+  `Uint32Array`가 아닌 그물 `indices`(`Uint16Array` 포함)도 그 그물을 빼고 `placement`로 알린다 — 알림 `field` 값 `'indices'`가 새로 나온다(알림 코드·글은 그대로)
+- `handleKey`·`handleKeyUp`은 객체가 아닌 키 사건에 false다. `preventDefault`가 함수가 아닌 키 사건 객체도 처리한다(0.93.0은 처리한 뒤 던졌다)
+- 생성자 `pickTolerance`·`touchPickTolerance`는 유한한 수만 받는다 — 수로 읽히는 글(`'8'`)·Infinity도 기본이다(0.93.0은 받았지만 선분을 고르지 못하거나 어디서나 골랐다).
+  순수 `pickTolerance(type, mouse, touch)`도 유한한 수가 아니면(`null` 포함) 기본을 쓴다
+- 생성자 `textureLimit`·`textureBudget`은 수로 읽히지 않으면 기본이다(Infinity·수로 읽히는 글·0 이하 예산은 0.93.0대로)
+- 순수 `gridSpec`은 상자가 아니면 빈 범위, 이름·수가 아닌 높이는 `'min'`이다(수로 읽히는 글 `'3'`도 — 뷰어 `setGridZ`는 0.92.0부터 받지 않는다).
+  `gridLines`·`checkScene`·`imageInfo`·`walkKeyOf`·`keySnapAction`은 `null`에 빈 값을 돌려준다
+- 정상 인자의 그림·GL 호출·돌려준 값·상태·알림은 0.93.0과 같다
+
+### 확인
+
+- 새 시험 `tests/v0940contract.test.ts`(쉰일곱): 깨진 인자 쉰셋(장면·그물 스물다섯 — 알림만 따로 본 하나 포함, 키 사건 열, 생성자 허용 거리 열둘, 무늬 한도·예산 하나, 순수 다섯)마다
+  깨진 값을 준 뷰어와 같아야 할 부름(`clear()`·빈 목록·`positions` 없는 항목·처리한 키·기본 선택)의 뷰어가 상태(카메라·장면 묶음·장면 알림·맞춤 범위·단면·측정·걷기·키보드 커서)·
+  돌려준 값·그 뒤 사건(누르기·전체 보기·단면·고르기·걷기·측정 미리 보기)·그리기 기록(가짜 WebGL2 — 프로그램·속성·균일 변수 값)에서 같고, 그 뒤 그리기도 던지지 않으며 균일 변수가 모두 유한하다.
+  0.93.0 src로는 쉰셋 모두 실패(0.93.0도 문제 없던 넷은 두 판 모두 통과)
+- 정상 값 그리기(저장소에 넣지 않은 탐색 시험): 장면·그물 바꾸기 열아홉(keepView·깨진 좌표·빈 장면·clear·bounds·알림·나눠 올리기·setMesh 여섯·removeMesh), 키 열다섯(F·1·7·Esc·Shift·걷기·키보드 스냅),
+  허용 거리 아홉 가지의 고르기·측정 붙잡기 열여덟 그림과 무늬 한도·예산 열한 가지(긴 변·무늬 통계), 순수 `gridSpec`·`gridLines` 서른하나·`checkScene` 넷·`sceneBounds`·`imageInfo` 다섯·
+  `walkKeyOf` 여덟·`keySnapAction` 열·`pickTolerance` 스물 — 그리기 기록·펼친 도형(tests/drawexpand.ts)·돌려준 값·상태·알림 기록 해시가 0.93.0 src와 144줄 모두 같다(그리기 4~15, 펼친 도형 114~224)
+- typecheck 통과. 새 시험과 바꾼 곳에 닿는 시험(`v0500input` — 장면 검사·격자, `v0460keysnap` — 키보드 스냅 키)과 탐색 시험 4파일 107개 통과
+- 부하로 생략 — CI가 전체 시험·화소를 한다: 전체 시험, 화소·값(`npm run pixels`), 펼친 도형 해시 하네스, 넓은 탐색, 실제 STEP·SKP 표본, 실제 브라우저.
+  그리기 길을 바꾸지 않아 화소는 0.93.0과 같아야 한다
+
+### 남은 한계
+
+- 순수 `sceneBounds`는 장면 계약 밖 값에 0.93.0처럼 `TypeError`다 — `bounds` 모듈이 첫 화면 `camera` 입구에 들어 바이트를 늘리지 않으려고 남겼다(뷰어는 쓰지 않는다 — `checkScene`을 거친 장면에 쓴다)
+- 훑은 순수 함수 90개 가운데 고치지 않은 예순셋(위 `sceneBounds` 포함) — 기하 도움 함수(카메라·범위·최근접·추론·글상자·면 미리 강조·고르기·BVH·속성 압축 등)와 글 틀(`keySnapText`·`keySnapHint`·`sceneIssueText` 등)·
+  색 대비 함수 — 은 `null`에 `TypeError`이거나 객체·글에 NaN이다. 코어·앱이 만든 값만 받는 셈이라 남겼다. 훑지 않은 내부 함수(묶어 그리기·끌어온 점·렌더러 등)도 같다
+- 장면 항목의 다른 배열 필드(`edges`·`normals`·`colors`·`uvs`·`segmentIds`·`pointIds` 등)는 형식을 보지 않는다 — 0.50.0 길이 검사가 거르는 만큼만(글은 길이 알림)
+- 객체 장면의 다른 필드(`name`·`units`·`fitRange` 등)의 꼴과 선택 객체 안의 참·거짓·이름 자리 다른 값은 0.93.0대로 읽는다
+- 실제 브라우저·GPU에서는 보지 않았다(가짜 WebGL)
+
+### 82~93차 모음 「남은 것」
+
+- 장면 계약 밖 값(`setScene(null)`·`setMesh`의 배열이 아닌 위치)과 키 사건 자리(`handleKey(null)`) — 고침(0.94.0)
+- 생성자의 다른 수 선택(`pickTolerance`·`touchPickTolerance`·`textureLimit`·`textureBudget`)과 하위 경로 입구의 다른 순수 함수(`gridSpec(null)` 등) — 고침(0.94.0 — 생성자 넷과 순수 일곱,
+  `sceneBounds`·기하 도움 함수는 위 「남은 한계」)
+
+### 앱이 할 일
+
+- STEP·SKP·NC: 판 올림만(코어 병합 커밋 전체 SHA로 고정). 공개 API 꼴은 같다. 세 앱은 키 사건·수 선택·`Float32Array`·`Uint32Array` 장면을 넘겨 바뀌는 것이 없다
+- 형 밖 값을 넘길 수 있는 앱(설정 파일·링크를 그대로 넘기는 임베드 등): `setScene(null)`은 이제 장면을 지운다 — 앞 장면을 지키려면 넘기기 전에 거른다.
+  해석기가 일반 배열·`Float64Array`·`Uint16Array`로 만든 위치·색인은 이제 그 항목을 빼고 알리므로(`sceneIssues`의 `placement`) `Float32Array`·`Uint32Array`로 바꿔 넘긴다.
+  알림 `field`에 `'indices'`가 새로 올 수 있다 — `field`로 글을 고르는 앱은 그 값을 더한다
+- 앱 가짜 WebGL 하네스의 GL 호출 수·그린 도형은 정상 인자에서 0.93.0과 같다(tests/drawexpand.ts는 바꾸지 않았다)
+- 코어 조각 +850 B(gzip +218 B), 묶어 그리기·면 미리 강조 조각·첫 화면 입구 바이트 그대로(`import()` 뷰어 조각 +848~850 B·gzip +303~326 B)
+
 npm에 올리지 않고 GitHub 의존으로 씁니다. TypeScript 원본 그대로 내보내므로 Vite 같은 번들러와 `moduleResolution: "bundler"`가 필요합니다.
 
 ```json
@@ -10491,8 +10593,9 @@ PR마다 CI(`.github/workflows/pixels.yml`)가 같은 러너에서 PR이 들어�
   0.87.0 단면 평면의 넘친 위치만 고쳤다 — 0.87.0이 훑은 측정·고르기 미리 강조 API는 재현되는 증상이 없어 그대로 두었고(0.87.0 "남은 한계"), 그 밖의 API 인자와
   강조 선분 좌표(`positions`)의 값은 이 규칙으로 따로 훑지 않았다. 꼴이 틀린 인자(TypeScript 형 밖 값)는 0.91.0이 단면·보기·투영·그리기 모드·카메라 투영을,
   0.92.0이 그 "남은 한계" 표(마커 `kind`·격자 높이·강조 선분·겉모습·덧그림·그리기 선택·걷기)와 선택 객체 `null`을, 0.93.0이 나머지 공개 API(알림 등록·포인터 맡기·측정·테마·
-  걷기 수 선택·창 확대·구간 목록)와 순수 `markerMesh`·`parseColor`·`mergeRanges`를 고쳤다 — 장면 계약 밖 값(`setScene(null)`)·`handleKey(null)`·생성자의 다른 수 선택·
-  그 밖의 순수 함수는 남겼다(0.93.0 "남은 한계"와 82~93차 모음 표)
+  걷기 수 선택·창 확대·구간 목록)와 순수 `markerMesh`·`parseColor`·`mergeRanges`를, 0.94.0이 장면 계약 밖 값(`setScene(null)`·배열이 아닌 목록·`Float32Array`가 아닌 위치·
+  `Uint32Array`가 아닌 색인)·`handleKey(null)`·생성자의 다른 수 선택과 입구 순수 함수 일곱(`gridSpec`·`gridLines`·`checkScene`·`imageInfo`·`walkKeyOf`·`keySnapAction`·`pickTolerance`)을 고쳤다 —
+  `sceneBounds`·기하 도움 순수 함수와 장면 항목의 다른 배열 필드 형식은 남겼다(0.94.0 "남은 한계"와 82~93차 모음 표)
 - 나눠 올리기에서 큰 묶음은 다 채운 뒤에야 보인다(채운 앞부분부터 그리지 않는다). 그물 범위(CPU)는 묶음 하나를 한 번에 센다. 나눠 올리지 않는 `setScene`은 예전처럼 한 번에 올린다
 - 앱이 포인터를 맡는 훅(0.32.0 `setPointerClaim`·`claimPointer`)은 누르기 단위다 — 휠·키는 맡지 않고(앱이 막으려면 그 사건을 먼저 받아 막는다), 코어에는 관성·길게 누르기가 없어
   앱이 길게 누르기를 하려면 제 타이머에서 `claimPointer`로 맡는다. 맡은 포인터 id로 보낸 합성 사건도 앱 것이라 코어 측정 미리 보기를 쓰는 정밀 조준은 지금처럼 합성 `pointercancel`을 쓴다.
