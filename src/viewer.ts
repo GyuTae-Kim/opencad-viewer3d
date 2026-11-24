@@ -45,7 +45,7 @@ import {
   viewDepth,
   zoomCamera,
 } from './camera';
-import { type GridSpec, type GridZ, gridLines, gridSpec } from './grid';
+import { type AxesFrame, type GridSpec, type GridZ, type UnitAxesFrame, axesFrameLines, axesFrameOf, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, mat4Mul, modelMatrix, placeMatrix, transform4, transformPoint, translation } from './math';
 import {
@@ -2036,6 +2036,10 @@ export class Viewer3d {
   private boundsVer = 0;
   private grid: GridSpec | null = null;
   private gridOn: boolean;
+  /** 0.101.0 앱이 준 좌표축 틀(setAxesFrame — 단위 방향, y는 x에 직교). null = 세계 원점·세계 축(0.100.0) */
+  private axesFrameV: UnitAxesFrame | null = null;
+  /** 0.101.0 그 틀의 X·Y축선 세계 끝점(xyz… — rebuildGrid가 세고 frame()이 보이는 범위에 넣는다). 틀이 없으면 null */
+  private axesEnds: number[] | null = null;
   private bvhs = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Bvh>>();
   /** 0.45.0 최근접점 구간 모양(closestPoints rangeA·rangeB): 정점 배열 → 번호 배열(없으면 종류) → 합친 구간 열쇠 → 조각. bvhs와 함께 버린다 */
   private parts = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Map<string, ClosestPart>>>();
@@ -3960,6 +3964,36 @@ export class Viewer3d {
   setAxesVisible(on: boolean): void {
     this.opts.axes = on;
     this.invalidate();
+  }
+
+  /**
+   * 0.101.0 좌표축 틀(앱의 그리기 축 — SketchUp처럼 옮기거나 돌린 축): 격자의 X·Y축선을 frame.origin을 지나 frame.x·frame.y 방향으로 그린다
+   * (0.100.0은 늘 세계 원점을 지나는 세계 X·Y — null이면 그것으로 돌아간다). 축선은 그 직선을 격자 사각 기둥(격자 x·y 범위)과 원점 높이 ± 격자 한 변으로 자른 선분이고
+   * 원점 높이에 그린다(격자 면에 내리지 않는다). 틀이 있으면 x = 0·y = 0 격자선도 그린다. 축선은 격자와 함께 보인다(setGridVisible). 장면을 바꿔도 틀은 남는다.
+   * 방향 길이는 상관없고 y가 x에 직교하지 않으면 x에 직교로 맞춘다(그람-슈미트 — Z = X × Y는 받지 않는다).
+   * 그리기만 바꾼다: 왼쪽 아래 축 표시(뷰 큐브·표준 뷰와 같은 세계 축)·측정 추론·잠금·결과 값·고르기는 세계 축 그대로다(틀 방향으로 재려면 setMeasureInferenceLock({ direction })).
+   * 쓸 수 없는 틀(객체가 아님, 유한한 수 셋이 아닌 원점·방향 — 원점은 좌표 한도 1e15 안, 길이 0이거나 넘치는 방향, x와 나란한 y)은 받지 않고 false(앞 틀 그대로 —
+   * setMeasureInferenceLock 꼴). 받거나 null이면 true
+   */
+  setAxesFrame(frame: AxesFrame | null): boolean {
+    if (frame == null) {
+      // 틀이 없으면 아무것도 하지 않는다(격자를 다시 만들지 않는다 — 0.100.0과 같은 GL 호출)
+      if (!this.axesFrameV) return true;
+      this.axesFrameV = null;
+    } else {
+      const f = axesFrameOf(frame);
+      if (!f) return false;
+      this.axesFrameV = f;
+    }
+    this.rebuildGrid();
+    this.invalidate();
+    return true;
+  }
+
+  /** 0.101.0 지금 좌표축 틀(setAxesFrame — 사본, 단위 방향·x에 직교로 맞춘 y). 없으면 null(세계 원점·세계 축) */
+  get axesFrame(): AxesFrame | null {
+    const f = this.axesFrameV;
+    return f ? { origin: [...f.origin], x: [...f.x], y: [...f.y] } : null;
   }
 
   get gridVisible(): boolean {
@@ -6792,7 +6826,11 @@ export class Viewer3d {
     const g = (this.grid = gridSpec(this.allBox, this.opts.gridZ));
     // 묶음 원점을 쓰는 장면(큰 좌표)이면 격자도 가운데 기준 좌표로 올린다(원점이 없는 장면은 예전 그대로)
     const o: V3 | null = this.usesOrigin ? [(g.x0 + g.x1) / 2, (g.y0 + g.y1) / 2, g.z] : null;
-    if (this.gpu) this.renderer.setGrid(gridLines(g, o), o);
+    // 0.101.0 앱이 준 좌표축 틀이 있으면 X·Y축선을 그 원점·방향으로(없으면 0.100.0 그대로 — 세계 원점, 셋째 인자 null)
+    const f = this.axesFrameV;
+    const e = f ? axesFrameLines(g, f) : null;
+    this.axesEnds = e ? [...e.x, ...e.y] : null;
+    if (this.gpu) this.renderer.setGrid(gridLines(g, o, f), o);
   }
 
   private zoomLimits(): { min: number; max: number } {
@@ -7035,6 +7073,9 @@ export class Viewer3d {
     if (this.gridOn && this.grid) {
       const g = this.grid;
       b = unionBox(b, { min: [g.x0, g.y0, g.z], max: [g.x1, g.y1, g.z] });
+      // 0.101.0 좌표축 틀 축선은 원점 높이라 격자 면 밖일 수 있다: 끝점이 밖이면 넓힌다(안이면 상자 그대로 — 카메라 틀·고르기·측정이 틀 없을 때와 같다)
+      const e = this.axesEnds;
+      if (e) for (let i = 0; i + 2 < e.length; i += 3) expandPoint(b, e[i]!, e[i + 1]!, e[i + 2]!);
     }
     // 덧그림도 가까운·먼 면 안에(장면 밖에 둔 측정이 잘리지 않게)
     if (this.annos?.box) b = unionBox(b, this.annos.box);
