@@ -311,6 +311,11 @@ export interface RenderState {
   highlight: ReadonlySet<string>;
   ranges: ReadonlyMap<string, DrawRange>;
   grid: boolean;
+  /**
+   * 0.108.0 축선 모양(Viewer3d.setAxesStyle — 켤 때만, 없으면 0.107.0 격자 그리기): Z축선 색(격자 기록의 axisZ·−쪽 점선의 Z),
+   * alone이면 격자를 그리지 않을 때(grid false)도 축선만 그린다
+   */
+  axesStyle?: { axisZ: Rgba; alone: boolean };
   marker: MarkerDraw | null;
   /** 선분 강조(없으면 null) */
   segHighlight: SegmentHighlightDraw | null;
@@ -1286,7 +1291,16 @@ export class Renderer3d {
   meshes: MeshRec[] = [];
   lines: (LineRec & { src: LineSet3d })[] = [];
   points: PointRec[] = [];
-  private grid: { major: ThinRec | null; minor: ThinRec | null; axisX: ThinRec | null; axisY: ThinRec | null; model?: ArrayLike<number> } | null = null;
+  /** 0.108.0 axisZ·dash = 축선 모양(GridLines.axisZ·axisDash가 있을 때만 — dash는 −쪽 선분과 선분마다 그 축) */
+  private grid: {
+    major: ThinRec | null;
+    minor: ThinRec | null;
+    axisX: ThinRec | null;
+    axisY: ThinRec | null;
+    model?: ArrayLike<number>;
+    axisZ?: ThinRec | null;
+    dash?: { rec: LineRec; axes: ('x' | 'y' | 'z')[] } | null;
+  } | null = null;
   private markers = new Map<MarkerKind, MeshRec>();
   /** 강조 선분(자주 바뀌므로 버퍼 캐시·VAO 목록 밖에서 따로 만들고 지운다) */
   private hiSeg: LineRec | null = null;
@@ -4795,10 +4809,38 @@ export class Renderer3d {
       this.deleteThin(this.grid.minor);
       this.deleteThin(this.grid.axisX);
       this.deleteThin(this.grid.axisY);
+      // 0.108.0 축선 모양 기록(없으면 아무것도 하지 않는다)
+      this.deleteThin(this.grid.axisZ ?? null);
+      this.deleteDyn(this.grid.dash?.rec ?? null);
     }
     this.grid = g
-      ? { major: this.thinRec(g.major), minor: this.thinRec(g.minor), axisX: this.thinRec(g.axisX), axisY: this.thinRec(g.axisY), model: hasOrigin(origin) ? translation(origin) : undefined }
+      ? {
+          major: this.thinRec(g.major),
+          minor: this.thinRec(g.minor),
+          axisX: this.thinRec(g.axisX),
+          axisY: this.thinRec(g.axisY),
+          model: hasOrigin(origin) ? translation(origin) : undefined,
+          ...(g.axisZ || g.axisDash ? this.axesStyleRecs(g, origin) : {}),
+        }
       : null;
+  }
+
+  /**
+   * 0.108.0 축선 모양의 Z축선(가는 선 기록)과 원점 −쪽 점선: 점선은 따로 두는 선분(dynLines — 굵은 선 VAO가 있어야 기존 점선 길로 그린다)에
+   * 축마다 선분 하나를 X·Y·Z 차례로 넣고 그 축을 적는다(색은 그릴 때 균일 변수로 — 테마를 바꿔도 다시 올리지 않는다)
+   */
+  private axesStyleRecs(g: GridLines, origin?: readonly number[] | null): { axisZ: ThinRec | null; dash: { rec: LineRec; axes: ('x' | 'y' | 'z')[] } | null } {
+    const axes: ('x' | 'y' | 'z')[] = [];
+    const pos: number[] = [];
+    const d = g.axisDash;
+    if (d)
+      for (const k of ['x', 'y', 'z'] as const)
+        if (d[k].length >= 6) {
+          axes.push(k);
+          for (let i = 0; i < 6; i++) pos.push(d[k][i]!);
+        }
+    const rec = axes.length ? this.dynLines('__axes', new Float32Array(pos), origin) : null;
+    return { axisZ: g.axisZ ? this.thinRec(g.axisZ) : null, dash: rec ? { rec, axes } : null };
   }
 
   /** 장면 GPU 자료 지우기(격자·표시 그물은 남긴다). keepTextures면 무늬는 남긴다(setScene이 새 장면과 맞춘다) */
@@ -4819,7 +4861,7 @@ export class Renderer3d {
     for (const r of this.lines) this.dropParts(r);
     for (const r of this.points) this.dropParts(r);
     const keep = new Set<WebGLVertexArrayObject>();
-    if (this.grid) for (const r of [this.grid.major, this.grid.minor, this.grid.axisX, this.grid.axisY]) if (r) keep.add(r.vao);
+    if (this.grid) for (const r of [this.grid.major, this.grid.minor, this.grid.axisX, this.grid.axisY, this.grid.axisZ]) if (r) keep.add(r.vao);
     const markerBufs = new Set<WebGLBuffer>();
     for (const m of this.markers.values()) {
       keep.add(m.vao);
@@ -7742,8 +7784,10 @@ export class Renderer3d {
       gl.disable(gl.BLEND);
     }
 
-    // 6) 격자
-    if (st.grid && this.grid) {
+    // 6) 격자(0.108.0 축선 모양의 alone이면 격자를 그리지 않는 동안 축선만)
+    const ax = st.axesStyle;
+    const axesOnly = !st.grid && !!ax?.alone;
+    if ((st.grid || axesOnly) && this.grid) {
       const p = this.thinP;
       gl.useProgram(p.p);
       gl.enable(gl.BLEND);
@@ -7758,18 +7802,28 @@ export class Renderer3d {
       this.uniF(this.loc(p, 'u_override'), 4, 0, 0, 0, 0);
       this.uniF(this.loc(p, 'u_bias'), 1, 0);
       const g = this.grid;
-      const parts: [ThinRec | null, Rgba][] = [
-        [g.minor, st.colors.gridMinor],
-        [g.major, st.colors.grid],
+      const parts: [ThinRec | null | undefined, Rgba][] = [
+        [axesOnly ? null : g.minor, st.colors.gridMinor],
+        [axesOnly ? null : g.major, st.colors.grid],
         [g.axisX, st.colors.axisX],
         [g.axisY, st.colors.axisY],
       ];
+      if (ax) parts.push([g.axisZ, ax.axisZ]);
       for (const [r, c] of parts) {
         if (!r) continue;
         this.uniF(this.loc(p, 'u_color'), 4, c[0], c[1], c[2], c[3]);
         gl.bindVertexArray(r.vao);
         gl.drawArrays(gl.LINES, 0, r.count);
         stats.drawCalls++;
+      }
+      // 0.108.0 원점 −쪽 축선: 기존 점선 길(drawLines dashed — 숨은 점선과 같은 굵은 선 프로그램·간격, 새 셰이더 없음)로 축마다 선분 하나.
+      // 굵기는 장치 화소 1(가는 +쪽과 같게), 격자처럼 안개·단면 없이
+      const dash = ax ? g.dash : null;
+      if (dash) {
+        const col = { x: st.colors.axisX, y: st.colors.axisY, z: ax!.axisZ };
+        dash.axes.forEach((k, i) =>
+          this.drawLines(f, dash.rec, dash.rec.model, { color: col[k], vcol: false, width: 1 / st.dpr, dashed: true, alpha: 1, first: i, count: 1, noFog: true }, st, stats),
+        );
       }
       gl.depthMask(true);
       gl.disable(gl.BLEND);

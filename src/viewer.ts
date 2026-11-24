@@ -45,7 +45,7 @@ import {
   viewDepth,
   zoomCamera,
 } from './camera';
-import { type AxesFrame, type GridSpec, type GridZ, type UnitAxesFrame, axesFrameLines, axesFrameOf, gridLines, gridSpec } from './grid';
+import { type AxesFrame, type AxesStyle, type GridSpec, type GridZ, type UnitAxesFrame, axesFrameLines, axesFrameOf, axesStyleLines, axesStyleOf, gridLines, gridSpec } from './grid';
 import { MARKER_HEIGHT, type MarkerKind } from './marker';
 import { type V3, dot, hasOrigin, mat4Mul, modelMatrix, placeMatrix, transform4, transformPoint, translation } from './math';
 import {
@@ -2038,8 +2038,12 @@ export class Viewer3d {
   private gridOn: boolean;
   /** 0.101.0 앱이 준 좌표축 틀(setAxesFrame — 단위 방향, y는 x에 직교). null = 세계 원점·세계 축(0.100.0) */
   private axesFrameV: UnitAxesFrame | null = null;
-  /** 0.101.0 그 틀의 X·Y축선 세계 끝점(xyz… — rebuildGrid가 세고 frame()이 보이는 범위에 넣는다). 틀이 없으면 null */
+  /** 0.101.0 그 틀의 X·Y축선 세계 끝점(xyz… — rebuildGrid가 세고 frame()이 보이는 범위에 넣는다). 틀이 없으면 null. 0.108.0 축선 모양을 켰으면 그 축선(Z축선 포함) 끝점 */
   private axesEnds: number[] | null = null;
+  /** 0.108.0 앱이 켠 축선 모양(setAxesStyle — 세 칸을 채운 것). null = 0.107.0(−쪽 실선·Z축선 없음·격자와 함께) */
+  private axesStyleV: Required<AxesStyle> | null = null;
+  /** 0.108.0 Z축선 색(theme.axisZ 글과 그 RGBA — 축선 모양을 켰을 때만 읽고 글이 바뀌면 다시) */
+  private axisZC: { s: string; c: Rgba } | null = null;
   private bvhs = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Bvh>>();
   /** 0.45.0 최근접점 구간 모양(closestPoints rangeA·rangeB): 정점 배열 → 번호 배열(없으면 종류) → 합친 구간 열쇠 → 조각. bvhs와 함께 버린다 */
   private parts = new WeakMap<Float32Array, Map<Uint32Array | PrimKind, Map<string, ClosestPart>>>();
@@ -3989,7 +3993,7 @@ export class Viewer3d {
   /**
    * 0.101.0 좌표축 틀(앱의 그리기 축 — SketchUp처럼 옮기거나 돌린 축): 격자의 X·Y축선을 frame.origin을 지나 frame.x·frame.y 방향으로 그린다
    * (0.100.0은 늘 세계 원점을 지나는 세계 X·Y — null이면 그것으로 돌아간다). 축선은 그 직선을 격자 사각 기둥(격자 x·y 범위)과 원점 높이 ± 격자 한 변으로 자른 선분이고
-   * 원점 높이에 그린다(격자 면에 내리지 않는다). 틀이 있으면 x = 0·y = 0 격자선도 그린다. 축선은 격자와 함께 보인다(setGridVisible). 장면을 바꿔도 틀은 남는다.
+   * 원점 높이에 그린다(격자 면에 내리지 않는다). 틀이 있으면 x = 0·y = 0 격자선도 그린다. 축선은 격자와 함께 보인다(setGridVisible — 0.108.0 setAxesStyle withoutGrid면 격자 없이도). 장면을 바꿔도 틀은 남는다.
    * 방향 길이는 상관없고 y가 x에 직교하지 않으면 x에 직교로 맞춘다(그람-슈미트 — Z = X × Y는 받지 않는다).
    * 그리기만 바꾼다: 왼쪽 아래 축 표시(뷰 큐브·표준 뷰와 같은 세계 축)·측정 추론·잠금·결과 값·고르기는 세계 축 그대로다(틀 방향으로 재려면 setMeasureInferenceLock({ direction })).
    * 쓸 수 없는 틀(객체가 아님, 유한한 수 셋이 아닌 원점·방향 — 원점은 좌표 한도 1e15 안, 길이 0이거나 넘치는 방향, x와 나란한 y)은 받지 않고 false(앞 틀 그대로 —
@@ -4014,6 +4018,39 @@ export class Viewer3d {
   get axesFrame(): AxesFrame | null {
     const f = this.axesFrameV;
     return f ? { origin: [...f.origin], x: [...f.x], y: [...f.y] } : null;
+  }
+
+  /**
+   * 0.108.0 축선 모양(앱이 켤 때만 — SketchUp처럼): negativeDashed면 격자 축선의 원점 −쪽을 점선으로(+쪽 실선 — 숨은 점선과 같은 점선 길·간격),
+   * z면 Z축선(축 색 axisZ — 원점을 지나 좌표축 틀의 X × Y, 틀이 없으면 세계 Z, 원점 높이 ± 격자 한 변으로 자름), withoutGrid면 격자를 숨긴 동안(setGridVisible(false))에도 축선만 그린다.
+   * 원점은 setAxesFrame 틀의 원점, 없으면 격자 높이의 세계 원점(세계 X·Y축선이 만나는 점). 축선은 끝점이 보이는 범위 밖일 때만 가까운·먼 면을 넓히고(Z축선은 대개 밖)
+   * 고르기·측정·장면 범위에는 끼지 않는다. 모두 끄거나 null이면 0.107.0 그림(모양이 없을 때 null은 격자를 다시 만들지 않는다). 장면·틀·격자 높이를 바꿔도 남는다.
+   * 쓸 수 없는 모양(객체가 아님·배열, true·false·undefined가 아닌 칸)은 받지 않고 false(앞 모양 그대로 — setAxesFrame 꼴). 받거나 null이면 true
+   */
+  setAxesStyle(style: AxesStyle | null): boolean {
+    const s = axesStyleOf(style);
+    if (s === undefined) return false;
+    const o = this.axesStyleV;
+    // 같은 모양이면(둘 다 없음도) 아무것도 하지 않는다(0.107.0과 같은 GL 호출)
+    if (s === o || (s && o && s.negativeDashed === o.negativeDashed && s.z === o.z && s.withoutGrid === o.withoutGrid)) return true;
+    this.axesStyleV = s;
+    this.rebuildGrid();
+    this.invalidate();
+    return true;
+  }
+
+  /** 0.108.0 지금 축선 모양(setAxesStyle — 사본, 세 칸을 채운 것). 모두 꺼졌으면 null */
+  get axesStyle(): AxesStyle | null {
+    const s = this.axesStyleV;
+    return s ? { ...s } : null;
+  }
+
+  /** 0.108.0 Z축선 색(theme.axisZ — 0.59.0 axisContrast로 맞춘 글도). 글이 같으면 앞 RGBA */
+  private axisZColor(): Rgba {
+    const s = this.theme.axisZ;
+    let z = this.axisZC;
+    if (!z || z.s !== s) this.axisZC = z = { s, c: this.rgba(s) };
+    return z.c;
   }
 
   get gridVisible(): boolean {
@@ -6894,7 +6931,13 @@ export class Viewer3d {
     const f = this.axesFrameV;
     const e = f ? axesFrameLines(g, f) : null;
     this.axesEnds = e ? [...e.x, ...e.y] : null;
-    if (this.gpu) this.renderer.setGrid(gridLines(g, o, f), o);
+    // 0.108.0 축선 모양을 켰으면 그 축선(Z축선 포함 — 틀이 없어도) 끝점을 보이는 범위에, 격자 선분에 넷째 인자로(없으면 0.107.0 그대로)
+    const s = this.axesStyleV;
+    if (s) {
+      const a = axesStyleLines(g, f, s.z);
+      this.axesEnds = [...a.x.line, ...a.y.line, ...(a.z?.line ?? [])];
+    }
+    if (this.gpu) this.renderer.setGrid(gridLines(g, o, f, s), o);
   }
 
   private zoomLimits(): { min: number; max: number } {
@@ -7134,9 +7177,11 @@ export class Viewer3d {
 
   private frame(): ViewFrame {
     let b = this.visibleBox();
-    if (this.gridOn && this.grid) {
+    // 0.108.0 축선 모양 withoutGrid로 격자를 숨긴 동안 축선만 그리면 격자 사각형 없이 축선 끝점만 넣는다
+    const alone = !this.gridOn && !!this.axesStyleV?.withoutGrid;
+    if ((this.gridOn || alone) && this.grid) {
       const g = this.grid;
-      b = unionBox(b, { min: [g.x0, g.y0, g.z], max: [g.x1, g.y1, g.z] });
+      b = unionBox(b, alone ? emptyBox() : { min: [g.x0, g.y0, g.z], max: [g.x1, g.y1, g.z] });
       // 0.101.0 좌표축 틀 축선은 원점 높이라 격자 면 밖일 수 있다: 끝점이 밖이면 넓힌다(안이면 상자 그대로 — 카메라 틀·고르기·측정이 틀 없을 때와 같다)
       const e = this.axesEnds;
       if (e) for (let i = 0; i + 2 < e.length; i += 3) expandPoint(b, e[i]!, e[i + 1]!, e[i + 2]!);
@@ -9765,6 +9810,8 @@ export class Viewer3d {
       highlight: this.hi,
       ranges: this.ranges,
       grid: this.gridOn,
+      // 0.108.0 축선 모양(켰을 때만 칸을 넣는다 — 끄면 0.107.0과 같은 상태)
+      ...(this.axesStyleV ? { axesStyle: { axisZ: this.axisZColor(), alone: this.axesStyleV.withoutGrid } } : {}),
       marker,
       segHighlight: this.segHi
         ? {

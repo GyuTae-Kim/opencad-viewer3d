@@ -203,7 +203,7 @@ export {
 export type { MeshArrays } from './release';
 export { TEXTURE_BUDGET, TEXTURE_LIMIT, imageInfo, type ImageInfo } from './texture';
 export type { MarkerKind } from './marker';
-export type { AxesFrame, GridZ } from './grid';
+export type { AxesFrame, AxesStyle, GridZ } from './grid';
 export type { Viewer3dTheme } from './theme';
 export { DARK_THEME, LIGHT_THEME, LINE_CONTRAST_MIN, THEME_CSS_VARS, contrastLineColor, contrastRatio, cssRgba, fitContrast } from './theme';
 export { sceneBounds } from './bounds';

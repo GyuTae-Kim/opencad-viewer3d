@@ -1,10 +1,11 @@
 /**
  * 바닥 격자(XY 면): 범위에 맞춘 간격(1·2·5×10ⁿ), 큰 칸·작은 칸, 원점을 지나는 X·Y축 선.
  * 0.101.0: X·Y축 선을 앱이 준 좌표축 틀(옮기거나 돌린 그리기 축)의 원점·방향으로도 낸다.
+ * 0.108.0: 앱이 켠 축선 모양(원점 −쪽 점선·Z축선)도 낸다.
  */
 import type { Box3 } from './types';
 import { boxIsEmpty, emptyBox, okCoord } from './bounds';
-import { type V3, dot, niceStep } from './math';
+import { type V3, cross, dot, niceStep } from './math';
 
 /**
  * 0.101.0 좌표축 틀(Viewer3d.setAxesFrame — 앱의 그리기 축): 세계 좌표 원점과 X·Y 방향(길이는 상관없다). Z는 X × Y(오른손)라 받지 않는다.
@@ -84,6 +85,58 @@ export function axesFrameLines(g: GridSpec, f: UnitAxesFrame): { x: number[]; y:
   return { x: frameAxisLine(g, f.origin, f.x), y: frameAxisLine(g, f.origin, f.y) };
 }
 
+/**
+ * 0.108.0 축선 모양(Viewer3d.setAxesStyle — 앱이 켤 때만, 모두 끄면 0.107.0 그림): SketchUp처럼 원점 양의 쪽 실선·음의 쪽 점선, 파랑 Z축선, 격자 없이 축선만.
+ * 원점은 좌표축 틀이 있으면 그 원점, 없으면 격자 높이의 세계 원점(세계 X·Y축선이 만나는 점)
+ */
+export interface AxesStyle {
+  /** 축선의 원점 −쪽을 점선으로(+쪽은 실선 그대로) */
+  negativeDashed?: boolean;
+  /** Z축선(축 색 axisZ): 원점을 지나 틀의 X × Y(틀이 없으면 세계 Z) — 원점 높이 ± 격자 한 변으로 자른다(세운 틀 축선과 같은 규칙) */
+  z?: boolean;
+  /** 격자를 숨긴 동안에도 축선만 그린다(SketchUp은 격자가 없다) */
+  withoutGrid?: boolean;
+}
+
+/**
+ * 0.108.0 축선 모양을 쓸 수 있으면 세 칸을 채운 모양(null·undefined이거나 모두 꺼졌으면 null — 주지 않은 것), 아니면 undefined:
+ * 객체가 아님·배열, true·false·undefined가 아닌 칸(수·글·null도 — 모르는 열쇠는 읽지 않는다)
+ */
+export function axesStyleOf(s: unknown): Required<AxesStyle> | null | undefined {
+  if (s == null) return null;
+  if (typeof s !== 'object' || Array.isArray(s)) return undefined;
+  const r = s as Record<string, unknown>;
+  for (const k of ['negativeDashed', 'z', 'withoutGrid']) if (r[k] !== undefined && typeof r[k] !== 'boolean') return undefined;
+  return r.negativeDashed || r.z || r.withoutGrid ? { negativeDashed: !!r.negativeDashed, z: !!r.z, withoutGrid: !!r.withoutGrid } : null;
+}
+
+/** 0.108.0 축선 하나를 원점에서 나눈 것(세계 xyz,xyz — 없으면 빈 배열): line = 자른 선분 통째, pos = +쪽, neg = −쪽(원점 쪽 끝부터 — 점선 간격이 원점에서 시작) */
+export interface AxisHalves {
+  line: number[];
+  pos: number[];
+  neg: number[];
+}
+
+/** 0.108.0 frameAxisLine(앞 끝이 −쪽)을 원점 o에서 나눈다 — o가 선분 밖이면 한쪽만 */
+function axisHalves(g: GridSpec, o: V3, d: V3): AxisHalves {
+  const line = frameAxisLine(g, o, d);
+  if (!line.length) return { line, pos: [], neg: [] };
+  const a = line.slice(0, 3), b = line.slice(3);
+  const t = (p: number[]): number => (p[0]! - o[0]) * d[0] + (p[1]! - o[1]) * d[1] + (p[2]! - o[2]) * d[2];
+  if (!(t(a) < 0)) return { line, pos: line, neg: [] };
+  if (!(t(b) > 0)) return { line, pos: [], neg: [...b, ...a] };
+  return { line, pos: [...o, ...b], neg: [...o, ...a] };
+}
+
+/**
+ * 0.108.0 축선 모양의 축선(세계 끝점): 틀 f(없으면 격자 높이의 세계 원점·세계 X·Y)의 X·Y축선과 z면 Z축선(X × Y)을 frameAxisLine으로 자르고 원점에서 나눈다.
+ * 틀이 없을 때 X·Y의 line은 0.100.0 세계 축선과 같은 선분이다
+ */
+export function axesStyleLines(g: GridSpec, f: UnitAxesFrame | null, z: boolean): { x: AxisHalves; y: AxisHalves; z: AxisHalves | null } {
+  const F: UnitAxesFrame = f ?? { origin: [0, 0, g.z], x: [1, 0, 0], y: [0, 1, 0] };
+  return { x: axisHalves(g, F.origin, F.x), y: axisHalves(g, F.origin, F.y), z: z ? axisHalves(g, F.origin, cross(F.x, F.y)) : null };
+}
+
 /** 격자를 놓을 높이: 'min' = 범위 바닥, 'zero' = Z 0, 수 = 그 높이 */
 export type GridZ = 'min' | 'zero' | number;
 
@@ -137,6 +190,10 @@ export interface GridLines {
   axisX: Float32Array;
   /** Y축(x = 0) 선분 */
   axisY: Float32Array;
+  /** 0.108.0 Z축선(축선 모양 z — 없으면 칸 없음) */
+  axisZ?: Float32Array;
+  /** 0.108.0 점선으로 그릴 원점 −쪽(축선 모양 negativeDashed — 축마다 선분 하나 또는 빈 배열, 없으면 칸 없음). 이때 axisX·axisY·axisZ는 +쪽만 */
+  axisDash?: { x: Float32Array; y: Float32Array; z: Float32Array };
 }
 
 /** 0.50.0 한 방향 격자 선 수 한도(gridSpec은 10칸 × 작은 칸 4~5 + 둘레라 백 남짓 — 이보다 많으면 범위가 깨진 것) */
@@ -145,12 +202,14 @@ export const GRID_MAX_LINES = 4096;
 /**
  * 격자 선분(xyz,xyz…). origin을 주면 그 점 기준 좌표로 낸다(세계 = origin + 값 — 큰 좌표에서 float32 정밀도를 지킨다).
  * 0.101.0 frame(좌표축 틀)을 주면 X·Y축 선은 그 원점을 지나 그 방향으로(axesFrameLines — 원점 높이), 세계 원점 축 선이 없으므로 x = 0·y = 0 격자선도 낸다.
- * 쓸 수 없는 틀(axesFrameOf가 null)은 주지 않은 것과 같다
+ * 쓸 수 없는 틀(axesFrameOf가 null)은 주지 않은 것과 같다.
+ * 0.108.0 style(축선 모양)을 주면 z면 axisZ, negativeDashed면 축선을 +쪽만 남기고 −쪽은 axisDash로(axesStyleLines). 쓸 수 없거나 모두 끈 모양은 주지 않은 것과 같다
  */
-export function gridLines(g: GridSpec, origin?: readonly number[] | null, frame?: AxesFrame | null): GridLines {
+export function gridLines(g: GridSpec, origin?: readonly number[] | null, frame?: AxesFrame | null, style?: AxesStyle | null): GridLines {
   // 0.94.0 명세가 없으면(null·undefined) 격자 없음 — 0.93.0은 TypeError(글·수·{}는 이미 격자 없음)
   g ??= {} as GridSpec;
   const f = frame == null ? null : axesFrameOf(frame);
+  const s = axesStyleOf(style);
   const major: number[] = [];
   const minor: number[] = [];
   const ox = origin?.[0] ?? 0, oy = origin?.[1] ?? 0, oz = origin?.[2] ?? 0;
@@ -180,15 +239,27 @@ export function gridLines(g: GridSpec, origin?: readonly number[] | null, frame?
     const ly = origin ? Y0 + j * g.minorStep : y;
     (j % ratio === 0 ? major : minor).push(X0, ly, Z, X1, ly, Z);
   }
+  const rel = (w: number[]): Float32Array => new Float32Array(w.map((v, i) => v - (i % 3 === 0 ? ox : i % 3 === 1 ? oy : oz)));
+  let l: GridLines;
   if (f) {
     const { x, y } = axesFrameLines(g, f);
-    const rel = (w: number[]): Float32Array => new Float32Array(w.map((v, i) => v - (i % 3 === 0 ? ox : i % 3 === 1 ? oy : oz)));
-    return { major: new Float32Array(major), minor: new Float32Array(minor), axisX: rel(x), axisY: rel(y) };
+    l = { major: new Float32Array(major), minor: new Float32Array(minor), axisX: rel(x), axisY: rel(y) };
+  } else
+    l = {
+      major: new Float32Array(major),
+      minor: new Float32Array(minor),
+      axisX: new Float32Array(hasX ? [X0, -oy, Z, X1, -oy, Z] : []),
+      axisY: new Float32Array(hasY ? [-ox, Y0, Z, -ox, Y1, Z] : []),
+    };
+  // 0.108.0 축선 모양(z·negativeDashed가 없으면 그대로)
+  if (s && (s.z || s.negativeDashed)) {
+    const a = axesStyleLines(g, f, s.z);
+    if (a.z) l.axisZ = rel(s.negativeDashed ? a.z.pos : a.z.line);
+    if (s.negativeDashed) {
+      l.axisX = rel(a.x.pos);
+      l.axisY = rel(a.y.pos);
+      l.axisDash = { x: rel(a.x.neg), y: rel(a.y.neg), z: rel(a.z?.neg ?? []) };
+    }
   }
-  return {
-    major: new Float32Array(major),
-    minor: new Float32Array(minor),
-    axisX: new Float32Array(hasX ? [X0, -oy, Z, X1, -oy, Z] : []),
-    axisY: new Float32Array(hasY ? [-ox, Y0, Z, -ox, Y1, Z] : []),
-  };
+  return l;
 }
