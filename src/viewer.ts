@@ -721,6 +721,15 @@ export interface MeasureSnapOptions {
    * (미리 보기 한 번 OPEN_REFINE_CALLS — 넘지 않는다), 다른 점 후보보다 뒤 차례다(1화소 넘게 가까워야 이긴다)
    */
   openEdgeLens?: boolean;
+  /**
+   * 0.116.0(기본 꺼짐 — true일 때만, 이것만으로는 붙잡기를 켜지 않는다 — pointsForFirst와 같다): 마우스·펜 측정 미리 보기에서 Tab·Shift+Tab으로 그 커서 자리의
+   * 붙잡기 후보를 다음·앞으로 돌린다(AutoCAD 객체 스냅 Tab 돌리기 — measureCandidates와 같은 목록·차례). 캔버스가 받은 키(handleKey로 넘긴 키도 대상이 캔버스이거나 없을 때 —
+   * 가상 커서와 같은 규칙)만이고, 그 자리 후보가 둘 이상일 때만 Tab을 받는다(하나·없으면 브라우저 초점 이동 그대로). 돌린 후보는 표식·measureHoverSnap·onMeasureHoverChange·
+   * Shift 잠금에 마우스 미리 보기처럼 쓰이고, 그 자리(DRAG_START_PX 4화소 안)를 누르면 그 후보를 찍는다. 포인터가 4화소 넘게 움직이면 돌리기를 버린다(새 자리 미리 보기 = 첫 후보).
+   * 돌리는 중 Esc는 돌리기를 풀고 첫 후보로 돌아간다(뷰어 Esc — 뷰 큐브 접기·측정 지우기 — 보다 먼저). 푼 뒤 포인터가 4화소 넘게 움직일 때까지 Tab은 초점 이동이다(키보드 덫 없음).
+   * 장면 길·잠금·붙잡기 선택이 미리 보기를 다시 구하면 돌리기도 끝난다. 가상 커서가 켜진 동안은 가상 커서 Tab이 앞선다. 알림 글(announce)은 내지 않는다
+   */
+  tabCycle?: boolean;
 }
 
 /** 측정 중 커서 아래 붙잡을 점(Viewer3d.measureHoverSnap — 0.103.0 onMeasureHoverChange가 넘기는 값도) */
@@ -2225,7 +2234,14 @@ export class Viewer3d {
     exact: boolean;
     /** 0.40.0 현이 커서에서 붙잡기 거리 밖이어도 활꼴 띠가 닿는 토막의 교차를 보는지(openEdgeLens — 기본 켜짐, refine이 있을 때만 true) */
     lens: boolean;
+    /** 0.116.0 마우스 미리 보기에서 Tab으로 같은 자리 후보를 돌리는지(tabCycle — true일 때만) */
+    tabCycle: boolean;
   } | null = null;
+  /**
+   * 0.116.0 마우스 미리 보기 Tab 돌리기(tabCycle을 켰을 때만 만든다 — 꺼져 있으면 늘 null): 돌린 자리·포인터 종류·그 자리 후보 목록(keyCandidates)·지금 차례·보인 미리 보기.
+   * measureHover가 shown이 아니면 끝난 것(장면 길·잠금·붙잡기 선택이 다시 구했다). released = Esc로 푼 뒤 — 포인터가 그 자리 DRAG_START_PX 안에 있는 동안 Tab은 초점 이동
+   */
+  private tabCyc: { x: number; y: number; pointerType: string; list: KeyEntry[]; index: number; shown: MeasurePick | null; released: boolean } | null = null;
   /**
    * 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다). 미리 보기가 null이어도 채우고 포인터가 떠나도 남는다 —
    * 0.111.0 커서가 아직 그 자리에 있는지는 lastPtr과 견준다(hoverStill). 측정을 끄면 버린다(가상 커서 자리는 keyEnd가)
@@ -3339,6 +3355,8 @@ export class Viewer3d {
     // 0.90.0 앱 함수·덧그림·피할 상자(키보드 스냅 선택의 announce·pickName·formatNumber·글 함수, 가상 커서 후보, 측정 덧그림, 피할 상자, 측정 글 꼴, 미리 강조) — 알리지 않는다
     this.keySnap = null;
     this.keyCur = null;
+    // 0.116.0 마우스 미리 보기 Tab 돌리기 후보
+    this.tabCyc = null;
     this.annos = null;
     this.annoLabels = [];
     this.labelAvoid = null;
@@ -5288,6 +5306,9 @@ export class Viewer3d {
       if (!refine) delete src.refine;
       if (!refineFace) delete src.refineFace;
       if (o.pointsFor != null && !pointsFor) delete src.pointsFor;
+      // 0.116.0 Tab 돌리기는 true일 때만(꼴이 틀린 값은 주지 않은 것 — measureSnap에서도 뺀다)
+      if (o.tabCycle === true) src.tabCycle = true;
+      else delete src.tabCycle;
       const so = (this.snapOpt = {
         midpoints: !!o.midpoints,
         edges: o.edges ?? null,
@@ -5314,6 +5335,7 @@ export class Viewer3d {
         ends: o.refineEnds === true && !!refine,
         exact: o.refineSnapToExact === true && !!(refine || refineFace),
         lens: o.openEdgeLens !== false && !!refine,
+        tabCycle: o.tabCycle === true,
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
@@ -5328,6 +5350,8 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.refsDrop();
+    // 0.116.0 Tab 돌리기도 새로(푼 상태도 — 끄면 만들지 않는다)
+    this.tabCyc = null;
     // 0.16.0: 끌어온 점도 새로(끄면 상태가 없다)
     this.clearTrack();
     this.tracker = this.snapOpt?.inference?.track ? new MeasureTracker() : null;
@@ -5492,7 +5516,7 @@ export class Viewer3d {
    * 0.46.0 키보드로 3D 붙잡기·고르기(기본 꺼짐 — 끄면 키·그리기·포인터 처리가 0.45.0 그대로). 켜면 3D 보기(캔버스)에 초점이 있을 때(handleKey로 넘긴 키도 대상이 캔버스일 때만):
    * - 화살표: 가상 커서를 켠다(처음 — 캔버스 가운데) · 옮긴다(step 화소, Shift와 함께면 bigStep). 측정 모드면 그 자리에서 마우스 미리 보기와 같은 규칙으로 붙잡을 점을 보인다
    * - Tab·Shift+Tab(커서가 켜진 측정 모드에서만): 그 자리의 붙잡기 후보를 차례로 돌린다(measureCandidates와 같은 차례 — AutoCAD 객체 스냅 Tab 돌리기).
-   *   커서를 켜기 전·끈 뒤 Tab은 브라우저 초점 이동 그대로다.
+   *   커서를 켜기 전·끈 뒤 Tab은 브라우저 초점 이동 그대로다(0.116.0 setMeasureSnap tabCycle을 켜면 마우스 미리 보기 자리 후보 돌리기 — 커서가 켜진 동안은 이 Tab이 앞선다).
    *   0.47.0: 고르기 모드에서도 커서가 켜져 있으면 그 자리에 겹친 고르기 후보(pickCandidates 차례 — AutoCAD 선택 돌리기)를 돌리고 Enter로 그 후보를 고른다
    *   (pickCycle — 기본 켬, false면 0.46.0처럼 고르기 모드의 Tab은 초점 이동). 지금 후보가 선분·윤곽선·점이면 화면 덧그림에 강조 색으로 표시한다
    *   (0.54.0 pickCycle.facePreview를 켜면 그물 면 후보도 그 면을 — setPickPreview와 같은 표식). 0.54.0 pickName이면 알림 글의 고른 것 이름을 앱 이름으로
@@ -5739,6 +5763,8 @@ export class Viewer3d {
     if (!on) {
       this.clearMeasure();
       if (this.lastHoverAt?.pointerType !== KEY_POINTER) this.lastHoverAt = null;
+      // 0.116.0 Tab 돌리기(푼 상태도)는 측정과 함께 끝난다
+      this.tabCyc = null;
     }
     // 0.46.0: 가상 커서가 켜져 있으면 새 모드로 그 자리를 다시 구한다(알리지 않는다)
     if (this.keyCur) this.keyRecompute();
@@ -9004,6 +9030,77 @@ export class Viewer3d {
     if (say && this.keySnap?.announce) this.keySnap.announce({ reason: 'end', mode, x: c.x, y: c.y, snap: null, index: 0, count: 0, pick: null, text: keySnapText(this.keySnap.msgs, 'end') });
   }
 
+  // ───────────────────────── 내부: 마우스 미리 보기 Tab 돌리기(0.116.0 — setMeasureSnap tabCycle) ─────────────────────────
+
+  /**
+   * Tab·Shift+Tab(handleKey가 tabCycle일 때만 부른다). 받았으면 true(기본 동작을 막는다). 측정 중·가상 커서 꺼짐·끌기·앱이 맡은 포인터 없음·캔버스가 받은 키
+   * (대상이 캔버스이거나 없음 — 가상 커서와 같은 규칙)·기본 동작이 막히지 않음·포인터가 3D 보기 안이고 마우스·펜 미리 보기 자리가 그 포인터 DRAG_START_PX 안일 때,
+   * 그 자리 후보(keyCandidates — measureCandidates와 같은 목록·차례)가 둘 이상이면 다음·앞으로 돌린다. 하나·없으면 false(브라우저 초점 이동 그대로 — 가두지 않는다).
+   * Esc로 푼 뒤(released) 포인터가 그 자리에 있는 동안도 false
+   */
+  private tabCycleKey(e: KeyboardEvent): boolean {
+    if (!this.measuring || this.keyCur || this.drag || this.holds.size || e.defaultPrevented) return false;
+    const t = e.target;
+    if (t && t !== this.canvas) return false;
+    const p = this.lastPtr;
+    if (!p) return false;
+    let c = this.tabCyc;
+    if (c && Math.hypot(p.x - c.x, p.y - c.y) >= DRAG_START_PX) c = this.tabCyc = null;
+    if (c?.released) return false;
+    if (!c || this.measureHover !== c.shown || this.hoverAt) {
+      // 처음(또는 장면 길·잠금 등이 미리 보기를 다시 구한 뒤): 아직 구하지 않은 새 자리가 있으면 그 자리, 아니면 마지막으로 구한 자리에서 후보를 구한다
+      const at = this.hoverAt ?? this.lastHoverAt;
+      if (!at || at.pointerType === KEY_POINTER || Math.hypot(p.x - at.x, p.y - at.y) >= DRAG_START_PX) return false;
+      const list = this.keyCandidates(at.x, at.y, at.pointerType, KEY_CANDIDATES_MAX);
+      if (list.length < 2) return false;
+      c = this.tabCyc = { x: at.x, y: at.y, pointerType: at.pointerType, list, index: 0, shown: null, released: false };
+      this.lastHoverAt = at;
+      this.hoverAt = null;
+    }
+    c.index = (c.index + (e.shiftKey ? -1 : 1) + c.list.length) % c.list.length;
+    this.tabShow(c);
+    return true;
+  }
+
+  /** 돌리는 중 Esc(handleKey가 tabCycle일 때만): 돌리기를 풀고 첫 후보로 돌아간다(true — 뷰어 Esc보다 먼저). 푼 뒤 포인터가 그 자리에 있는 동안 Tab은 초점 이동 */
+  private tabCycleEsc(e: KeyboardEvent): boolean {
+    const c = this.tabCyc;
+    if (!c || c.released || !this.measuring || this.measureHover !== c.shown || this.hoverAt || e.defaultPrevented) return false;
+    const t = e.target;
+    if (t && t !== this.canvas) return false;
+    c.index = 0;
+    c.released = true;
+    this.tabShow(c);
+    return true;
+  }
+
+  /** 지금 차례의 후보를 측정 미리 보기로(keyShow와 같은 뒤처리 — 머무르기는 마우스 미리 보기처럼 그 마우스 자리로) */
+  private tabShow(c: NonNullable<Viewer3d['tabCyc']>): void {
+    const e = c.list[c.index]!;
+    this.refsSet(e.after);
+    this.measureHover = c.shown = e.pick;
+    if (this.measurePts.length === 1 && !e.pick.locked) this.lastLockable = this.hoverLock(e.pick) ?? this.lastLockable;
+    if (this.tracker) this.dwell(e.pick, this.lastHoverAt);
+    this.invalidate();
+  }
+
+  /** 측정 중 포인터 이동: 돌린 자리에서 DRAG_START_PX를 넘었으면 돌리기를 버리고 false, 안이면 돌린 미리 보기가 살아 있을 때 true(그대로 둔다 — 누르면 그 후보, 손 떨림) */
+  private tabCycleHold(p: { x: number; y: number }): boolean {
+    const c = this.tabCyc!;
+    if (Math.hypot(p.x - c.x, p.y - c.y) >= DRAG_START_PX) {
+      this.tabCyc = null;
+      return false;
+    }
+    return !c.released && this.measureHover === c.shown && !this.hoverAt;
+  }
+
+  /** 누른 자리가 살아 있는 돌리기 자리 DRAG_START_PX 안이면 보인 후보(찍을 것), 아니면 null */
+  private tabCycleEntry(x: number, y: number): KeyEntry | null {
+    const c = this.tabCyc!;
+    if (c.released || this.measureHover !== c.shown || this.hoverAt || Math.hypot(x - c.x, y - c.y) >= DRAG_START_PX) return null;
+    return c.list[c.index] ?? null;
+  }
+
   /** 측정 모드의 첫 점에서 지금 후보까지 거리(첫 점만 찍었을 때) */
   private keyDistance(p: readonly number[] | null): number | null {
     const a = this.measurePts.length === 1 ? this.measurePts[0]! : null;
@@ -9229,6 +9326,14 @@ export class Viewer3d {
       return;
     }
     if (this.measuring) {
+      // 0.116.0 Tab으로 돌린 미리 보기 자리(DRAG_START_PX 안)를 누르면 보인 그 후보를 찍는다(commitMeasureCandidate와 같다)
+      const tc = this.tabCyc ? this.tabCycleEntry(x, y) : null;
+      if (tc) {
+        this.tabCyc = null;
+        this.refsSet(tc.after);
+        this.commitMeasure(tc.pick);
+        return;
+      }
       const s = this.measureAt(x, y, type, this.snapOpt ? undefined : d);
       if (!s) return;
       this.commitMeasure(s);
@@ -9286,6 +9391,8 @@ export class Viewer3d {
     this.on<PointerEvent>(cv, 'pointercancel', (e) => this.onUp(e, true));
     this.on(cv, 'pointerleave', () => {
       this.lastPtr = null;
+      // 0.116.0 Tab 돌리기(푼 상태도)는 포인터가 떠나면 끝난다(켰을 때만 있다)
+      this.tabCyc = null;
       // 0.46.0: 가상 커서의 미리 보기는 포인터가 떠나도 둔다
       if (this.keyCur) return;
       if (this.measureHover || this.hoverAt) {
@@ -9532,6 +9639,8 @@ export class Viewer3d {
       if (this.measuring && !d) {
         // Shift를 누른 채 움직이면(0.10.0) 앞 미리 보기의 방향 추론을 잠그고, 뗀 채 움직이면 푼다
         this.setShift(e.shiftKey);
+        // 0.116.0 Tab으로 돌린 미리 보기는 그 자리 DRAG_START_PX 안의 이동에 그대로 둔다(넘으면 돌리기를 버리고 새 자리 미리 보기 — 켰을 때만 있다)
+        if (this.tabCyc && this.tabCycleHold(p)) return;
         this.hoverAt = { x: p.x, y: p.y, pointerType: e.pointerType || 'mouse' };
         this.invalidate();
       }
@@ -9677,6 +9786,7 @@ export class Viewer3d {
    * 뷰어 키(F 전체 보기, 1~7 표준 뷰, Esc 측정 지우기)를 처리한다. 처리했으면 기본 동작을 막고 true.
    * 캔버스에 초점이 없을 때 앱이 창 키를 넘겨 같은 규칙을 쓰게 한다(입력 칸 걸러내기는 앱 몫).
    * 0.88.0 dispose 뒤에는 아무것도 하지 않고 false(기본 동작을 막지 않는다 — 0.87.0은 걷기 키·Shift에 창·문서 리스너를 다시 걸고 F·1~7·걷기 키에 true였다)
+   * 0.116.0 setMeasureSnap({ tabCycle: true })면 Tab·Shift+Tab(마우스 미리 보기 자리 후보가 둘 이상일 때 돌리기)·돌리는 중 Esc(돌리기 풀기)도 — 캔버스가 받은 키만
    */
   handleKey(e: KeyboardEvent): boolean {
     // 0.94.0 키 사건이 객체가 아니면(null·undefined·글·수) 처리하지 않는다(false — 0.93.0은 null에 TypeError). preventDefault가 없는 객체는 처리하고 막기만 건너뛴다(stopKey)
@@ -9687,6 +9797,12 @@ export class Viewer3d {
       return true;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    // 0.116.0 마우스 미리 보기 Tab 돌리기(setMeasureSnap({ tabCycle: true })일 때만 — 가상 커서 다음): Tab·Shift+Tab은 그 커서 자리 후보를 돌리고(둘 이상일 때만),
+    // 돌리는 중 Esc는 돌리기를 푼다(뷰 큐브 접기·측정 지우기보다 먼저)
+    if (this.snapOpt?.tabCycle && (e.key === 'Tab' ? this.tabCycleKey(e) : e.key === 'Escape' && this.tabCycleEsc(e))) {
+      stopKey(e);
+      return true;
+    }
     // Shift(0.10.0): 측정 추론 잠금(setMeasureSnap({ inference: { lock: true } })일 때). 기본 동작은 막지 않으므로 false
     if (e.key === 'Shift') {
       this.setShift(true);
