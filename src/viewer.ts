@@ -727,7 +727,9 @@ export interface MeasureSnapOptions {
    * 가상 커서와 같은 규칙)만이고, 그 자리 후보가 둘 이상일 때만 Tab을 받는다(하나·없으면 브라우저 초점 이동 그대로). 돌린 후보는 표식·measureHoverSnap·onMeasureHoverChange·
    * Shift 잠금에 마우스 미리 보기처럼 쓰이고, 그 자리(DRAG_START_PX 4화소 안)를 누르면 그 후보를 찍는다. 포인터가 4화소 넘게 움직이면 돌리기를 버린다(새 자리 미리 보기 = 첫 후보).
    * 돌리는 중 Esc는 돌리기를 풀고 첫 후보로 돌아간다(뷰어 Esc — 뷰 큐브 접기·측정 지우기 — 보다 먼저). 푼 뒤 포인터가 4화소 넘게 움직일 때까지 Tab은 초점 이동이다(키보드 덫 없음).
-   * 장면 길·잠금·붙잡기 선택이 미리 보기를 다시 구하면 돌리기도 끝난다. 가상 커서가 켜진 동안은 가상 커서 Tab이 앞선다. 알림 글(announce)은 내지 않는다
+   * 장면 길·잠금·붙잡기 선택이 미리 보기를 다시 구하면 돌리기도 끝난다. 가상 커서가 켜진 동안은 가상 커서 Tab이 앞선다. 알림 글(announce)은 내지 않는다.
+   * 0.117.0: 받은 Tab은 초점이 캔버스에 그대로라 누르기로 받은 초점 표시(data-v3d-focus="pointer" — 0.9.1)를 떼지 않는다(마우스로 돌리는 동안 초점 테두리가 나오지 않는다).
+   * 받지 않은 Tab(초점 이동)은 0.9.1처럼 뗀다
    */
   tabCycle?: boolean;
 }
@@ -2242,6 +2244,8 @@ export class Viewer3d {
    * measureHover가 shown이 아니면 끝난 것(장면 길·잠금·붙잡기 선택이 다시 구했다). released = Esc로 푼 뒤 — 포인터가 그 자리 DRAG_START_PX 안에 있는 동안 Tab은 초점 이동
    */
   private tabCyc: { x: number; y: number; pointerType: string; list: KeyEntry[]; index: number; shown: MeasurePick | null; released: boolean } | null = null;
+  /** 0.117.0 마우스 미리 보기 Tab 돌리기가 받은 마지막 Tab 사건(캔버스 keydown 리스너가 그 사건이면 누르기 초점 표시를 떼지 않는다 — 초점이 옮겨 가지 않는다) */
+  private tabTook: KeyboardEvent | null = null;
   /**
    * 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다). 미리 보기가 null이어도 채우고 포인터가 떠나도 남는다 —
    * 0.111.0 커서가 아직 그 자리에 있는지는 lastPtr과 견준다(hoverStill). 측정을 끄면 버린다(가상 커서 자리는 keyEnd가)
@@ -3355,8 +3359,9 @@ export class Viewer3d {
     // 0.90.0 앱 함수·덧그림·피할 상자(키보드 스냅 선택의 announce·pickName·formatNumber·글 함수, 가상 커서 후보, 측정 덧그림, 피할 상자, 측정 글 꼴, 미리 강조) — 알리지 않는다
     this.keySnap = null;
     this.keyCur = null;
-    // 0.116.0 마우스 미리 보기 Tab 돌리기 후보
+    // 0.116.0 마우스 미리 보기 Tab 돌리기 후보(0.117.0 받은 Tab 사건도)
     this.tabCyc = null;
+    this.tabTook = null;
     this.annos = null;
     this.annoLabels = [];
     this.labelAvoid = null;
@@ -9407,8 +9412,14 @@ export class Viewer3d {
       if (e.button === 1) e.preventDefault();
     });
     this.on<KeyboardEvent>(cv, 'keydown', (e) => {
-      focusKey(cv, e);
-      this.onKey(e);
+      try {
+        this.onKey(e);
+      } finally {
+        // 0.117.0: 마우스 미리 보기 Tab 돌리기(tabCycle)가 받은 Tab은 초점이 캔버스에 그대로라 누르기 표시를 둔다(앱이 capture 단계에서 handleKey로 넘겨 받은 것도).
+        // 그 밖의 Tab·Shift+Tab(초점 이동 — 가상 커서 Tab도)은 0.9.1처럼 뗀다(앱 알림 함수가 던져도 — 0.116.0은 키 처리 앞에 뗐다)
+        if (this.tabTook === e) this.tabTook = null;
+        else focusKey(cv, e);
+      }
     });
     this.on<KeyboardEvent>(cv, 'keyup', (e) => {
       if (this.opts.keyboard && this.handleKeyUp(e)) e.stopPropagation();
@@ -9800,6 +9811,8 @@ export class Viewer3d {
     // 0.116.0 마우스 미리 보기 Tab 돌리기(setMeasureSnap({ tabCycle: true })일 때만 — 가상 커서 다음): Tab·Shift+Tab은 그 커서 자리 후보를 돌리고(둘 이상일 때만),
     // 돌리는 중 Esc는 돌리기를 푼다(뷰 큐브 접기·측정 지우기보다 먼저)
     if (this.snapOpt?.tabCycle && (e.key === 'Tab' ? this.tabCycleKey(e) : e.key === 'Escape' && this.tabCycleEsc(e))) {
+      // 0.117.0: 받은 Tab은 캔버스 keydown 리스너가 누르기 초점 표시를 떼지 않게 적어 둔다
+      if (e.key === 'Tab') this.tabTook = e;
       stopKey(e);
       return true;
     }
