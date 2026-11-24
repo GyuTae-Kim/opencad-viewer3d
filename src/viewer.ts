@@ -1668,6 +1668,30 @@ function isGridZ(z: unknown): z is GridZ {
 }
 
 /**
+ * 0.93.0 수 자리의 값이 수로 읽히지 않는지(NaN·±Infinity·수로 읽히지 않는 글·객체). null·undefined는 주지 않은 것이라 아니고,
+ * 수로 읽히는 글('0.5')은 0.92.0처럼 받는다(91·92차 규칙)
+ */
+function numBad(x: unknown): boolean {
+  return x != null && (typeof x === 'symbol' || !Number.isFinite(typeof x === 'number' ? x : Number(x)));
+}
+
+/** 0.93.0 걷기 선택의 수 필드(setNavigation — 유한한 수만 받는다) */
+const WALK_NUMS = ['eyeHeight', 'speed', 'stepHeight', 'radius'] as const;
+
+/** 0.93.0 앱 함수 자리: 함수가 아니면(글·객체·수) 주지 않은 것(undefined) — 0.46.0 setKeyboardSnap·0.29.0 parallelEdge와 같은 판정 */
+function fnOf<F>(f: F | null | undefined): F | undefined {
+  return typeof f === 'function' ? f : undefined;
+}
+
+/** 0.93.0 앱 포인터 처리기의 move·end는 함수일 때만 부른다(함수가 아닌 값은 주지 않은 것 — 0.92.0은 움직이고 뗄 때마다 TypeError) */
+function holdMove(h: PointerHoldHandler | null | undefined, p: HeldPointer): void {
+  if (h && typeof h.move === 'function') h.move(p);
+}
+function holdEnd(h: PointerHoldHandler | null | undefined, p: HeldPointer, why: PointerHoldEnd): void {
+  if (h && typeof h.end === 'function') h.end(p, why);
+}
+
+/**
  * 0.83.0 앱이 준 색 배열이 깨졌는지 — 0.50.0 setItemColor 규칙(앞 셋과 넷째(없으면 1)가 유한한 수가 아니면 null을 준 것과 같다)을 겉모습
  * (setItemColor·setItemEdgeColor·setItemProfileColor·setItemLooks)과 그리기 선택(setRenderOptions의 선 색)이 함께 쓴다. CSS 글·null·없음은 깨지지 않은 것으로
  */
@@ -1683,12 +1707,13 @@ function lookAlpha(a: number): number | null {
 
 /**
  * 0.84.0 바탕·안개·조명 선택의 얕은 사본: 색 배열 필드(colors)가 깨졌거나(badRgba) 수 필드(nums)가 유한하지 않은 수면 그 필드를 뺀다 — 주지 않은 것(기본)과 같다
- * (0.83.0 규칙을 넓힘 — 0.83.0은 그대로 두어 지우기 색·하늘·안개·해 균일 변수가 NaN). 멀쩡한 필드는 0.83.0과 같은 사본
+ * (0.83.0 규칙을 넓힘 — 0.83.0은 그대로 두어 지우기 색·하늘·안개·해 균일 변수가 NaN). 멀쩡한 필드는 0.83.0과 같은 사본.
+ * 0.93.0 수 필드가 수로 읽히지 않는 글·객체여도 뺀다(numBad — 0.92.0은 남겨 해 색·주변광·그림자 치우침·마커 행렬 균일 변수가 NaN이거나 강조 선분이 1화소 선)
  */
 function withoutBad<T extends object>(o: T, colors: readonly string[], nums: readonly string[] = []): T {
   const c = { ...o } as Record<string, unknown>;
   for (const k of colors) if (badRgba(c[k] as Rgba | string | undefined)) delete c[k];
-  for (const k of nums) if (typeof c[k] === 'number' && !Number.isFinite(c[k])) delete c[k];
+  for (const k of nums) if (numBad(c[k])) delete c[k];
   return c as T;
 }
 
@@ -2288,13 +2313,15 @@ export class Viewer3d {
       pickTolerance: opts.pickTolerance ?? PICK_TOLERANCE_PX,
       touchPickTolerance: opts.touchPickTolerance ?? TOUCH_PICK_TOLERANCE_PX,
       pickEdges: opts.pickEdges ?? false,
-      maxPixelRatio: opts.maxPixelRatio ?? 2,
+      // 0.93.0 수로 읽히지 않으면(엉뚱한 글·NaN·객체) 주지 않은 것(2 — 0.92.0은 캔버스 크기가 NaN이었다). ±Infinity는 0.92.0처럼 자른다
+      maxPixelRatio: Number.isNaN(Number(opts.maxPixelRatio ?? 2)) ? 2 : (opts.maxPixelRatio ?? 2),
       textureLimit: opts.textureLimit ?? TEXTURE_LIMIT,
       textureBudget: opts.textureBudget ?? TEXTURE_BUDGET,
     };
     this.themeOpt = opts.theme;
     this.motion = normalizeAnimate(opts.animate);
-    this.measureFmt = opts.formatMeasure ?? null;
+    // 0.93.0 함수가 아니면 주지 않은 것(setMeasureFormat과 같다)
+    this.measureFmt = fnOf(opts.formatMeasure) ?? null;
     this.gridOn = this.opts.grid;
     // 0.91.0 이름이 아닌 그리기 모드·투영(형 밖 값)은 주지 않은 것과 같다(0.90.0은 그 값을 두어 와이어프레임처럼 그리거나 첫 맞춤 거리가 0이었다)
     this.mode = isRenderMode(opts.renderMode) ? opts.renderMode : 'shadedEdges';
@@ -2433,6 +2460,8 @@ export class Viewer3d {
     } = {},
   ): void {
     if (this.disposed) return;
+    // 0.93.0 opts가 객체가 아니면(null) 주지 않은 것과 같다(0.92.0은 장면을 반쯤 바꾼 뒤 TypeError — 0.92.0 setMesh와 같은 꼴)
+    opts = optsOf(opts);
     const hadSection = !!this.sec;
     // 0.50.0 입력 검사: 놓을 자리를 모르는 항목(유한하지 않은 원점·행렬)은 빼고, 깨진 색·굵기·크기·재질 값·정점 색은 고친 얕은 사본으로(배열은 같은 객체).
     // 고칠 것이 없으면 받은 장면 객체 그대로다. 깨진 좌표·색인은 범위에서 건너뛰고(bounds) 그리기 사본을 올린다(renderer — triangleFix·segmentFix)
@@ -2535,10 +2564,12 @@ export class Viewer3d {
 
   /**
    * 0.89.0 알림 등록(on* 여덟 — onPick은 선택을 함께 든다). dispose 뒤에는 아무것도 걸지 않고 아무것도 하지 않는 해제 함수를 돌려준다
-   * (0.88.0은 dispose가 비운 목록에 다시 넣어, 부르지 않는 앱 콜백과 그 콜백이 쥔 자료가 없앤 뷰어와 함께 남았다)
+   * (0.88.0은 dispose가 비운 목록에 다시 넣어, 부르지 않는 앱 콜백과 그 콜백이 쥔 자료가 없앤 뷰어와 함께 남았다).
+   * 0.93.0 함수가 아닌 값(글·객체·수·null)도 걸지 않고 같은 해제 함수를 돌려준다(브라우저 addEventListener의 null처럼 — 0.92.0은 걸어 알릴 때마다 TypeError를 던지고
+   * 그 뒤에 단 알림을 부르지 않았다. onCameraChange는 카메라가 바뀐 그리기마다 renderNow가 던졌다)
    */
   private listen<F>(map: Listeners<F>, cb: F): () => void {
-    if (this.disposed) return NO_OFF;
+    if (this.disposed || typeof cb !== 'function') return NO_OFF;
     // 0.90.0 같은 함수를 다시 달면 처음 자리·같은 등록 표(뗐다 다시 달면 새 표 — 끝 자리)
     if (!map.has(cb)) map.set(cb, {});
     return () => map.delete(cb);
@@ -3501,7 +3532,8 @@ export class Viewer3d {
    * 해 조명(0.7.0, 기본은 꺼짐 — 예전 고정 조명): sun.direction = 해 쪽 세계 방향(예: [0.4, −0.6, 0.7]), intensity(기본 0.85)·color, ambient(기본 0.35).
    * shadows면 해 쪽 평행 투영 깊이 그림(기본 2048², 3×3 PCF)으로 그림자를 드리운다 — 장면·보이기·단면·겉모습·조명이 바뀔 때만 다시 그린다. null이면 끈다.
    * 0.84.0: 해 방향이 유한한 수 셋이 아니면(NaN·±Infinity·수 둘·sun·direction 없음) null과 같다(끈다 — 0.83.0은 u_sunDir NaN으로 모든 면이 검었고 sun·direction이 없으면 던졌다).
-   * 유한하지 않은 값이 든 색 배열(sun.color)과 유한하지 않은 수(intensity·ambient·shadows의 size·bias)는 그 필드를 주지 않은 것(기본)과 같다
+   * 유한하지 않은 값이 든 색 배열(sun.color)과 유한하지 않은 수(intensity·ambient·shadows의 size·bias)는 그 필드를 주지 않은 것(기본)과 같다.
+   * 0.93.0 그 수 필드의 수로 읽히지 않는 글·객체도 주지 않은 것이다(0.92.0은 해 색·주변광·그림자 치우침 균일 변수가 NaN — 마커 반지름·화면 높이, 강조 선분 굵기도 같다)
    */
   setLighting(o: LightingOptions | null): void {
     const d = o?.sun?.direction;
@@ -3590,7 +3622,11 @@ export class Viewer3d {
     // 0.92.0 'orbit'·'walk'가 아니면 받지 않는다(선택도 — 0.91.0은 그 값을 navigation에 두었다)
     if (mode !== 'orbit' && mode !== 'walk') return;
     const hadGravity = !!this.walkOpts.gravity;
-    this.walkOpts = { ...this.walkOpts, ...opts };
+    // 0.93.0 유한한 수가 아닌 눈높이·빠르기·오를 높이·몸 반지름(엉뚱한 글·NaN·±Infinity·객체 — 걷기 셈은 + 로 잇으므로 수로 읽히는 글도)은 주지 않은 것
+    // (앞 값 그대로 — 0.92.0은 걷기 카메라가 NaN·무한). null은 0.92.0처럼 기본으로 되돌린다
+    const w = { ...optsOf(opts) } as Record<string, unknown>;
+    for (const k of WALK_NUMS) if (w[k] != null && !(typeof w[k] === 'number' && Number.isFinite(w[k]))) delete w[k];
+    this.walkOpts = { ...this.walkOpts, ...(w as WalkOptions) };
     if (mode === this.nav) {
       // 걷는 중에 중력을 켜면 발밑 바닥에 선다
       if (mode === 'walk' && this.walkOpts.gravity && !hadGravity) {
@@ -3661,6 +3697,8 @@ export class Viewer3d {
    * 0이 아닌 값이 있는 동안 프레임마다 움직인다. 모두 0이면 멈춘다
    */
   setWalkInput(i: { forward?: number; right?: number; up?: number; turn?: number; look?: number }): void {
+    // 0.93.0 객체가 아니면(null) 입력 없음({})과 같다(0.92.0은 TypeError)
+    i = optsOf(i);
     const c = (v: number | undefined): number => Math.max(-1, Math.min(1, Number(v) || 0));
     this.walkIn = { forward: c(i.forward), right: c(i.right), up: c(i.up), turn: c(i.turn), look: c(i.look) };
     this.invalidate();
@@ -3701,7 +3739,8 @@ export class Viewer3d {
 
   /** 눈높이(세계 단위): 정하지 않았으면 장면 단위로 1.6 m(단위를 모르면 0.65.0 맞춤 범위로 잰다) */
   private eyeHeight(): number {
-    if (this.walkOpts.eyeHeight !== undefined) return this.walkOpts.eyeHeight;
+    // 0.93.0 null도 주지 않은 것(다른 걷기 수 필드의 ?? 와 같다 — 0.92.0은 눈높이 0으로 대상점이 눈에 붙었다)
+    if (this.walkOpts.eyeHeight != null) return this.walkOpts.eyeHeight;
     const u = this.sceneRef?.units;
     return u === 'mm' ? 1600 : u === 'inch' ? 63 : u === 'm' ? 1.6 : Math.max(boxSphere(this.fitBox()).radius * 0.1, 1e-6);
   }
@@ -3866,9 +3905,12 @@ export class Viewer3d {
     return this.opts.axes;
   }
 
-  /** 테마 바꾸기(인자 없이 부르면 CSS 변수만 다시 읽는다) */
+  /**
+   * 테마 바꾸기(인자 없이 부르면 CSS 변수만 다시 읽는다).
+   * 0.93.0 null은 주지 않은 것(앞 테마 그대로 — 0.92.0은 TypeError를 던지고 null을 남겨 그 뒤 setTheme()도 던졌다). 글이 아닌 테마 색은 그 색을 주지 않은 것(기본 테마 색)
+   */
   setTheme(theme?: Viewer3dOptions['theme']): void {
-    if (theme !== undefined) this.themeOpt = theme;
+    if (theme != null) this.themeOpt = theme;
     this.applyTheme();
     this.invalidate();
   }
@@ -4793,8 +4835,8 @@ export class Viewer3d {
    * 0.90.0 알림 동안 단 알림은 다음 누르기부터, 알림 동안 끊은 알림(끊었다 다시 단 것도)은 그 누르기에 부르지 않는다(on* 아홉 같은 규칙 — 브라우저 EventTarget과 같다)
    */
   onPick(cb: (p: Pick3d | null, e: PickEvent) => void, opts?: OnPickOptions): () => void {
-    // 0.89.0 dispose 뒤에는 걸지 않는다(다른 on*와 같다 — listen)
-    if (this.disposed) return NO_OFF;
+    // 0.89.0 dispose 뒤에는 걸지 않는다(다른 on*와 같다 — listen). 0.93.0 함수가 아닌 값도(0.92.0은 걸어 누를 때마다 TypeError — 뒤에 단 알림을 부르지 않았다)
+    if (this.disposed || typeof cb !== 'function') return NO_OFF;
     const o = { meshesOnly: !!opts?.meshesOnly, through: !!opts?.throughTranslucent, front: !!opts?.front };
     // 0.90.0 다시 달면 같은 등록 표(선택 객체)에 선택만 바꿔 넣는다 — 알림 동안 그리해도 뗀 것이 아니어서 그 알림에 새 선택으로 부른다(0.89.0과 같다)
     const had = this.pickCbs.get(cb);
@@ -4823,15 +4865,16 @@ export class Viewer3d {
    * 지금 자리에서 함께 누른 것으로 두 손가락 이동·핀치를 한다. 앱이 맡지 않은 손가락끼리는 0.31.0 그대로다(코어가 다루는 손가락이 있을 때 새 손가락을 맡으면
    * 코어는 제 손가락만으로 하던 것을 잇는다). 마우스·펜은 서로·손가락과 상관없다.
    * 함수만 주면 claim만 있는 처리기다. 다른 처리기를 주거나 null이면 앞 처리기가 맡은 포인터는 end('off')를 알리고 뗄 때까지 무시만 한다.
-   * 주지 않거나 null이면 0.31.0과 같다
+   * 주지 않거나 null이면 0.31.0과 같다.
+   * 0.93.0 함수도, claim이 함수인 객체도 아니면(글·수·{}·참) null과 같다(0.92.0은 걸어 누를 때마다 TypeError). 처리기의 move·end가 함수가 아니면 주지 않은 것이다
    */
   setPointerClaim(h: PointerClaimHandler | PointerClaimHandler['claim'] | null): void {
     if (this.disposed) return;
-    const next = typeof h === 'function' ? { claim: h } : (h ?? null);
+    const next = typeof h === 'function' ? { claim: h } : h && typeof h === 'object' && typeof h.claim === 'function' ? h : null;
     const prev = this.claimer;
     if (next === prev) return;
     this.claimer = next;
-    if (prev) for (const x of this.holds.detach(prev)) prev.end?.(heldOf(x), 'off');
+    if (prev) for (const x of this.holds.detach(prev)) holdEnd(prev, heldOf(x), 'off');
   }
 
   /**
@@ -4904,12 +4947,15 @@ export class Viewer3d {
    * 마우스를 올리면 표식 모양으로 종류를 보인다(끝점·꼭짓점 네모, 가운데 점 세모, 중심 ⊕, 0.38.0 접점('tangent') 동그라미 위 가로선, 그 밖의 앱 점 마름모). 측정 결과에 snapA·snapB가 실린다.
    * null(또는 빈 선택)이면 끈다. 장면을 바꿔도 남는다(점 목록은 앱이 장면에 맞춰 다시 준다).
    * 0.88.0 dispose 뒤에는 아무것도 하지 않는다(0.87.0은 붙잡기를 켜고 점 색인·타이머를 만들었다 — dispose는 앞 선택도 놓는다)
+   * 0.93.0 앱 함수(pointsFor·refine·refineFace)가 함수가 아니면 주지 않은 것(measureSnap에서도 뺀다 — 0.92.0은 측정 미리 보기마다 TypeError), 배열이 아닌 points는 빈 목록,
+   * points의 객체가 아닌 항목(null 등)은 건너뛴다(0.92.0은 TypeError)
    */
   setMeasureSnap(o: MeasureSnapOptions | null): void {
     if (this.disposed) return;
-    const pts = o?.points ?? [];
+    const pts = Array.isArray(o?.points) ? o.points : [];
     const inference = normalizeInference(o?.inference);
-    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !o.pointsFor && !inference && !o.refine && !o.refineFace && !o.throughTranslucent)) this.snapOpt = null;
+    const pointsFor = fnOf(o?.pointsFor), refine = fnOf(o?.refine), refineFace = fnOf(o?.refineFace);
+    if (!o || (!o.midpoints && o.edges === undefined && !pts.length && !pointsFor && !inference && !refine && !refineFace && !o.throughTranslucent)) this.snapOpt = null;
     else {
       const xyz = new Float64Array(pts.length * 3);
       const kinds: SnapKind[] = [], ids: (string | undefined)[] = [];
@@ -4919,7 +4965,7 @@ export class Viewer3d {
       let raws: Int32Array | null = null, rawEdges: Uint8Array | null = null;
       let n = 0;
       for (const sp of pts) {
-        const q = sp.point;
+        const q = (sp as SnapPoint | null | undefined)?.point;
         // 유한하지 않은 점은 0.8.0부터 건너뛴다 — 0.50.0: 좌표 한도(COORD_LIMIT) 밖 점도(색인 가운데가 그 점으로 쏠려 다른 점의 정밀도를 잃는다)
         if (!q || !okPoint3(q)) continue;
         xyz[n * 3] = q[0]!;
@@ -4954,12 +5000,13 @@ export class Viewer3d {
       if (limit === null) delete src.limit;
       else src.limit = limit;
       const orders = ord ? ord.subarray(0, n) : null;
-      if (!o.refine) delete src.refine;
-      if (!o.refineFace) delete src.refineFace;
+      if (!refine) delete src.refine;
+      if (!refineFace) delete src.refineFace;
+      if (o.pointsFor != null && !pointsFor) delete src.pointsFor;
       const so = (this.snapOpt = {
         midpoints: !!o.midpoints,
         edges: o.edges ?? null,
-        pointsFor: o.pointsFor ?? null,
+        pointsFor: pointsFor ?? null,
         src,
         pts: xyz.subarray(0, n * 3),
         kinds,
@@ -4973,15 +5020,15 @@ export class Viewer3d {
         limit,
         pfMemo: null,
         pfFirst: o.pointsForFirst === true,
-        refine: o.refine ?? null,
-        refineFace: o.refineFace ?? null,
+        refine: refine ?? null,
+        refineFace: refineFace ?? null,
         rfMemo: null,
         openMemo: new RefineMemo(),
         ofMemo: null,
         through: !!o.throughTranslucent,
-        ends: o.refineEnds === true && !!o.refine,
-        exact: o.refineSnapToExact === true && !!(o.refine || o.refineFace),
-        lens: o.openEdgeLens !== false && !!o.refine,
+        ends: o.refineEnds === true && !!refine,
+        exact: o.refineSnapToExact === true && !!(refine || refineFace),
+        lens: o.openEdgeLens !== false && !!refine,
       });
       // 앱 점이 많으면(0.9.0) 색인을 쉬는 틈에 미리 만든다(30만 개에 0.1초쯤 — 첫 마우스 이동에서 멈칫하지 않게)
       if (n >= SNAP_INDEX_MIN) {
@@ -5191,6 +5238,8 @@ export class Viewer3d {
    * pointsFor·다듬기 앱 함수는 미리 보기처럼 부를 수 있다(같은 입력이면 기억을 다시 쓴다)
    */
   measureCandidates(x: number, y: number, o: MeasureCandidatesOptions = {}): MeasureHoverSnap[] {
+    // 0.93.0 o가 객체가 아니면(null) 주지 않은 것과 같다(0.92.0은 측정 모드에서 TypeError — commitMeasureCandidate도 같다)
+    o = optsOf(o);
     if (!this.measuring || !Number.isFinite(x) || !Number.isFinite(y)) return [];
     const max = typeof o.max === 'number' && o.max >= 1 ? Math.floor(o.max) : KEY_CANDIDATES_MAX;
     return this.keyCandidates(x, y, o.pointerType || 'mouse', max).map((e) => this.hoverSnapOf(e.pick));
@@ -5201,6 +5250,7 @@ export class Viewer3d {
    * 측정 모드가 아니거나 그 차례의 후보가 없으면 false
    */
   commitMeasureCandidate(x: number, y: number, index: number, o: MeasureCandidatesOptions = {}): boolean {
+    o = optsOf(o);
     if (!this.measuring || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isInteger(index) || index < 0) return false;
     const max = Math.max(index + 1, typeof o.max === 'number' && o.max >= 1 ? Math.floor(o.max) : KEY_CANDIDATES_MAX);
     const e = this.keyCandidates(x, y, o.pointerType || 'mouse', max)[index];
@@ -6130,7 +6180,8 @@ export class Viewer3d {
    */
   setMeasureFormat(fn: MeasureFormat | null): void {
     if (this.disposed) return;
-    this.measureFmt = fn ?? null;
+    // 0.93.0 함수가 아니면(글·객체·수) null과 같다(기본 — 0.92.0은 측정 글·글 없는 거리 덧그림을 그릴 때마다 TypeError로 그 뒤 그림이 멈췄다)
+    this.measureFmt = fnOf(fn) ?? null;
     this.invalidate();
   }
 
@@ -6248,11 +6299,12 @@ export class Viewer3d {
    * 지금 화면(덧그림 포함, 뷰 큐브 제외)을 그림 파일로. 첫 인자로 선택을 주면 화면 밖에서 다시 그린다:
    * scale(화면 화소의 몇 배, 기본 1 — 굵기·점 크기도 같은 비율), transparent(바탕을 비운 PNG), overlays(측정·덧그림·좌표축·단면 표시, 기본 true),
    * type·quality. 너무 크면(한 변 GPU 한도·전체 약 4천만 화소) 비율을 줄인다.
-   * 0.89.0 dispose 뒤에는 선택이 없어도 선택을 준 toBlob과 같은 Error로 거절한다(0.88.0은 놓은 캔버스 그대로를 그림으로 풀어 주었다)
+   * 0.89.0 dispose 뒤에는 선택이 없어도 선택을 준 toBlob과 같은 Error로 거절한다(0.88.0은 놓은 캔버스 그대로를 그림으로 풀어 주었다).
+   * 0.93.0 null은 주지 않은 것(화면 그림 PNG — 0.92.0은 화면 밖 선택 길에서 TypeError로 거절). 글이 아닌 형식은 기본 형식(PNG)이다
    */
   toBlob(type: string | SnapshotOptions = 'image/png', quality?: number): Promise<Blob> {
     if (this.disposed) return Promise.reject(new Error(NO_GL_SNAPSHOT));
-    if (typeof type === 'object') return this.snapshotBlob(type);
+    if (type && typeof type === 'object') return this.snapshotBlob(type);
     // 나눠 올리는 중이면 그림에는 다 올린 장면을 담는다
     if (this.gpu && this.renderer.uploading) this.pumpUpload(Infinity);
     this.renderNow();
@@ -6266,7 +6318,7 @@ export class Viewer3d {
     if ((this.labelAvoid && ((this.measuring && this.measurePts.length) || (this.annos && this.labelAvoid.rects.length))) || this.labelsShifted)
       this.drawOverlayOn(ctx, this.frame(), this.dpr);
     else ctx.drawImage(this.overlay, 0, 0);
-    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), type, quality));
+    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('그림을 만들지 못했습니다'))), typeof type === 'string' ? type : undefined, quality));
   }
 
   /** 화면 밖 그리기로 그림 만들기(toBlob 선택). 실패하면 무엇이 문제인지 적은 Error로 거절한다 */
@@ -6278,9 +6330,11 @@ export class Viewer3d {
 
   /**
    * 화면 밖 그림의 실제 크기와 배율(화면 CSS 화소 대비). scale을 GPU 한 변 한도·2D 캔버스 넓이 한도(SNAPSHOT_MAX_PIXELS,
-   * iOS Safari도 되는 4096² 화소)에 맞춰 줄인 값이다 — toBlob·renderImage가 이 크기로 그린다
+   * iOS Safari도 되는 4096² 화소)에 맞춰 줄인 값이다 — toBlob·renderImage가 이 크기로 그린다.
+   * 0.93.0 o가 객체가 아니면(null) 주지 않은 것과 같다(0.92.0은 TypeError — renderImage도 같다)
    */
   snapshotSize(o: Pick<SnapshotOptions, 'scale'> = {}): { width: number; height: number; scale: number } {
+    o = optsOf(o);
     const gl = this.gl;
     const dpr = this.dpr || 1;
     const lost = !this.gpu;
@@ -6301,6 +6355,7 @@ export class Viewer3d {
    * GPU 다중 표본 버퍼에 그리고 읽어 온다(화면 캔버스는 건드리지 않는다)
    */
   renderImage(o: Omit<SnapshotOptions, 'type' | 'quality'> = {}): ImageData {
+    o = optsOf(o);
     if (o.overlays === false) return this.renderPixels(o).data;
     const c = this.renderCanvas(o);
     return c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
@@ -6405,10 +6460,11 @@ export class Viewer3d {
   /**
    * 창 확대: 화면 사각형(캔버스 CSS 화소 두 구석)이 화면을 채우게 한다. 사각형 가운데 아래 점(없으면 대상점 깊이)을 화면 가운데로 옮기고
    * 그 깊이에서 사각형이 꼭 맞게 확대한다. 너무 작은 사각형(2화소 미만)은 무시한다.
-   * 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다). 무시한 사각형·dispose 뒤에는 옮기지 않으므로 바로 false
+   * 0.49.0 끝 알림 Promise<boolean>(flyTo와 같다). 무시한 사각형·dispose 뒤에는 옮기지 않으므로 바로 false.
+   * 0.93.0 구석이 수로 읽히지 않으면(NaN·±Infinity·엉뚱한 글) 무시한다(0.82.0 카메라 규칙 — 0.92.0은 무한대 구석에 카메라가 NaN, NaN·글은 옮기지 않고 true)
    */
   zoomToRect(x0: number, y0: number, x1: number, y1: number, animate = this.animate): Promise<boolean> {
-    if (this.disposed || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return Promise.resolve(false);
+    if (this.disposed || [x0, y0, x1, y1].some(numBad) || Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return Promise.resolve(false);
     this.finishAnim();
     const f = this.frame();
     const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
@@ -6681,8 +6737,12 @@ export class Viewer3d {
 
   private applyTheme(): void {
     const t = this.themeOpt;
-    const base = t === 'light' || (typeof t === 'object' && t.base === 'light') ? LIGHT_THEME : DARK_THEME;
-    const theme: Viewer3dTheme = { ...base, ...(typeof t === 'object' ? t : {}) };
+    // 0.93.0 객체 테마(null은 아니다 — 생성자 theme: null은 주지 않은 것)의 글인 필드만 덮는다: 글이 아닌 색(수·배열·null·undefined)은 주지 않은 것(기본 테마 색 —
+    // 0.92.0은 null.base·parseColor가 TypeError). 글인 필드는 0.92.0처럼 그대로 덮는다(모르는 열쇠도)
+    const o = t && typeof t === 'object' ? t : undefined;
+    const base = t === 'light' || o?.base === 'light' ? LIGHT_THEME : DARK_THEME;
+    const theme: Viewer3dTheme = { ...base };
+    if (o) for (const [k, v] of Object.entries(o)) if (typeof v === 'string') (theme as unknown as Record<string, string>)[k] = v;
     delete (theme as { base?: unknown }).base;
     delete (theme as { axisContrast?: unknown }).axisContrast;
     const cs = getComputedStyle(this.host);
@@ -6691,7 +6751,7 @@ export class Viewer3d {
       if (v) theme[k] = v;
     }
     // 0.59.0 좌표축 대비(선택): 받은 색이 이미 닿으면 글을 그대로 둔다(같은 그림)
-    const ac = typeof t === 'object' ? t.axisContrast : undefined;
+    const ac = o?.axisContrast;
     const min = ac === true ? LINE_CONTRAST_MIN : typeof ac === 'number' && ac > 1 ? ac : 0;
     this.axisFit = min > 0;
     if (min > 0) {
@@ -8935,7 +8995,7 @@ export class Viewer3d {
     if (this.claimer || this.holds.size) {
       // 맡은 포인터 id로 다시 누르면(앱이 코어에 돌려주는 합성 누르기 등) 앞 맡기는 끝난 것으로 본다
       const again = this.holds.release(e.pointerId);
-      if (again) again.on?.end?.(heldOf(again), 'cancel');
+      if (again) holdEnd(again.on, heldOf(again), 'cancel');
       const h = this.claimer;
       if (h && this.askClaim(h, 'down', e, p, p, e.button)) {
         this.holds.hold(e.pointerId, type, p.x, p.y, p.x, p.y, h);
@@ -8993,7 +9053,7 @@ export class Viewer3d {
   private takeBackTouches(): boolean {
     const back = this.holds.takeTouches();
     for (const h of back) this.pointers.set(h.id, { x: h.x, y: h.y, type: h.type, sx: h.x, sy: h.y });
-    for (const h of back) h.on?.end?.(heldOf(h), 'pinch');
+    for (const h of back) holdEnd(h.on, heldOf(h), 'pinch');
     return back.length > 0;
   }
 
@@ -9021,7 +9081,7 @@ export class Viewer3d {
     if (this.holds.size) {
       const h = this.holds.move(e.pointerId, p.x, p.y);
       if (h) {
-        h.on?.move?.(heldOf(h, e));
+        holdMove(h.on, heldOf(h, e));
         return;
       }
     }
@@ -9107,7 +9167,7 @@ export class Viewer3d {
         const p = this.local(e);
         h.x = p.x;
         h.y = p.y;
-        h.on?.end?.(heldOf(h, e), cancel ? 'cancel' : 'up');
+        holdEnd(h.on, heldOf(h, e), cancel ? 'cancel' : 'up');
         return;
       }
     }

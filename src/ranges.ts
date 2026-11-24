@@ -135,6 +135,8 @@ export function mergeRanges(ranges: readonly IndexRange[] | null | undefined, n:
   if (!ranges?.length || !(n > 0)) return [];
   const tmp: [number, number][] = [];
   for (const r of ranges) {
+    // 0.93.0 null·undefined 항목은 건너뛴다(수·글 항목처럼 — 0.92.0은 TypeError)
+    if (r == null) continue;
     const s = Math.max(0, Math.floor(r.start)), e = Math.min(n, Math.floor(r.start) + Math.floor(r.count));
     if (Number.isFinite(s) && Number.isFinite(e) && e > s) tmp.push([s, e]);
   }

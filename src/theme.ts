@@ -174,8 +174,10 @@ export const THEME_CSS_VARS: Record<keyof Viewer3dTheme, string> = {
 /**
  * CSS 색 → RGBA(0~1). #rgb #rgba #rrggbb #rrggbbaa, rgb()/rgba()(쉼표·빈칸·슬래시) 를 읽는다.
  * 못 읽으면 null(브라우저에서는 부르는 쪽이 캔버스로 정규화한 뒤 다시 읽는다).
+ * 0.93.0 글이 아니면(수·null·배열 등) null(0.92.0은 TypeError)
  */
 export function parseColor(s: string): Rgba | null {
+  if (typeof s !== 'string') return null;
   const t = s.trim().toLowerCase();
   let m = /^#([0-9a-f]{3,8})$/.exec(t);
   if (m) {
