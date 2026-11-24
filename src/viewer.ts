@@ -2104,6 +2104,10 @@ export class Viewer3d {
   private parallelOwn: [V3, V3] | null = null;
   private parallelAsked: EdgeAsked | null = null;
   /**
+   * 0.99.0 기준 선분(위 셋 — PickDetail.ends 배열 그대로)을 낸 고르기(묶음 id·종류·배열 안 번호). 장면 길이 그 묶음을 빼거나 바꾸거나 숨기면 그 기준을 버린다(refsDrop)
+   */
+  private refPick = new WeakMap<object, Pick3d>();
+  /**
    * 첫 점을 찍은 뒤 미리 보기에서 마지막으로 본 방향 추론(0.10.0 — setMeasureInferenceLock(true)가 커서가 캔버스를 떠난 뒤에도,
    * 예를 들어 마우스로 앱 단추를 누를 때 쓴다). 점을 찍거나 측정을 지우면 잊는다
    */
@@ -2531,6 +2535,8 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.clearTrack();
+    // 0.99.0 지나간 기준 선분도(찍은 점·끌어온 점처럼 — 0.98.0은 남겨 새 장면에서 앞 장면 선분과의 나란함을 그렸다)
+    this.refsDrop();
     // 0.98.0 앱 pointsFor 기억(고르기 사본이 열쇠 — 남기면 새 장면의 같은 자리·id·삼각형에 앞 장면의 앱 점을 붙인다. setMesh·removeMesh는 sceneEdited가 비운다)과 가상 커서 후보
     if (this.snapOpt) this.snapOpt.pfMemo = null;
     this.keySceneChanged();
@@ -2657,6 +2663,8 @@ export class Viewer3d {
     this.inferLock = null;
     this.lastLockable = null;
     this.clearTrack();
+    // 0.99.0 지나간 기준 선분도(setScene과 같다)
+    this.refsDrop();
     this.marker = null;
     this.bvhs = new WeakMap();
     this.parts = new WeakMap();
@@ -3186,6 +3194,8 @@ export class Viewer3d {
     this.allBox = box;
     if (moved || hadOrigin !== this.usesOrigin) this.rebuildGrid();
     if (this.snapOpt) this.snapOpt.pfMemo = null;
+    // 0.99.0 바꾸거나 뺀 그물이 낸 지나간 기준 선분은 버린다(0.98.0은 그 윤곽선과 나란함을 그렸다 — 다른 묶음이 낸 기준은 그대로)
+    if (prev) this.refsDrop((p) => p.id === prev.id);
     // 측정 미리 보기는 그 커서 자리에서 바뀐 그물로 다시 구한다(찍은 점은 그대로). 0.98.0 가상 커서 후보도(미리 보기가 없던 측정 모드·고르기 모드)
     this.rehover();
     this.keySceneChanged();
@@ -4031,6 +4041,8 @@ export class Viewer3d {
     this.visBox = this.fitBx = this.shBx = null;
     this.visLists = null;
     this.cutDirty = true;
+    // 0.99.0 숨긴 묶음(묶음 숨김도)·숨긴 구간에 든 선분·윤곽선이 낸 지나간 기준 선분은 버린다(0.98.0은 숨긴 선분과 나란함을 그렸다)
+    this.refsDrop((p) => !this.isVisible(p.id) || !!(p.kind === 'edge' ? this.rangeSel.get(p.id)?.eTest : this.rangeSel.get(p.id)?.test)?.(p.raw ?? p.index));
     // 0.98.0 측정 미리 보기는 메시 바꾸기·빼기처럼 그 커서 자리에서 다시 구하고(0.97.0은 마우스를 옮길 때까지 숨긴 묶음·구간의 붙잡기 표식을 그렸다) 가상 커서 후보도 다시 구하게 한다
     this.rehover();
     this.keySceneChanged();
@@ -4594,6 +4606,8 @@ export class Viewer3d {
     this.secSync();
     this.wheelAnchor = null;
     if (this.measuring) this.measureHover = null;
+    // 0.99.0 지나간 기준 선분은 모두 버린다(단면은 모든 묶음의 보이는 조각을 바꾼다 — 어느 선분이 잘렸는지는 따지지 않는다. 0.98.0은 잘린 선분과 나란함을 그렸다)
+    this.refsDrop(() => true);
     // 0.98.0 가상 커서 후보는 다음 그림에서 그 자리에서 다시 구한다(0.97.0은 잘린 후보를 Tab으로 알리고 표식으로 그렸다)
     this.keySceneChanged();
     this.invalidate();
@@ -5009,6 +5023,8 @@ export class Viewer3d {
     if (this.opts.pickEdges === on) return;
     this.opts.pickEdges = on;
     if (this.measuring) this.measureHover = null;
+    // 0.99.0 가상 커서 후보도 다음 그림·Tab 앞에서 새 선택으로 다시 구한다(장면 길과 같은 꼴 — 0.98.0은 옛 윤곽선 후보를 Tab으로 알리고 고르기 모드 표식으로 그렸다)
+    this.keySceneChanged();
     if (on) this.scheduleBvh();
     this.invalidate();
   }
@@ -5118,15 +5134,15 @@ export class Viewer3d {
     // 0.10.0: 추론 잠금·나란함 기준 선분은 붙잡기 선택과 함께 새로
     this.inferLock = null;
     this.lastLockable = null;
-    this.parallelRef = null;
-    this.trackDirRef = null;
-    this.trackDirAsked = null;
-    this.parallelOwn = null;
-    this.parallelAsked = null;
+    this.refsDrop();
     // 0.16.0: 끌어온 점도 새로(끄면 상태가 없다)
     this.clearTrack();
     this.tracker = this.snapOpt?.inference?.track ? new MeasureTracker() : null;
-    if (this.measuring) this.measureHover = null;
+    if (this.measuring) {
+      this.measureHover = null;
+      // 0.99.0 가상 커서 측정 후보도 다음 그림·Tab 앞에서 새 선택으로 다시 구한다(장면 길과 같은 꼴 — 0.98.0은 다음 그림에 미리 보기가 없고 Tab이 옛 선택의 후보를 알렸다)
+      this.keySceneChanged();
+    }
     this.invalidate();
   }
 
@@ -6219,6 +6235,11 @@ export class Viewer3d {
    * 범위·모형 행렬·숨긴 구간 범위는 묶음마다 그 묶음의 행렬로만 정해진다), false면 없음. 보이는 범위·단면 테두리·휠 기준은 하나라도 바뀌면 버린다
    */
   private lookChanged(moved: boolean | readonly string[]): void {
+    // 0.99.0 행렬이 바뀌었을 수 있는 묶음이 낸 지나간 기준 선분은 버린다(세계 끝점이 옛 자리 — 0.98.0은 옮기기 전 선분과 나란함을 그렸다)
+    if (moved) {
+      const mv = moved;
+      this.refsDrop((p) => mv === true || mv.includes(p.id));
+    }
     this.shadowVer++;
     this.visLists = null;
     // 묶음 절반 넘게 옮겼으면 하나씩 지우기보다 통째로 버리는 편이 싸다(값은 같다)
@@ -7237,6 +7258,8 @@ export class Viewer3d {
     // 0.27.0: 끌어온 점의 나란함·수직(trackDirs)도 같은 기준 선분을 쓴다(parallel을 켜지 않아도 기억한다)
     if ((inf?.parallel || inf?.trackDirs) && d?.ends) {
       this.parallelRef = d.ends;
+      // 0.99.0 그 선분을 낸 고르기(장면 길에서 그 묶음이 빠지거나 바뀌면 버린다 — refsDrop)
+      this.refPick.set(d.ends, d.pick);
       // 0.28.0: 앱이 기준 선분을 거르면(trackDirs { edge }) 받은 선분만 끌어온 점의 기준으로(앞 기준이 남는다 — 0.10.0 나란함 기준은 그대로)
       const tdEdge = inf.trackDirs && inf.trackDirs !== true ? inf.trackDirs.edge : null;
       if (tdEdge && this.edgeOk(tdEdge, d, 'track')) this.trackDirRef = d.ends;
@@ -8549,6 +8572,23 @@ export class Viewer3d {
   }
 
   /**
+   * 0.99.0 지나간 기준 선분(나란함·끌어온 점 방향 — parallelRef·trackDirRef·parallelOwn)을 버린다: gone(그 선분을 낸 고르기)이 true인 것만, 주지 않으면 모두(앱 거르기 기억도 —
+   * setMeasureSnap·setScene·clear). 장면 길이 그 선분을 낸 묶음을 빼거나 바꾸거나 숨기면 부른다(0.98.0은 남겨, 새 장면에서 선분을 지나기 전 첫 점 뒤 없는·숨긴·옮긴 선분과
+   * 나란한 안내선을 그리고 'parallel'로 찍었다). 다른 묶음만 바뀌면 그대로 남긴다(커서를 옮겨도 남는 것 — 0.10.0)
+   */
+  private refsDrop(gone?: (p: Pick3d) => boolean): void {
+    const out = (r: [V3, V3] | null): boolean => {
+      if (!r) return false;
+      const p = this.refPick.get(r);
+      return !gone || !p || gone(p);
+    };
+    if (out(this.parallelRef)) this.parallelRef = null;
+    if (out(this.trackDirRef)) this.trackDirRef = null;
+    if (out(this.parallelOwn)) this.parallelOwn = null;
+    if (!gone) this.trackDirAsked = this.parallelAsked = null;
+  }
+
+  /**
    * 한 화면 자리의 측정 후보(차례대로, max개까지): 첫째는 그 자리 마우스 미리 보기와 같은 것(measureAt 그대로), 다음은 앞 후보로 고른 점 붙잡기 자리를 빼고 같은 measureAt —
    * 그래서 붙잡기 차례·우선(0.41.0)·다듬기·잠금·구간 단면이 그대로다. 점 붙잡기가 다하면 선 추론(축·나란함·끌어온 축·잠근 선 교차) 하나, 그다음 선 추론 없이
    * 'fallback' 앱 점과 붙잡지 않은 자리(선분·면 위 점, 잠근 동안이면 커서를 잠근 선에 내린 자리). 자리가 꼭 같은 결과는 앞의 것만 둔다.
@@ -8616,7 +8656,8 @@ export class Viewer3d {
   /**
    * 0.98.0 장면 조각이 바뀌었다(setScene·clear·setMesh·removeMesh·보이기·구간 숨김·단면·겉모습): 켜진 가상 커서의 후보(측정 후보 목록·겹친 고르기 후보·고른 것)는
    * 그때의 장면으로 구한 것이라, 다음 그림과 Tab 앞에서 그 자리에서 다시 구하게 표시한다(같은 후보가 남았으면 그 차례 — 알리지 않는다. 0.97.0은 커서를 옮길 때까지 앞 장면 후보를
-   * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로)
+   * Tab으로 알리고 고르기 모드 표식으로 그렸다). 측정 모드의 미리 보기가 있던 메시 바꾸기·빼기·보이기는 그보다 먼저 rehover가 다시 구하고 'refresh'로 알린다(0.46.0 그대로).
+   * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다
    */
   private keySceneChanged(): void {
     if (this.keyCur) this.keyCur.stale = true;
