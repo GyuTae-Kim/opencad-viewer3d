@@ -501,7 +501,8 @@ describe('0.110.0 0.109.0 그대로인 길', () => {
     expect(h.measureHoverSnap).toEqual(before);
   });
 
-  it('가상 커서 고르기 모드(측정 꺼짐): 다시 구하지 않는다', () => {
+  // 0.112.0부터 고르기 모드 가상 커서도 카메라가 멈춘 그림에서 다시 구한다(0.110.0·0.111.0은 0 — 자세한 것은 v01120pickcam 시험)
+  it('가상 커서 고르기 모드(측정 꺼짐): 0.112.0부터 카메라가 멈춘 그림마다 한 번 다시 구한다', () => {
     const v = make();
     v.setKeyboardSnap({ announce: () => undefined });
     key(v, 'Enter');
@@ -509,8 +510,9 @@ describe('0.110.0 0.109.0 그대로인 길', () => {
     const k = calls(v, 'keyRecompute');
     press(v, 'f');
     v.renderNow();
+    expect(k.n).toBe(1);
     v.setProjection('orthographic');
     v.renderNow();
-    expect(k.n).toBe(0);
+    expect(k.n).toBe(2);
   });
 });

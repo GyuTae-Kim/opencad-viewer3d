@@ -2274,7 +2274,8 @@ export class Viewer3d {
   /**
    * 0.110.0 3D 보기 안 사용자 입력(휠·보기 키 F·1~7·가운데 두 번 누르기 전체 보기·뷰 큐브 누르기·끌기·걷기 키·조이스틱·걷기 서기)·3D 보기 크기·setProjection으로
    * 카메라가 바뀌었다 — 카메라가 멈춘 첫 그림(움직임 끝 프레임·휠 160 ms 뒤·걷기를 멈춘 그림, 한 번이면 다음 그림)에서 내리고, 측정 중이면 측정 미리 보기와 가상 커서 후보를
-   * 그 커서 자리에서 한 번 다시 구한다(draw — camSettle). 미리 보기가 없어도 세운다(움직이는 동안 포인터 이동으로 구한 미리 보기도 끝에서 맞춘다)
+   * 그 커서 자리에서 한 번 다시 구한다(draw — camSettle). 미리 보기가 없어도 세운다(움직이는 동안 포인터 이동으로 구한 미리 보기도 끝에서 맞춘다).
+   * 0.112.0 가상 커서 후보는 측정 밖(고르기 모드)에서도 그 그림에서 다시 구한다
    */
   private camWait = false;
 
@@ -5431,15 +5432,16 @@ export class Viewer3d {
   }
 
   /**
-   * 0.110.0 카메라만 바뀐 뒤 카메라가 멈춘 첫 그림(draw — camWait)에서 한 번, 측정 중일 때만(측정이 꺼진 길 — 고르기 모드 가상 커서 포함 — 은 0.109.0 그대로):
+   * 0.110.0 카메라만 바뀐 뒤 카메라가 멈춘 첫 그림(draw — camWait)에서 한 번, 측정 중일 때만(측정이 꺼진 길은 0.109.0 그대로 — 0.112.0부터 고르기 모드 가상 커서는 아래처럼 다시 구한다):
    * 가상 커서 후보는 keySceneChanged(같은 그림에서 알리지 않고 다시 구한다 — 0.98.0 꼴, 화면 px로 고른 후보라 같은 커서 자리 아래가 바뀐다), 마우스·펜 미리 보기는 측정 중·미리 보기 있음·앱이 맡은 포인터 없음·커서 자리가 3D 보기 안이면 그 커서 자리에서
    * (rehover와 같은 hoverAt ??= lastHoverAt — 그리기 안이라 invalidate 없이 같은 그림의 미리 보기 셈이 구한다). 아니면 0.109.0 그대로(앞 화면에서 고른 세계 점 — 표식은 그 점의 새 투영).
    * 끌기(누른 포인터)는 부르는 쪽이 뗀 뒤까지 기다린다 — 끌기 시작에서 마우스 미리 보기를 버리고 누르기에서 가상 커서를 끄므로 그 뒤 다시 구할 것은 대개 없다.
    * 0.111.0 미리 보기가 null이어도 커서가 그 자리에 그대로 있으면(hoverStill) 다시 구한다 — 휠 축소로 윤곽선이 허용 거리 안에 들거나 보기 키로 형상이 커서 아래로 온 그림
+   * 0.112.0 가상 커서 후보는 측정 밖(고르기 모드 — 겹친 고르기 후보·고른 것)에서도 같은 표시로 다시 구한다(0.111.0은 커서를 옮길 때까지 앞 화면 후보). 마우스 미리 보기는 측정 중일 때만 그대로
    */
   private camSettle(): void {
-    if (!this.measuring) return;
     this.keySceneChanged();
+    if (!this.measuring) return;
     const at = this.lastHoverAt;
     if (!(this.measureHover || this.hoverStill()) || !at || at.pointerType === KEY_POINTER || this.holds.size) return;
     if (at.x >= 0 && at.y >= 0 && at.x <= this.cssW && at.y <= this.cssH) this.hoverAt ??= at;
@@ -8923,7 +8925,8 @@ export class Viewer3d {
    * 0.99.0 후보를 정하는 선택이 바뀐 setMeasureSnap(측정 중)·setPickEdges도 부른다. 0.100.0 선분 그리기 범위가 준 뒤에도(drawRangeCut).
    * 0.106.0 음영 가림이 바뀐 setRenderMode도(측정 미리 보기는 그보다 먼저 rehover).
    * 0.109.0 단면·겉모습·setPickEdges의 마우스 미리 보기는 rehoverOrDrop이 다시 구하고, 가상 커서 미리 보기는 그대로 이 표시로 다시 구한다(알리지 않는다).
-   * 0.110.0 사용자 입력·크기·setProjection으로 바뀐 카메라가 멈춘 그림에서도(camSettle — 0.109.0은 커서를 옮길 때까지 앞 화면 후보)
+   * 0.110.0 사용자 입력·크기·setProjection으로 바뀐 카메라가 멈춘 그림에서도(camSettle — 0.109.0은 커서를 옮길 때까지 앞 화면 후보).
+   * 0.112.0 그 카메라 길은 고르기 모드에서도(0.111.0은 측정 중일 때만 — 고르기 모드는 커서를 옮길 때까지 앞 화면 후보)
    */
   private keySceneChanged(): void {
     if (this.keyCur) this.keyCur.stale = true;
@@ -9363,7 +9366,8 @@ export class Viewer3d {
       const cd = this.cubeDrag;
       this.cubeDrag = null;
       // 0.110.0 큐브를 끌어 돌린 뒤: 끌기는 뗄 때 그리지 않으므로, 다시 구할 것(가상 커서·측정 미리 보기)이 있을 때만 그 한 장을 건다
-      if (cd?.moved && this.camWait && this.measuring && (this.keyCur || this.measureHover)) this.invalidate();
+      // (0.112.0 가상 커서는 고르기 모드도 — camSettle이 측정 밖에서도 그 후보를 다시 구한다)
+      if (cd?.moved && this.camWait && (this.keyCur || (this.measuring && this.measureHover))) this.invalidate();
       if (!cd || cd.moved || cancel) return;
       // 0.44.0 손가락으로 접힌 큐브를 누르면 고르지 않고 편다(편 큐브를 다시 눌러 고른다)
       if (cd.touch && !this.cubeZoom && this.unfoldCube()) return;
