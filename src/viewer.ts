@@ -289,7 +289,9 @@ export interface Viewer3dOptions {
   /**
    * 0.44.0 손가락 뷰 큐브(기본 켬 — 바뀐 기본 동작): 손가락(pointerType 'touch')으로 큐브를 누르면 고르지 않고 큐브를 CUBE_TOUCH_SIZE(224) 화소로 펴서
    * 띠 경계를 보이고, 편 큐브를 다시 누르면 그 자리(띠 CUBE_TOUCH_BAND 0.3)의 뷰로 간 뒤 접는다. 편 큐브 밖을 누르거나 Esc면 고르지 않고 접는다.
-   * false면 0.43.0처럼 손가락도 바로 고른다. { size, band }로 편 크기(이 큐브 크기보다 커야 편다 — 뷰어 짧은 변 − 16으로 자른다)·띠를 바꾼다.
+   * 0.119.0(바뀐 기본 동작 — 손가락만): 손가락으로 누른 자리가 큐브 윤곽 밖이어도 윤곽에서 touchPickTolerance(기본 14화소) 안이면 가장 가까운 모서리·꼭짓점 자리를 고른다
+   * (그리기는 그대로 — 편 큐브를 펴지 못해 바로 고르는 손가락도). 그보다 먼 자리가 「편 큐브 밖」이다.
+   * false면 0.43.0처럼 손가락도 바로 고른다(윤곽 밖 붙이기도 없음). { size, band }로 편 크기(이 큐브 크기보다 커야 편다 — 뷰어 짧은 변 − 16으로 자른다)·띠를 바꾼다.
    * 마우스·펜은 늘 0.43.0 그대로다
    */
   viewCubeTouch?: boolean | ViewCubeTouchOptions;
@@ -309,7 +311,8 @@ export interface Viewer3dOptions {
   pickTolerance?: number;
   /**
    * 터치로 누를 때(누르기·측정 점 찍기·측정 중 터치 미리 보기)의 고르기 허용 거리(화면 화소, 기본 14).
-   * 측정 점을 꼭짓점·끝점에 붙잡는 거리도 이 값(10보다 작으면 10)까지 넓힌다
+   * 측정 점을 꼭짓점·끝점에 붙잡는 거리도 이 값(10보다 작으면 10)까지 넓힌다.
+   * 0.119.0 손가락 뷰 큐브(viewCubeTouch 켬)를 누른 자리가 큐브 윤곽 밖일 때 가장 가까운 모서리·꼭짓점 자리로 붙이는 거리도 이 값이다
    */
   touchPickTolerance?: number;
   /**
@@ -408,7 +411,7 @@ export interface ViewCubeTouchOptions {
 
 /**
  * 0.53.0 손가락 뷰 큐브를 펴거나 접은 까닭(onViewCubeExpandedChange): 'touch' 손가락으로 접힌 큐브를 눌러 폈다 · 'pick' 편 큐브에서 면·모서리·꼭짓점을 골라 접었다 ·
- * 'cube' 편 큐브의 고를 것이 없는 자리를 눌러 접었다 · 'canvas' 3D 보기를 눌러 접었다 · 'escape' Esc로 접었다 ·
+ * 'cube' 편 큐브의 고를 것이 없는 자리를 눌러 접었다(0.119.0 손가락은 큐브 윤곽에서 touchPickTolerance보다 먼 자리) · 'canvas' 3D 보기를 눌러 접었다 · 'escape' Esc로 접었다 ·
  * 'option' 앱이 큐브 선택을 바꿔 접었다(setViewCubeVisible(false)·setViewCubeTouch·setViewCubeSize)
  */
 export type ViewCubeExpandReason = 'touch' | 'pick' | 'cube' | 'canvas' | 'escape' | 'option';
@@ -9544,7 +9547,10 @@ export class Viewer3d {
       // 0.44.0 손가락으로 접힌 큐브를 누르면 고르지 않고 편다(편 큐브를 다시 눌러 고른다)
       if (cd.touch && !this.cubeZoom && this.unfoldCube()) return;
       const p = this.local(e, cube);
-      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow());
+      // 0.119.0 손가락 뷰 큐브(viewCubeTouch 켬)를 손가락으로 누른 자리가 큐브 윤곽 밖이면 손가락 고르기 허용 거리(touchPickTolerance) 안의
+      // 가장 가까운 모서리·꼭짓점 자리로 붙인다(그리기·가리킴은 그대로 — 마우스·펜·viewCubeTouch false는 0.118.0 그대로 snap 0)
+      const snap = cd.touch && this.opts.viewCubeTouch !== false ? pickTolerance('touch', this.opts.pickTolerance, this.opts.touchPickTolerance).tol : 0;
+      const h = cubeHit(cameraBasis(this.cam), cubeLayout(this.cubeSizeNow()), p.x, p.y, this.cubeBandNow(), snap);
       if (h) {
         // 0.110.0 움직임이면 끝 프레임에서, 바로 옮기면 다음 그림에서 한 번 다시 구한다
         this.camWait = true;
