@@ -10,7 +10,8 @@ export const USAGE = `쓰는 법: npm run pixels -- --base <git 판> [선택]
   --runs <N>       판마다 찍는 횟수(기본 2 — 같은 코드가 같은 그림을 내는지 먼저 본다, 1이면 건너뛴다)
   --size <폭x높이>  그림 크기(CSS 화소, 기본 960x600)
   --only <정규식>  이 이름에 맞는 장면·값 묶음만
-  --port <N>       비교 페이지를 내줄 포트(기본 0 = 아무 빈 포트, 127.0.0.1에만)
+  --shard <i/n>    장면·값 묶음을 n조각으로 나눈 i째 조각만(1부터 — CI가 러너 여러 대에 나눠 찍는다. 장면마다 base·head는 같은 러너에서 찍는다)
+  --port <N>      비교 페이지를 내줄 포트(기본 0 = 아무 빈 포트, 127.0.0.1에만)
   --chrome <경로>  Chrome 실행 파일(기본 CHROME_PATH 또는 흔한 자리)
   --keep-shots     같은 장면의 그림·값도 out/shots/에 남긴다
   --timeout <초>   장면·값 묶음 하나를 찍는 CDP 한도(기본 120, 환경 변수 PIXELS_TIMEOUT도 된다 — 부하가 높은 기계에서 늘린다.
@@ -22,10 +23,20 @@ export const USAGE = `쓰는 법: npm run pixels -- --base <git 판> [선택]
 /** 장면·값 묶음 하나를 찍는 CDP 한도 기본값(초) */
 export const DEFAULT_TIMEOUT_S = 120;
 
+/** @typedef {{ index: number; count: number }} Shard 장면·값 묶음 조각(--shard i/n — index는 1부터) */
+
+/**
+ * 이름 목록 가운데 그 조각의 몫(조각이 없으면 그대로): 목록 차례에서 번호 % count === index − 1인 것.
+ * 비교 페이지가 주는 차례는 판(base·head)과 러너에 상관없이 같아서 조각들을 모으면 빠짐·겹침 없이 전체이고,
+ * 이웃한 장면(같은 꼴의 무거운 장면이 줄지어 있다)이 조각마다 고르게 나뉜다
+ * @template T @param {readonly T[]} names @param {Shard | null} shard @returns {T[]}
+ */
+export const shardOf = (names, shard) => (shard ? names.filter((_, i) => i % shard.count === shard.index - 1) : [...names]);
+
 /**
  * @param {string[]} argv
  * @param {Record<string, string | undefined>} [env] 환경 변수(PIXELS_TIMEOUT — --timeout이 먼저다)
- * @returns {{ help: true } | { help: false; base: string; head: string | null; out: string | null; runs: number; size: { w: number; h: number }; only: RegExp | null; port: number; chrome: string | null; keepShots: boolean; timeoutMs: number }}
+ * @returns {{ help: true } | { help: false; base: string; head: string | null; out: string | null; runs: number; size: { w: number; h: number }; only: RegExp | null; shard: Shard | null; port: number; chrome: string | null; keepShots: boolean; timeoutMs: number }}
  */
 export function readArgs(argv, env = {}) {
   const { values } = parseArgs({
@@ -38,6 +49,7 @@ export function readArgs(argv, env = {}) {
       runs: { type: 'string' },
       size: { type: 'string' },
       only: { type: 'string' },
+      shard: { type: 'string' },
       port: { type: 'string' },
       chrome: { type: 'string' },
       'keep-shots': { type: 'boolean' },
@@ -63,6 +75,15 @@ export function readArgs(argv, env = {}) {
       throw new Error(`--only 정규식이 틀렸습니다: ${values.only}`);
     }
   }
+  /** @type {Shard | null} */
+  let shard = null;
+  if (values.shard !== undefined) {
+    const s = /^(\d+)\/(\d+)$/.exec(values.shard);
+    const index = s ? Number(s[1]) : NaN;
+    const count = s ? Number(s[2]) : NaN;
+    if (!(count >= 1 && count <= 16 && index >= 1 && index <= count)) throw new Error(`--shard는 i/n(1 ≤ i ≤ n ≤ 16, 예 2/4): ${values.shard}`);
+    shard = { index, count };
+  }
   const ts = values.timeout ?? env.PIXELS_TIMEOUT;
   const timeout = ts === undefined || ts === '' ? DEFAULT_TIMEOUT_S : Number(ts);
   if (!Number.isFinite(timeout) || timeout < 10 || timeout > 3600) throw new Error(`--timeout(PIXELS_TIMEOUT)은 10~3600초: ${ts}`);
@@ -74,6 +95,7 @@ export function readArgs(argv, env = {}) {
     runs,
     size,
     only,
+    shard,
     port,
     chrome: values.chrome ?? null,
     keepShots: !!values['keep-shots'],

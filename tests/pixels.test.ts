@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { readArgs, readyWaitMs, slug } from '../scripts/pixels/args.mjs';
+import { readArgs, readyWaitMs, shardOf, slug } from '../scripts/pixels/args.mjs';
 import { chromeArgs, findChrome } from '../scripts/pixels/chrome.mjs';
 import { classify, countStatuses, exitCode, FAILING, markdown, valueDiff } from '../scripts/pixels/compare.mjs';
 import { gitSource, listTree, resolveCommit } from '../scripts/pixels/gitsrc.mjs';
@@ -229,6 +229,21 @@ describe('인자', () => {
     expect(() => readArgs(['--base', 'x', '--size', 'big'])).toThrow(/--size/);
     expect(() => readArgs(['--base', 'x', '--only', '('])).toThrow(/--only/);
     expect(() => readArgs(['--base', 'x', '--what'])).toThrow();
+  });
+
+  it('조각(--shard i/n — CI가 러너 여러 대에 나눠 찍는다): 기본 없음, 조각들을 모으면 빠짐·겹침 없이 전체이고 이웃한 이름은 다른 조각으로', () => {
+    expect(readArgs(['--base', 'x'])).toMatchObject({ shard: null });
+    expect(readArgs(['--base', 'x', '--shard', '2/4'])).toMatchObject({ shard: { index: 2, count: 4 } });
+    expect(readArgs(['--base', 'x', '--shard', '1/1'])).toMatchObject({ shard: { index: 1, count: 1 } });
+    for (const bad of ['0/4', '5/4', '1/0', '1/17', '2', '2/4/1', 'a/b', '-1/4']) expect(() => readArgs(['--base', 'x', '--shard', bad])).toThrow(/--shard/);
+    const names = Array.from({ length: 157 }, (_, i) => `scene-${i}`);
+    expect(shardOf(names, null)).toEqual(names);
+    const parts = [1, 2, 3, 4].map((index) => shardOf(names, { index, count: 4 }));
+    expect(parts.map((p) => p.length)).toEqual([40, 39, 39, 39]);
+    expect(parts.flat().sort()).toEqual([...names].sort());
+    expect(parts[0]!.slice(0, 3)).toEqual(['scene-0', 'scene-4', 'scene-8']);
+    expect(parts[1]!.slice(0, 2)).toEqual(['scene-1', 'scene-5']);
+    expect(shardOf([], { index: 3, count: 4 })).toEqual([]);
   });
 
   it('폴더 이름 조각', () => {

@@ -14,7 +14,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { createServer } from 'node:http';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readArgs, readyWaitMs, slug, USAGE } from './args.mjs';
+import { readArgs, readyWaitMs, shardOf, slug, USAGE } from './args.mjs';
 import { buildPage } from './build.mjs';
 import { launchChrome } from './chrome.mjs';
 import { classify, countStatuses, exitCode, markdown, valueDiff } from './compare.mjs';
@@ -150,8 +150,9 @@ async function main() {
         const listKey = JSON.stringify([list.shots, list.values]);
         if (!shotNames || !valueNames) {
           firstListKey = listKey;
-          shotNames = /** @type {string[]} */ (list.shots).filter((n) => !args.only || args.only.test(n));
-          valueNames = /** @type {string[]} */ (list.values).filter((n) => !args.only || args.only.test(n));
+          // --only로 거른 뒤 --shard 조각(CI가 러너 여러 대에 나눠 찍는다 — 조각마다 base·head를 같은 러너에서 찍는다)
+          shotNames = shardOf(/** @type {string[]} */ (list.shots).filter((n) => !args.only || args.only.test(n)), args.shard);
+          valueNames = shardOf(/** @type {string[]} */ (list.values).filter((n) => !args.only || args.only.test(n)), args.shard);
         } else if (listKey !== firstListKey) throw new Error('두 묶음의 장면 목록이 다릅니다');
         if (run === 0) webgl[side] = list.info;
         if (list.info?.renderer === '(WebGL2 없음)') throw new Error('헤드리스 Chrome에서 WebGL2를 만들지 못했습니다(SwiftShader 인자·GPU 흉내를 확인하세요)');
@@ -263,6 +264,7 @@ async function main() {
     size: args.size,
     runs: args.runs,
     only: args.only ? String(args.only) : null,
+    shard: args.shard ? `${args.shard.index}/${args.shard.count}` : null,
     timeoutSeconds: tmo / 1000,
     chrome: browser.version,
     webgl,
