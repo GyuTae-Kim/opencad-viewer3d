@@ -76,8 +76,12 @@ export function visibleFaces(b: CameraBasis): CubeFaceDef[] {
   return CUBE_FACES.filter((f) => dot(f.n, b.back) > 0.02);
 }
 
-/** 큐브 캔버스 위 점(x, y) → 누른 면·구역·눈 방향. band는 면 가장자리 띠 폭(0.44.0 — 손가락 큐브는 CUBE_TOUCH_BAND) */
-export function cubeHit(b: CameraBasis, L: CubeLayout, x: number, y: number, band = CUBE_BAND): CubeHit | null {
+/**
+ * 큐브 캔버스 위 점(x, y) → 누른 면·구역·눈 방향. band는 면 가장자리 띠 폭(0.44.0 — 손가락 큐브는 CUBE_TOUCH_BAND).
+ * 0.119.0 snap(캔버스 화소, 기본 0 = 0.118.0): 보이는 면 어디에도 들지 않은 점이 큐브 윤곽에서 snap 안이면 가장 가까운 윤곽 점의 자리로 붙인다
+ * (손가락 허용치 — 윤곽 위 점은 s나 t가 0·1이라 늘 모서리 띠·꼭짓점이고, 면 가운데로는 붙지 않는다). 윤곽 안은 snap과 무관하게 같다
+ */
+export function cubeHit(b: CameraBasis, L: CubeLayout, x: number, y: number, band = CUBE_BAND, snap = 0): CubeHit | null {
   for (const f of visibleFaces(b)) {
     const O = proj(b, L, add(scale(f.n, 0.5), add(scale(f.u, -0.5), scale(f.v, -0.5))));
     const A = projLin(b, L, f.u);
@@ -91,7 +95,32 @@ export function cubeHit(b: CameraBasis, L: CubeLayout, x: number, y: number, ban
     const region = cubeRegion(s, t, band);
     return { face: f, s, t, region, dir: cubeRegionDir(f, region[0], region[1]) };
   }
-  return null;
+  return snap > 0 ? cubeSnapHit(b, L, x, y, band, snap) : null;
+}
+
+/** 0.119.0 윤곽 밖 점(x, y)에서 snap 화소 안의 가장 가까운 보이는 면 테두리 점 → 그 자리(없으면 null). 이웃 면이 함께 쓰는 꼭짓점은 두 면에서 같은 방향이다 */
+function cubeSnapHit(b: CameraBasis, L: CubeLayout, x: number, y: number, band: number, snap: number): CubeHit | null {
+  let best: { f: CubeFaceDef; s: number; t: number; d: number } | null = null;
+  for (const f of visibleFaces(b)) {
+    const O = proj(b, L, add(scale(f.n, 0.5), add(scale(f.u, -0.5), scale(f.v, -0.5))));
+    const A = projLin(b, L, f.u);
+    const B = projLin(b, L, f.v);
+    if (Math.abs(A[0] * B[1] - A[1] * B[0]) < 1e-9) continue;
+    const px = x - O[0], py = y - O[1];
+    const aa = A[0] * A[0] + A[1] * A[1], bb = B[0] * B[0] + B[1] * B[1];
+    const clamp = (k: number): number => (k < 0 ? 0 : k > 1 ? 1 : k);
+    // 테두리 넷: t = 0·1(A 방향), s = 0·1(B 방향) — 그 위 가장 가까운 점의 (s, t)
+    for (const [s0, t0, alongA] of [[0, 0, true], [0, 1, true], [0, 0, false], [1, 0, false]] as const) {
+      const qx = px - s0 * A[0] - t0 * B[0], qy = py - s0 * A[1] - t0 * B[1];
+      const k = alongA ? clamp((qx * A[0] + qy * A[1]) / aa) : clamp((qx * B[0] + qy * B[1]) / bb);
+      const s = alongA ? k : s0, t = alongA ? t0 : k;
+      const d = Math.hypot(px - s * A[0] - t * B[0], py - s * A[1] - t * B[1]);
+      if (!best || d < best.d) best = { f, s, t, d };
+    }
+  }
+  if (!best || !(best.d <= snap)) return null;
+  const region = cubeRegion(best.s, best.t, band);
+  return { face: best.f, s: best.s, t: best.t, region, dir: cubeRegionDir(best.f, region[0], region[1]) };
 }
 
 // ───────────── 0.44.0 손가락 기기 뷰 큐브 ─────────────
