@@ -6,6 +6,7 @@
  * 끄면 0.115.0과 같고 꼴이 틀린 값은 주지 않은 것(가짜 DOM·가짜 WebGL).
  * 장면은 0.46.0 키보드 붙잡기 시험과 같다(z = 0, 위에서 봄): L1 (0,0)–(20,0), L2 (5,−5)–(5,8)(교차점 X (5,0)), L3 (30,−10)–(30,14),
  * 앱 점 A 'center' (5.4, 0.3), B 'point' low (4.5, −0.45). 카메라 대상 SPOT (5.1, 0.12)이 캔버스 가운데(400, 300) — 그 자리 후보는 교차점·중심·점·붙잡지 않은 자리 넷이다.
+ * 0.118.0: 돌린 동안의 미리 보기 값에는 차례·수(cycle)가 실려 견주는 값에 더한다(cyc — 칸 자체는 v01180hovercycle 시험).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
@@ -73,6 +74,8 @@ function key(v: Viewer3d, k: string, shift = false): boolean {
   return prevented;
 }
 const r6 = (p: readonly number[]): number[] => p.map((x) => Math.round(x * 1e6) / 1e6);
+/** 0.118.0 Tab으로 돌린 동안의 미리 보기 값: 후보 i에 차례·수 */
+const cyc = (list: MeasureHoverSnap[], i: number): MeasureHoverSnap => ({ ...list[i]!, cycle: { index: i, count: list.length } });
 
 function make(o: Partial<MeasureSnapOptions> = { tabCycle: true }): Viewer3d {
   const host = dom.host();
@@ -124,21 +127,21 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     v.onMeasureHoverChange((s) => seen.push(s));
     for (let i = 1; i <= 5; i++) {
       expect(key(v, 'Tab')).toBe(true);
-      expect(v.measureHoverSnap).toEqual(list[i % 4]);
+      expect(v.measureHoverSnap).toEqual(cyc(list, i % 4));
       expect(seen).toHaveLength(i);
-      expect(seen.at(-1)).toEqual(list[i % 4]);
+      expect(seen.at(-1)).toEqual(cyc(list, i % 4));
     }
     // Shift+Tab은 앞으로(1 → 0 → 3)
     expect(key(v, 'Tab', true)).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[0]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 0));
     expect(key(v, 'Tab', true)).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[3]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 3));
     expect(seen).toHaveLength(7);
     // 대상이 없는 합성 키(앱이 만든 키)도 받는다
     const ev = { key: 'Tab', code: '', shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, preventDefault() {} } as unknown as KeyboardEvent;
     expect(v.handleKey(ev)).toBe(true);
     v.renderNow();
-    expect(v.measureHoverSnap).toEqual(list[0]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 0));
   });
 
   it('누르면 보인 후보를 찍는다 — 4화소 안 이동은 돌린 미리 보기를 두고, 넘으면 돌리기를 버린다(새 자리 미리 보기 = 첫 후보)', () => {
@@ -147,10 +150,10 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     const list = v.measureCandidates(400, 300);
     key(v, 'Tab');
     key(v, 'Tab');
-    expect(v.measureHoverSnap).toEqual(list[2]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 2));
     // 손 떨림(2.2화소)에는 그대로
     hoverXY(v, 402, 301);
-    expect(v.measureHoverSnap).toEqual(list[2]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 2));
     pressXY(v, 402, 301);
     expect(v.measurePointCount).toBe(1);
     const p = v.measurePoints[0]!;
@@ -163,7 +166,7 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     const w = make();
     hoverXY(w, 400, 300);
     key(w, 'Tab');
-    expect(w.measureHoverSnap).toEqual(list[1]);
+    expect(w.measureHoverSnap).toEqual(cyc(list, 1));
     hoverXY(w, 406, 300);
     expect(w.measureHoverSnap).toEqual(w.measureCandidates(406, 300)[0]);
     hoverXY(w, 400, 300);
@@ -171,7 +174,7 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     expect(w.measureHoverSnap).toEqual(list[0]);
     // 다시 처음부터 돈다
     expect(key(w, 'Tab')).toBe(true);
-    expect(w.measureHoverSnap).toEqual(list[1]);
+    expect(w.measureHoverSnap).toEqual(cyc(list, 1));
     // 4화소 넘게 옮긴 자리를 누르면 그 자리 보통 찍기(돌린 후보가 아니다)
     key(w, 'Tab');
     pressXY(w, 408, 300);
@@ -185,12 +188,12 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     const list = v.measureCandidates(400, 300);
     key(v, 'Tab');
     key(v, 'Tab');
-    expect(v.measureHoverSnap).toEqual(list[2]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 2));
     v.setMeasureSnapLimit(100);
     v.renderNow();
     expect(v.measureHoverSnap).toEqual(list[0]);
     expect(key(v, 'Tab')).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[1]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 1));
   });
 
   it('Esc: 돌리는 중이면 풀고 첫 후보로(측정 지우기보다 먼저) — 푼 뒤 그 자리 Tab은 초점 이동, 다음 Esc는 측정 지우기, 포인터를 옮기면 다시 돈다', () => {
@@ -204,7 +207,7 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     expect(list.length).toBeGreaterThan(1);
     expect(v.measureHoverSnap).toEqual(list[0]);
     expect(key(v, 'Tab')).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[1]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 1));
     expect(key(v, 'Escape')).toBe(true);
     expect(v.measurePointCount).toBe(1);
     expect(v.measureHoverSnap).toEqual(list[0]);
@@ -261,7 +264,7 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     hoverXY(v, 400, 300);
     const list = v.measureCandidates(400, 300);
     expect(key(v, 'Tab')).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[1]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 1));
     expect(said).toHaveLength(0);
     expect(v.keyboardCursor).toBeNull();
     expect(key(v, 'ArrowRight')).toBe(true);
@@ -288,7 +291,7 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기(0.116.0 setMeasureSnap
     expect(ai).toBeGreaterThan(0);
     expect(list[ai]!.axis).toBe('y');
     for (let i = 0; i < ai; i++) expect(key(v, 'Tab')).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[ai]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, ai));
     expect(v.measureHoverLock).toMatchObject({ kind: 'axis', axis: 'y' });
     // Shift를 누른 채 제자리 이동 → 지금(돌린) 미리 보기의 방향으로 잠근다
     hoverXY(v, 400, 300, true);

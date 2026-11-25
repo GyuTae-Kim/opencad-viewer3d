@@ -729,7 +729,8 @@ export interface MeasureSnapOptions {
    * 돌리는 중 Esc는 돌리기를 풀고 첫 후보로 돌아간다(뷰어 Esc — 뷰 큐브 접기·측정 지우기 — 보다 먼저). 푼 뒤 포인터가 4화소 넘게 움직일 때까지 Tab은 초점 이동이다(키보드 덫 없음).
    * 장면 길·잠금·붙잡기 선택이 미리 보기를 다시 구하면 돌리기도 끝난다. 가상 커서가 켜진 동안은 가상 커서 Tab이 앞선다. 알림 글(announce)은 내지 않는다.
    * 0.117.0: 받은 Tab은 초점이 캔버스에 그대로라 누르기로 받은 초점 표시(data-v3d-focus="pointer" — 0.9.1)를 떼지 않는다(마우스로 돌리는 동안 초점 테두리가 나오지 않는다).
-   * 받지 않은 Tab(초점 이동)은 0.9.1처럼 뗀다
+   * 받지 않은 Tab(초점 이동)은 0.9.1처럼 뗀다.
+   * 0.118.0: 돌린 동안 measureHoverSnap·onMeasureHoverChange 값에 지금 차례·후보 수(MeasureHoverSnap.cycle)를 싣는다(앱이 「끝점 2/4」를 쓸 때)
    */
   tabCycle?: boolean;
 }
@@ -791,6 +792,12 @@ export interface MeasureHoverSnap {
    * 수직 발(snap 'perpendicular' — 선분 위 점, 이 필드 없음)과 가른다. 잠근 뒤(locked)에는 수직 발 잠금과 같은 값이라 없다
    */
   perpendicularDir?: true;
+  /**
+   * 0.118.0: 마우스 미리 보기 Tab 돌리기(MeasureSnapOptions.tabCycle)로 돌린 동안만 그 자리 후보의 지금 차례(0부터)와 수(measureCandidates와 같은 목록 — 둘 이상).
+   * 첫 Tab 전·Esc로 푼 뒤·포인터가 그 자리를 벗어나거나 찍은 뒤·다른 길이 미리 보기를 다시 구한 뒤·tabCycle 끔·가상 커서(차례는 keyboardCursor·알림의 index·count)에는 없다.
+   * measureHoverSnap·onMeasureHoverChange 값에만 싣는다(measureCandidates·measurePoints·키보드 붙잡기 알림의 snap에는 없다)
+   */
+  cycle?: { index: number; count: number };
 }
 
 /** 추론 잠금 상태(0.10.0, Viewer3d.measureInferenceLock). source = 'shift'(Shift를 누르고 있는 동안) 또는 'api'(setMeasureInferenceLock) */
@@ -2378,10 +2385,11 @@ export class Viewer3d {
   /**
    * 0.103.0 측정 미리 보기 바뀜 알림(onMeasureHoverChange)과 마지막으로 견준 미리 보기: 측정 중일 때의 measureHover(같은 객체·같은 찍은 점 1개 여부면 값도 같다 —
    * 측정 점 고르기 결과는 만든 뒤 고치지 않는다)와 값 열쇠(measureHoverSnap·measureHoverLock의 JSON, 없으면 ''). 듣는 쪽이 있을 때만 맞춘다.
-   * 0.107.0 측정 중일 때의 끌어온 점 목록(MeasureTracker.view — 바꿀 때마다 새 배열이라 같은 배열이면 값도 같다)도 견주고, 목록이 있으면 열쇠 뒤에 그 JSON을 붙인다
+   * 0.107.0 측정 중일 때의 끌어온 점 목록(MeasureTracker.view — 바꿀 때마다 새 배열이라 같은 배열이면 값도 같다)도 견주고, 목록이 있으면 열쇠 뒤에 그 JSON을 붙인다.
+   * 0.118.0 Tab 돌리기 차례(measureHoverSnap.cycle의 index — 돌리지 않으면 −1)도 견준다(Esc로 첫 후보에 풀면 같은 객체에서 칸만 없어진다)
    */
   private hoverCbs: Listeners<(snap: MeasureHoverSnap | null) => void> = new Map();
-  private hoverSeen: { pick: MeasurePick | null; one: boolean; track: readonly V3[] | null; key: string } = { pick: null, one: false, track: null, key: '' };
+  private hoverSeen: { pick: MeasurePick | null; one: boolean; track: readonly V3[] | null; cycle: number; key: string } = { pick: null, one: false, track: null, cycle: -1, key: '' };
 
   private ro: ResizeObserver;
   private hostPos: string | null = null;
@@ -3330,7 +3338,7 @@ export class Viewer3d {
     this.issueCbs.clear();
     // 0.103.0 미리 보기 바뀜 알림과 견준 미리 보기도 놓는다(0.107.0 견준 끌어온 점 목록도)
     this.hoverCbs.clear();
-    this.hoverSeen = { pick: null, one: false, track: null, key: '' };
+    this.hoverSeen = { pick: null, one: false, track: null, cycle: -1, key: '' };
     this.issues = [];
     this.restoreCbs.clear();
     this.lostCbs.clear();
@@ -5129,7 +5137,8 @@ export class Viewer3d {
    * 0.107.0 끌어온 점 목록(measureTrackPoints)이 바뀐 그림 뒤에도 한 번(머무르기 끝·setMeasureTrackPoints·두 점째·측정 지우기·Esc·측정 모드 끄기·붙잡기 선택·새 장면 —
    * 미리 보기 값과 함께 바뀌어도 한 번, 같은 목록이면 없음). 그때 받는 값은 그 그림의 measureHoverSnap이라 앞 알림과 같을 수 있다(null 다음 null도) — 목록은 measureTrackPoints로 읽는다.
    * 0.111.0 겉모습·setPickEdges·단면·음영 가림·카메라가 멈춘 그림은 미리 보기가 null이어도 마우스·펜 커서가 그 자리에 그대로 있으면 다시 구한다 — 빈 곳 위에서 형상이 커서 아래로 오면
-   * null 다음 그 값으로 한 번(0.110.0은 다음 포인터 이동까지 알림이 없었다)
+   * null 다음 그 값으로 한 번(0.110.0은 다음 포인터 이동까지 알림이 없었다).
+   * 0.118.0 마우스 미리 보기 Tab 돌리기(tabCycle)의 차례·수(cycle)도 값에 든다 — Tab마다 한 번(0.117.0과 같은 때), 첫 후보에서 Esc로 풀어 칸만 없어져도 한 번(0.117.0은 없었다)
    */
   onMeasureHoverChange(cb: (snap: MeasureHoverSnap | null) => void): () => void {
     // 처음 다는 쪽이면 지금 값부터 견준다(듣는 쪽이 없던 동안은 맞추지 않았다)
@@ -5139,17 +5148,20 @@ export class Viewer3d {
 
   /**
    * 0.103.0 지금 측정 미리 보기를 마지막으로 견준 것과 견주어 맞추고, 값이 바뀌었으면 지금 measureHoverSnap(없어졌으면 null)을, 같으면 undefined를 돌려준다.
-   * 미리 보기 객체·측정 모드·찍은 점 1개 여부가 그대로면 셈하지 않는다. 0.107.0 끌어온 점 목록도 값에 든다(같은 배열이면 셈하지 않고, 비었으면 0.106.0과 같은 열쇠)
+   * 미리 보기 객체·측정 모드·찍은 점 1개 여부가 그대로면 셈하지 않는다. 0.107.0 끌어온 점 목록도 값에 든다(같은 배열이면 셈하지 않고, 비었으면 0.106.0과 같은 열쇠).
+   * 0.118.0 Tab 돌리기 차례도(같은 객체라도 차례·풀기가 바뀌면 셈한다 — 수가 바뀌는 새 돌리기는 후보가 새 객체라 index만 견준다)
    */
   private hoverCheck(): MeasureHoverSnap | null | undefined {
     const s = this.hoverSeen;
     const pick = this.measuring ? this.measureHover : null;
     const one = this.measurePts.length === 1;
     const track = this.measuring && this.tracker ? this.tracker.view : null;
-    if (pick === s.pick && one === s.one && track === s.track) return undefined;
+    const cycle = this.tabLive(pick)?.index ?? -1;
+    if (pick === s.pick && one === s.one && track === s.track && cycle === s.cycle) return undefined;
     s.pick = pick;
     s.one = one;
     s.track = track;
+    s.cycle = cycle;
     const snap = this.measureHoverSnap;
     const base = snap ? JSON.stringify([snap, this.measureHoverLock]) : '';
     const key = track?.length ? `${base}|${JSON.stringify(track)}` : base;
@@ -5509,12 +5521,17 @@ export class Viewer3d {
 
   /**
    * 측정 중 커서 아래 붙잡을 점과 그 종류(0.8.0 — 앱이 상태 줄에 "끝점·가운데 점·중심"을 보일 때), 축 붙잡기면 그 축(0.9.0).
-   * 측정 중이 아니거나 없으면 null. 0.103.0 값이 바뀐 그림 뒤 onMeasureHoverChange가 알린다(포인터 밖에서 다시 구하거나 버린 것도)
+   * 측정 중이 아니거나 없으면 null. 0.103.0 값이 바뀐 그림 뒤 onMeasureHoverChange가 알린다(포인터 밖에서 다시 구하거나 버린 것도).
+   * 0.118.0 마우스 미리 보기 Tab 돌리기(tabCycle)로 돌린 동안은 차례·수(cycle)도
    */
   get measureHoverSnap(): MeasureHoverSnap | null {
     const h = this.measuring ? this.measureHover : null;
     if (!h) return null;
-    return this.hoverSnapOf(h);
+    const r = this.hoverSnapOf(h);
+    // 0.118.0 이 값에만 싣는다(hoverSnapOf는 measureCandidates와 함께 쓴다 — 후보 목록·찍은 점에는 없다)
+    const c = this.tabLive(h);
+    if (c) r.cycle = { index: c.index, count: c.list.length };
+    return r;
   }
 
   /**
@@ -9097,6 +9114,15 @@ export class Viewer3d {
       return false;
     }
     return !c.released && this.measureHover === c.shown && !this.hoverAt;
+  }
+
+  /**
+   * 0.118.0 미리 보기 h가 살아 있는 돌리기가 보인 후보면 그 돌리기(measureHoverSnap.cycle — 풀지 않았고 다른 길이 다시 구하지 않았고 가상 커서 꺼짐,
+   * 누르면 그 후보를 찍는 때와 같다. 자리를 벗어나면 포인터 이동이 돌리기를 버린다), 아니면 null
+   */
+  private tabLive(h: MeasurePick | null): NonNullable<Viewer3d['tabCyc']> | null {
+    const c = this.tabCyc;
+    return c && h && h === c.shown && !c.released && !this.hoverAt && !this.keyCur ? c : null;
   }
 
   /** 누른 자리가 살아 있는 돌리기 자리 DRAG_START_PX 안이면 보인 후보(찍을 것), 아니면 null */

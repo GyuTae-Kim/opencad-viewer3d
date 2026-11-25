@@ -4,10 +4,11 @@
  * 가상 커서 Tab은 0.116.0처럼 뗀다. keyboard: false 앱이 capture 단계에서 handleKey로 넘겨 받은 Tab(같은 사건)도 둔다(가짜 DOM·가짜 WebGL).
  * 장면은 0.116.0 시험과 같다(z = 0, 위에서 봄): L1 (0,0)–(20,0), L2 (5,−5)–(5,8)(교차점 X (5,0)), L3 (30,−10)–(30,14),
  * 앱 점 A 'center' (5.4, 0.3), B 'point' low (4.5, −0.45). 카메라 대상 SPOT (5.1, 0.12)이 캔버스 가운데(400, 300) — 그 자리 후보는 넷이다.
+ * 0.118.0: 돌린 동안의 미리 보기 값에는 차례·수(cycle)가 실려 견주는 값에 더한다(cyc).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type FakeElement, installDom } from './fakedom';
-import { type MeasureSnapOptions, type Viewer3dOptions, Viewer3d } from '../src/viewer';
+import { type MeasureHoverSnap, type MeasureSnapOptions, type Viewer3dOptions, Viewer3d } from '../src/viewer';
 import { POINTER_FOCUS_ATTR } from '../src/theme';
 import type { V3 } from '../src/math';
 import type { LineSet3d, Scene3d, SnapPoint } from '../src/types';
@@ -41,6 +42,8 @@ afterAll(() => {
 
 const cv = (v: Viewer3d): FakeElement => v.canvas as unknown as FakeElement;
 const mark = (v: Viewer3d): string | null => cv(v).getAttribute(POINTER_FOCUS_ATTR);
+/** 0.118.0 Tab으로 돌린 동안의 미리 보기 값: 후보 i에 차례·수 */
+const cyc = (list: MeasureHoverSnap[], i: number): MeasureHoverSnap => ({ ...list[i]!, cycle: { index: i, count: list.length } });
 const ptr = (v: Viewer3d, type: string, x: number, y: number, button: number, buttons: number): void =>
   cv(v).fire(type, { clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', button, buttons, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false });
 const hoverXY = (v: Viewer3d, x: number, y: number): void => {
@@ -96,10 +99,10 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기와 누르기 초점 �
     const list = v.measureCandidates(400, 300);
     expect(list).toHaveLength(4);
     expect(key(v, 'Tab')).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[1]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 1));
     expect(mark(v)).toBe('pointer');
     expect(key(v, 'Tab', true)).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[0]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 0));
     expect(mark(v)).toBe('pointer');
     // 뷰어가 쓰지 않는 다른 키도 그대로(0.9.1)
     expect(key(v, 'x')).toBe(false);
@@ -164,11 +167,11 @@ describe('Viewer3d: 마우스 미리 보기 Tab 돌리기와 누르기 초점 �
     hoverXY(v, 400, 300);
     const list = v.measureCandidates(400, 300);
     expect(key(v, 'Tab')).toBe(true);
-    expect(v.measureHoverSnap).toEqual(list[1]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 1));
     expect(mark(v)).toBe('pointer');
     set.delete(app);
     expect(key(v, 'Tab')).toBe(false);
-    expect(v.measureHoverSnap).toEqual(list[1]);
+    expect(v.measureHoverSnap).toEqual(cyc(list, 1));
     expect(mark(v)).toBeNull();
   });
 });
