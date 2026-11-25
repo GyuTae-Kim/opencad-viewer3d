@@ -1,9 +1,10 @@
 /** 화소·값 회귀 비교 도구(scripts/pixels): PNG 쓰기·읽기, 차이, 판정, 인자, git 판 소스 플러그인, Chrome 인자 */
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { readArgs, readyWaitMs, slug } from '../scripts/pixels/args.mjs';
+import { readArgs, readyWaitMs, shardPlan, slug } from '../scripts/pixels/args.mjs';
 import { chromeArgs, findChrome } from '../scripts/pixels/chrome.mjs';
 import { classify, countStatuses, exitCode, FAILING, markdown, valueDiff } from '../scripts/pixels/compare.mjs';
 import { gitSource, listTree, resolveCommit } from '../scripts/pixels/gitsrc.mjs';
@@ -229,6 +230,55 @@ describe('인자', () => {
     expect(() => readArgs(['--base', 'x', '--size', 'big'])).toThrow(/--size/);
     expect(() => readArgs(['--base', 'x', '--only', '('])).toThrow(/--only/);
     expect(() => readArgs(['--base', 'x', '--what'])).toThrow();
+  });
+
+  it('조각(--shard i/n — CI가 러너 여러 대에 나눠 찍는다): 인자, 기본 없음', () => {
+    expect(readArgs(['--base', 'x'])).toMatchObject({ shard: null });
+    expect(readArgs(['--base', 'x', '--shard', '2/4'])).toMatchObject({ shard: { index: 2, count: 4 } });
+    expect(readArgs(['--base', 'x', '--shard', '1/1'])).toMatchObject({ shard: { index: 1, count: 1 } });
+    for (const bad of ['0/4', '5/4', '1/0', '1/17', '2', '2/4/1', 'a/b', '-1/4']) expect(() => readArgs(['--base', 'x', '--shard', bad])).toThrow(/--shard/);
+  });
+
+  it('조각 나누기: 모으면 빠짐·겹침 없이 전체, 무거운 것부터 가벼운 조각에(무게 고르게), 무게 표에 없으면 중앙값, 같은 이름의 장면·값 묶음은 따로, 차례 그대로', () => {
+    const shots = Array.from({ length: 157 }, (_, i) => `scene-${i}`);
+    const values = Array.from({ length: 121 }, (_, i) => `value-${i}`);
+    expect(shardPlan(shots, values, null)).toEqual({ shots, values });
+    // 무게 없이(모두 같은 무게)도 모으면 전체·겹침 없음, 조각 크기 차이는 하나 안
+    const flat = [1, 2, 3, 4].map((index) => shardPlan(shots, values, { index, count: 4 }));
+    expect(flat.flatMap((p) => p.shots).sort()).toEqual([...shots].sort());
+    expect(flat.flatMap((p) => p.values).sort()).toEqual([...values].sort());
+    const sizes = flat.map((p) => p.shots.length + p.values.length);
+    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1);
+    // 무거운 셋(16·16·12초)은 서로 다른 조각, 무게 합은 고르게
+    const w: Record<string, number> = { 'value:value-3': 16_000, 'shot:scene-7': 16_000, 'value:value-4': 12_000 };
+    for (const s of shots) w[`shot:${s}`] ??= 300;
+    for (const v of values) w[`value:${v}`] ??= 500;
+    const parts = [1, 2, 3, 4].map((index) => shardPlan(shots, values, { index, count: 4 }, w));
+    const load = parts.map((p) => [...p.shots.map((s) => w[`shot:${s}`]!), ...p.values.map((v) => w[`value:${v}`]!)].reduce((a, b) => a + b, 0));
+    expect(Math.max(...load) - Math.min(...load)).toBeLessThanOrEqual(500);
+    const holder = (key: string) => parts.findIndex((p) => (key.startsWith('shot:') ? p.shots : p.values).includes(key.slice(key.indexOf(':') + 1)));
+    expect(new Set([holder('value:value-3'), holder('shot:scene-7'), holder('value:value-4')]).size).toBe(3);
+    // 차례 그대로, 같은 입력이면 같은 몫
+    for (const p of parts) expect(p.shots).toEqual(shots.filter((s) => p.shots.includes(s)));
+    expect(shardPlan(shots, values, { index: 2, count: 4 }, w)).toEqual(parts[1]);
+    // 무게 표에 없는 새 이름은 중앙값(300)으로 — 빠지지 않는다
+    const more = [...shots, 'scene-new'];
+    expect([1, 2, 3, 4].flatMap((index) => shardPlan(more, values, { index, count: 4 }, w).shots)).toContain('scene-new');
+    // 장면과 값 묶음에 같은 이름이 있어도 열쇠(shot:·value:)가 달라 따로 센다
+    const same = shardPlan(['x'], ['x'], { index: 1, count: 2 }, { 'shot:x': 5, 'value:x': 9 });
+    const other = shardPlan(['x'], ['x'], { index: 2, count: 2 }, { 'shot:x': 5, 'value:x': 9 });
+    expect([same, other]).toEqual([{ shots: [], values: ['x'] }, { shots: ['x'], values: [] }]);
+    expect(shardPlan([], [], { index: 3, count: 4 }, w)).toEqual({ shots: [], values: [] });
+  });
+
+  it('무게 표(scripts/pixels/weights.json): 장면·값 묶음 열쇠와 양의 정수 ms', () => {
+    const w = JSON.parse(readFileSync(resolve(repo, 'scripts/pixels/weights.json'), 'utf8')) as Record<string, unknown>;
+    const keys = Object.keys(w);
+    expect(keys.length).toBeGreaterThan(100);
+    for (const k of keys) {
+      expect(k).toMatch(/^(shot|value):\S+$/);
+      expect(Number.isInteger(w[k]) && (w[k] as number) > 0).toBe(true);
+    }
   });
 
   it('폴더 이름 조각', () => {

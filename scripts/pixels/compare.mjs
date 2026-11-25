@@ -99,7 +99,7 @@ export function countStatuses(items) {
 
 /**
  * 사람이 읽는 요약(Markdown — CI 작업 요약에도 쓴다)
- * @param {{ base: { ref: string; commit: string }; head: { ref: string; commit: string; dirty?: boolean }; size: { w: number; h: number }; runs: number; chrome?: string; webgl?: string; seconds?: number;
+ * @param {{ base: { ref: string; commit: string }; head: { ref: string; commit: string; dirty?: boolean }; size: { w: number; h: number }; runs: number; shard?: string | null; chrome?: string; webgl?: string; seconds?: number;
  *   shots: { name: string; status: string; diffPixels?: number; maxDelta?: number; side?: string; detail?: string }[];
  *   values: { name: string; status: string; n?: number; count?: number; side?: string; detail?: string }[]; ok: boolean }} s
  */
@@ -114,7 +114,7 @@ export function markdown(s) {
   L.push('');
   L.push(`- base \`${s.base.ref}\` (${s.base.commit.slice(0, 12)}) ↔ head \`${s.head.ref}\` (${s.head.commit.slice(0, 12)}${s.head.dirty ? ', 커밋 안 한 변경 포함' : ''})`);
   L.push(`- 장면 ${s.shots.length}개: ${fmt(c)} · 값 묶음 ${s.values.length}개: ${fmt(cv)}`);
-  L.push(`- ${s.size.w}×${s.size.h}, 판마다 ${s.runs}번 찍기${s.chrome ? ` · ${s.chrome}` : ''}${s.webgl ? ` · ${s.webgl}` : ''}${s.seconds ? ` · ${s.seconds.toFixed(0)}초` : ''}`);
+  L.push(`- ${s.size.w}×${s.size.h}, 판마다 ${s.runs}번 찍기${s.shard ? ` · 조각 ${s.shard}` : ''}${s.chrome ? ` · ${s.chrome}` : ''}${s.webgl ? ` · ${s.webgl}` : ''}${s.seconds ? ` · ${s.seconds.toFixed(0)}초` : ''}`);
   const bad = s.shots.filter((x) => x.status !== 'same');
   if (bad.length) {
     L.push('');
