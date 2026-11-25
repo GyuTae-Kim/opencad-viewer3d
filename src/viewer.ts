@@ -2257,6 +2257,19 @@ export class Viewer3d {
   /** 0.117.0 마우스 미리 보기 Tab 돌리기가 받은 마지막 Tab 사건(캔버스 keydown 리스너가 그 사건이면 누르기 초점 표시를 떼지 않는다 — 초점이 옮겨 가지 않는다) */
   private tabTook: KeyboardEvent | null = null;
   /**
+   * 0.120.0 Shift 누름(keydown — shiftPress)이 건 방향 잠금과 걸기 전 상태: 같은 누름의 첫 Shift+Tab이 잠금을 되돌리고 앞 후보로 돌린다(tabCycleKey·keyboardKey).
+   * lock = 그 누름이 건 잠금(그대로여야 되돌린다). 마우스(tabCycle): x·y = 되돌릴 자리(돌리던 자리, 아니면 포인터), cyc·at = 누를 때 살아 있던 돌리기와 그 미리 보기 자리.
+   * key = 가상 커서와 누를 때 후보 목록·차례·다시 구할 표시. 다른 키·누르기·떠남·DRAG_START_PX 넘는 이동·다른 길의 다시 구하기·뗌이면 버린다(잠근 채 — 0.119.0)
+   */
+  private shiftUndo: {
+    lock: MeasureInferenceLock;
+    x: number;
+    y: number;
+    cyc: NonNullable<Viewer3d['tabCyc']> | null;
+    at: { x: number; y: number; pointerType: string } | null;
+    key: { cur: NonNullable<Viewer3d['keyCur']>; list: KeyEntry[]; index: number; stale: boolean } | null;
+  } | null = null;
+  /**
    * 마지막으로 측정 미리 보기를 구한 자리(0.10.0 — 한도·잠금이 바뀌면 그 자리에서 다시 구한다). 미리 보기가 null이어도 채우고 포인터가 떠나도 남는다 —
    * 0.111.0 커서가 아직 그 자리에 있는지는 lastPtr과 견준다(hoverStill). 측정을 끄면 버린다(가상 커서 자리는 keyEnd가)
    */
@@ -3370,9 +3383,10 @@ export class Viewer3d {
     // 0.90.0 앱 함수·덧그림·피할 상자(키보드 스냅 선택의 announce·pickName·formatNumber·글 함수, 가상 커서 후보, 측정 덧그림, 피할 상자, 측정 글 꼴, 미리 강조) — 알리지 않는다
     this.keySnap = null;
     this.keyCur = null;
-    // 0.116.0 마우스 미리 보기 Tab 돌리기 후보(0.117.0 받은 Tab 사건도)
+    // 0.116.0 마우스 미리 보기 Tab 돌리기 후보(0.117.0 받은 Tab 사건도, 0.120.0 Shift+Tab 되돌리기도)
     this.tabCyc = null;
     this.tabTook = null;
+    this.shiftUndo = null;
     this.annos = null;
     this.annoLabels = [];
     this.labelAvoid = null;
@@ -5465,6 +5479,8 @@ export class Viewer3d {
    * 프레임마다 올 수 있는 길(장면·보이기·그리기 범위·붙잡기 한도 — NC 재생)과 잠금·끌어온 점 같은 선택 setter는 넘기지 않는다(0.98.0 규칙 — 빈 곳 위 커서로 프레임마다 고르지 않는다)
    */
   private rehover(still = false): void {
+    // 0.120.0 다른 길이 미리 보기를 다시 구하면 Shift+Tab 되돌리기를 버린다(잠근 채 — setShift가 잠그며 부른 것은 shiftPress가 그 뒤에 둔다)
+    this.shiftUndo = null;
     if (this.measuring && (this.measureHover || still) && this.lastHoverAt && !this.drag) {
       this.hoverAt ??= this.lastHoverAt;
       this.invalidate();
@@ -5487,6 +5503,7 @@ export class Viewer3d {
    * 0.111.0 미리 보기가 null이어도 커서가 그 자리에 그대로 있으면(hoverStill — 빈 곳 위·단면에 잘린 자리) 다시 구한다(0.110.0은 다음 포인터 이동까지 null)
    */
   private rehoverOrDrop(): void {
+    this.shiftUndo = null;
     if (!this.measuring) return;
     const at = this.lastHoverAt;
     if ((this.measureHover && at && at.pointerType !== KEY_POINTER && !this.drag && !this.holds.size) || this.hoverStill()) this.rehover(true);
@@ -5502,6 +5519,7 @@ export class Viewer3d {
    * 0.112.0 가상 커서 후보는 측정 밖(고르기 모드 — 겹친 고르기 후보·고른 것)에서도 같은 표시로 다시 구한다(0.111.0은 커서를 옮길 때까지 앞 화면 후보). 마우스 미리 보기는 측정 중일 때만 그대로
    */
   private camSettle(): void {
+    this.shiftUndo = null;
     this.keySceneChanged();
     if (!this.measuring) return;
     const at = this.lastHoverAt;
@@ -5748,6 +5766,8 @@ export class Viewer3d {
   private setShift(down: boolean): void {
     if (down === this.shiftDown) return;
     this.shiftDown = down;
+    // 0.120.0 누름·뗌마다 앞 누름의 Shift+Tab 되돌리기는 끝난다(새 누름의 것은 shiftPress가 잠근 뒤 둔다)
+    this.shiftUndo = null;
     const on = !!this.snapOpt?.inference?.lock;
     this.listenShiftRelease(down && on);
     if (down) {
@@ -5759,6 +5779,20 @@ export class Viewer3d {
     } else if (this.inferLock?.source === 'shift') this.releaseLock();
   }
 
+  /**
+   * 0.120.0 Shift keydown(handleKey): setShift(true)로 잠그고, 이 새 누름이 방향을 잠갔으면 걸기 전 상태를 shiftUndo로 둔다 — 같은 누름의 첫 Shift+Tab이 되돌린다
+   * (마우스 미리 보기 Tab 돌리기 — tabCycle을 켜고 포인터가 3D 보기 안일 때, 가상 커서 측정). 키 되풀이·잠그지 않은 누름은 두지 않는다
+   */
+  private shiftPress(): void {
+    const fresh = !this.shiftDown, was = this.inferLock, k = this.keyCur, p = this.lastPtr;
+    const cyc = this.tabLive(this.measureHover), at = this.lastHoverAt;
+    this.setShift(true);
+    const lock = this.inferLock;
+    if (!fresh || !lock || lock === was) return;
+    if (k) this.shiftUndo = { lock, x: k.x, y: k.y, cyc: null, at: null, key: { cur: k, list: k.list, index: k.index, stale: k.stale } };
+    else if (p && this.snapOpt?.tabCycle) this.shiftUndo = { lock, x: cyc ? cyc.x : p.x, y: cyc ? cyc.y : p.y, cyc, at, key: null };
+  }
+
   private listenShiftRelease(on: boolean): void {
     if (on === !!this.shiftRelease) return;
     if (!on) {
@@ -5768,6 +5802,8 @@ export class Viewer3d {
     }
     const up = (e: KeyboardEvent): void => {
       if (e.key === 'Shift' || !e.shiftKey) this.setShift(false);
+      // 0.120.0 Shift를 누른 채 다른 키를 떼면(앱이 가로채 handleKey에 오지 않은 키도) 그 누름의 Shift+Tab 되돌리기를 버린다
+      else this.shiftUndo = null;
     };
     const blur = (): void => this.setShift(false);
     window.addEventListener('keyup', up, true);
@@ -9061,14 +9097,37 @@ export class Viewer3d {
    * Tab·Shift+Tab(handleKey가 tabCycle일 때만 부른다). 받았으면 true(기본 동작을 막는다). 측정 중·가상 커서 꺼짐·끌기·앱이 맡은 포인터 없음·캔버스가 받은 키
    * (대상이 캔버스이거나 없음 — 가상 커서와 같은 규칙)·기본 동작이 막히지 않음·포인터가 3D 보기 안이고 마우스·펜 미리 보기 자리가 그 포인터 DRAG_START_PX 안일 때,
    * 그 자리 후보(keyCandidates — measureCandidates와 같은 목록·차례)가 둘 이상이면 다음·앞으로 돌린다. 하나·없으면 false(브라우저 초점 이동 그대로 — 가두지 않는다).
-   * Esc로 푼 뒤(released) 포인터가 그 자리에 있는 동안도 false
+   * Esc로 푼 뒤(released) 포인터가 그 자리에 있는 동안도 false.
+   * 0.120.0 u = 같은 누름의 Shift가 방금 건 방향 잠금(handleKey가 Shift+Tab에만 넘긴다): 걸기 전 상태(잠금 없음 — 누를 때 돌리던 차례, 아니면 그 자리 새 후보)에서
+   * 이 Tab을 받으면 잠금을 되돌리고 받는다. 받지 못하면(걸기 전 그 자리 후보가 하나·없음 등) 잠근 상태로 돌려 0.119.0 길
    */
-  private tabCycleKey(e: KeyboardEvent): boolean {
+  private tabCycleKey(e: KeyboardEvent, u: Viewer3d['shiftUndo'] = null): boolean {
     if (!this.measuring || this.keyCur || this.drag || this.holds.size || e.defaultPrevented) return false;
     const t = e.target;
     if (t && t !== this.canvas) return false;
     const p = this.lastPtr;
     if (!p) return false;
+    if (u && !u.key && this.inferLock === u.lock) {
+      const { measureHover, lastHoverAt, hoverAt, tabCyc } = this;
+      this.inferLock = null;
+      if (u.cyc) {
+        this.tabCyc = u.cyc;
+        this.measureHover = u.cyc.shown;
+        this.lastHoverAt = u.at;
+        this.hoverAt = null;
+      }
+      if (this.tabTurn(e, p)) return true;
+      this.inferLock = u.lock;
+      this.measureHover = measureHover;
+      this.lastHoverAt = lastHoverAt;
+      this.hoverAt = hoverAt;
+      this.tabCyc = tabCyc;
+    }
+    return this.tabTurn(e, p);
+  }
+
+  /** Tab·Shift+Tab 돌리기 본체(tabCycleKey가 받는 때를 거른 뒤 — p는 포인터 자리) */
+  private tabTurn(e: KeyboardEvent, p: { x: number; y: number }): boolean {
     let c = this.tabCyc;
     if (c && Math.hypot(p.x - c.x, p.y - c.y) >= DRAG_START_PX) c = this.tabCyc = null;
     if (c?.released) return false;
@@ -9210,9 +9269,9 @@ export class Viewer3d {
 
   /**
    * 키보드 붙잡기 키(켰을 때만 — handleKey 맨 앞). 걷기 중·앱이 이미 기본 동작을 막은 키·캔버스가 아닌 대상의 키(앱이 다른 칸에서 넘긴 Tab·Enter)는 받지 않는다.
-   * 처리했으면 true(handleKey가 기본 동작을 막는다)
+   * 처리했으면 true(handleKey가 기본 동작을 막는다). 0.120.0 u = 같은 누름의 Shift가 건 잠금의 되돌리기(handleKey가 Shift+Tab에만 넘긴다)
    */
-  private keyboardKey(e: KeyboardEvent): boolean {
+  private keyboardKey(e: KeyboardEvent, u: Viewer3d['shiftUndo'] = null): boolean {
     const ks = this.keySnap!;
     if (this.nav === 'walk') {
       // 걷기의 화살표는 걷기 키다(켜 둔 커서는 끈다)
@@ -9247,6 +9306,14 @@ export class Viewer3d {
         // 커서가 켜진 측정 모드에서만(그 밖의 Tab은 브라우저 초점 이동 그대로 — 키보드 덫을 만들지 않는다).
         // 0.47.0: 고르기 모드도 pickCycle이면 겹친 고르기 후보를 돌린다(끄면 0.46.0처럼 초점 이동)
         if (!c || (!this.measuring && !ks.pickCycle)) return false;
+        // 0.120.0 같은 누름의 Shift가 방금 건 방향 잠금은 풀고 누를 때 후보 목록·차례로 되돌려 그 앞 후보로(그때 후보가 둘 이상일 때만 — 아니면 잠근 그대로)
+        const k = u?.key;
+        if (k && k.cur === c && a.action === 'prev' && this.measuring && this.inferLock === u!.lock && k.list.length > 1) {
+          this.inferLock = null;
+          c.list = k.list;
+          c.index = k.index;
+          c.stale ||= k.stale;
+        }
         // 0.98.0 장면 조각이 바뀐 뒤 그리기 전이면 그 자리 후보를 먼저 다시 구한다(보이던 후보의 다음 차례로)
         if (c.stale) this.keyRecompute(true);
         const n = this.keyCount(c);
@@ -9425,8 +9492,9 @@ export class Viewer3d {
     this.on<PointerEvent>(cv, 'pointercancel', (e) => this.onUp(e, true));
     this.on(cv, 'pointerleave', () => {
       this.lastPtr = null;
-      // 0.116.0 Tab 돌리기(푼 상태도)는 포인터가 떠나면 끝난다(켰을 때만 있다)
+      // 0.116.0 Tab 돌리기(푼 상태도)는 포인터가 떠나면 끝난다(켰을 때만 있다 — 0.120.0 Shift+Tab 되돌리기도)
       this.tabCyc = null;
+      this.shiftUndo = null;
       // 0.46.0: 가상 커서의 미리 보기는 포인터가 떠나도 둔다
       if (this.keyCur) return;
       if (this.measureHover || this.hoverAt) {
@@ -9566,6 +9634,8 @@ export class Viewer3d {
 
   private onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button > 2) return;
+    // 0.120.0 누르면 Shift+Tab 되돌리기를 버린다(잠근 채)
+    this.shiftUndo = null;
     // 0.46.0: 포인터로 누르면 가상 커서를 끈다(포인터가 이어받는다)
     if (this.keyCur) this.keyEnd(true);
     // 0.44.0 편 손가락 뷰 큐브는 3D 보기를 누르면 접는다(누르기는 그대로 이어 간다)
@@ -9682,6 +9752,9 @@ export class Viewer3d {
       if (this.measuring && !d) {
         // Shift를 누른 채 움직이면(0.10.0) 앞 미리 보기의 방향 추론을 잠그고, 뗀 채 움직이면 푼다
         this.setShift(e.shiftKey);
+        // 0.120.0 마우스 Shift+Tab 되돌리기는 되돌릴 자리 DRAG_START_PX 안의 이동에만 남는다(넘으면 버린다 — 잠근 채)
+        const su = this.shiftUndo;
+        if (su && !su.key && Math.hypot(p.x - su.x, p.y - su.y) >= DRAG_START_PX) this.shiftUndo = null;
         // 0.116.0 Tab으로 돌린 미리 보기는 그 자리 DRAG_START_PX 안의 이동에 그대로 둔다(넘으면 돌리기를 버리고 새 자리 미리 보기 — 켰을 때만 있다)
         if (this.tabCyc && this.tabCycleHold(p)) return;
         this.hoverAt = { x: p.x, y: p.y, pointerType: e.pointerType || 'mouse' };
@@ -9834,23 +9907,27 @@ export class Viewer3d {
   handleKey(e: KeyboardEvent): boolean {
     // 0.94.0 키 사건이 객체가 아니면(null·undefined·글·수) 처리하지 않는다(false — 0.93.0은 null에 TypeError). preventDefault가 없는 객체는 처리하고 막기만 건너뛴다(stopKey)
     if (this.disposed || !e || typeof e !== 'object') return false;
+    // 0.120.0 Shift 누름이 건 잠금의 되돌리기(shiftUndo)는 그 누름 뒤 첫 Shift+Tab 하나만 쓴다 — Shift 밖의 키는 받든 받지 않든 버린다
+    const su = e.key === 'Tab' && e.shiftKey ? this.shiftUndo : null;
+    if (e.key !== 'Shift') this.shiftUndo = null;
     // 0.46.0 키보드 붙잡기(setKeyboardSnap을 켰을 때만 — 캔버스가 받은 키): 화살표 가상 커서·Tab 후보 돌리기·Enter 찍기·Esc 끄기
-    if (this.keySnap && this.keyboardKey(e)) {
+    if (this.keySnap && this.keyboardKey(e, su)) {
       stopKey(e);
       return true;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     // 0.116.0 마우스 미리 보기 Tab 돌리기(setMeasureSnap({ tabCycle: true })일 때만 — 가상 커서 다음): Tab·Shift+Tab은 그 커서 자리 후보를 돌리고(둘 이상일 때만),
     // 돌리는 중 Esc는 돌리기를 푼다(뷰 큐브 접기·측정 지우기보다 먼저)
-    if (this.snapOpt?.tabCycle && (e.key === 'Tab' ? this.tabCycleKey(e) : e.key === 'Escape' && this.tabCycleEsc(e))) {
+    if (this.snapOpt?.tabCycle && (e.key === 'Tab' ? this.tabCycleKey(e, su) : e.key === 'Escape' && this.tabCycleEsc(e))) {
       // 0.117.0: 받은 Tab은 캔버스 keydown 리스너가 누르기 초점 표시를 떼지 않게 적어 둔다
       if (e.key === 'Tab') this.tabTook = e;
       stopKey(e);
       return true;
     }
-    // Shift(0.10.0): 측정 추론 잠금(setMeasureSnap({ inference: { lock: true } })일 때). 기본 동작은 막지 않으므로 false
+    // Shift(0.10.0): 측정 추론 잠금(setMeasureSnap({ inference: { lock: true } })일 때). 기본 동작은 막지 않으므로 false.
+    // 0.120.0 이 누름이 방향을 잠갔으면 같은 누름의 첫 Shift+Tab이 되돌린다(shiftPress)
     if (e.key === 'Shift') {
-      this.setShift(true);
+      this.shiftPress();
       return false;
     }
     // 걷기: W·A·S·D·화살표·Q·E·PageUp·PageDown(물리 키 — 한글 입력기에서도)은 누르는 동안 움직인다.
