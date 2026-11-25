@@ -2005,7 +2005,7 @@ export class Viewer3d {
   private items = new Map<string, Item>();
   private hiddenGroups = new Set<string>();
   private hiddenItems = new Set<string>();
-  /** 0.60.0 숨김 판(숨김을 바꿀 때마다 1씩 — 렌더러가 같은 판의 보이는 목록을 다시 쓴다) */
+  /** 0.60.0 숨김 판(숨김을 바꿀 때마다 1씩 — 렌더러가 같은 판의 보이는 목록을 다시 쓴다). 0.121.0 앱은 visibilityVersion으로 읽는다 */
   private visVer = 0;
   /**
    * 0.63.0 판 visBase 뒤의 숨김 바꾸기가 모두 항목 하나씩(setItemVisible)이면 그 id 차례(k번째가 판 visBase + k + 1). 다른 바꾸기(묶음·장면·구간 숨김)나
@@ -4189,9 +4189,12 @@ export class Viewer3d {
     return [...out.values()];
   }
 
-  /** 묶음 켜고 끄기. 0.64.0: 지금 상태와 같은 값이면 아무것도 하지 않는다(숨김 판·다시 그리기를 남기지 않는다) */
+  /**
+   * 묶음 켜고 끄기. 0.64.0: 지금 상태와 같은 값이면 아무것도 하지 않는다(숨김 판·다시 그리기를 남기지 않는다).
+   * 0.121.0 dispose 뒤에는 아무것도 하지 않는다(setHiddenRanges처럼 — 0.120.0은 숨김 기록과 숨김 판을 바꿨다)
+   */
   setGroupVisible(group: string, on: boolean): void {
-    if (!on === this.hiddenGroups.has(group)) return;
+    if (this.disposed || !on === this.hiddenGroups.has(group)) return;
     if (on) this.hiddenGroups.delete(group);
     else this.hiddenGroups.add(group);
     this.visibilityChanged();
@@ -4199,10 +4202,11 @@ export class Viewer3d {
 
   /**
    * 항목 하나 켜고 끄기(id). 0.64.0: 지금 상태와 같은 값이면(그 id를 이미 숨겼거나 숨기지 않았으면) 아무것도 하지 않는다 — 숨김 판·바꾼 항목 기록·다시 그리기를 남기지 않는다.
-   * 그래서 보이기를 바꿀 때마다 모든 항목에 부르는 앱도 렌더러는 바뀐 항목만 다시 묻는다(0.63.0은 같은 값 호출도 바꾼 항목 기록에 들어 기록이 1,024개를 넘으면 그물마다 물었다)
+   * 그래서 보이기를 바꿀 때마다 모든 항목에 부르는 앱도 렌더러는 바뀐 항목만 다시 묻는다(0.63.0은 같은 값 호출도 바꾼 항목 기록에 들어 기록이 1,024개를 넘으면 그물마다 물었다).
+   * 0.121.0 dispose 뒤에는 아무것도 하지 않는다(setGroupVisible과 같다)
    */
   setItemVisible(id: string, on: boolean): void {
-    if (!on === this.hiddenItems.has(id)) return;
+    if (this.disposed || !on === this.hiddenItems.has(id)) return;
     if (on) this.hiddenItems.delete(id);
     else this.hiddenItems.add(id);
     this.visibilityChanged(id);
@@ -4230,6 +4234,18 @@ export class Viewer3d {
   isVisible(id: string): boolean {
     const it = this.items.get(id);
     return !!it && this.visible(id, it.item.group);
+  }
+
+  /**
+   * 0.121.0 숨김 판(읽기만): 보이기가 실제로 바뀔 때마다 1씩 오르는 수 — 처음 0. 앱이 「보이는 것이 바뀌었는지」를 값싸게 견줄 때
+   * (앱 자체 측정 추정을 구할 때 이 수를 두고 다음에 다르면 다시 구한다 — 모든 항목의 isVisible·hiddenRanges를 훑지 않고).
+   * 오르는 때: setGroupVisible·setItemVisible(없는 id·장면에 없는 묶음 이름도 — 그 이름으로 넣는 메시가 숨는다)·setHiddenRanges·clearHiddenRanges가
+   * 숨김을 바꿈(0.64.0 — 지금 상태와 같은 값이면 그대로), setScene(숨김을 모두 푸는 새 장면 — 늘 하나).
+   * 오르지 않는 때: setMesh·removeMesh·clear(장면 내용 — 앱이 그 호출을 안다), 겉모습·단면·그리기 모드·선분 그리기 범위·강조, 문맥 복구, dispose와 그 뒤.
+   * 렌더러가 보이는 목록을 다시 쓸지 가르는 판(visVer) 그대로다
+   */
+  get visibilityVersion(): number {
+    return this.visVer;
   }
 
   /** 강조할 항목 id(null이면 해제). 0.92.0 돌 수 없는 값({}·수·참)은 null과 같다(0.91.0은 TypeError) */
