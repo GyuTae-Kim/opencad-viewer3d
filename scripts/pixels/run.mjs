@@ -14,7 +14,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { createServer } from 'node:http';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readArgs, readyWaitMs, shardOf, slug, USAGE } from './args.mjs';
+import { readArgs, readyWaitMs, shardPlan, slug, USAGE } from './args.mjs';
 import { buildPage } from './build.mjs';
 import { launchChrome } from './chrome.mjs';
 import { classify, countStatuses, exitCode, markdown, valueDiff } from './compare.mjs';
@@ -22,6 +22,16 @@ import { git, resolveCommit } from './gitsrc.mjs';
 import { decodePng, diffImages, encodePng } from './png.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+
+/** --shard 무게 표(scripts/pixels/weights.json — `shot:<이름>`·`value:<이름>` → 찍는 시간 ms). 없거나 깨졌으면 빈 표(모두 같은 무게) */
+function readWeights() {
+  try {
+    const w = JSON.parse(readFileSync(join(repo, 'scripts/pixels/weights.json'), 'utf8'));
+    return w && typeof w === 'object' && !Array.isArray(w) ? /** @type {Record<string, number>} */ (w) : {};
+  } catch {
+    return {};
+  }
+}
 const log = (/** @type {string} */ s) => console.error(`[pixels] ${s}`);
 const sha = (/** @type {string | Uint8Array} */ b) => createHash('sha256').update(b).digest('hex');
 
@@ -150,9 +160,16 @@ async function main() {
         const listKey = JSON.stringify([list.shots, list.values]);
         if (!shotNames || !valueNames) {
           firstListKey = listKey;
-          // --only로 거른 뒤 --shard 조각(CI가 러너 여러 대에 나눠 찍는다 — 조각마다 base·head를 같은 러너에서 찍는다)
-          shotNames = shardOf(/** @type {string[]} */ (list.shots).filter((n) => !args.only || args.only.test(n)), args.shard);
-          valueNames = shardOf(/** @type {string[]} */ (list.values).filter((n) => !args.only || args.only.test(n)), args.shard);
+          // --only로 거른 뒤 --shard 조각(CI가 러너 여러 대에 나눠 찍는다 — 조각마다 base·head를 같은 러너에서 찍는다).
+          // 조각은 장면·값 묶음의 찍는 시간(weights.json — 작업 트리 것)으로 고르게 나눈다
+          const plan = shardPlan(
+            /** @type {string[]} */ (list.shots).filter((n) => !args.only || args.only.test(n)),
+            /** @type {string[]} */ (list.values).filter((n) => !args.only || args.only.test(n)),
+            args.shard,
+            args.shard ? readWeights() : {},
+          );
+          shotNames = plan.shots;
+          valueNames = plan.values;
         } else if (listKey !== firstListKey) throw new Error('두 묶음의 장면 목록이 다릅니다');
         if (run === 0) webgl[side] = list.info;
         if (list.info?.renderer === '(WebGL2 없음)') throw new Error('헤드리스 Chrome에서 WebGL2를 만들지 못했습니다(SwiftShader 인자·GPU 흉내를 확인하세요)');
